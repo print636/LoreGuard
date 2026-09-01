@@ -314,7 +314,10 @@ def main() -> None:
     payload = "".join(
         json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows
     )
-    target.write_text(payload, encoding="utf-8")
+    # Dataset identity must be identical on Windows and Linux.  Explicit LF
+    # prevents the platform text writer from changing the bytes Git/CI hash.
+    with target.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(payload)
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     expected_count = sum(len(row["expected_issues"]) for row in rows)
     categories = sorted({row["category_focus"] for row in rows})
@@ -342,9 +345,10 @@ def main() -> None:
         ),
         "license_note": "Original fictional content; no commercial IP or ConStory-Bench content.",
     }
-    (root / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    with (root / "manifest.json").open(
+        "w", encoding="utf-8", newline="\n"
+    ) as handle:
+        handle.write(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     print(f"cases={len(rows)} expected_issues={expected_count} sha256={digest}")
 
 

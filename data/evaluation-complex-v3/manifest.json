@@ -21,7 +21,7 @@
   ],
   "minimum_documents_per_case": 4,
   "evidence_contract": "Every expected issue fixes the exact source document and 1-based line number pair.",
-  "sha256": "c5eb2f74e5197d19b28ded926c4867ff11dcc3d627e710a3d375925e731da330",
+  "sha256": "db1b4571b36faf861e8097d384e337e9fee8aac1dbf0cc7c73708e90865aaaae",
   "limitations": "Developer-authored and developer-visible synthetic acceptance data. It is not independently annotated, not blind, and cannot estimate production accuracy.",
   "license_note": "Original fictional content; no commercial IP or ConStory-Bench content."
 }
