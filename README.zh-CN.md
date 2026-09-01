@@ -17,9 +17,10 @@
 - 每个问题返回两处证据、行号、严重度、置信度和修订建议
 - 本地线程/Celery 两种后台执行方式、受状态约束的取消/重试与可断线续传的持久化 SSE 进度流
 - 接受、误报、已解决反馈，含最新状态、重复提交抑制和完整审计历史
-- 80 条显式指令规则回归，以及 100 条含困难负样本的合成自然中文评测（40 dev / 60 test）
+- 80 条显式指令规则回归、100 条含困难负样本的合成自然中文评测，以及 14 例原创多文档复杂验收集
 - React 审查界面、Docker Compose、GitHub Actions 与 Prometheus 指标
 - 已完成运行的关系图与保守时间线，支持类别筛选、问题关系筛选、证据详情和问题联动高亮；展示不会再次调用模型
+- 同名文档任意两个版本的本地行级差异；项目切换状态隔离、上传结果汇总、错误/空状态与反馈防重复提交
 
 ## 快速开始
 
@@ -121,13 +122,14 @@ React/Vite ──HTTP/SSE── FastAPI
 
 ## 与 ConStory-Bench 的关系
 
-当前版本没有复制 ConStory-Bench 的代码、Prompt、架构或数据。规则回归与自然中文评测内容均由 LoreGuard 的固定模板生成。ConStory-Bench 是模型长篇故事一致性的研究基准；LoreGuard 是面向编剧工作流的交互式审查工具。详见 [`docs/constory-bench-boundary.md`](docs/constory-bench-boundary.md)。
+当前版本没有复制 ConStory-Bench 的代码、Prompt、架构或数据。规则回归与合成自然中文评测由 LoreGuard 的固定模板生成，复杂多文档验收集则是独立编写的原创“潮痕群岛”场景。ConStory-Bench 是模型长篇故事一致性的研究基准；LoreGuard 是面向编剧工作流的交互式审查工具。详见 [`docs/constory-bench-boundary.md`](docs/constory-bench-boundary.md)。
 
 ## 评测
 
 ```bash
 python scripts/run_evaluation.py
 python scripts/run_natural_evaluation.py
+python scripts/run_complex_v3_evaluation.py --require-perfect
 python scripts/run_model_stability.py --case advanced --repeats 3 --max-total-tokens 15000
 ```
 
@@ -136,10 +138,13 @@ python scripts/run_model_stability.py --case advanced --repeats 3 --max-total-to
 - `artifacts/directive-regression-report.json`：80 条显式 `@directive` 样本，只验证规则引擎接线，100% 结果不能解释为自然文本准确率。
 - `artifacts/natural-evaluation-report.json`：固定 seed 生成的合成自然中文 test 集，共 60 例，其中 30 例无预期问题。状态建模前为 Precision 0.625、Recall 1.000、F1 0.769；加入角色/路线许可、显式知识来源和 actor 规则例外后，当前固定回归为 1.000/1.000/1.000。该 test 已被开发者查看，after 只能作为回归参考，不能称为无偏提升。
 - `artifacts/state-modeling-v2/`：保存 natural dev、原 test 和 50 例 challenge-v2 的 before/after 完整报告及误差。challenge-v2 after 为 Precision 0.962、Recall 1.000、F1 0.980，仍保留 1 个移动许可措辞误报；它同样是开发者可见合成数据，不是盲测或人工标注。
+- `artifacts/complex-v3-evaluation.json`：14 例原创、多文档复杂验收场景，共 10 个固定预期问题；五类问题均有正例与困难反例。当前无模型固定基线 TP 10、FP 0、FN 0，证据对精确命中率 1.0。该数据由开发者编写且可见，只能作为可审计回归，不能估计开放故事或生产准确率。
 
 完整数据位于 `data/evaluation-natural/`：40 个 dev 场景和 60 个 test 场景的 `scenario_id` 不重叠。它是模板生成的 `synthetic natural-language` 数据，不是人工标注集，也不能外推为生产准确率。评测 harness 运行 test 时只打开 `test.jsonl`，测试样本不进入 Prompt 或调参示例。
 
 challenge-v2 位于 `data/evaluation-challenge-v2/`，schema、固定 seed、生成器和 SHA-256 均落盘可审计。详细口径见 [`docs/state-modeling-v2-evaluation.md`](docs/state-modeling-v2-evaluation.md)。
+
+复杂验收集位于 `data/evaluation-complex-v3/`，其原创声明、固定证据行、数据哈希与限制见 [`docs/complex-v3-evaluation.md`](docs/complex-v3-evaluation.md)。简历采用哪些事实则受 [`docs/resume-readiness.md`](docs/resume-readiness.md) 的保守门槛约束。
 
 `run_model_stability.py` 会真实调用已配置的 Provider，记录逐次类别/证据、首进度、P50/P95、Token 与预算停止状态；预期答案只用于运行后评分，不进入 Prompt。报告不保存 Key 或原始响应正文。总预算是运行间停止阈值，单次 Provider 实际 usage 可能让最后一次发生少量越界，报告会单独记录 `budget_overshoot_tokens`。
 
