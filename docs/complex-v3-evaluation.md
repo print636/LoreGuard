@@ -45,3 +45,13 @@ python scripts/run_complex_v3_evaluation.py
 ## 边界
 
 这套验收集可以支持以下项目事实：LoreGuard 已建立原创、多文档、固定证据行的开发回归集，并能报告精确率、召回率、F1 和证据定位命中率。它不能支持“经过人工盲测”“开放文本准确率达到 90%”或“已验证商业游戏全量剧情”等表述。
+
+## 预算化真实模型 pilot
+
+```powershell
+python scripts/run_complex_model_evaluation.py --suite pilot --max-total-tokens 25000
+```
+
+pilot 固定选择一个同时包含五类问题的跨文档正例，以及每类各一个困难反例，共 6 例。只有至少一个模型分块成功的案例才进入模型增强指标；纯基线降级不会被计作模型成绩。报告不保存 API Key、Prompt 或原始响应正文，并同时记录 Provider 报告 Token 与保守预算计数。
+
+如果首个案例的 Provider 请求全部失败且没有模型分块成功，运行器会以 `systemic_provider_failure` 立即停止后续案例。2026-09-01 的当前中转配置返回 HTTP 403，fail-fast 复验在首例 5 个请求全部失败后停止，成功案例和计量 Token 均为 0，因此没有可发布的模型指标。

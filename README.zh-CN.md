@@ -130,6 +130,7 @@ React/Vite ──HTTP/SSE── FastAPI
 python scripts/run_evaluation.py
 python scripts/run_natural_evaluation.py
 python scripts/run_complex_v3_evaluation.py --require-perfect
+python scripts/run_complex_model_evaluation.py --suite pilot --max-total-tokens 25000
 python scripts/run_model_stability.py --case advanced --repeats 3 --max-total-tokens 15000
 ```
 
