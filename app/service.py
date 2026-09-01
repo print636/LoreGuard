@@ -16,7 +16,7 @@ def emit(db, run_id: str, stage: str, progress: int, message: str) -> None:
     db.commit()
 
 
-def execute_analysis(run_id: str) -> None:
+def execute_analysis(run_id: str, *, raise_on_failure: bool = False) -> None:
     service_started = perf_counter()
     with SessionLocal() as db:
         run = db.get(AnalysisRunRow, run_id)
@@ -86,3 +86,5 @@ def execute_analysis(run_id: str) -> None:
             run.completed_at = datetime.utcnow()
             db.commit()
             emit(db, run_id, "failed", 100, "分析失败，可调用重试接口恢复")
+            if raise_on_failure:
+                raise

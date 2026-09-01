@@ -4,6 +4,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://loreguard:loreguard@postgres:5432/loreguard
       REDIS_URL: redis://redis:6379/0
+      USE_CELERY: "true"
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
@@ -12,7 +13,11 @@ services:
       MODEL_CHUNK_OVERLAP_LINES: ${MODEL_CHUNK_OVERLAP_LINES:-1}
       MODEL_MAX_CHUNKS_PER_DOCUMENT: ${MODEL_MAX_CHUNKS_PER_DOCUMENT:-24}
     ports: ["8000:8000"]
-    depends_on: [postgres, redis]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
   web:
     build: ./frontend
     ports: ["8080:80"]
@@ -30,13 +35,27 @@ services:
       MODEL_CHUNK_MAX_CHARS: ${MODEL_CHUNK_MAX_CHARS:-6000}
       MODEL_CHUNK_OVERLAP_LINES: ${MODEL_CHUNK_OVERLAP_LINES:-1}
       MODEL_MAX_CHUNKS_PER_DOCUMENT: ${MODEL_MAX_CHUNKS_PER_DOCUMENT:-24}
-    depends_on: [postgres, redis]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
   postgres:
     image: pgvector/pgvector:pg16
     environment: {POSTGRES_DB: loreguard, POSTGRES_USER: loreguard, POSTGRES_PASSWORD: loreguard}
     volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loreguard -d loreguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
   redis:
     image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
   prometheus:
     image: prom/prometheus:latest
     volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
