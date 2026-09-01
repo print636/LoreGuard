@@ -1,0 +1,27 @@
+{
+  "name": "LoreGuard complex original acceptance set v3",
+  "version": "3.0.0",
+  "dataset_kind": "developer-authored fixed natural-language scenarios",
+  "world": "潮痕群岛",
+  "human_annotated": false,
+  "developer_visible": true,
+  "blind_test": false,
+  "model_required": false,
+  "generator": "scripts/generate_complex_v3.py",
+  "case_count": 14,
+  "positive_case_count": 6,
+  "hard_negative_case_count": 8,
+  "expected_issue_count": 10,
+  "categories": [
+    "fact_conflict",
+    "item_ownership",
+    "knowledge_without_acquisition",
+    "location_collision",
+    "world_rule_conflict"
+  ],
+  "minimum_documents_per_case": 4,
+  "evidence_contract": "Every expected issue fixes the exact source document and 1-based line number pair.",
+  "sha256": "c5eb2f74e5197d19b28ded926c4867ff11dcc3d627e710a3d375925e731da330",
+  "limitations": "Developer-authored and developer-visible synthetic acceptance data. It is not independently annotated, not blind, and cannot estimate production accuracy.",
+  "license_note": "Original fictional content; no commercial IP or ConStory-Bench content."
+}

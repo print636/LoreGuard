@@ -51,11 +51,15 @@ def extract_natural_line(evidence: EvidenceSpan) -> list[ParsedDirective]:
     rows: list[ParsedDirective] = []
 
     fact = re.search(
-        rf"(?P<subject>{NAME})的(?P<predicate>[\u4e00-\u9fffA-Za-z0-9_-]{{1,16}})(?:是|为)(?P<value>[^，。；;]{{1,32}})",
+        rf"(?:{TIME}[，,\s]+)?(?P<subject>{NAME})的"
+        rf"(?P<predicate>[\u4e00-\u9fffA-Za-z0-9_-]{{1,16}})(?:是|为)"
+        rf"(?P<value>[^，。；;]{{1,32}})",
         text,
     )
     if fact:
-        rows.append(_directive("fact", fact.groupdict(), evidence))
+        attrs = fact.groupdict()
+        attrs["time"] = attrs.get("time") or ""
+        rows.append(_directive("fact", attrs, evidence))
 
     timed_patterns = [
         ("knows", rf"{TIME}[，,\s]+(?P<character>{NAME})(?:得知|获知|知道了)(?P<fact>[^，。；;]{{1,36}})"),

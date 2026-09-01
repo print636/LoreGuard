@@ -259,6 +259,25 @@ class CandidateNormalizerTests(unittest.TestCase):
         ])
         self.assertFalse(any(row.category.value == "fact_conflict" for row in result.issues))
 
+    def test_natural_timed_facts_preserve_state_transition_time(self):
+        result = AnalysisPipeline(extractor=BaselineExtractor()).run([
+            DocumentInput(
+                id="state",
+                name="state.md",
+                content=(
+                    "1027-01-01 08:00，叶峤的行动能力是受限。\n"
+                    "1027-02-01 08:00，叶峤的行动能力是恢复。"
+                ),
+            ),
+        ])
+
+        facts = [row for row in result.directives if row.kind == "fact"]
+        self.assertEqual(
+            ["1027-01-01 08:00", "1027-02-01 08:00"],
+            [row.attrs.get("time") for row in facts],
+        )
+        self.assertFalse(any(row.category.value == "fact_conflict" for row in result.issues))
+
 
 if __name__ == "__main__":
     unittest.main()
