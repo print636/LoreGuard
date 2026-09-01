@@ -27,11 +27,11 @@ class FactExtraction(ExtractionBase):
     time: str | None = None
     origin: str | None = None
     destination: str | None = None
-    bidirectional: str | None = None
+    bidirectional: bool | None = None
     status: str | None = None
     valid_from: str | None = None
     valid_until: str | None = None
-    current: str | None = None
+    current: bool | None = None
     key: str | None = None
 
 
@@ -100,7 +100,7 @@ SYSTEM_PROMPT = """你是 LoreGuard 的叙事状态抽取器，只抽取状态�
 每条记录只表达一个原子状态，且只能使用对应 kind 的字段；所有记录都必须包含 kind、source_line_start、source_line_end。
 
 唯一允许的记录格式如下（未标 optional 的字段全部必需）：
-- fact: kind, subject, predicate, value, time(optional), source_line_start, source_line_end。明确的移动许可可使用 predicate=mobility_permission、value=instant_transport，并附 origin、destination、bidirectional、status、valid_from、valid_until、current；明确的规则例外可使用 predicate=rule_exception、value=allowed，并附 key、status、valid_from、valid_until、current。不得把模糊许可猜成有效状态
+- fact: kind, subject, predicate, value, time(optional), source_line_start, source_line_end。普通 fact 的 subject、predicate、value 使用原文语言和原文措辞，不得翻译字段值或自创英文 predicate。明确的移动许可可使用 predicate=mobility_permission、value=instant_transport，并附 origin、destination、bidirectional、status、valid_from、valid_until、current；明确的规则例外可使用 predicate=rule_exception、value=allowed，并附 key、status、valid_from、valid_until、current。bidirectional/current 必须是 JSON boolean true/false，不是字符串。不得把模糊许可猜成有效状态
 - event: kind, id(optional), time, location, participants, source_line_start, source_line_end；participants 必须是非空字符串数组
 - knows: kind, character, fact, time, source_line_start, source_line_end
 - claims_knows: kind, character, fact, time, source_line_start, source_line_end
@@ -131,7 +131,10 @@ def _attrs(record: ExtractionRecord, line_start: int) -> dict[str, str]:
         participants = data.pop("participants")
         data["participants"] = ",".join(participants)
         data["id"] = data.get("id") or f"model-{line_start}"
-    return {key: str(value) for key, value in data.items()}
+    return {
+        key: str(value).lower() if isinstance(value, bool) else str(value)
+        for key, value in data.items()
+    }
 
 
 def _fingerprint(
@@ -169,6 +172,15 @@ def merge_directives(
 def _evidence_supports(record: ExtractionRecord, text: str) -> bool:
     """Conservative lexical guard for model records prone to false positives."""
     compact = _clean(text)
+    if record.kind == "fact":
+        subject = _clean(record.subject)
+        predicate = _clean(record.predicate)
+        if subject not in compact:
+            return False
+        if record.predicate not in {"mobility_permission", "rule_exception"}:
+            if re.search(r"[A-Za-z_]", predicate) and predicate not in compact:
+                return False
+        return True
     if record.kind == "uses":
         if _clean(record.item) not in compact or _clean(record.user) not in compact:
             return False
@@ -186,7 +198,11 @@ def _evidence_supports(record: ExtractionRecord, text: str) -> bool:
         if re.search(r"(?:没有|无人|无权|禁止|不得|不能|未曾)[^。；]{0,16}使用", compact):
             return bool(re.search(r"取出|拿出|掏出|拔出|盖下|按下|插入|启用|挥动", compact))
     elif record.kind == "item":
-        return _clean(record.item) in compact and _clean(record.owner) in compact
+        return bool(
+            _clean(record.item) in compact
+            and _clean(record.owner) in compact
+            and re.search(r"获得|持有|保管|掌管|交给|移交|交接|归还|接收", compact)
+        )
     elif record.kind == "event":
         return all(_clean(participant) in compact for participant in record.participants)
     return True
@@ -259,10 +275,20 @@ class ModelEnhancedExtractor:
                     try:
                         record = RECORD_ADAPTER.validate_python(raw_record)
                         chunk_directives.append(self._to_directive(document, chunk, record))
-                    except (ValidationError, ValueError):
+                    except ValidationError:
                         invalid_count += 1
                         parsed.warnings.append(
-                            f"模型记录 #{index}（分块 {chunk.id}）不符合抽取协议，已安全跳过"
+                            f"模型记录 #{index}（分块 {chunk.id}）不符合抽取协议（schema_validation），已安全跳过"
+                        )
+                    except ValueError as exc:
+                        invalid_count += 1
+                        reason = {
+                            "模型返回的证据行号越界": "evidence_range",
+                            "模型返回了空证据区间": "empty_evidence",
+                            "模型记录缺少原文词面支持": "lexical_support",
+                        }.get(str(exc), "record_validation")
+                        parsed.warnings.append(
+                            f"模型记录 #{index}（分块 {chunk.id}）不符合抽取协议（{reason}），已安全跳过"
                         )
                 if envelope.records and not chunk_directives:
                     raise ValueError(f"模型返回的 {invalid_count} 条记录全部无效")
@@ -303,6 +329,12 @@ class ModelEnhancedExtractor:
             raise ValueError("模型返回了空证据区间")
         if not _evidence_supports(record, evidence.text):
             raise ValueError("模型记录缺少原文词面支持")
-        return ParsedDirective(
-            kind=record.kind, attrs=_attrs(record, start), evidence=evidence
-        )
+        attrs = _attrs(record, start)
+        if record.kind in {"fact", "item", "uses"} and not attrs.get("time"):
+            timestamp = re.search(
+                r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?",
+                evidence.text,
+            )
+            if timestamp:
+                attrs["time"] = timestamp.group(0)
+        return ParsedDirective(kind=record.kind, attrs=attrs, evidence=evidence)

@@ -60,7 +60,17 @@ class ChunkingTests(unittest.TestCase):
             return completion({"records": records})
 
         provider = OpenAICompatibleProvider(model_settings(), transport=httpx.MockTransport(handler))
-        content = "\n".join(f"普通叙述段落{index}没有结构化句式。" for index in range(1, 8))
+        content = "\n".join(
+            [
+                "普通叙述段落一没有结构化句式。",
+                "林澈的身份是领航员。",
+                "林澈的身份是守卫。",
+                "普通叙述段落四没有结构化句式。",
+                "普通叙述段落五没有结构化句式。",
+                "普通叙述段落六没有结构化句式。",
+                "普通叙述段落七没有结构化句式。",
+            ]
+        )
         result = AnalysisPipeline(extractor=ModelEnhancedExtractor(provider)).run([
             DocumentInput(id="doc", name="story.md", content=content)
         ])

@@ -91,6 +91,20 @@ class ParserAndRuleTests(unittest.TestCase):
         )
         self.assertFalse(any(issue.category.value == "location_collision" for issue in detect_issues(nested.directives)))
 
+    def test_fact_records_from_the_same_evidence_cannot_conflict_with_themselves(self):
+        evidence = EvidenceSpan(
+            document_id="state",
+            document_name="state.md",
+            line_start=1,
+            line_end=1,
+            text="叶峤的行动能力是受限。",
+        )
+        directives = [
+            ParsedDirective(kind="fact", attrs={"subject": "叶峤", "predicate": "行动能力", "value": "受限"}, evidence=evidence),
+            ParsedDirective(kind="fact", attrs={"subject": "叶峤", "predicate": "行动能力", "value": "限制"}, evidence=evidence),
+        ]
+        self.assertFalse(any(issue.category.value == "fact_conflict" for issue in detect_issues(directives)))
+
     def test_knowledge_issue_requires_explicit_later_acquisition(self):
         claim_only = parse_document(
             "claim",

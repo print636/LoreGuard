@@ -167,6 +167,82 @@ class ModelExtractorTests(unittest.TestCase):
         )
         self.assertEqual(1, len(result.directives))
 
+    def test_boolean_permission_fields_are_valid_and_normalized(self):
+        payload = {
+            "records": [
+                {
+                    "kind": "fact",
+                    "subject": "祁霁",
+                    "predicate": "mobility_permission",
+                    "value": "instant_transport",
+                    "origin": "沉钟港",
+                    "destination": "月沫城",
+                    "bidirectional": True,
+                    "status": "active",
+                    "current": True,
+                    "source_line_start": 1,
+                    "source_line_end": 1,
+                }
+            ]
+        }
+        result = ModelEnhancedExtractor(self.provider_for(payload)).extract(
+            DocumentInput(
+                id="permit",
+                name="permit.md",
+                content="议会向祁霁签发瞬时通行许可，路线为沉钟港至月沫城，当前有效。",
+            )
+        )
+        permission = next(
+            row for row in result.directives
+            if row.kind == "fact" and row.attrs.get("predicate") == "mobility_permission"
+        )
+        self.assertEqual("true", permission.attrs["bidirectional"])
+        self.assertEqual("true", permission.attrs["current"])
+        self.assertFalse(any("schema_validation" in warning for warning in result.warnings))
+
+    def test_model_fact_inherits_explicit_source_time(self):
+        payload = {
+            "records": [
+                {"kind": "fact", "subject": "叶峤", "predicate": "行动能力", "value": "受限", "source_line_start": 1, "source_line_end": 1},
+                {"kind": "fact", "subject": "叶峤", "predicate": "行动能力", "value": "恢复", "source_line_start": 2, "source_line_end": 2},
+            ]
+        }
+        result = AnalysisPipeline(
+            extractor=ModelEnhancedExtractor(self.provider_for(payload))
+        ).run([
+            DocumentInput(
+                id="state",
+                name="state.md",
+                content=(
+                    "1027-01-01 08:00，叶峤的行动能力是受限。\n"
+                    "1027-02-01 08:00，叶峤的行动能力是恢复。"
+                ),
+            )
+        ])
+        self.assertFalse(any(row.category.value == "fact_conflict" for row in result.issues))
+        self.assertEqual(
+            ["1027-01-01 08:00", "1027-02-01 08:00"],
+            sorted({row.attrs.get("time") for row in result.directives if row.kind == "fact"}),
+        )
+
+    def test_use_wording_cannot_create_a_fake_item_owner(self):
+        payload = {
+            "records": [
+                {"kind": "item", "item": "潮汐钥", "owner": "莫行", "source_line_start": 1, "source_line_end": 1},
+                {"kind": "uses", "item": "潮汐钥", "user": "莫行", "source_line_start": 1, "source_line_end": 1},
+            ]
+        }
+        result = ModelEnhancedExtractor(self.provider_for(payload)).extract(
+            DocumentInput(
+                id="chapter",
+                name="chapter.md",
+                content="1044-06-18 09:30，莫行取出潮汐钥，并按下启动机关。",
+            )
+        )
+        self.assertFalse(any(row.kind == "item" for row in result.directives))
+        self.assertTrue(any(row.kind == "uses" for row in result.directives))
+        self.assertTrue(any("lexical_support" in warning for warning in result.warnings))
+
     def test_model_use_record_requires_positive_lexical_support(self):
         payload = {
             "records": [

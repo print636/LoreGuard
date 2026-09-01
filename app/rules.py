@@ -101,6 +101,14 @@ def _evidence_shares_place(first: ParsedDirective, second: ParsedDirective) -> b
     return bool(_place_tokens(first.evidence.text) & _place_tokens(second.evidence.text))
 
 
+def _same_evidence(first: ParsedDirective, second: ParsedDirective) -> bool:
+    return (
+        first.evidence.document_id == second.evidence.document_id
+        and first.evidence.line_start == second.evidence.line_start
+        and first.evidence.line_end == second.evidence.line_end
+    )
+
+
 def _rule_exception_applies(
     state: ParsedDirective, actor: str, key: str, action_time: str
 ) -> bool:
@@ -176,6 +184,8 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
         conflict_pair: tuple[ParsedDirective, ParsedDirective] | None = None
         for index, first in enumerate(rows):
             for second in rows[index + 1:]:
+                if _same_evidence(first, second):
+                    continue
                 if not first.attrs.get("value") or first.attrs.get("value") == second.attrs.get("value"):
                     continue
                 first_time, second_time = first.attrs.get("time", ""), second.attrs.get("time", "")
