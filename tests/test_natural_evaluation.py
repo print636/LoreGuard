@@ -110,15 +110,16 @@ class DatasetTests(unittest.TestCase):
             loaded = load_cases("test", root)
             self.assertEqual(["test-sample-01"], [row.case_id for row in loaded])
 
-    def test_current_baseline_report_uses_test_only_and_preserves_before_errors(self):
+    def test_current_baseline_report_uses_test_only_and_is_self_contained(self):
         report = run_natural_evaluation("test")
         self.assertFalse(report["benchmark"]["model_enabled"])
         self.assertEqual(60, report["benchmark"]["case_count"])
         self.assertEqual(30, report["benchmark"]["negative_case_count"])
-        before = json.loads(
-            (Path(__file__).resolve().parents[1] / "artifacts" / "state-modeling-v2" / "before-natural-test-errors.json").read_text(encoding="utf-8")
+        self.assertEqual([], report["errors"])
+        self.assertEqual(
+            {"tp": 30, "fp": 0, "fn": 0},
+            {key: report["metrics"]["overall"][key] for key in ("tp", "fp", "fn")},
         )
-        self.assertTrue(before["errors"])
 
     def test_challenge_v2_is_fixed_developer_visible_synthetic_data(self):
         root = Path(__file__).resolve().parents[1] / "data" / "evaluation-challenge-v2"
