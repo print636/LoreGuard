@@ -12,8 +12,18 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     }
 }
 
-Write-Host "Checking backend dependencies..." -ForegroundColor Cyan
-& $venvPython -m pip install --disable-pip-version-check -r (Join-Path $projectRoot "requirements.txt")
+$requirementsPath = Join-Path $projectRoot "requirements.txt"
+$requirementsMarker = Join-Path $projectRoot ".venv\.loreguard-requirements.sha256"
+$requirementsHash = (Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256).Hash
+$installedHash = if (Test-Path -LiteralPath $requirementsMarker) {
+    (Get-Content -LiteralPath $requirementsMarker -Raw).Trim()
+} else { "" }
+if ($installedHash -ne $requirementsHash) {
+    Write-Host "Installing backend dependencies..." -ForegroundColor Cyan
+    & $venvPython -m pip install --disable-pip-version-check -r $requirementsPath
+    if ($LASTEXITCODE -ne 0) { throw "Backend dependency installation failed." }
+    Set-Content -LiteralPath $requirementsMarker -Value $requirementsHash -Encoding ascii
+}
 
 $frontendRoot = Join-Path $projectRoot "frontend"
 $distIndex = Join-Path $frontendRoot "dist\index.html"
