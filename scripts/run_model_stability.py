@@ -41,7 +41,14 @@ def load_case(case_name: str, root: Path | None = None) -> list[DocumentInput]:
                 chosen = [lines[0], *lines[-3:]]
             selected[path.name] = "\n".join(chosen)
         return [DocumentInput(id=name.rsplit(".", 1)[0], name=name, content=content) for name, content in selected.items()]
-    raise ValueError("case must be advanced or long-smoke-subset")
+    if case_name == "long-smoke-2k":
+        data_root = project_root / "data" / "long-text-smoke"
+        sections = []
+        for path in sorted(data_root.glob("*.md")):
+            sections.append(f"# {path.name}\n{path.read_text(encoding='utf-8')}")
+        content = "\n\n".join(sections)[:2_000]
+        return [DocumentInput(id="long-smoke-2k", name="long-smoke-2k.md", content=content)]
+    raise ValueError("case must be advanced, long-smoke-subset or long-smoke-2k")
 
 
 def percentile(values: list[float], percentile_value: float) -> float:
@@ -173,6 +180,7 @@ def run_stability(
 ) -> dict:
     documents = load_case(case_name, root)
     expected_issues = load_expected_issues(case_name, root)
+    expected_categories = EXPECTED_CATEGORIES if case_name != "long-smoke-2k" else set()
     runs = []
     budget_exhausted = max_total_tokens <= 0
     for repeat in range(repeats):
@@ -248,13 +256,17 @@ def run_stability(
         "budget_exhausted": budget_exhausted,
         "budget_overshoot_tokens": max(0, total_tokens - max_total_tokens),
         "runs": runs,
-        "summary": aggregate_runs(runs, EXPECTED_CATEGORIES, expected_issues),
+        "summary": aggregate_runs(runs, expected_categories, expected_issues),
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case", choices=("advanced", "long-smoke-subset"), default="advanced")
+    parser.add_argument(
+        "--case",
+        choices=("advanced", "long-smoke-subset", "long-smoke-2k"),
+        default="advanced",
+    )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--max-total-tokens", type=int, default=50_000)
     parser.add_argument("--output", type=Path, default=Path("artifacts/model-stability-report.json"))
@@ -267,9 +279,10 @@ def main() -> None:
     if args.rescore:
         report = json.loads(args.rescore.read_text(encoding="utf-8"))
         case_name = report["benchmark"]["case"]
+        expected_categories = EXPECTED_CATEGORIES if case_name != "long-smoke-2k" else set()
         report["summary"] = aggregate_runs(
             report["runs"],
-            EXPECTED_CATEGORIES,
+            expected_categories,
             load_expected_issues(case_name),
         )
         report["benchmark"]["rescored_without_provider_call"] = True

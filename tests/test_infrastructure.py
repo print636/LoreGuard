@@ -12,7 +12,7 @@ from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
 from app.provider import OpenAICompatibleProvider
 from app.rate_limit import SlidingWindowLimiter, WriteRateLimitMiddleware
 from app.usage import configured_cost_usd, estimate_request_tokens
-from scripts.run_model_stability import run_stability
+from scripts.run_model_stability import load_case, run_stability
 
 
 def completion(prompt_tokens=3, completion_tokens=2):
@@ -166,6 +166,11 @@ class RateLimitTests(unittest.TestCase):
 
 
 class TimingAndStabilityTests(unittest.TestCase):
+    def test_two_thousand_character_latency_case_is_one_document(self):
+        documents = load_case("long-smoke-2k")
+        self.assertEqual(1, len(documents))
+        self.assertEqual(2_000, len(documents[0].content))
+
     def test_pipeline_exposes_monotonic_stage_timings(self):
         result = AnalysisPipeline(extractor=BaselineExtractor()).run([
             DocumentInput(id="doc", name="doc.md", content="林澈的发色是银色。")
