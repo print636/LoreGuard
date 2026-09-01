@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from time import perf_counter
 
 from sqlalchemy import delete, select
@@ -9,6 +8,7 @@ from .db import AnalysisDiagnosticRow, AnalysisRecordRow, AnalysisRunRow, Docume
 from .pipeline import AnalysisPipeline, DocumentInput
 from .config import get_settings
 from .usage import configured_cost_usd
+from .time_utils import utc_now_naive
 
 
 def emit(db, run_id: str, stage: str, progress: int, message: str) -> None:
@@ -25,12 +25,12 @@ def execute_analysis(run_id: str, *, raise_on_failure: bool = False) -> None:
         try:
             if run.cancel_requested:
                 run.status = "cancelled"
-                run.completed_at = datetime.utcnow()
+                run.completed_at = utc_now_naive()
                 db.commit()
                 emit(db, run_id, "cancelled", 100, "任务在开始前已取消")
                 return
             run.status = "running"
-            run.started_at = datetime.utcnow()
+            run.started_at = utc_now_naive()
             db.commit()
             docs = db.scalars(select(DocumentRow).where(DocumentRow.project_id == run.project_id, DocumentRow.active.is_(True))).all()
             run.input_chars = sum(len(doc.content) for doc in docs)
@@ -41,7 +41,7 @@ def execute_analysis(run_id: str, *, raise_on_failure: bool = False) -> None:
             )
             if run.cancel_requested:
                 run.status = "cancelled"
-                run.completed_at = datetime.utcnow()
+                run.completed_at = utc_now_naive()
                 db.commit()
                 emit(db, run_id, "cancelled", 100, "任务已取消")
                 return
@@ -69,7 +69,7 @@ def execute_analysis(run_id: str, *, raise_on_failure: bool = False) -> None:
             cost = configured_cost_usd(result.prompt_tokens, result.completion_tokens, get_settings())
             run.estimated_cost_usd = cost if cost is not None else 0
             run.status = "completed"
-            run.completed_at = datetime.utcnow()
+            run.completed_at = utc_now_naive()
             timings = result.diagnostics.setdefault("timings", {})
             timings["report_ms"] = round(float(timings.get("report_ms", 0)) + (perf_counter() - report_started) * 1000, 3)
             timings["total_ms"] = round((perf_counter() - service_started) * 1000, 3)
@@ -83,7 +83,7 @@ def execute_analysis(run_id: str, *, raise_on_failure: bool = False) -> None:
         except Exception as exc:
             run.status = "failed"
             run.error = str(exc)
-            run.completed_at = datetime.utcnow()
+            run.completed_at = utc_now_naive()
             db.commit()
             emit(db, run_id, "failed", 100, "分析失败，可调用重试接口恢复")
             if raise_on_failure:

@@ -7,6 +7,7 @@ from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, Stri
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from .config import get_settings
+from .time_utils import utc_now_naive
 
 
 class Base(DeclarativeBase):
@@ -22,7 +23,7 @@ class ProjectRow(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
     documents: Mapped[list["DocumentRow"]] = relationship(cascade="all, delete-orphan")
 
 
@@ -34,7 +35,7 @@ class DocumentRow(Base):
     content: Mapped[str] = mapped_column(Text)
     version: Mapped[int] = mapped_column(Integer, default=1)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
 class AnalysisRunRow(Base):
@@ -42,7 +43,7 @@ class AnalysisRunRow(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     status: Mapped[str] = mapped_column(String(32), default="queued")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     input_chars: Mapped[int] = mapped_column(Integer, default=0)
@@ -80,7 +81,7 @@ class AnalysisDiagnosticRow(Base):
     __tablename__ = "analysis_diagnostics"
     run_id: Mapped[str] = mapped_column(ForeignKey("analysis_runs.id"), primary_key=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
 class RunEventRow(Base):
@@ -90,7 +91,7 @@ class RunEventRow(Base):
     stage: Mapped[str] = mapped_column(String(80))
     progress: Mapped[int] = mapped_column(Integer)
     message: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
 class FeedbackRow(Base):
@@ -99,7 +100,7 @@ class FeedbackRow(Base):
     issue_id: Mapped[str] = mapped_column(ForeignKey("issues.id"), index=True)
     label: Mapped[str] = mapped_column(String(32))
     comment: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
 settings = get_settings()

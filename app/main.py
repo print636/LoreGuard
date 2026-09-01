@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
 from threading import Thread
 from typing import Annotated
@@ -24,6 +23,7 @@ from .evaluation import run_evaluation
 from .projections import project_graph, project_timeline, record_sort_key
 from .rate_limit import SlidingWindowLimiter, WriteRateLimitMiddleware
 from .service import execute_analysis
+from .time_utils import utc_now_naive
 
 RUNS = Counter("loreguard_analysis_runs_total", "Analysis runs", ["status"])
 LATENCY = Histogram("loreguard_analysis_seconds", "Analysis duration")
@@ -100,7 +100,8 @@ def enforce_daily_model_budget(db) -> None:
     )
     if not model_requested:
         return
-    day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    now = utc_now_naive()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     daily_usage = db.scalar(
         select(
             func.coalesce(
@@ -116,7 +117,7 @@ def enforce_daily_model_budget(db) -> None:
     ) or 0
     if settings.daily_token_budget <= 0 or daily_usage >= settings.daily_token_budget:
         seconds_to_reset = max(
-            1, int(86400 - (datetime.utcnow() - day_start).total_seconds())
+            1, int(86400 - (now - day_start).total_seconds())
         )
         raise HTTPException(
             429,
@@ -149,7 +150,7 @@ def prepare_document_version(db, project_id: str, name: str, replace_document_id
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+    return {"status": "ok", "time": utc_now_naive().isoformat()}
 
 
 @app.post("/api/v1/projects", status_code=201)

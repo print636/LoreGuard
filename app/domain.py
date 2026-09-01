@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+from .time_utils import utc_now_naive
+
 
 class Severity(StrEnum):
     low = "low"
@@ -91,7 +93,7 @@ class AnalysisRun(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
     status: RunStatus = RunStatus.queued
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now_naive)
     started_at: datetime | None = None
     completed_at: datetime | None = None
     input_chars: int = 0
@@ -111,7 +113,7 @@ class EvaluationResult(BaseModel):
     f1: float
     evidence_hit_rate: float
     category_scores: dict[str, dict[str, float | int]]
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=utc_now_naive)
 
 
 class GraphNode(BaseModel):
