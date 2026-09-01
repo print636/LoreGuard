@@ -17,3 +17,15 @@ jobs:
         working-directory: frontend
       - run: pnpm run build
         working-directory: frontend
+  compose-smoke:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker compose up --build --detach
+      - run: python3 scripts/run_compose_smoke.py --timeout-seconds 180
+      - if: always()
+        run: docker compose logs --no-color
+      - if: always()
+        run: docker compose down --volumes
