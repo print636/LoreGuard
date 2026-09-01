@@ -25,6 +25,16 @@
   grid-template-columns: minmax(260px, 1.4fr) minmax(230px, 1fr) auto;
 }
 
+.uploadSelection {
+  margin: -4px 0 14px;
+  color: #9db2a9;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .projectControls input,
 .projectControls select,
 .uploadRow input,
@@ -220,6 +230,20 @@ td {
 th {
   color: #8de0af;
   font-weight: 600;
+}
+
+.tableEmpty {
+  height: 72px;
+  color: #81968d;
+  text-align: center;
+  white-space: normal;
+}
+
+.inlineEmpty {
+  margin-top: 14px;
+  padding: 16px;
+  color: #81968d;
+  background: #0d1c17;
 }
 
 .badge {
