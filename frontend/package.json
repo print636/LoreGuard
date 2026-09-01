@@ -1,0 +1,1 @@
+{"type":"module","packageManager":"pnpm@11.19.0","scripts":{"dev":"vite --host 0.0.0.0","build":"tsc && vite build"},"dependencies":{"@vitejs/plugin-react":"latest","cytoscape":"^3.30.4","vite":"latest","react":"latest","react-dom":"latest"},"devDependencies":{"typescript":"latest","@types/react":"latest","@types/react-dom":"latest","@types/cytoscape":"latest"}}

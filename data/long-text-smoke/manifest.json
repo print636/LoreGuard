@@ -1,0 +1,22 @@
+{
+  "dataset_kind": "generated long-text smoke",
+  "human_annotated": false,
+  "commercial_ip": false,
+  "generator": "scripts/generate_long_text_smoke.py",
+  "document_count": 4,
+  "character_count": 24418,
+  "expected_categories": [
+    "fact_conflict",
+    "location_collision",
+    "knowledge_without_acquisition",
+    "item_ownership",
+    "world_rule_conflict"
+  ],
+  "sha256": {
+    "world.md": "27d90750c11e5c8b99202d6ca8d4394c34e53df0064b6f54799a832016e8ed60",
+    "chapter-01.md": "2ac62518156d8ec6fa76813330a9694f952428eeb3f780a0a7eb8cedc3b0167c",
+    "chapter-02.md": "8311a97eafe6e36ad4f89d86eff00a6f5b750608d82345ea0245cc163b75b52b",
+    "chapter-03.md": "b93a95738c064b9300fa16f663b772fd27f66a839f4acade89408174248a340f"
+  },
+  "limitations": "Generated smoke fixture for pipeline, evidence-line and regression checks; not an accuracy benchmark."
+}

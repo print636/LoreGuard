@@ -1,0 +1,16 @@
+{
+  "name": "LoreGuard challenge-v2",
+  "dataset_kind": "synthetic natural-language",
+  "human_annotated": false,
+  "developer_visible": true,
+  "blind_test": false,
+  "seed": 20260902,
+  "generator": "scripts/generate_challenge_v2.py",
+  "case_count": 50,
+  "cases_per_category": 10,
+  "positive_cases": 25,
+  "hard_negative_cases": 25,
+  "sha256": "37470c6e8479c6bc3e5789f8a800f69ca00a40558a1ee97147866b98dddfa3fe",
+  "limitations": "Fixed-template, developer-visible synthetic challenge. It is not an independent human blind test and cannot estimate production accuracy.",
+  "license_note": "Original fictional content; no commercial IP or ConStory-Bench data."
+}

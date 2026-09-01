@@ -1,0 +1,11 @@
+{
+  "scenario": "静海纪元",
+  "purpose": "用于模型增强抽取的原创回归场景，不进入 Prompt 示例。",
+  "expected_issue_families": [
+    {"category": "location_collision", "evidence": ["chapter-01.md:3", "chapter-01.md:5"], "note": "同一时刻北港与南塔"},
+    {"category": "world_rule_conflict", "evidence": ["world.md:7", "chapter-01.md:7"], "note": "静默海域中发动潮汐术"},
+    {"category": "item_ownership", "evidence": ["world.md:3", "chapter-01.md:9"], "note": "未交接即使用白潮印"},
+    {"category": "knowledge_without_acquisition", "evidence": ["world.md:11", "chapter-02.md:3"], "note": "正式获知入口前说出坐标"},
+    {"category": "fact_conflict", "evidence": ["world.md:5", "chapter-02.md:7"], "note": "失去左臂却描述为完好的左手"}
+  ]
+}

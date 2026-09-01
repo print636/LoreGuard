@@ -1,0 +1,371 @@
+.wide {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.tokenWarn {
+  color: #d8c988;
+  line-height: 1.55;
+}
+
+.projectPanel {
+  padding: 46px 0 18px;
+  border-bottom: 1px solid #28443c;
+}
+
+.projectControls,
+.uploadRow {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.5fr) minmax(180px, 1fr) auto auto;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.uploadRow {
+  grid-template-columns: minmax(260px, 1.4fr) minmax(230px, 1fr) auto;
+}
+
+.projectControls input,
+.projectControls select,
+.uploadRow input,
+.uploadRow select,
+.note {
+  min-width: 0;
+  border: 1px solid #5f8d7a;
+  background: #0d1d18;
+  color: #dce9e4;
+  padding: 10px 12px;
+}
+
+.visualization {
+  padding: 42px 0 10px;
+}
+
+.visualTabs,
+.visualControls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.visualTabs button.active {
+  color: #07110e;
+  border-color: #78dea1;
+  background: #78dea1;
+}
+
+.visualControls {
+  margin-bottom: 12px;
+  color: #9db2a9;
+  font-size: 13px;
+}
+
+.visualControls select {
+  border: 1px solid #5f8d7a;
+  background: #0d1d18;
+  color: #dce9e4;
+  padding: 8px 11px;
+}
+
+.visualControls label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.graphCanvas {
+  width: 100%;
+  height: 520px;
+  border: 1px solid #355448;
+  background: radial-gradient(circle at 50% 45%, #112a21, #08130f 70%);
+}
+
+.visualEmpty,
+.visualWarning,
+.visualDetail {
+  padding: 14px;
+  border: 1px solid #355448;
+  color: #9db2a9;
+  background: #0b1915;
+}
+
+.visualWarning {
+  color: #d8c988;
+  border-color: #6e653c;
+}
+
+.visualDetail {
+  margin-top: 10px;
+}
+
+.visualDetail b,
+.visualDetail span,
+.visualDetail small {
+  display: block;
+}
+
+.visualDetail span,
+.visualDetail small {
+  margin-top: 5px;
+  color: #8de0af;
+}
+
+.timelineList {
+  border-left: 2px solid #355448;
+  margin-left: 110px;
+}
+
+.timelineList section {
+  position: relative;
+  display: grid;
+  grid-template-columns: 105px 1fr;
+  gap: 20px;
+  margin-left: -112px;
+  padding-bottom: 18px;
+}
+
+.timelineList time {
+  color: #8de0af;
+  font: 12px ui-monospace, monospace;
+  text-align: right;
+  padding-top: 12px;
+}
+
+.timelineList section > div {
+  display: grid;
+  gap: 8px;
+}
+
+.timelineList button {
+  position: relative;
+  text-align: left;
+  background: #0d1c17;
+  border-color: #355448;
+}
+
+.timelineList button::before {
+  content: '';
+  position: absolute;
+  left: -27px;
+  top: 15px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #74df9f;
+}
+
+.timelineList button.hasIssue {
+  border-left: 3px solid #d9816c;
+}
+
+.timelineList button.focused {
+  border-color: #f4dc78;
+  box-shadow: 0 0 0 1px #f4dc78;
+}
+
+.timelineList button small {
+  display: block;
+  margin-top: 5px;
+  color: #8fa39b;
+}
+
+.timelineList .unscheduled time {
+  color: #d8c988;
+}
+
+.issues article {
+  cursor: pointer;
+}
+
+.issues article.focusedIssue {
+  background: linear-gradient(90deg, rgba(244,220,120,.08), transparent 70%);
+  box-shadow: inset 3px 0 #f4dc78;
+}
+
+.tables {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.tables > div {
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid #355448;
+  padding: 14px;
+  background: #0b1915;
+}
+
+.tables h3 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  padding: 9px 7px;
+  border-top: 1px solid #29463c;
+  text-align: left;
+  white-space: nowrap;
+}
+
+th {
+  color: #8de0af;
+  font-weight: 600;
+}
+
+.badge {
+  display: inline-block;
+  padding: 3px 7px;
+  border: 1px solid #5f8d7a;
+  border-radius: 999px;
+  color: #bad0c7;
+  font: 11px ui-monospace, monospace;
+}
+
+.badge.ok,
+.badge.completed {
+  border-color: #74df9f;
+  color: #74df9f;
+}
+
+.badge.failed,
+.badge.cancelled {
+  border-color: #dc8c81;
+  color: #f1ada4;
+}
+
+.badge.running,
+.badge.queued {
+  border-color: #d8c988;
+  color: #d8c988;
+}
+
+.badge.muted {
+  opacity: .58;
+}
+
+.status {
+  grid-template-columns: 1fr 1fr 1.4fr 1.2fr auto;
+}
+
+.runActions {
+  display: flex;
+  gap: 8px;
+}
+
+.feedbackState {
+  margin: 12px 0 8px;
+  color: #8de0af;
+  font-size: 13px;
+}
+
+.diffPanel {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid #355448;
+  background: #0b1915;
+}
+
+.diffPanel .sectionHead h3 {
+  margin: 3px 0 12px;
+}
+
+.diffPanel .sectionHead small {
+  color: #8de0af;
+}
+
+.diffControls {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+}
+
+.diffControls select {
+  min-width: 0;
+  border: 1px solid #5f8d7a;
+  background: #0d1d18;
+  color: #dce9e4;
+  padding: 10px 12px;
+}
+
+.diffResult {
+  margin-top: 15px;
+}
+
+.diffSummary {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  color: #a8bbb3;
+  background: #0d1d18;
+}
+
+.diffAdded,
+.diffLine.added b { color: #78dea1; }
+.diffRemoved,
+.diffLine.removed b { color: #f1ada4; }
+
+.diffHunks {
+  max-height: 560px;
+  overflow: auto;
+  border: 1px solid #29463c;
+}
+
+.diffHunk + .diffHunk { border-top: 12px solid #07110e; }
+.diffHeader { padding: 7px 10px; color: #8de0af; background: #173027; font: 12px ui-monospace, monospace; }
+.diffLine { display: grid; grid-template-columns: 52px 52px 24px minmax(0, 1fr); min-height: 25px; font: 12px ui-monospace, monospace; }
+.diffLine code { padding: 5px 7px; color: #71877e; text-align: right; border-right: 1px solid #29463c; }
+.diffLine b { padding: 5px 7px; font-weight: 400; }
+.diffLine pre { margin: 0; padding: 5px 8px; white-space: pre-wrap; overflow-wrap: anywhere; color: #cbd9d3; }
+.diffLine.added { background: rgba(76, 180, 116, .12); }
+.diffLine.removed { background: rgba(205, 94, 82, .12); }
+
+.note {
+  width: min(620px, 100%);
+  margin: 0 0 9px;
+}
+
+@media (max-width: 900px) {
+  .projectControls,
+  .uploadRow,
+  .tables,
+  .status,
+  .diffControls {
+    grid-template-columns: 1fr;
+  }
+
+  .graphCanvas {
+    height: 420px;
+  }
+
+  .timelineList {
+    margin-left: 0;
+    border-left: 0;
+  }
+
+  .timelineList section {
+    grid-template-columns: 1fr;
+    margin-left: 0;
+    gap: 5px;
+  }
+
+  .timelineList time {
+    text-align: left;
+  }
+
+  .timelineList button::before {
+    display: none;
+  }
+}

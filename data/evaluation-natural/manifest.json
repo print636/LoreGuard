@@ -1,0 +1,17 @@
+{
+  "dataset_kind": "synthetic natural-language",
+  "seed": 20260901,
+  "generator": "scripts/generate_natural_evaluation.py",
+  "license_note": "Original fictional material generated for LoreGuard; no commercial IP or ConStory-Bench data.",
+  "dev_cases": 40,
+  "test_cases": 60,
+  "scenario_overlap": false,
+  "categories": [
+    "fact_conflict",
+    "location_collision",
+    "knowledge_without_acquisition",
+    "item_ownership",
+    "world_rule_conflict"
+  ],
+  "limitations": "Template-generated and not human-annotated; metrics do not estimate production accuracy."
+}
