@@ -29,7 +29,7 @@ def wait_until_ready(base_url: str, timeout_seconds: float) -> None:
         try:
             if request_json(base_url, "/health").get("status") == "ok":
                 return
-        except (URLError, TimeoutError, ValueError) as exc:
+        except (URLError, OSError, TimeoutError, ValueError) as exc:
             last_error = exc
         time.sleep(2)
     raise RuntimeError(f"API did not become ready: {type(last_error).__name__}")
