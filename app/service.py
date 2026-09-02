@@ -16,6 +16,28 @@ def emit(db, run_id: str, stage: str, progress: int, message: str) -> None:
     db.commit()
 
 
+def analysis_mode(result) -> tuple[str, bool]:
+    failure_markers = (
+        "模型分块",
+        "运行级熔断",
+        "后续模型分块已停止",
+        "降级到 BaselineExtractor",
+    )
+    partial_fallback = any(
+        marker in warning
+        for warning in result.warnings
+        for marker in failure_markers
+    )
+    if result.model_used:
+        return (
+            "模型增强（部分分块已降级）" if partial_fallback else "完整模型增强",
+            partial_fallback,
+        )
+    if partial_fallback:
+        return "确定性基线（模型未参与或已降级）", True
+    return "确定性基线", False
+
+
 def execute_analysis(run_id: str, *, raise_on_failure: bool = False) -> None:
     service_started = perf_counter()
     with SessionLocal() as db:
@@ -73,11 +95,16 @@ def execute_analysis(run_id: str, *, raise_on_failure: bool = False) -> None:
             timings = result.diagnostics.setdefault("timings", {})
             timings["report_ms"] = round(float(timings.get("report_ms", 0)) + (perf_counter() - report_started) * 1000, 3)
             timings["total_ms"] = round((perf_counter() - service_started) * 1000, 3)
+            mode, partial_fallback = analysis_mode(result)
+            result.diagnostics["model"] = {
+                "used": result.model_used,
+                "partial_fallback": partial_fallback,
+                "mode": mode,
+            }
             db.add(AnalysisDiagnosticRow(run_id=run_id, payload=result.diagnostics))
             db.commit()
             if result.warnings:
                 emit(db, run_id, "warning", 90, "；".join(result.warnings[:5]))
-            mode = "模型增强" if result.model_used else "确定性基线"
             emit(db, run_id, "extract", 92, f"本次使用{mode}，保存 {len(result.directives)} 条记录")
             emit(db, run_id, "report", 100, "证据化报告生成完成")
         except Exception as exc:

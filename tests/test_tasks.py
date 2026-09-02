@@ -2,11 +2,27 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from app.service import execute_analysis
+from app.service import analysis_mode, execute_analysis
 from app.tasks import analyze_project
 
 
 class CeleryTaskTests(unittest.TestCase):
+    def test_analysis_mode_distinguishes_complete_partial_and_baseline(self):
+        complete = SimpleNamespace(model_used=True, warnings=[])
+        partial = SimpleNamespace(
+            model_used=True,
+            warnings=["doc.md: 模型分块 x 抽取不可用，已由全文基线覆盖"],
+        )
+        failed = SimpleNamespace(
+            model_used=False,
+            warnings=["doc.md: 模型运行级熔断已开启"],
+        )
+        baseline = SimpleNamespace(model_used=False, warnings=[])
+        self.assertEqual(("完整模型增强", False), analysis_mode(complete))
+        self.assertEqual(("模型增强（部分分块已降级）", True), analysis_mode(partial))
+        self.assertEqual(("确定性基线（模型未参与或已降级）", True), analysis_mode(failed))
+        self.assertEqual(("确定性基线", False), analysis_mode(baseline))
+
     def test_worker_requests_service_failure_reraise_for_autoretry(self):
         task_body = analyze_project.run
         with patch("app.tasks.execute_analysis") as execute:
