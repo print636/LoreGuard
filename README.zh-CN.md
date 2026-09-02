@@ -38,6 +38,8 @@ docker compose up --build
 - API：<http://localhost:8000/docs>
 - Prometheus：<http://localhost:9090>
 
+GitHub Actions 会实际构建并启动整套 Compose，在关闭模型的隔离环境中经 Celery worker 完成复杂样例分析，并断言五类问题、关系图、时间线和 SSE 终态；这不是只做 YAML 语法检查。
+
 ### 本地开发
 
 ```bash
@@ -130,8 +132,9 @@ React/Vite ──HTTP/SSE── FastAPI
 python scripts/run_evaluation.py
 python scripts/run_natural_evaluation.py
 python scripts/run_complex_v3_evaluation.py --require-perfect
-python scripts/run_complex_model_evaluation.py --suite pilot --max-total-tokens 25000
+python scripts/run_complex_model_evaluation.py --suite full --repeats 3 --max-total-tokens 350000
 python scripts/run_model_stability.py --case advanced --repeats 3 --max-total-tokens 15000
+python scripts/run_model_stability.py --case long-smoke-2k --repeats 5 --max-total-tokens 100000
 ```
 
 两套报告含义不同：
@@ -145,11 +148,13 @@ python scripts/run_model_stability.py --case advanced --repeats 3 --max-total-to
 
 challenge-v2 位于 `data/evaluation-challenge-v2/`，schema、固定 seed、生成器和 SHA-256 均落盘可审计。详细口径见 [`docs/state-modeling-v2-evaluation.md`](docs/state-modeling-v2-evaluation.md)。
 
-复杂验收集位于 `data/evaluation-complex-v3/`，其原创声明、固定证据行、数据哈希与限制见 [`docs/complex-v3-evaluation.md`](docs/complex-v3-evaluation.md)。简历采用哪些事实则受 [`docs/resume-readiness.md`](docs/resume-readiness.md) 的保守门槛约束。
+复杂验收集位于 `data/evaluation-complex-v3/`，其原创声明、固定证据行、数据哈希与限制见 [`docs/complex-v3-evaluation.md`](docs/complex-v3-evaluation.md)。真实模型重复运行的严格统计协议与当前结果见 [`docs/complex-v3-model-evaluation.md`](docs/complex-v3-model-evaluation.md)。简历采用哪些事实则受 [`docs/resume-readiness.md`](docs/resume-readiness.md) 的保守门槛约束。
 
 `run_model_stability.py` 会真实调用已配置的 Provider，记录逐次类别/证据、首进度、P50/P95、Token 与预算停止状态；预期答案只用于运行后评分，不进入 Prompt。报告不保存 Key 或原始响应正文。总预算是运行间停止阈值，单次 Provider 实际 usage 可能让最后一次发生少量越界，报告会单独记录 `budget_overshoot_tokens`。
 
-固定高级开发场景已经完成 3 次初测和 2 次证据约束后的真实调用。最新两次为 TP 10、FP 8、FN 0，Precision 0.556、Recall 1.000、F1 0.714，尚未达到投递门槛；详情与限制见 [`docs/model-stability-evaluation.md`](docs/model-stability-evaluation.md)。
+历史高级开发场景曾在约束不足时得到 P 0.556 / R 1.000；失败记录没有删除。通用结构化与证据修复后，complex-v3 完整 14 例 × 3 轮为 42/42 完整无降级、171/171 次调用成功，类别和严格完整证据评分均为 TP 30、FP 0、FN 0，P95 84.97 秒。它是开发者可见固定回归，不是人工盲测或生产准确率；详情见 [`docs/model-stability-evaluation.md`](docs/model-stability-evaluation.md)。
+
+固定 2000 字单文档真实模型延迟测试 5 次的首进度 P95 为 5.9 ms，端到端 P50 / P95 为 6.30 / 7.94 秒，总计 11,799 Token。该样本没有准确率标注，只用于验证当前 Provider 下的短文本延迟门槛。
 
 ## 测试
 
