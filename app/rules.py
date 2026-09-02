@@ -326,7 +326,10 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
     for assertion in assertions:
         key = assertion.attrs.get("key", "")
         expected = rules.get(key, [])
-        if expected and expected[-1].attrs.get("value") != assertion.attrs.get("value"):
+        canonical_rule = expected[-1] if expected else None
+        if canonical_rule and _same_evidence(canonical_rule, assertion):
+            continue
+        if canonical_rule and canonical_rule.attrs.get("value") != assertion.attrs.get("value"):
             if any(
                 _rule_exception_applies(
                     exception,
@@ -340,8 +343,8 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
             issues.append(_issue(
                 IssueCategory.world_rule_conflict,
                 _world_rule_title(key),
-                f"权威规则为“{expected[-1].attrs.get('value')}”，当前剧情写为“{assertion.attrs.get('value')}”。",
-                [expected[-1].evidence, assertion.evidence],
+                f"权威规则为“{canonical_rule.attrs.get('value')}”，当前剧情写为“{assertion.attrs.get('value')}”。",
+                [canonical_rule.evidence, assertion.evidence],
                 "遵循既有规则，或在世界观文档中正式引入规则例外及其代价。",
                 key=key,
             ))

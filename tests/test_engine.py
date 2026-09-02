@@ -112,6 +112,33 @@ class ParserAndRuleTests(unittest.TestCase):
         ]
         self.assertFalse(any(issue.category.value == "fact_conflict" for issue in detect_issues(directives)))
 
+    def test_world_rule_records_from_same_evidence_cannot_self_conflict(self):
+        evidence = EvidenceSpan(
+            document_id="rule",
+            document_name="rule.md",
+            line_start=1,
+            line_end=1,
+            text="在静默海域中发动潮汐术，然而该术在此必然失效。",
+        )
+        directives = [
+            ParsedDirective(
+                kind="world_rule",
+                attrs={"key": "scope_action:静默海域:潮汐术", "value": "disabled"},
+                evidence=evidence,
+            ),
+            ParsedDirective(
+                kind="world_assert",
+                attrs={"key": "scope_action:静默海域:潮汐术", "value": "performed"},
+                evidence=evidence,
+            ),
+        ]
+        self.assertFalse(
+            any(
+                issue.category.value == "world_rule_conflict"
+                for issue in detect_issues(directives)
+            )
+        )
+
     def test_knowledge_issue_requires_explicit_later_acquisition(self):
         claim_only = parse_document(
             "claim",
