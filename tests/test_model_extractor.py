@@ -118,6 +118,40 @@ class ModelExtractorTests(unittest.TestCase):
             settings(), transport=httpx.MockTransport(lambda _: completion(content))
         )
 
+    def test_pipeline_opens_circuit_after_one_fully_failed_document(self):
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            raise httpx.ReadTimeout("simulated", request=request)
+
+        provider = OpenAICompatibleProvider(
+            settings(
+                model_circuit_breaker_failed_documents=1,
+                model_chunk_max_chars=32,
+                model_chunk_overlap_lines=0,
+            ),
+            transport=httpx.MockTransport(handler),
+            retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+            sleep=lambda _: None,
+        )
+        result = AnalysisPipeline(extractor=ModelEnhancedExtractor(provider)).run(
+            [
+                DocumentInput(
+                    id="first",
+                    name="first.md",
+                    content="林澈的身份是领航员。" + "这是一段没有额外状态的航海背景。" * 8,
+                ),
+                DocumentInput(id="second", name="second.md", content="苏弦的身份是档案官。"),
+                DocumentInput(id="third", name="third.md", content="闻序的身份是观察员。"),
+            ]
+        )
+        self.assertEqual(1, calls)
+        self.assertFalse(result.model_used)
+        self.assertEqual(3, len([row for row in result.directives if row.kind == "fact"]))
+        self.assertTrue(any("运行级熔断已开启" in warning for warning in result.warnings))
+
     def test_validates_all_supported_model_kinds_and_binds_original_evidence(self):
         text = """林澈的身份是领航员。
 1026-04-03 10:00，林澈抵达北港。
@@ -284,7 +318,7 @@ class ModelExtractorTests(unittest.TestCase):
             )
             self.assertEqual(1, len(result.directives))
             self.assertFalse(result.model_used)
-            self.assertIn("已降级", result.warnings[-1])
+            self.assertTrue(any("已降级" in warning for warning in result.warnings))
 
     def test_partial_valid_records_survive_invalid_description_record(self):
         payload = {

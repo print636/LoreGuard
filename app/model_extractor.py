@@ -219,9 +219,13 @@ class ModelEnhancedExtractor:
         self.provider = provider or OpenAICompatibleProvider()
         self.baseline = baseline or BaselineExtractor()
         self._run_tokens_used = 0
+        self._failed_documents = 0
+        self._circuit_open = False
 
     def begin_run(self) -> None:
         self._run_tokens_used = 0
+        self._failed_documents = 0
+        self._circuit_open = False
 
     def extract(self, document: DocumentInput) -> ParsedDocument:
         parsed = self.baseline.extract(document)
@@ -229,6 +233,11 @@ class ModelEnhancedExtractor:
             return parsed
 
         settings = self.provider.settings
+        if self._circuit_open:
+            parsed.warnings.append(
+                "模型运行级熔断已开启：先前文档的模型分块全部失败；本文件直接使用全文 BaselineExtractor"
+            )
+            return parsed
         chunks = chunk_document(
             document,
             max_chars=settings.model_chunk_max_chars,
@@ -299,10 +308,27 @@ class ModelEnhancedExtractor:
                 parsed.warnings.append(
                     f"模型分块 {chunk.id} 抽取不可用，已由全文基线覆盖（{type(exc).__name__}）"
                 )
+                parsed.warnings.append(
+                    "当前文档后续模型分块已停止；全文 BaselineExtractor 仍会覆盖完整文档"
+                )
+                break
         parsed.directives = merge_directives(parsed.directives, model_directives)
         parsed.model_used = any_success
-        if selected and failed_chunks == len(selected):
-            parsed.warnings.append("模型抽取不可用，已降级到 BaselineExtractor（所有分块失败）")
+        if failed_chunks:
+            if not any_success:
+                parsed.warnings.append(
+                    "模型抽取不可用，已降级到 BaselineExtractor（所有已尝试分块失败）"
+                )
+            self._failed_documents += 1
+            threshold = max(1, settings.model_circuit_breaker_failed_documents)
+            if self._failed_documents >= threshold:
+                self._circuit_open = True
+                parsed.warnings.append(
+                    f"模型运行级熔断已开启：已有 {self._failed_documents} 个文档全部失败，"
+                    "本次运行后续文档将直接使用全文 BaselineExtractor"
+                )
+        elif any_success:
+            self._failed_documents = 0
         return parsed
 
     @staticmethod

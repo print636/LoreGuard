@@ -13,8 +13,9 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
     enable_model_extraction: bool = False
-    provider_timeout_seconds: float = 45
-    provider_max_attempts: int = 3
+    provider_timeout_seconds: float = 30
+    provider_max_attempts: int = 2
+    model_circuit_breaker_failed_documents: int = 1
     model_chunk_max_chars: int = 6000
     model_chunk_overlap_lines: int = 1
     model_max_chunks_per_document: int = 24
