@@ -44,6 +44,7 @@ def _parse_attrs(raw: str) -> dict[str, str]:
 
 def parse_document(document_id: str, document_name: str, content: str) -> ParsedDocument:
     parsed = ParsedDocument(document_id=document_id, document_name=document_name)
+    unmatched_natural_lines: list[int] = []
     if document_name.lower().endswith(".json"):
         try:
             payload = json.loads(content)
@@ -67,7 +68,7 @@ def parse_document(document_id: str, document_name: str, content: str) -> Parsed
             extracted = extract_natural_line(evidence)
             parsed.directives.extend(extracted)
             if not extracted and len(line) >= 8:
-                parsed.warnings.append(f"Line {line_no}: no high-confidence baseline extraction")
+                unmatched_natural_lines.append(line_no)
             continue
         head, _, evidence_text = line.partition("|")
         parts = head[1:].strip().split(maxsplit=1)
@@ -84,4 +85,12 @@ def parse_document(document_id: str, document_name: str, content: str) -> Parsed
             text=(evidence_text.strip() or source_line.strip()),
         )
         parsed.directives.append(ParsedDirective(kind=kind, attrs=attrs, evidence=evidence))
+    if unmatched_natural_lines:
+        preview = "、".join(str(line) for line in unmatched_natural_lines[:5])
+        remaining = len(unmatched_natural_lines) - 5
+        suffix = f"，另有 {remaining} 行" if remaining > 0 else ""
+        parsed.warnings.append(
+            f"确定性基线有 {len(unmatched_natural_lines)} 行未做高置信抽取"
+            f"（示例行号：{preview}{suffix}）；普通叙述仍保留，启用模型可增强语义覆盖"
+        )
     return parsed

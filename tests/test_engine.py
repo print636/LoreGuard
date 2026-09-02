@@ -8,6 +8,13 @@ from app.domain import EvidenceSpan, ParsedDirective
 
 
 class ParserAndRuleTests(unittest.TestCase):
+    def test_unmatched_narrative_lines_are_summarized_once(self):
+        text = "\n".join(f"这是第 {index} 行普通背景叙述，没有明确状态变化。" for index in range(1, 9))
+        parsed = parse_document("background", "background.md", text)
+        self.assertEqual(1, len(parsed.warnings))
+        self.assertIn("有 8 行未做高置信抽取", parsed.warnings[0])
+        self.assertIn("另有 3 行", parsed.warnings[0])
+
     def test_natural_chinese_baseline_detects_all_five_categories(self):
         text = """林澈的发色是银色。
 林澈的发色是黑色。
