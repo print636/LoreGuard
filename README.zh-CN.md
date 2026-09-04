@@ -65,6 +65,8 @@ set DAILY_TOKEN_BUDGET=100000
 
 模型逐分块调用前会用保守 Token 估算与本次已用额度执行门控；兼容 Provider 不返回 usage 时也按保守估算扣减内部预算。超出单次额度后停止后续模型分块，但全文基线仍会继续。每日额度在创建或重试分析时检查，当前是本地单数据库的非原子配额；多实例生产环境仍需 Redis 或事务式配额服务。写接口另有单进程滑动窗口限流，429 响应包含 `Retry-After`。
 
+模型模式以持久化的结构化执行记录判定，不依赖警告文字。页面会显示逻辑调用成功、失败、跳过和拒绝记录数；任何分块被跳过或记录被拒绝都不能算完整成功。旧运行缺少这些计数时显示“覆盖情况未知”。`python scripts/check_provider.py` 可经生产调用路径测试当前配置，只输出安全状态、耗时与 Token，不输出密钥或上游响应正文。
+
 只有同时配置 `MODEL_INPUT_PRICE_PER_MILLION` 和 `MODEL_OUTPUT_PRICE_PER_MILLION` 时才计算估算成本；未配置时 API/UI 显示“未配置”，不会把未知价格误报为 0 美元。
 
 模型分块默认每块最多 6000 字符、重叠 1 行、每文档最多 24 块，可通过 `MODEL_CHUNK_MAX_CHARS`、`MODEL_CHUNK_OVERLAP_LINES`、`MODEL_MAX_CHUNKS_PER_DOCUMENT` 调整。超过块上限时只截断模型增强部分并明确返回 warning；全文确定性基线仍处理完整文档。模型必须返回原文全局行号，服务端再从完整文档回填证据。
@@ -153,6 +155,8 @@ challenge-v2 位于 `data/evaluation-challenge-v2/`，schema、固定 seed、生
 `run_model_stability.py` 会真实调用已配置的 Provider，记录逐次类别/证据、首进度、P50/P95、Token 与预算停止状态；预期答案只用于运行后评分，不进入 Prompt。报告不保存 Key 或原始响应正文。总预算是运行间停止阈值，单次 Provider 实际 usage 可能让最后一次发生少量越界，报告会单独记录 `budget_overshoot_tokens`。
 
 历史高级开发场景曾在约束不足时得到 P 0.556 / R 1.000；失败记录没有删除。通用结构化与证据修复后，complex-v3 完整 14 例 × 3 轮为 42/42 完整无降级、171/171 次调用成功，类别和严格完整证据评分均为 TP 30、FP 0、FN 0，P95 84.97 秒。它是开发者可见固定回归，不是人工盲测或生产准确率；详情见 [`docs/model-stability-evaluation.md`](docs/model-stability-evaluation.md)。
+
+上述历史模型轮次使用 2026-09-02 的旧覆盖判定。2026-09-04 起完整模型统计必须有结构化执行计数，并排除部分无效记录；旧报告缺少计数时仅保留带“历史未验证”标记的原统计，不能据此声称通过了新协议，也不能移用为新 Provider/模型的成绩。
 
 固定 2000 字单文档真实模型延迟测试 5 次的首进度 P95 为 5.9 ms，端到端 P50 / P95 为 6.30 / 7.94 秒，总计 11,799 Token。该样本没有准确率标注，只用于验证当前 Provider 下的短文本延迟门槛。
 

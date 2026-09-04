@@ -31,6 +31,12 @@ class FakeModelPipeline:
         result = self.pipeline.run(documents)
         result.model_used = self.model_used
         result.prompt_tokens = self.tokens
+        result.diagnostics["model"] = {
+            "enabled": True, "configured": True, "total_chunks": 1,
+            "attempted_chunks": 1, "succeeded_chunks": int(self.model_used),
+            "failed_chunks": int(not self.model_used), "skipped_chunks": 0,
+            "invalid_records": 0, "reason_codes": [] if self.model_used else ["provider_error"],
+        }
         return result
 
 
@@ -51,10 +57,93 @@ class FakePartialFallbackPipeline(FakeModelPipeline):
     def run(self, documents):
         result = super().run(documents)
         result.warnings.append("模型分块 x 抽取不可用，已由全文基线覆盖（ProviderError）")
+        result.diagnostics["model"].update(
+            total_chunks=2, attempted_chunks=2, failed_chunks=1,
+            reason_codes=["provider_error"],
+        )
         return result
 
 
 class ComplexModelEvaluationTests(unittest.TestCase):
+    def test_structured_partial_status_overrides_model_used_without_warning(self):
+        selected = select_cases(load_cases("test", DATASET_ROOT), "pilot")[:1]
+        for status in (
+            {"invalid_records": 1, "reason_codes": ["schema_validation"]},
+            {"total_chunks": 2, "skipped_chunks": 1, "reason_codes": ["token_budget"]},
+            {"total_chunks": 2, "skipped_chunks": 1, "reason_codes": ["chunk_limit"]},
+        ):
+            with self.subTest(status=status):
+                class PartialPipeline(FakeModelPipeline):
+                    def run(self, documents):
+                        result = super().run(documents)
+                        result.warnings.clear()
+                        result.diagnostics["model"].update(status)
+                        return result
+
+                report = run_evaluation(selected, 100, pipeline_factory=PartialPipeline)
+                self.assertEqual(1, report["coverage"]["model_scored_case_count"])
+                self.assertEqual(0, report["coverage"]["strict_model_scored_case_count"])
+                self.assertEqual("structured_execution", report["attempts"][0]["classification_source"])
+
+    def test_unknown_new_execution_never_counts_as_full_model(self):
+        class UnknownPipeline(FakeModelPipeline):
+            def run(self, documents):
+                result = super().run(documents)
+                result.diagnostics.pop("model")
+                result.warnings.clear()
+                return result
+
+        selected = select_cases(load_cases("test", DATASET_ROOT), "pilot")[:1]
+        report = run_evaluation(selected, 100, pipeline_factory=UnknownPipeline)
+        self.assertEqual(0, report["coverage"]["strict_model_scored_case_count"])
+        self.assertEqual("unknown_execution", report["attempts"][0]["classification_source"])
+
+    def test_structured_complete_ignores_warning_wording_and_zero_call_budget_stops(self):
+        selected = select_cases(load_cases("test", DATASET_ROOT), "pilot")
+
+        class CompletePipeline(FakeModelPipeline):
+            def run(self, documents):
+                result = super().run(documents)
+                result.warnings = ["旧文案：模型单次运行 Token 预算不足，抽取不可用"]
+                return result
+
+        complete = run_evaluation(selected[:1], 100, pipeline_factory=CompletePipeline)
+        self.assertEqual(1, complete["coverage"]["strict_model_scored_case_count"])
+
+        class BudgetPipeline(FakeModelPipeline):
+            def run(self, documents):
+                result = super().run(documents)
+                result.model_used = False
+                result.warnings.clear()
+                result.diagnostics["model"].update(
+                    attempted_chunks=0, succeeded_chunks=0, skipped_chunks=1,
+                    reason_codes=["token_budget"],
+                )
+                return result
+
+        exhausted = run_evaluation(selected, 100, pipeline_factory=BudgetPipeline)
+        self.assertEqual(1, exhausted["coverage"]["attempted_case_count"])
+        self.assertEqual("token_budget_exhausted_before_model_success", exhausted["stop_reason"])
+        self.assertEqual(0, exhausted["coverage"]["strict_model_scored_case_count"])
+
+    def test_rescore_structured_status_overrides_stale_flags_but_preserves_explicit_legacy(self):
+        selected = select_cases(load_cases("test", DATASET_ROOT), "pilot")[:1]
+        report = run_evaluation(selected, 100, repeats=3, pipeline_factory=FakeModelPipeline)
+        report["benchmark"] = {}
+        report["attempts"][0]["model_execution"]["invalid_records"] = 1
+        legacy = report["attempts"][1]
+        legacy.pop("model_execution")
+        unknown = report["attempts"][2]
+        unknown.pop("model_execution")
+        unknown.pop("included_in_strict_metrics")
+        unknown.pop("included_in_model_metrics")
+        rescored = rescore_report(report)
+        self.assertEqual(1, rescored["coverage"]["strict_model_scored_case_count"])
+        self.assertEqual(0, rescored["repeat_summaries"][0]["full_model_case_count"])
+        self.assertEqual("legacy_stored_flags_unverified", legacy["classification_source"])
+        self.assertTrue(legacy["included_in_strict_metrics"])
+        self.assertFalse(unknown["included_in_strict_metrics"])
+
     def test_pilot_has_five_category_positive_and_hard_negative_coverage(self):
         selected = select_cases(load_cases("test", DATASET_ROOT), "pilot")
         expected_categories = {

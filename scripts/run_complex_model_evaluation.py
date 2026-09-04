@@ -106,6 +106,29 @@ def _provider_stats(pipeline) -> dict:
     }
 
 
+def _execution_classification(execution: dict | None) -> tuple[bool, bool]:
+    """Only structured, internally consistent execution facts prove full coverage."""
+    if not isinstance(execution, dict):
+        return False, False
+    fields = ("total_chunks", "attempted_chunks", "succeeded_chunks",
+              "failed_chunks", "skipped_chunks", "invalid_records")
+    if any(type(execution.get(key)) is not int or execution[key] < 0 for key in fields):
+        return False, False
+    participating = execution["succeeded_chunks"] > 0
+    complete = bool(
+        execution.get("enabled") is True
+        and execution.get("configured") is True
+        and execution["total_chunks"] > 0
+        and execution["total_chunks"] == execution["attempted_chunks"]
+        == execution["succeeded_chunks"]
+        and execution["failed_chunks"] == 0
+        and execution["skipped_chunks"] == 0
+        and execution["invalid_records"] == 0
+        and not execution.get("reason_codes")
+    )
+    return participating, complete
+
+
 def _exact_metrics(case_results: list[dict]) -> dict:
     """Treat a category match with wrong evidence as both one FP and one FN."""
     counts = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
@@ -266,6 +289,32 @@ def rescore_report(report: dict) -> dict:
     """Refresh derived metrics from stored safe attempt rows without a provider call."""
     attempts = report["attempts"]
     repeats = int(report["coverage"]["requested_repeat_count"])
+    for attempt in attempts:
+        if "model_execution" in attempt:
+            participating, complete = _execution_classification(attempt["model_execution"])
+            attempt["included_in_model_metrics"] = participating
+            attempt["included_in_strict_metrics"] = complete
+            attempt["full_model_attempt"] = complete
+            attempt["classification_source"] = (
+                "structured_execution" if isinstance(attempt["model_execution"], dict)
+                else "unknown_execution"
+            )
+        else:
+            # Historical reports cannot recover missing extraction facts. Keep
+            # their explicitly stored decisions, without upgrading unknown rows.
+            attempt["included_in_model_metrics"] = attempt.get("included_in_model_metrics") is True
+            attempt["included_in_strict_metrics"] = attempt.get("included_in_strict_metrics") is True
+            attempt["full_model_attempt"] = attempt["included_in_strict_metrics"]
+            attempt["classification_source"] = "legacy_stored_flags_unverified"
+    report["coverage"].update({
+        "model_scored_case_count": sum(row["included_in_model_metrics"] for row in attempts),
+        "strict_model_scored_case_count": sum(row["included_in_strict_metrics"] for row in attempts),
+        "full_model_attempt_case_count": sum(row["full_model_attempt"] for row in attempts),
+    })
+    for summary in report.get("repeat_summaries", []):
+        rows = [row for row in attempts if row["repeat_index"] == summary["repeat_index"]]
+        summary["model_participating_case_count"] = sum(row["included_in_model_metrics"] for row in rows)
+        summary["full_model_case_count"] = sum(row["included_in_strict_metrics"] for row in rows)
     participating_results = [
         attempt["score"] for attempt in attempts if attempt["included_in_model_metrics"]
     ]
@@ -376,27 +425,8 @@ def run_evaluation(
             predictions = _predictions(result)
             scored = score_case(case, predictions)
             provider_stats = _provider_stats(pipeline)
-            fallback_markers = (
-                "模型分块超过上限",
-                "模型单次运行 Token 预算不足",
-                "抽取不可用",
-                "降级到 BaselineExtractor",
-            )
-            no_fallback_warning = not any(
-                marker in warning
-                for warning in result.warnings
-                for marker in fallback_markers
-            )
-            provider_complete = (
-                not provider_stats["instrumented"]
-                or (
-                    provider_stats["requested"] > 0
-                    and provider_stats["failed"] == 0
-                    and provider_stats["succeeded"] == provider_stats["requested"]
-                )
-            )
-            full_model_attempt = bool(result.model_used) and no_fallback_warning and provider_complete
-            participating = bool(result.model_used)
+            execution = getattr(result, "diagnostics", {}).get("model")
+            participating, full_model_attempt = _execution_classification(execution)
             if participating:
                 participating_results.append(scored)
             if full_model_attempt:
@@ -409,6 +439,8 @@ def run_evaluation(
                     "category_focus": case.category_focus.value,
                     "document_count": len(case.documents),
                     "model_used": bool(result.model_used),
+                    "model_execution": execution,
+                    "classification_source": "structured_execution" if execution is not None else "unknown_execution",
                     "full_model_attempt": full_model_attempt,
                     "included_in_model_metrics": participating,
                     "included_in_strict_metrics": full_model_attempt,
@@ -437,9 +469,7 @@ def run_evaluation(
                         "duration_ms": round(duration_ms, 3),
                     }
                 )
-            if not result.model_used and any(
-                "Token 预算不足" in warning for warning in result.warnings
-            ):
+            if not participating and "token_budget" in (execution or {}).get("reason_codes", []):
                 budget_exhausted = True
                 stop_reason = "token_budget_exhausted_before_model_success"
                 halt = True
@@ -569,9 +599,10 @@ def build_report(
             "developer_visible": True,
             "blind_test": False,
             "metric_scope": (
-                "Primary metrics include only full-model attempts: model_used=true, "
-                "all logical provider completions succeeded, and no chunk-limit, "
-                "budget, extraction, or baseline-only fallback warning occurred. "
+                "Primary metrics require structured execution facts: every chunk "
+                "attempted and successfully extracted, no failed/skipped chunks, "
+                "invalid records or degradation reason codes. Unknown execution "
+                "is excluded; warning wording and model_used alone are not proof. "
                 "Model-participating partial attempts are reported separately."
             ),
             "answer_isolation": (

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import json
 from time import perf_counter
 from typing import Callable, Protocol
@@ -120,8 +120,14 @@ class AnalysisPipeline:
 
         emit("extract", 10, "开始抽取叙事状态")
         extract_started = perf_counter()
+        model_documents = []
         for document in documents:
             parsed = self.extractor.extract(document)
+            model_documents.append({
+                "document_id": document.id,
+                "document_name": document.name,
+                **asdict(parsed.model_execution),
+            })
             result.directives.extend(parsed.directives)
             result.warnings.extend(f"{document.name}: {warning}" for warning in parsed.warnings)
             result.prompt_tokens += parsed.prompt_tokens
@@ -150,6 +156,22 @@ class AnalysisPipeline:
         result.issues = _dedupe_issues(checked)
         report_ms = (perf_counter() - report_started) * 1000
         result.diagnostics = {
+            "model": {
+                "enabled": any(row["enabled"] for row in model_documents),
+                "configured": any(row["configured"] for row in model_documents),
+                **{
+                    key: sum(row[key] for row in model_documents)
+                    for key in (
+                        "total_chunks", "attempted_chunks", "succeeded_chunks",
+                        "failed_chunks", "skipped_chunks", "invalid_records",
+                        "empty_response_chunks",
+                    )
+                },
+                "reason_codes": sorted({
+                    reason for row in model_documents for reason in row["reason_codes"]
+                }),
+                "documents": model_documents,
+            },
             "chunking": {
                 "max_chars": settings.model_chunk_max_chars,
                 "overlap_lines": settings.model_chunk_overlap_lines,

@@ -22,6 +22,31 @@ SUPPORTED_DIRECTIVES = {
 
 
 @dataclass(slots=True)
+class ModelExecution:
+    """Extraction facts, independent of human-readable warning wording.
+
+    Attempts count logical provider calls (including their internal retries).
+    A succeeded chunk may still contain rejected records; these are counted
+    separately and prevent the run from being classified as complete.
+    """
+
+    enabled: bool = False
+    configured: bool = False
+    total_chunks: int = 0
+    attempted_chunks: int = 0
+    succeeded_chunks: int = 0
+    failed_chunks: int = 0
+    skipped_chunks: int = 0
+    invalid_records: int = 0
+    empty_response_chunks: int = 0
+    reason_codes: list[str] = field(default_factory=list)
+
+    def note(self, reason: str) -> None:
+        if reason not in self.reason_codes:
+            self.reason_codes.append(reason)
+
+
+@dataclass(slots=True)
 class ParsedDocument:
     document_id: str
     document_name: str
@@ -30,6 +55,7 @@ class ParsedDocument:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     model_used: bool = False
+    model_execution: ModelExecution = field(default_factory=ModelExecution)
 
 
 def _parse_attrs(raw: str) -> dict[str, str]:

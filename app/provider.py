@@ -81,7 +81,7 @@ class OpenAICompatibleProvider:
 
         with httpx.Client(
             timeout=httpx.Timeout(self.settings.provider_timeout_seconds, connect=10),
-            follow_redirects=True,
+            follow_redirects=False,
             transport=self.transport,
         ) as client:
             for attempt in range(1, self.retry_policy.max_attempts + 1):
@@ -92,7 +92,7 @@ class OpenAICompatibleProvider:
                         raise httpx.HTTPStatusError(
                             last_reason, request=response.request, response=response
                         )
-                    if response.status_code >= 400:
+                    if response.status_code >= 300:
                         raise ProviderError(f"模型服务拒绝请求（HTTP {response.status_code}）")
                     body: Any = response.json()
                     text = body["choices"][0]["message"]["content"]
@@ -121,7 +121,9 @@ class OpenAICompatibleProvider:
                     TypeError,
                     ValueError,
                 ) as exc:
-                    last_reason = str(exc)[:80] or type(exc).__name__
+                    # Exception messages can contain provider-controlled values
+                    # (for example an invalid usage field). Persist only types.
+                    last_reason = type(exc).__name__
 
                 if attempt < self.retry_policy.max_attempts:
                     self.sleep(self.retry_policy.base_delay_seconds * (2 ** (attempt - 1)))

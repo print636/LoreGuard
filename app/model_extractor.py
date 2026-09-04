@@ -89,7 +89,7 @@ class ExtractionEnvelope(BaseModel):
     """Validate the transport envelope without making one bad record fatal."""
 
     model_config = ConfigDict(extra="forbid")
-    records: list[Any] = Field(default_factory=list, max_length=500)
+    records: list[Any] = Field(max_length=500)
 
 
 ENVELOPE_ADAPTER = TypeAdapter(ExtractionEnvelope)
@@ -159,9 +159,40 @@ def _fingerprint(
 def merge_directives(
     baseline: list[ParsedDirective], model: list[ParsedDirective]
 ) -> list[ParsedDirective]:
+    # Only align a model's extra copula against an independently extracted
+    # baseline fact with exactly the same subject/value/time and source span.
+    # Do not strip suffixes globally: predicates such as “行为” are meaningful.
+    def fact_key(item: ParsedDirective) -> tuple:
+        return (
+            item.evidence.document_id,
+            item.evidence.document_name,
+            item.evidence.line_start,
+            item.evidence.line_end,
+            item.evidence.text,
+            *(_clean(item.attrs.get(key, "")) for key in ("subject", "value", "time")),
+        )
+
+    baseline_predicates: dict[tuple, dict[str, str]] = {}
+    for item in baseline:
+        if item.kind == "fact" and item.attrs.get("predicate"):
+            baseline_predicates.setdefault(fact_key(item), {})[
+                _clean(item.attrs["predicate"])
+            ] = item.attrs["predicate"]
+
     merged = list(baseline)
     seen = {_fingerprint(item) for item in baseline}
     for item in model:
+        if item.kind == "fact":
+            predicate = _clean(item.attrs.get("predicate", ""))
+            candidates = baseline_predicates.get(fact_key(item), {})
+            if (
+                predicate not in candidates
+                and predicate.endswith(("是", "为"))
+                and predicate[:-1] in candidates
+            ):
+                item = item.model_copy(update={
+                    "attrs": {**item.attrs, "predicate": candidates[predicate[:-1]]}
+                })
         fingerprint = _fingerprint(item)
         if fingerprint not in seen:
             merged.append(item)
@@ -229,22 +260,30 @@ class ModelEnhancedExtractor:
 
     def extract(self, document: DocumentInput) -> ParsedDocument:
         parsed = self.baseline.extract(document)
-        if not self.provider.configured:
-            return parsed
-
         settings = self.provider.settings
-        if self._circuit_open:
-            parsed.warnings.append(
-                "模型运行级熔断已开启：先前文档的模型分块全部失败；本文件直接使用全文 BaselineExtractor"
-            )
-            return parsed
+        execution = parsed.model_execution
+        execution.enabled = settings.enable_model_extraction
+        execution.configured = self.provider.configured
         chunks = chunk_document(
             document,
             max_chars=settings.model_chunk_max_chars,
             overlap_lines=settings.model_chunk_overlap_lines,
         )
+        execution.total_chunks = len(chunks)
+        if not self.provider.configured:
+            execution.skipped_chunks = len(chunks)
+            execution.note("not_configured" if execution.enabled else "disabled")
+            return parsed
+        if self._circuit_open:
+            execution.skipped_chunks = len(chunks)
+            execution.note("circuit_open")
+            parsed.warnings.append(
+                "模型运行级熔断已开启：先前文档发生不可恢复的模型抽取失败；本文件直接使用全文 BaselineExtractor"
+            )
+            return parsed
         selected = chunks[: settings.model_max_chunks_per_document]
         if len(selected) < len(chunks):
+            execution.note("chunk_limit")
             parsed.warnings.append(
                 f"模型分块超过上限：仅处理前 {len(selected)}/{len(chunks)} 块；未处理部分仍由全文 BaselineExtractor 覆盖"
             )
@@ -260,11 +299,13 @@ class ModelEnhancedExtractor:
             estimated_tokens = estimate_request_tokens(SYSTEM_PROMPT, user_prompt)
             used_tokens = self._run_tokens_used
             if used_tokens + estimated_tokens > settings.per_run_token_budget:
+                execution.note("token_budget")
                 parsed.warnings.append(
                     f"模型单次运行 Token 预算不足：已用 {used_tokens}，下一分块保守估算 {estimated_tokens}，预算 {settings.per_run_token_budget}；后续分块由全文基线覆盖"
                 )
                 break
             try:
+                execution.attempted_chunks += 1
                 response = self.provider.complete(
                     SYSTEM_PROMPT,
                     user_prompt,
@@ -286,16 +327,20 @@ class ModelEnhancedExtractor:
                         chunk_directives.append(self._to_directive(document, chunk, record))
                     except ValidationError:
                         invalid_count += 1
+                        execution.invalid_records += 1
+                        execution.note("schema_validation")
                         parsed.warnings.append(
                             f"模型记录 #{index}（分块 {chunk.id}）不符合抽取协议（schema_validation），已安全跳过"
                         )
                     except ValueError as exc:
                         invalid_count += 1
+                        execution.invalid_records += 1
                         reason = {
                             "模型返回的证据行号越界": "evidence_range",
                             "模型返回了空证据区间": "empty_evidence",
                             "模型记录缺少原文词面支持": "lexical_support",
                         }.get(str(exc), "record_validation")
+                        execution.note(reason)
                         parsed.warnings.append(
                             f"模型记录 #{index}（分块 {chunk.id}）不符合抽取协议（{reason}），已安全跳过"
                         )
@@ -303,8 +348,19 @@ class ModelEnhancedExtractor:
                     raise ValueError(f"模型返回的 {invalid_count} 条记录全部无效")
                 model_directives.extend(chunk_directives)
                 any_success = True
+                execution.succeeded_chunks += 1
+                if not envelope.records:
+                    execution.empty_response_chunks += 1
             except (ProviderError, ValidationError, ValueError) as exc:
                 failed_chunks += 1
+                execution.failed_chunks += 1
+                execution.note(
+                    "provider_error" if isinstance(exc, ProviderError)
+                    else "schema_validation" if isinstance(exc, ValidationError)
+                    else "record_validation"
+                )
+                if execution.attempted_chunks < len(selected):
+                    execution.note("document_aborted")
                 parsed.warnings.append(
                     f"模型分块 {chunk.id} 抽取不可用，已由全文基线覆盖（{type(exc).__name__}）"
                 )
@@ -314,6 +370,7 @@ class ModelEnhancedExtractor:
                 break
         parsed.directives = merge_directives(parsed.directives, model_directives)
         parsed.model_used = any_success
+        execution.skipped_chunks = execution.total_chunks - execution.attempted_chunks
         if failed_chunks:
             if not any_success:
                 parsed.warnings.append(
@@ -323,8 +380,9 @@ class ModelEnhancedExtractor:
             threshold = max(1, settings.model_circuit_breaker_failed_documents)
             if self._failed_documents >= threshold:
                 self._circuit_open = True
+                execution.note("circuit_open")
                 parsed.warnings.append(
-                    f"模型运行级熔断已开启：已有 {self._failed_documents} 个文档全部失败，"
+                    f"模型运行级熔断已开启：已有 {self._failed_documents} 个文档发生不可恢复的模型抽取失败，"
                     "本次运行后续文档将直接使用全文 BaselineExtractor"
                 )
         elif any_success:

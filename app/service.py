@@ -17,25 +17,22 @@ def emit(db, run_id: str, stage: str, progress: int, message: str) -> None:
 
 
 def analysis_mode(result) -> tuple[str, bool]:
-    failure_markers = (
-        "模型分块",
-        "运行级熔断",
-        "后续模型分块已停止",
-        "降级到 BaselineExtractor",
+    execution = getattr(result, "diagnostics", {}).get("model")
+    if execution is None:
+        return "执行状态未知（缺少结构化记录）", True
+    if not execution["enabled"]:
+        return "确定性基线", False
+    succeeded = execution["succeeded_chunks"]
+    partial_fallback = bool(
+        execution["failed_chunks"] or execution["skipped_chunks"]
+        or execution["invalid_records"] or not execution["configured"]
     )
-    partial_fallback = any(
-        marker in warning
-        for warning in result.warnings
-        for marker in failure_markers
-    )
-    if result.model_used:
+    if succeeded:
         return (
             "模型增强（部分分块已降级）" if partial_fallback else "完整模型增强",
             partial_fallback,
         )
-    if partial_fallback:
-        return "确定性基线（模型未参与或已降级）", True
-    return "确定性基线", False
+    return "确定性基线（模型未参与或已降级）", True
 
 
 def execute_analysis(run_id: str, *, raise_on_failure: bool = False) -> None:
@@ -96,11 +93,11 @@ def execute_analysis(run_id: str, *, raise_on_failure: bool = False) -> None:
             timings["report_ms"] = round(float(timings.get("report_ms", 0)) + (perf_counter() - report_started) * 1000, 3)
             timings["total_ms"] = round((perf_counter() - service_started) * 1000, 3)
             mode, partial_fallback = analysis_mode(result)
-            result.diagnostics["model"] = {
+            result.diagnostics.setdefault("model", {}).update({
                 "used": result.model_used,
                 "partial_fallback": partial_fallback,
                 "mode": mode,
-            }
+            })
             db.add(AnalysisDiagnosticRow(run_id=run_id, payload=result.diagnostics))
             db.commit()
             if result.warnings:

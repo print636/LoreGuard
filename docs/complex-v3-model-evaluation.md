@@ -45,6 +45,10 @@ python scripts/run_complex_model_evaluation.py `
 
 主指标只纳入“完整模型轮次”：
 
+2026-09-04 起，以 `model_execution` 中的结构化记录为唯一新运行判据：启用且已配置，分块总数大于 0，全部分块均已调用并成功，失败/跳过/无效记录均为 0，且无降级原因码。只看 `model_used` 或扫描 warning 都不足以证明完整成功。未知执行状态排除出严格分母。旧报告离线重算只保留原有明确标记并注明 `legacy_stored_flags_unverified`，不补造缺失计数；下列历史成绩不是新协议的重新认证。
+
+旧判定（仅用于解释历史报告）：
+
 1. `model_used=true`；
 2. 所有被包装的 Provider 逻辑调用成功；
 3. 没有分块上限、Token 预算、抽取失败或 Baseline-only 降级告警。
