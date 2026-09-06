@@ -1,0 +1,602 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "evidence-retrieval-v1",
+  "language": "zh-CN",
+  "status": "frozen",
+  "license": "MIT",
+  "provenance": "全部世界观、章节与问题均为本仓开发者原创；未使用商业游戏语料，未调用模型生成。",
+  "evaluation_boundary": "开发者可见的冻结工程评测集，用于比较检索配置；不是盲测、用户数据或开放文本质量证明。",
+  "target_profile_id": "bge-small-zh-v1.5-512-local-tei-v1",
+  "profiles": [
+    {
+      "profile_id": "bge-small-zh-v1.5-512-local-tei-v1",
+      "model_identifier": "BAAI/bge-small-zh-v1.5",
+      "model_revision": "7999e1d3359715c523056ef9478215996d62a620",
+      "dimensions": 512,
+      "normalized": true
+    },
+    {
+      "profile_id": "distractor-wrong-profile-768-v0",
+      "model_identifier": "fixture-only/wrong-space",
+      "model_revision": "fixture-v0",
+      "dimensions": 768,
+      "normalized": true
+    }
+  ],
+  "worlds": [
+    {
+      "world_id": "cloud-theater-decoy",
+      "project_id": "eval-dev-cloud-theater-decoy",
+      "split": "dev",
+      "documents": [
+        {"document_id": "cloud-decoy", "version": 1, "role": "isolation_decoy", "active": true, "path": "worlds/cloud-theater/isolation-decoys-v1.md"}
+      ]
+    },
+    {
+      "world_id": "mist-harbor",
+      "project_id": "eval-dev-mist-harbor",
+      "split": "dev",
+      "documents": [
+        {"document_id": "mist-canon", "version": 2, "role": "canon", "active": true, "path": "worlds/mist-harbor/canon-v2.md"},
+        {"document_id": "mist-canon", "version": 1, "role": "canon", "active": false, "path": "worlds/mist-harbor/canon-v1.md"},
+        {"document_id": "mist-bell", "version": 1, "role": "chapter", "active": true, "path": "worlds/mist-harbor/chapter-bell-v1.md"},
+        {"document_id": "mist-tide", "version": 1, "role": "chapter", "active": true, "path": "worlds/mist-harbor/chapter-tide-v1.md"},
+        {"document_id": "mist-decoy", "version": 1, "role": "isolation_decoy", "active": true, "path": "worlds/mist-harbor/isolation-decoys-v1.md"}
+      ]
+    },
+    {
+      "world_id": "white-ash",
+      "project_id": "eval-holdout-white-ash",
+      "split": "holdout",
+      "documents": [
+        {"document_id": "ash-canon", "version": 3, "role": "canon", "active": true, "path": "worlds/white-ash/canon-v3.md"},
+        {"document_id": "ash-canon", "version": 2, "role": "canon", "active": false, "path": "worlds/white-ash/canon-v2.md"},
+        {"document_id": "ash-fire", "version": 2, "role": "chapter", "active": true, "path": "worlds/white-ash/chapter-ash-v2.md"},
+        {"document_id": "ash-mirror", "version": 1, "role": "chapter", "active": true, "path": "worlds/white-ash/chapter-mirror-v1.md"},
+        {"document_id": "ash-decoy", "version": 1, "role": "isolation_decoy", "active": true, "path": "worlds/white-ash/isolation-decoys-v1.md"}
+      ]
+    },
+    {
+      "world_id": "star-cocoon",
+      "project_id": "eval-holdout-star-cocoon",
+      "split": "holdout",
+      "documents": [
+        {"document_id": "star-canon", "version": 2, "role": "canon", "active": true, "path": "worlds/star-cocoon/canon-v2.md"},
+        {"document_id": "star-canon", "version": 1, "role": "canon", "active": false, "path": "worlds/star-cocoon/canon-v1.md"},
+        {"document_id": "star-platform", "version": 1, "role": "chapter", "active": true, "path": "worlds/star-cocoon/chapter-platform-v1.md"},
+        {"document_id": "star-dream", "version": 1, "role": "chapter", "active": true, "path": "worlds/star-cocoon/chapter-dream-v1.md"},
+        {"document_id": "star-decoy", "version": 1, "role": "isolation_decoy", "active": true, "path": "worlds/star-cocoon/isolation-decoys-v1.md"}
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": "MH-D-01",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "港里究竟在什么自然现象之后才翻到下一天？",
+      "difficulty": "medium",
+      "labels": ["low_lexical_overlap", "world_rule"],
+      "expected_evidence": [{"document_id": "mist-canon", "version": 2, "start_line": 1, "end_line": 1}]
+    },
+    {
+      "task_id": "MH-D-02",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "所谓潮痕章是什么东西，谁有资格让它留下印记？",
+      "difficulty": "easy",
+      "labels": ["alias", "authorization"],
+      "expected_evidence": [{"document_id": "mist-canon", "version": 2, "start_line": 2, "end_line": 2}]
+    },
+    {
+      "task_id": "MH-D-03",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "旅客没拿常规凭证，却赶上天体遮蔽时，有没有别的合法进城办法？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "exception_rule"],
+      "expected_evidence": [{"document_id": "mist-canon", "version": 2, "start_line": 3, "end_line": 4}]
+    },
+    {
+      "task_id": "MH-D-04",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "看塔人这次外出为何没有违反职守禁令？",
+      "difficulty": "hard",
+      "labels": ["exception_rule", "cross_chapter_causality"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 5, "end_line": 5},
+        {"document_id": "mist-bell", "version": 1, "start_line": 3, "end_line": 4}
+      ]
+    },
+    {
+      "task_id": "MH-D-05",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "夜巡以前，那件能开启检修入口的蓝色器物放在哪里、由谁看管？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "object_state"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 6, "end_line": 6},
+        {"document_id": "mist-bell", "version": 1, "start_line": 2, "end_line": 2}
+      ]
+    },
+    {
+      "task_id": "MH-D-06",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "南码头自称灰鸥的人真实身份是什么？",
+      "difficulty": "easy",
+      "labels": ["alias", "identity"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 9, "end_line": 9},
+        {"document_id": "mist-bell", "version": 1, "start_line": 1, "end_line": 1}
+      ]
+    },
+    {
+      "task_id": "MH-D-07",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "全面停航警报中，哪类救助船仍能载伤员离港？",
+      "difficulty": "medium",
+      "labels": ["low_lexical_overlap", "exception_rule"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 10, "end_line": 10},
+        {"document_id": "mist-bell", "version": 1, "start_line": 10, "end_line": 10}
+      ]
+    },
+    {
+      "task_id": "MH-D-08",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "水井为什么起初不展示石鲸，后来却能映出它？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "knowledge_acquisition", "cross_chapter_causality"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 11, "end_line": 11},
+        {"document_id": "mist-bell", "version": 1, "start_line": 6, "end_line": 6},
+        {"document_id": "mist-tide", "version": 1, "start_line": 12, "end_line": 13}
+      ]
+    },
+    {
+      "task_id": "MH-D-09",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "乔禾是在何时从只听说功能变成亲眼确认钥匙用途的？",
+      "difficulty": "hard",
+      "labels": ["knowledge_acquisition", "cross_chapter_causality"],
+      "expected_evidence": [
+        {"document_id": "mist-bell", "version": 1, "start_line": 8, "end_line": 9},
+        {"document_id": "mist-tide", "version": 1, "start_line": 5, "end_line": 6}
+      ]
+    },
+    {
+      "task_id": "MH-D-10",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "沈砚丢掉的是哪段记忆，为什么当天的新经历还保留着？",
+      "difficulty": "hard",
+      "labels": ["knowledge_state", "temporal_rule"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 8, "end_line": 8},
+        {"document_id": "mist-bell", "version": 1, "start_line": 13, "end_line": 14}
+      ]
+    },
+    {
+      "task_id": "MH-D-11",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "陆弥为何不能独自让兄长从名册中消失？",
+      "difficulty": "medium",
+      "labels": ["low_lexical_overlap", "authorization"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 14, "end_line": 14},
+        {"document_id": "mist-tide", "version": 1, "start_line": 8, "end_line": 9}
+      ]
+    },
+    {
+      "task_id": "MH-D-12",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "同一张黑盐许可为什么前一次能过桥，天象结束后却失效？",
+      "difficulty": "hard",
+      "labels": ["exception_rule", "temporal_rule"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 4, "end_line": 4},
+        {"document_id": "mist-tide", "version": 1, "start_line": 10, "end_line": 11}
+      ]
+    },
+    {
+      "task_id": "MH-D-13",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "外海生物并非钟体破损后立刻闯入，中间还缺少哪个触发环节？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "cross_chapter_causality", "temporal_rule"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 12, "end_line": 12},
+        {"document_id": "mist-tide", "version": 1, "start_line": 1, "end_line": 4}
+      ]
+    },
+    {
+      "task_id": "MH-D-14",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "第二天没人承认换班安排，根本原因是什么？",
+      "difficulty": "medium",
+      "labels": ["cross_chapter_causality", "world_rule"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 7, "end_line": 7},
+        {"document_id": "mist-tide", "version": 1, "start_line": 14, "end_line": 15}
+      ]
+    },
+    {
+      "task_id": "MH-D-15",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "罚款和风暴封港同在日落前宣布，为何一个等待、一个马上执行？",
+      "difficulty": "hard",
+      "labels": ["exception_rule", "temporal_rule"],
+      "expected_evidence": [
+        {"document_id": "mist-canon", "version": 2, "start_line": 16, "end_line": 16},
+        {"document_id": "mist-bell", "version": 1, "start_line": 16, "end_line": 18}
+      ]
+    },
+    {
+      "task_id": "MH-D-16",
+      "split": "dev",
+      "world_id": "mist-harbor",
+      "query": "按当前设定，蓝釉钥匙的初始保管地点在哪里？",
+      "difficulty": "hard",
+      "labels": ["isolation_negative", "version_isolation"],
+      "expected_evidence": [{"document_id": "mist-canon", "version": 2, "start_line": 6, "end_line": 6}],
+      "negative_candidates": [
+        {"kind": "stale_version", "project_id": "eval-dev-mist-harbor", "document_id": "mist-canon", "version": 1, "start_line": 6, "end_line": 6, "profile_id": "bge-small-zh-v1.5-512-local-tei-v1"},
+        {"kind": "wrong_profile", "project_id": "eval-dev-mist-harbor", "document_id": "mist-canon", "version": 2, "start_line": 6, "end_line": 6, "profile_id": "distractor-wrong-profile-768-v0"},
+        {"kind": "wrong_document", "project_id": "eval-dev-mist-harbor", "document_id": "mist-decoy", "version": 1, "start_line": 1, "end_line": 2, "profile_id": "bge-small-zh-v1.5-512-local-tei-v1"},
+        {"kind": "wrong_project", "project_id": "eval-dev-cloud-theater-decoy", "document_id": "cloud-decoy", "version": 1, "start_line": 1, "end_line": 1, "profile_id": "bge-small-zh-v1.5-512-local-tei-v1"}
+      ]
+    },
+    {
+      "task_id": "WA-H-01",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "这座馆不是看钟表换日，它用什么动作划分日界？",
+      "difficulty": "medium",
+      "labels": ["low_lexical_overlap", "world_rule"],
+      "expected_evidence": [{"document_id": "ash-canon", "version": 3, "start_line": 1, "end_line": 1}]
+    },
+    {
+      "task_id": "WA-H-02",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "寻钟密录上的无页者究竟是谁？",
+      "difficulty": "easy",
+      "labels": ["alias", "identity"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 2, "end_line": 2},
+        {"document_id": "ash-mirror", "version": 1, "start_line": 19, "end_line": 20}
+      ]
+    },
+    {
+      "task_id": "WA-H-03",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "交接板上写冬芽时，指的是哪名见习人员？",
+      "difficulty": "easy",
+      "labels": ["alias", "identity"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 9, "end_line": 9},
+        {"document_id": "ash-fire", "version": 2, "start_line": 1, "end_line": 2}
+      ]
+    },
+    {
+      "task_id": "WA-H-04",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "柏棠破坏封口却没有违规，需要同时满足哪两个条件？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "exception_rule"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 3, "end_line": 3},
+        {"document_id": "ash-fire", "version": 2, "start_line": 3, "end_line": 6}
+      ]
+    },
+    {
+      "task_id": "WA-H-05",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "同一页文字第二次才向弥生显现逃生路线，期间新增了什么认知前提？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "knowledge_acquisition", "cross_chapter_causality"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 4, "end_line": 4},
+        {"document_id": "ash-mirror", "version": 1, "start_line": 9, "end_line": 12}
+      ]
+    },
+    {
+      "task_id": "WA-H-06",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "弥生在第六次闭灯后交还记忆容器是否已经超期？",
+      "difficulty": "medium",
+      "labels": ["temporal_rule", "object_state"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 5, "end_line": 5},
+        {"document_id": "ash-mirror", "version": 1, "start_line": 16, "end_line": 17}
+      ]
+    },
+    {
+      "task_id": "WA-H-07",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "为什么取偶数架顶层卷宗时必须换成木制攀爬工具？",
+      "difficulty": "medium",
+      "labels": ["low_lexical_overlap", "world_rule"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 6, "end_line": 6},
+        {"document_id": "ash-fire", "version": 2, "start_line": 17, "end_line": 18}
+      ]
+    },
+    {
+      "task_id": "WA-H-08",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "镜面预演晨间交接的异常，是由此前哪件失窃事件触发的？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "cross_chapter_causality"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 7, "end_line": 7},
+        {"document_id": "ash-mirror", "version": 1, "start_line": 1, "end_line": 7}
+      ]
+    },
+    {
+      "task_id": "WA-H-09",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "柏棠发现日期抄错后，怎样更正才不破坏原始档案？",
+      "difficulty": "medium",
+      "labels": ["procedure", "document_integrity"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 8, "end_line": 8},
+        {"document_id": "ash-fire", "version": 2, "start_line": 9, "end_line": 11}
+      ]
+    },
+    {
+      "task_id": "WA-H-10",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "弥生手里的入场凭证能带她到哪一层，哪里仍然禁止？",
+      "difficulty": "medium",
+      "labels": ["authorization", "spatial_rule"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 10, "end_line": 10},
+        {"document_id": "ash-fire", "version": 2, "start_line": 7, "end_line": 8}
+      ]
+    },
+    {
+      "task_id": "WA-H-11",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "写下的承诺为何自行消退，而不是继续约束许诺者？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "exception_rule"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 11, "end_line": 11},
+        {"document_id": "ash-fire", "version": 2, "start_line": 13, "end_line": 14}
+      ]
+    },
+    {
+      "task_id": "WA-H-12",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "不能发声的来客通过哪种替代方式完成公共目录借阅？",
+      "difficulty": "medium",
+      "labels": ["low_lexical_overlap", "accessibility", "exception_rule"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 13, "end_line": 13},
+        {"document_id": "ash-fire", "version": 2, "start_line": 9, "end_line": 9}
+      ]
+    },
+    {
+      "task_id": "WA-H-13",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "负责人失联时，封存文件还能怎样获得有效授权？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "exception_rule", "authorization"],
+      "expected_evidence": [
+        {"document_id": "ash-canon", "version": 3, "start_line": 14, "end_line": 14},
+        {"document_id": "ash-fire", "version": 2, "start_line": 12, "end_line": 12}
+      ]
+    },
+    {
+      "task_id": "WA-H-14",
+      "split": "holdout",
+      "world_id": "white-ash",
+      "query": "按现行规则，陌生读者能否直接看到回声墨水里所有人的批注？",
+      "difficulty": "hard",
+      "labels": ["isolation_negative", "version_isolation", "profile_isolation"],
+      "expected_evidence": [{"document_id": "ash-canon", "version": 3, "start_line": 4, "end_line": 4}],
+      "negative_candidates": [
+        {"kind": "stale_version", "project_id": "eval-holdout-white-ash", "document_id": "ash-canon", "version": 2, "start_line": 4, "end_line": 4, "profile_id": "bge-small-zh-v1.5-512-local-tei-v1"},
+        {"kind": "wrong_profile", "project_id": "eval-holdout-white-ash", "document_id": "ash-canon", "version": 3, "start_line": 4, "end_line": 4, "profile_id": "distractor-wrong-profile-768-v0"},
+        {"kind": "wrong_document", "project_id": "eval-holdout-white-ash", "document_id": "ash-decoy", "version": 1, "start_line": 1, "end_line": 2, "profile_id": "bge-small-zh-v1.5-512-local-tei-v1"},
+        {"kind": "wrong_project", "project_id": "eval-holdout-star-cocoon", "document_id": "star-decoy", "version": 1, "start_line": 4, "end_line": 4, "profile_id": "bge-small-zh-v1.5-512-local-tei-v1"}
+      ]
+    },
+    {
+      "task_id": "SC-H-01",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "车上日历翻页取决于什么旅程节点，而非墙上时钟？",
+      "difficulty": "medium",
+      "labels": ["low_lexical_overlap", "temporal_rule"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 1, "end_line": 1},
+        {"document_id": "star-platform", "version": 1, "start_line": 1, "end_line": 1}
+      ]
+    },
+    {
+      "task_id": "SC-H-02",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "以拾火人名义进入引擎室的实际是谁？",
+      "difficulty": "easy",
+      "labels": ["alias", "identity"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 2, "end_line": 2},
+        {"document_id": "star-platform", "version": 1, "start_line": 2, "end_line": 2}
+      ]
+    },
+    {
+      "task_id": "SC-H-03",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "夜间封闭后，救援人员凭什么仍能从卧铺区带人撤离？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "exception_rule", "authorization"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 3, "end_line": 3},
+        {"document_id": "star-platform", "version": 1, "start_line": 3, "end_line": 4}
+      ]
+    },
+    {
+      "task_id": "SC-H-04",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "芮冬和祁岸面对同一张星图，为何只有前者读出暗线？",
+      "difficulty": "hard",
+      "labels": ["knowledge_acquisition", "cross_chapter_causality"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 4, "end_line": 4},
+        {"document_id": "star-dream", "version": 1, "start_line": 1, "end_line": 4}
+      ]
+    },
+    {
+      "task_id": "SC-H-05",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "抵达茧心站后为何重新经历告别过的清晨？请找出前因与延迟结果。",
+      "difficulty": "hard",
+      "labels": ["cross_chapter_causality", "temporal_rule"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 5, "end_line": 5},
+        {"document_id": "star-dream", "version": 1, "start_line": 5, "end_line": 8}
+      ]
+    },
+    {
+      "task_id": "SC-H-06",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "同一只琥珀容器拒绝甜果汁，却为何接受苦味药液？",
+      "difficulty": "hard",
+      "labels": ["exception_rule", "object_state"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 6, "end_line": 6},
+        {"document_id": "star-platform", "version": 1, "start_line": 13, "end_line": 14}
+      ]
+    },
+    {
+      "task_id": "SC-H-07",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "纸鹤的报告进入寂静区后是彻底消失，还是只延迟发送？",
+      "difficulty": "hard",
+      "labels": ["alias", "cross_chapter_causality", "communication_rule"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 9, "end_line": 9},
+        {"document_id": "star-canon", "version": 2, "start_line": 17, "end_line": 17},
+        {"document_id": "star-platform", "version": 1, "start_line": 5, "end_line": 7},
+        {"document_id": "star-dream", "version": 1, "start_line": 19, "end_line": 19}
+      ]
+    },
+    {
+      "task_id": "SC-H-08",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "座椅对阿晏毫无反应、对芮冬却播放森林，差别来自哪里？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "exception_rule"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 12, "end_line": 12},
+        {"document_id": "star-platform", "version": 1, "start_line": 8, "end_line": 9}
+      ]
+    },
+    {
+      "task_id": "SC-H-09",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "简照看到三连绿光后为何要求停车？",
+      "difficulty": "medium",
+      "labels": ["signal_rule", "exception_rule"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 13, "end_line": 13},
+        {"document_id": "star-dream", "version": 1, "start_line": 11, "end_line": 12}
+      ]
+    },
+    {
+      "task_id": "SC-H-10",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "每日清柜时，药箱和围巾为什么得到不同处置？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "exception_rule", "object_state"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 14, "end_line": 14},
+        {"document_id": "star-platform", "version": 1, "start_line": 11, "end_line": 12}
+      ]
+    },
+    {
+      "task_id": "SC-H-11",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "冷却作业禁止点火，祁岸采用哪种替代工具仍可修管？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "exception_rule"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 15, "end_line": 15},
+        {"document_id": "star-platform", "version": 1, "start_line": 18, "end_line": 19}
+      ]
+    },
+    {
+      "task_id": "SC-H-12",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "丢失实体票据的人需要多少名工作人员作保才能换乘一次？",
+      "difficulty": "medium",
+      "labels": ["low_lexical_overlap", "authorization"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 16, "end_line": 16},
+        {"document_id": "star-platform", "version": 1, "start_line": 16, "end_line": 17}
+      ]
+    },
+    {
+      "task_id": "SC-H-13",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "靠近危险恒星时，检修员为何还能从车体开口出去？",
+      "difficulty": "hard",
+      "labels": ["low_lexical_overlap", "exception_rule", "spatial_rule"],
+      "expected_evidence": [
+        {"document_id": "star-canon", "version": 2, "start_line": 10, "end_line": 10},
+        {"document_id": "star-dream", "version": 1, "start_line": 9, "end_line": 10}
+      ]
+    },
+    {
+      "task_id": "SC-H-14",
+      "split": "holdout",
+      "world_id": "star-cocoon",
+      "query": "按当前版本，黑种子造成的是立即返航还是下一站的时间重复？",
+      "difficulty": "hard",
+      "labels": ["isolation_negative", "version_isolation", "profile_isolation"],
+      "expected_evidence": [{"document_id": "star-canon", "version": 2, "start_line": 5, "end_line": 5}],
+      "negative_candidates": [
+        {"kind": "stale_version", "project_id": "eval-holdout-star-cocoon", "document_id": "star-canon", "version": 1, "start_line": 5, "end_line": 5, "profile_id": "bge-small-zh-v1.5-512-local-tei-v1"},
+        {"kind": "wrong_profile", "project_id": "eval-holdout-star-cocoon", "document_id": "star-canon", "version": 2, "start_line": 5, "end_line": 5, "profile_id": "distractor-wrong-profile-768-v0"},
+        {"kind": "wrong_document", "project_id": "eval-holdout-star-cocoon", "document_id": "star-decoy", "version": 1, "start_line": 1, "end_line": 1, "profile_id": "bge-small-zh-v1.5-512-local-tei-v1"},
+        {"kind": "wrong_project", "project_id": "eval-holdout-white-ash", "document_id": "ash-decoy", "version": 1, "start_line": 3, "end_line": 3, "profile_id": "bge-small-zh-v1.5-512-local-tei-v1"}
+      ]
+    }
+  ]
+}

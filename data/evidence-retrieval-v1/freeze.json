@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "evidence-retrieval-v1",
+  "frozen_at": "2026-09-07",
+  "freeze_policy": "修改 manifest 或任一语料文件必须升级数据集版本；不得在同一 v1 标识下重写哈希。",
+  "counts": {
+    "tasks": 44,
+    "dev_tasks": 16,
+    "holdout_tasks": 28,
+    "worlds": 4,
+    "low_lexical_overlap_tasks": 22
+  },
+  "manifest": {
+    "path": "manifest.json",
+    "sha256": "e7f7100116c52e55585a55258914bb22b26b97711e35c0a50d3dae4a8ebbbdca",
+    "bytes": 27155,
+    "line_count": 602
+  },
+  "frozen_documents": [
+    {"path": "worlds/cloud-theater/isolation-decoys-v1.md", "sha256": "c0aa9da9347b7f7b649cb64bf66464dbf3fcab2402b520b01ab18d864444c9f4", "bytes": 361, "line_count": 4},
+    {"path": "worlds/mist-harbor/canon-v1.md", "sha256": "0417ac166974acb66531627dbaccb2216366401831b038657cb30b23af249dd7", "bytes": 907, "line_count": 16},
+    {"path": "worlds/mist-harbor/canon-v2.md", "sha256": "0862d6dc6c8ea7603ae3f0d5b056e0ab2242097fb41abee070128f40680c2c48", "bytes": 1009, "line_count": 16},
+    {"path": "worlds/mist-harbor/chapter-bell-v1.md", "sha256": "88d340c552c441eb40be654fcf7d68b0ca1b2a11164c7ea3ef5905f99faecdf8", "bytes": 1236, "line_count": 18},
+    {"path": "worlds/mist-harbor/chapter-tide-v1.md", "sha256": "8c0a7ed72956b18b952a5edd40cb75de920c6c9cdf44ca6159555da524d19ddf", "bytes": 1131, "line_count": 18},
+    {"path": "worlds/mist-harbor/isolation-decoys-v1.md", "sha256": "521d63b08aa2b37566db1fb7f67ba525c3743fccf01c2795e2c33076e78d0fa9", "bytes": 367, "line_count": 4},
+    {"path": "worlds/star-cocoon/canon-v1.md", "sha256": "29543b8aaba71cd924eb4824c30d632df9c08aaecb835f8ec4dbd27d2ef4a434", "bytes": 1050, "line_count": 18},
+    {"path": "worlds/star-cocoon/canon-v2.md", "sha256": "0b090cf4905375ad4fc5a44965f8a4bc17c9c646dc9c9446d343b24af2c863a8", "bytes": 1323, "line_count": 18},
+    {"path": "worlds/star-cocoon/chapter-dream-v1.md", "sha256": "f1d37d738d6454cf85c17379cf126aa73a82f06ff05fd19e198fdc8cb3b9e834", "bytes": 1247, "line_count": 20},
+    {"path": "worlds/star-cocoon/chapter-platform-v1.md", "sha256": "94d24f371159e020da7755af56d6571e574da937a31e347c1926da1c3f600951", "bytes": 1298, "line_count": 20},
+    {"path": "worlds/star-cocoon/isolation-decoys-v1.md", "sha256": "b82090ecb2d3680bed57fd2fded711323f81cdf4ce720eb47a777e3cbc0175e5", "bytes": 352, "line_count": 4},
+    {"path": "worlds/white-ash/canon-v2.md", "sha256": "fb69b38ea7b6d64fb838085ed8f5eb934f26df76f23b479868f34b129f64fee6", "bytes": 987, "line_count": 18},
+    {"path": "worlds/white-ash/canon-v3.md", "sha256": "a49f1bc41f4c37691ed1a887b62cd247fde550ccc4051956276c5dbcb3f2b7a7", "bytes": 1218, "line_count": 18},
+    {"path": "worlds/white-ash/chapter-ash-v2.md", "sha256": "20b152a5f5e3239fb628ccd912aeb593f67fbbdc984011f6d23a1d8af81f1e9e", "bytes": 1298, "line_count": 20},
+    {"path": "worlds/white-ash/chapter-mirror-v1.md", "sha256": "22f14a9ec865187b837b8c527fc879af87b53199d2c28c7472b21bd3412ace91", "bytes": 1244, "line_count": 20},
+    {"path": "worlds/white-ash/isolation-decoys-v1.md", "sha256": "dcd525373d15866dc97e50dabb122e256115b349b8b410e68c89b9e4acc8e41a", "bytes": 364, "line_count": 4}
+  ]
+}
