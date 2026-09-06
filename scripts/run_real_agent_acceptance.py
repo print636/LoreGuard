@@ -29,7 +29,11 @@ from app.provider import (
     safe_thinking_configuration,
 )
 from app.semantic_quality import assess_directive
-from app.review_agent import AGENT_SYSTEM_PROMPT, _sha256_text
+from app.review_agent import (
+    AGENT_SYSTEM_PROMPT,
+    MAX_SAFE_AGENT_LINE_NUMBER,
+    _sha256_text,
+)
 from scripts.run_agent_acceptance import (
     DEFAULT_SUITE_ROOT,
     LEGACY_SUITE_ROOT,
@@ -152,6 +156,12 @@ SAFE_PROTOCOL_SCHEMA_ERROR_TYPES = {
     "string_pattern_mismatch",
     "validation_error",
 }
+DEFAULT_REVIEW_AGENT_CONTEXT_RADIUS_LINES = int(
+    Settings.model_fields["review_agent_context_radius_lines"].default
+)
+DEFAULT_REVIEW_AGENT_MAX_READ_LINES = int(
+    Settings.model_fields["review_agent_max_read_lines"].default
+)
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -390,6 +400,14 @@ def _safe_provider_call(call: dict[str, Any]) -> dict[str, Any]:
     return {key: call[key] for key in allowed if key in call}
 
 
+def _safe_line_number(value: Any) -> int | None:
+    return (
+        value
+        if type(value) is int and 1 <= value <= MAX_SAFE_AGENT_LINE_NUMBER
+        else None
+    )
+
+
 def _safe_protocol_diagnostic(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -474,6 +492,8 @@ def _safe_agent_run(run: dict[str, Any]) -> dict[str, Any]:
         "doc_ref",
         "line_start",
         "line_end",
+        "allowed_line_start",
+        "allowed_line_end",
         "span_hash",
         "fields",
         "validator_reason",
@@ -489,8 +509,23 @@ def _safe_agent_run(run: dict[str, Any]) -> dict[str, Any]:
         safe_event = {
             key: copy.deepcopy(event[key])
             for key in trace_keys
-            if key in event and key != "protocol_diagnostic"
+            if key in event
+            and key
+            not in {
+                "protocol_diagnostic",
+                "line_start",
+                "line_end",
+                "allowed_line_start",
+                "allowed_line_end",
+            }
         }
+        for line_field in (
+            "line_start",
+            "line_end",
+            "allowed_line_start",
+            "allowed_line_end",
+        ):
+            safe_event[line_field] = _safe_line_number(event.get(line_field))
         safe_event["protocol_diagnostic"] = _safe_protocol_diagnostic(
             event.get("protocol_diagnostic")
         )
@@ -678,6 +713,8 @@ def _trace_assessment(
     agent_run: dict[str, Any],
     *,
     suite_root: Path,
+    server_context_radius_lines: int = DEFAULT_REVIEW_AGENT_CONTEXT_RADIUS_LINES,
+    server_max_read_lines: int = DEFAULT_REVIEW_AGENT_MAX_READ_LINES,
 ) -> tuple[bool, int, list[str], list[str]]:
     trace = agent_run.get("trace") or []
     reasons: list[str] = []
@@ -697,11 +734,28 @@ def _trace_assessment(
     }
     document_lines: dict[str, list[str]] = {}
 
+    candidate_metadata = document_metadata.get(candidate_doc)
+    candidate_source_start = int(task["initial_candidate"]["source_line_start"])
+    candidate_source_end = int(task["initial_candidate"]["source_line_end"])
+
+    def server_read_window() -> tuple[int, int, int] | None:
+        if candidate_metadata is None:
+            return None
+        if candidate_doc not in document_lines:
+            path = _resolve_document(suite_root, candidate_metadata["path"])
+            document_lines[candidate_doc] = path.read_text(encoding="utf-8").splitlines()
+        line_count = len(document_lines[candidate_doc])
+        return (
+            max(1, candidate_source_start - server_context_radius_lines),
+            min(line_count, candidate_source_end + server_context_radius_lines),
+            line_count,
+        )
+
     def expected_span_hash(event: dict[str, Any]) -> str | None:
         doc_ref = event.get("doc_ref")
         metadata = document_metadata.get(doc_ref)
         start, end = event.get("line_start"), event.get("line_end")
-        if metadata is None or not isinstance(start, int) or not isinstance(end, int):
+        if metadata is None or type(start) is not int or type(end) is not int:
             return None
         if doc_ref not in document_lines:
             path = _resolve_document(suite_root, metadata["path"])
@@ -721,33 +775,68 @@ def _trace_assessment(
         if action == "DECISION":
             continue
         if action == "READ_SPAN":
-            accepted = event.get("final") in {"continue", "accepted"}
+            accepted = event.get("final") == "continue"
             identity_matches = event.get("candidate_hash") == expected_candidate_hash
             span_matches = event.get("span_hash") == expected_span_hash(event)
-            if not identity_matches:
-                reasons.append("candidate_hash_mismatch")
-            if not span_matches:
-                reasons.append("span_hash_mismatch")
-            in_bounds = any(
-                event.get("doc_ref") == evidence["doc_ref"]
-                and event.get("line_start", -1) >= evidence["line_start"]
-                and event.get("line_end", 10**9) <= evidence["line_end"]
-                for evidence in allowed
-            )
-            if accepted and not in_bounds:
-                # ``allowed_evidence`` is a post-run oracle span, not the
-                # production READ_SPAN authorization policy.  A different
-                # same-document neighbourhood read therefore fails benchmark
-                # replay, but is not misreported as a server safety breach.
-                reasons.append("read_outside_oracle_evidence")
-            if accepted and (
-                event.get("doc_ref") != candidate_doc
-                or not identity_matches
-                or not span_matches
-            ):
-                accepted_safety_violations += 1
             if accepted:
+                if not identity_matches:
+                    reasons.append("candidate_hash_mismatch")
+                if not span_matches:
+                    reasons.append("span_hash_mismatch")
+                window = server_read_window()
+                start, end = event.get("line_start"), event.get("line_end")
+                server_authorized = (
+                    event.get("doc_ref") == candidate_doc
+                    and window is not None
+                    and type(start) is int
+                    and type(end) is int
+                    and 1 <= start <= end <= window[2]
+                    and start >= window[0]
+                    and end <= window[1]
+                    and end - start + 1 <= server_max_read_lines
+                )
+                if not server_authorized:
+                    reasons.append("read_outside_server_window")
+                if not identity_matches or not span_matches or not server_authorized:
+                    accepted_safety_violations += 1
                 reads.append(event)
+            elif event.get("final") == "rejected":
+                # A failed READ preflight is diagnostic only. It must expose
+                # attempted line numbers and the server window without a span
+                # hash or document content, and can never become an accepted
+                # read or a successful semantic path.
+                window = server_read_window()
+                start, end = event.get("line_start"), event.get("line_end")
+                bounded_attempt = (
+                    type(start) is int
+                    and type(end) is int
+                    and 1 <= start <= MAX_SAFE_AGENT_LINE_NUMBER
+                    and 1 <= end <= MAX_SAFE_AGENT_LINE_NUMBER
+                )
+                range_violation = bool(
+                    bounded_attempt
+                    and window is not None
+                    and (
+                        start > end
+                        or end > window[2]
+                        or start < window[0]
+                        or end > window[1]
+                        or end - start + 1 > server_max_read_lines
+                    )
+                )
+                if (
+                    event.get("validator_reason") != "evidence_range"
+                    or event.get("doc_ref") != candidate_doc
+                    or not identity_matches
+                    or window is None
+                    or event.get("allowed_line_start") != window[0]
+                    or event.get("allowed_line_end") != window[1]
+                    or event.get("span_hash") is not None
+                    or not range_violation
+                ):
+                    reasons.append("invalid_read_preflight_diagnostic")
+            else:
+                reasons.append("invalid_read_final")
         elif action == "PATCH_RECORDS":
             identity_matches = event.get("candidate_hash") == expected_candidate_hash
             span_matches = event.get("span_hash") == expected_span_hash(event)
@@ -786,6 +875,21 @@ def _trace_assessment(
             reasons.append("unknown_trace_action")
             if event.get("final") in {"accepted", "continue"}:
                 accepted_safety_violations += 1
+    if reads:
+        evidence_hit = any(
+            read.get("doc_ref") == evidence["doc_ref"]
+            and isinstance(read.get("line_start"), int)
+            and isinstance(read.get("line_end"), int)
+            and read["line_start"] <= evidence["line_start"]
+            and read["line_end"] >= evidence["line_end"]
+            for read in reads
+            for evidence in allowed
+        )
+        if not evidence_hit:
+            # ``allowed_evidence`` is a post-run scoring target, not the
+            # production authorization range. An authorized neighbourhood
+            # READ hits when it contains at least one target oracle span.
+            reasons.append("read_misses_oracle_evidence")
     return not reasons, accepted_safety_violations, _normalized_path(trace), reasons
 
 
@@ -794,12 +898,18 @@ def score_execution(
     artifact: dict[str, Any],
     *,
     suite_root: Path = DEFAULT_SUITE_ROOT,
+    server_context_radius_lines: int = DEFAULT_REVIEW_AGENT_CONTEXT_RADIUS_LINES,
+    server_max_read_lines: int = DEFAULT_REVIEW_AGENT_MAX_READ_LINES,
 ) -> dict[str, Any]:
     oracle = task["oracle"]
     agent_runs = artifact.get("agent_runs") or []
     run = agent_runs[0] if len(agent_runs) == 1 else {}
     replayable, accepted_violations, actual_path, trace_reasons = _trace_assessment(
-        task, run, suite_root=suite_root
+        task,
+        run,
+        suite_root=suite_root,
+        server_context_radius_lines=server_context_radius_lines,
+        server_max_read_lines=server_max_read_lines,
     )
     expected_path = oracle["expected_action_path"]
     expected_fingerprint = _expected_directive_fingerprint(task, suite_root)
@@ -950,6 +1060,22 @@ def score_execution(
     return score
 
 
+def _frozen_bounded_int(
+    configuration: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if key not in configuration:
+        return default
+    value = configuration[key]
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f"invalid frozen evaluation configuration: {key}")
+    return value
+
+
 def score_suite(
     manifest: dict[str, Any],
     selected_tasks: list[dict[str, Any]],
@@ -971,8 +1097,29 @@ def score_suite(
     duplicate_runs = len(run_ids) - len(set(run_ids))
     missing_runs = sorted(expected_run_ids - set(run_ids))
     unexpected_runs = sorted(set(run_ids) - expected_run_ids)
+    frozen_configuration = evaluation_configuration or {}
+    server_context_radius_lines = _frozen_bounded_int(
+        frozen_configuration,
+        "agent_context_radius",
+        default=DEFAULT_REVIEW_AGENT_CONTEXT_RADIUS_LINES,
+        minimum=0,
+        maximum=50,
+    )
+    server_max_read_lines = _frozen_bounded_int(
+        frozen_configuration,
+        "agent_max_read_lines",
+        default=DEFAULT_REVIEW_AGENT_MAX_READ_LINES,
+        minimum=1,
+        maximum=20,
+    )
     scores = [
-        score_execution(task_by_id[artifact["task_id"]], artifact, suite_root=suite_root)
+        score_execution(
+            task_by_id[artifact["task_id"]],
+            artifact,
+            suite_root=suite_root,
+            server_context_radius_lines=server_context_radius_lines,
+            server_max_read_lines=server_max_read_lines,
+        )
         for artifact in artifacts
         if artifact.get("task_id") in task_by_id
     ]
@@ -1319,6 +1466,8 @@ def score_suite(
             "configured_agent_total_deadline_seconds": (
                 evaluation_configuration or {}
             ).get("agent_total_deadline_seconds"),
+            "configured_agent_context_radius_lines": server_context_radius_lines,
+            "configured_agent_max_read_lines": server_max_read_lines,
         },
         "subgroups": subgroup_metrics,
         "gates": gates,

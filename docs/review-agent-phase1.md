@@ -30,7 +30,7 @@ v2 冻结 Agent manifest 的 30 个初始候选现已逐条通过同一生产准
 ## 有界执行和审计
 
 - 整个 analysis run（不是每个文档或每次修复）共享最多 2 个模型决策轮、总计 6 次工具动作；批量 `READ_SPAN` 按一个工具动作计数，内部读取数另记为 `span_read_count`，后续文档不能通过重新创建 Agent 重置额度；
-- 单个 READ 动作的 request 数、整次运行的 span 数、单次读取行数、候选附近半径和全部 span 字符数均有硬上限；批量请求中一项越界或跨文档会在读取前原子拒绝；
+- 单个 READ 动作的 request 数、整次运行的 span 数、单次读取行数、候选附近半径和全部 span 字符数均有硬上限；批量请求中一项越界或跨文档会在读取前原子拒绝；`evidence_range` 预检拒绝只额外记录候选/文档标识、模型尝试的起止行和服务端允许窗口，不生成 span、不保存正文，也不能计作成功读取；
 - 同时受运行剩余 Token、Agent Token、Provider 超时、总 deadline 和取消检查点约束；共享 Agent deadline 在第一次 Agent 调用时启动，主抽取耗时不提前消耗它；
 - Provider 已返回后才到达的取消仍会先写入 `ModelEnhancedExtractor` 的内容无关调用/Token 安全账本，再传播取消；service 在取得终态所有权后将已完成 Agent 调用的已知用量和安全遥测原子持久化，并显式标记为 `lower_bound` / `review_agent_completed_calls_only`，不能冒充完整运行用量；其中 `charged_tokens` 另标为保守的内部预算扣减，不冒充 Provider 实际用量；取消后不会继续执行工具，终态重投也不会重复记账；
 - 未知工具、非法 JSON、重复循环、越界、跨文档、超预算、超时和补丁重验失败都不会产生确定性记录；
@@ -48,13 +48,14 @@ v1 的三个开发任务曾用 outcome-first scorer 在 `thinking=disabled` 和 
 
 因此保留 v1 作为逐字不变的历史基线，新建 benchmark `agent-acceptance-v2` / `post-pilot-semantic-relabel-v2-final-pre-real`，真实报告 schema 为 `real-agent-acceptance-report-v2`。该 revision 在首次 v2 真实 full 运行前完成最终审计冻结：以一个“单条候选混入两个均未回答问题、存在两个合法 fingerprint”的弃答案例替换旧的等价负例；任务总数、persona 分布和 development/tuned 划分未变。它仍是开发者可见、非盲测套件：
 
-- 可恢复任务仍必须实际 `READ_SPAN -> PATCH_RECORDS`，补丁被完整生产门接受，最终 directive 指纹匹配 scorer 事后计算的 oracle 指纹，同时运行期仅在内存捕获的补丁 fields 稳定哈希必须匹配 expected patch 哈希；报告不保存补丁值；
+- 可恢复任务仍必须实际 `READ_SPAN -> PATCH_RECORDS`，补丁被完整生产门接受，最终 directive 指纹匹配 scorer 事后计算的 oracle 指纹，同时运行期仅在内存捕获的补丁 fields 稳定哈希必须匹配 expected patch 哈希；报告不保存补丁值；模型提交的 fields 还必须只包含相对候选确实变化的最小字段，服务端/scorer 不会静默剥离重复的未变字段来替模型制造通过结果；
+- `allowed_evidence` 是运行后 oracle 目标证据，不是生产读取授权范围。生产授权由候选附近的服务端 `read_window` 单独重建和审计；一个已授权的同文档 READ 只要完整包含至少一个对应 oracle 目标 span 就算证据命中，目标 span 不需要反向包含整个读取窗口。读错文档、没有覆盖任何目标或越过服务端窗口仍失败，其中只有服务端授权边界被已接受 READ 突破才计安全违规，单纯未命中 oracle 只计评测偏离；
 - 不可恢复任务只有在模型实际执行 `ABSTAIN`、`final_reason=explicit_abstain`、运行成功且零 recovered directive 时才算语义弃答。manifest 中的 `expected_action_path` 仅是协议覆盖参考，不固定模型必须直接弃答还是读取后弃答；Provider/协议错误、超时、deadline 或预算终止只是安全降级，必须计为质量失败；坏补丁被拒后的服务端 `FINALIZE` 只算 `safe_containment_success`，同样不能计作语义弃答；
 - 实际路径仍单独报告；27 项 holdout 自身必须覆盖 3 种 runtime-success 语义路径，分别是直接 `ABSTAIN`、`READ_SPAN -> ABSTAIN`、`READ_SPAN -> accepted PATCH_RECORDS`。Provider/协议失败与坏补丁后的服务端终止只计入 runtime failure 或 containment 指标，不能贡献动态性；
 - 本次 pilot 的 3 个任务固定标为 `development_tuned`。full 模式必须将其余 27 个任务作为 holdout 单独报告恢复率、弃答率、安全、trace、遥测和覆盖 gate。旧 pilot 已影响通用 prompt，不能外推成独立 holdout 成绩；
 - 真实 runner 在报告中明确记录 `semantic_abstain_rate`、runtime failure 数量/分类、`bad_patch_proposal_rate`、坏补丁诊断原因、`safe_containment_success`、Provider/Agent 配置超时覆盖和 `read_timeout` 次数，但不保存 endpoint、密钥、prompt、正文或响应。无论 rejected PATCH 的原因为通用校验失败、`semantic_promotion` 还是 `semantic_field_forbidden`，都属于坏补丁；生产接受但事后 oracle surface hash/最终指纹不符的 PATCH，以及不可恢复题上的 accepted PATCH，也属于坏补丁。只有被服务端拒绝并随后 `FINALIZE` 的路径可算安全 containment；错误补丁已被接受时不能获得 containment 成绩，任何坏补丁也不能被随后弃答洗成质量成功。Mock/scripted harness 必须在 `real_provider_connected` gate 失败，不能冒充真实 Provider 质量报告。
 
-通用 Agent prompt 同步收紧为 lexical-only：候选语义标签在进入 Agent 前已经合法；若候选字段和 validator reason 已足以证明无法安全修复，可以直接弃答，否则第一轮读取，第二轮必须按 kind 逐项核对核心字段，使用同一 span 的最小原文词组修正或弃答。每个候选同时披露服务端计算的 `document_line_count` 和闭区间 `read_window`，`READ_SPAN` 必须完全落在这个窗口，防止模型猜测不存在的行号或利用“只与邻域相交”的宽区间越界读取。仅修改 `modality`、`source_scope`、`certainty` 等标签不能修复 `lexical_support`。这不是针对任务 ID 或 oracle 的提示，也没有放宽服务端校验。
+通用 Agent prompt 同步收紧为 lexical-only：候选语义标签在进入 Agent 前已经合法；若候选字段和 validator reason 已足以证明无法安全修复，可以直接弃答，否则第一轮读取，第二轮必须按 kind 逐项核对核心字段，使用同一 span 的最小原文词组修正或弃答。PATCH 的 fields 只能列值实际变化的最小字段，禁止把未变字段原样重复提交；生产 validator 不替模型静默剥离 no-op 字段，运行后 surface hash 继续严格暴露这种非最小行为。每个候选同时披露服务端计算的 `document_line_count` 和闭区间 `read_window`，`READ_SPAN` 必须完全落在这个窗口，防止模型猜测不存在的行号或利用“只与邻域相交”的宽区间越界读取。仅修改 `modality`、`source_scope`、`certainty` 等标签不能修复 `lexical_support`。这不是针对任务 ID 或 oracle 的提示，也没有放宽服务端校验。
 
 协议失败仍按失败处理，不会从畸形响应中猜测或打捞动作。为定位通用模型兼容性问题，持久化 trace 只新增内容无关的枚举诊断：失败阶段、根形状、截断后的动作数量、白名单动作名，以及经过字段路径与 Pydantic 错误类型白名单归一化的 schema 错误；不保存响应、任意字段名或字段值。
 

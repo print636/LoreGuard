@@ -42,6 +42,7 @@ _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _SAFE_AGENT_HASH = re.compile(r"^[a-f0-9]{64}$")
 _SAFE_AGENT_DOC_REF = re.compile(r"^[A-Za-z0-9._-]{1,16}$")
 _SAFE_AGENT_FIELD = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_SAFE_AGENT_MAX_LINE_NUMBER = 10_000_000
 _SAFE_AGENT_ACTIONS = {
     "DECISION",
     "READ_SPAN",
@@ -137,6 +138,14 @@ def _optional_nonnegative_int(value: Any) -> int | None:
     return value if type(value) is int and value >= 0 else None
 
 
+def _optional_agent_line_number(value: Any) -> int | None:
+    return (
+        value
+        if type(value) is int and 1 <= value <= _SAFE_AGENT_MAX_LINE_NUMBER
+        else None
+    )
+
+
 def _optional_request_id(value: Any) -> str | None:
     return value if isinstance(value, str) and _SAFE_REQUEST_ID.fullmatch(value) else None
 
@@ -224,8 +233,14 @@ def _safe_review_agent_trace(row: Any) -> dict[str, Any]:
             if isinstance(doc_ref, str) and _SAFE_AGENT_DOC_REF.fullmatch(doc_ref)
             else None
         ),
-        "line_start": _optional_nonnegative_int(source.get("line_start")),
-        "line_end": _optional_nonnegative_int(source.get("line_end")),
+        "line_start": _optional_agent_line_number(source.get("line_start")),
+        "line_end": _optional_agent_line_number(source.get("line_end")),
+        "allowed_line_start": _optional_agent_line_number(
+            source.get("allowed_line_start")
+        ),
+        "allowed_line_end": _optional_agent_line_number(
+            source.get("allowed_line_end")
+        ),
         "span_hash": (
             span_hash
             if isinstance(span_hash, str) and _SAFE_AGENT_HASH.fullmatch(span_hash)

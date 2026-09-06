@@ -19,8 +19,11 @@ from app.model_extractor import ModelEnhancedExtractor
 from app.pipeline import AnalysisPipeline, DocumentInput
 from app.provider import ModelResult, OpenAICompatibleProvider, ProviderError
 from app.review_agent import (
+    AGENT_SYSTEM_PROMPT,
     AgentCandidate,
+    AgentTraceEvent,
     BoundedReviewAgent,
+    MAX_SAFE_AGENT_LINE_NUMBER,
     ProtocolParseDiagnostic,
 )
 
@@ -242,6 +245,7 @@ class ReviewAgentUnitTests(unittest.TestCase):
         self.assertEqual(
             {"line_start": 1, "line_end": 1}, disclosed["read_window"]
         )
+        self.assertEqual(12, payload["limits"]["max_read_lines"])
 
     def test_read_must_be_fully_contained_in_disclosed_window(self):
         run, provider = self.run_agent(
@@ -258,6 +262,75 @@ class ReviewAgentUnitTests(unittest.TestCase):
         self.assertEqual("evidence_range", run.final_reason)
         self.assertEqual(0, run.tool_calls)
         self.assertEqual(0, run.span_read_count)
+        rejected_read = next(row for row in run.trace if row.action == "READ_SPAN")
+        self.assertEqual("rejected", rejected_read.final)
+        self.assertEqual("evidence_range", rejected_read.validator_reason)
+        self.assertEqual((1, 2), (rejected_read.line_start, rejected_read.line_end))
+        self.assertEqual(
+            (1, 1),
+            (rejected_read.allowed_line_start, rejected_read.allowed_line_end),
+        )
+        self.assertIsNone(rejected_read.span_hash)
+        safe_trace = json.dumps(run.safe_dict()["trace"], ensure_ascii=False)
+        self.assertNotIn("林澈的身份是领航员", safe_trace)
+        persisted = ModelExecutionDiagnostics(
+            review_agent_runs=[run.safe_dict()]
+        ).safe_dict()
+        persisted_read = next(
+            row
+            for row in persisted["review_agent_runs"][0]["trace"]
+            if row["action"] == "READ_SPAN"
+        )
+        self.assertEqual(1, persisted_read["allowed_line_start"])
+        self.assertEqual(1, persisted_read["allowed_line_end"])
+
+    def test_prompt_requires_minimal_changed_fields_without_silent_noop_masking(self):
+        self.assertIn("只能列出相对候选值确实发生变化的最小字段", AGENT_SYSTEM_PROMPT)
+        self.assertIn("不得重复提交值未变化的字段", AGENT_SYSTEM_PROMPT)
+        self.assertIn("limits.max_read_lines", AGENT_SYSTEM_PROMPT)
+
+    def test_trace_line_numbers_are_bounded_at_product_and_persistence_layers(self):
+        huge = MAX_SAFE_AGENT_LINE_NUMBER + 1
+        event = AgentTraceEvent(
+            action="READ_SPAN",
+            round=1,
+            line_start=huge,
+            line_end=-1,
+            allowed_line_start=True,  # type: ignore[arg-type]
+            allowed_line_end=huge,
+            validator_reason="evidence_range",
+            final="rejected",
+        ).safe_dict()
+        self.assertIsNone(event["line_start"])
+        self.assertIsNone(event["line_end"])
+        self.assertIsNone(event["allowed_line_start"])
+        self.assertIsNone(event["allowed_line_end"])
+
+        persisted = ModelExecutionDiagnostics(
+            review_agent_runs=[
+                {
+                    "trace": [
+                        {
+                            "action": "READ_SPAN",
+                            "round": 1,
+                            "line_start": huge,
+                            "line_end": huge,
+                            "allowed_line_start": huge,
+                            "allowed_line_end": huge,
+                            "validator_reason": "evidence_range",
+                            "final": "rejected",
+                        }
+                    ]
+                }
+            ]
+        ).safe_dict()["review_agent_runs"][0]["trace"][0]
+        for field in (
+            "line_start",
+            "line_end",
+            "allowed_line_start",
+            "allowed_line_end",
+        ):
+            self.assertIsNone(persisted[field])
 
     def test_invalid_action_persists_only_allowlisted_parse_diagnostics(self):
         marker = "DO_NOT_PERSIST_STORY_OR_SECRET_KEY"
