@@ -80,6 +80,10 @@ class CountingProvider:
         )
         return CountingProvider(child, _counts=self._counts)
 
+    def fork_for_agent(self, settings: Any) -> CountingProvider:
+        """Create an Agent child with the same content-free logical counters."""
+        return self.fork_for_repair(settings)
+
     def complete(self, system: str, user: str):
         self._counts.requested += 1
         try:

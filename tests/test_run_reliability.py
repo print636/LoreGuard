@@ -16,6 +16,7 @@ os.environ["OPENAI_API_KEY"] = ""
 from sqlalchemy import create_engine, inspect, select, update
 from sqlalchemy.orm import sessionmaker
 
+from app.config import Settings
 from app.domain import AnalysisCancelled
 from app.db import (
     AnalysisDiagnosticRow,
@@ -36,6 +37,7 @@ from app.service import (
     WorkerLeaseHeartbeatError,
     WorkerLeaseLost,
     _finalize_terminal,
+    _interrupted_review_agent_usage,
     capture_run_inputs,
     claim_analysis_run,
     copy_run_inputs,
@@ -522,6 +524,170 @@ class RunReliabilityTests(unittest.TestCase):
                     self.assertEqual(terminal_status, run.status)
                     self.assertIsNone(execution.worker_token)
                     self.assertIsNone(execution.lease_expires_at)
+
+    def test_cancel_persists_agent_usage_as_safe_lower_bound_once(self):
+        _, _, run_id = self.create_snapshotted_run()
+        instances = []
+
+        class CancelAfterAgentResponsePipeline:
+            def __init__(self):
+                self.accounting_reads = 0
+                instances.append(self)
+
+            def run(self, documents, on_stage, checkpoint):
+                raise AnalysisCancelled("cancelled after Agent response")
+
+            def interrupted_model_usage(self):
+                self.accounting_reads += 1
+                return {
+                    "logical_calls": 1,
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "charged_tokens": 23,
+                    "provider_calls": [
+                        {
+                            "status": "success",
+                            "category": "success",
+                            "attempt": 1,
+                            "elapsed_ms": 19,
+                            "input_chars": 321,
+                            "response_chars": 45,
+                            "prompt_tokens": 11,
+                            "completion_tokens": 7,
+                            "total_tokens": 18,
+                            "http_status": 200,
+                            "request_id": "s" + "k-MUST_NOT_PERSIST",
+                            "purpose": "extract",
+                            "url": "must-not-persist",
+                            "raw_response": "must-not-persist",
+                            "api_key": "must-not-persist",
+                        }
+                    ],
+                    "prompt": "must-not-persist",
+                }
+
+        with patch(
+            "app.service.AnalysisPipeline", CancelAfterAgentResponsePipeline
+        ):
+            execute_analysis(run_id)
+            # A redelivery of the same terminal run cannot add the usage again.
+            execute_analysis(run_id)
+
+        self.assertEqual(1, len(instances))
+        self.assertEqual(1, instances[0].accounting_reads)
+        with self.Session() as db:
+            run = db.get(AnalysisRunRow, run_id)
+            diagnostic = db.get(AnalysisDiagnosticRow, run_id)
+            self.assertEqual("cancelled", run.status)
+            self.assertEqual((11, 7), (run.prompt_tokens, run.completion_tokens))
+            usage = diagnostic.payload["usage_accounting"]
+            self.assertEqual("lower_bound", usage["completeness"])
+            self.assertEqual(
+                "review_agent_completed_calls_only", usage["scope"]
+            )
+            self.assertEqual("cancelled", usage["terminal_status"])
+            self.assertEqual(23, usage["charged_tokens"])
+            self.assertEqual(
+                "conservative_internal_budget_debit",
+                usage["charged_token_semantics"],
+            )
+            self.assertEqual(1, usage["logical_calls"])
+            self.assertEqual("agent", usage["provider_calls"][0]["purpose"])
+            self.assertIsNone(usage["provider_calls"][0]["request_id"])
+            serialized = str(diagnostic.payload)
+            for forbidden in (
+                "must-not-persist",
+                "api_key",
+                "raw_response",
+                "url",
+                "s" + "k-MUST_NOT_PERSIST",
+            ):
+                self.assertNotIn(forbidden, serialized)
+
+    def test_broken_interrupted_accounting_cannot_block_cancellation(self):
+        _, _, run_id = self.create_snapshotted_run()
+
+        class BrokenAccountingPipeline:
+            def run(self, documents, on_stage, checkpoint):
+                raise AnalysisCancelled("requested")
+
+            def interrupted_model_usage(self):
+                raise RuntimeError("accounting unavailable")
+
+        with patch("app.service.AnalysisPipeline", BrokenAccountingPipeline):
+            execute_analysis(run_id)
+
+        with self.Session() as db:
+            run = db.get(AnalysisRunRow, run_id)
+            self.assertEqual("cancelled", run.status)
+            self.assertEqual((0, 0), (run.prompt_tokens, run.completion_tokens))
+            self.assertIsNone(db.get(AnalysisDiagnosticRow, run_id))
+
+    def test_huge_interrupted_usage_fails_closed_without_blocking_cancel(self):
+        _, _, run_id = self.create_snapshotted_run()
+        huge = 10 ** 1000
+
+        class HugeAccountingPipeline:
+            def run(self, documents, on_stage, checkpoint):
+                raise AnalysisCancelled("requested")
+
+            def interrupted_model_usage(self):
+                return {
+                    "logical_calls": 1,
+                    "prompt_tokens": huge,
+                    "completion_tokens": huge,
+                    "charged_tokens": huge,
+                    "provider_calls": [],
+                }
+
+        priced_settings = Settings(
+            _env_file=None,
+            model_input_price_per_million=1.0,
+            model_output_price_per_million=2.0,
+        )
+        with (
+            patch("app.service.AnalysisPipeline", HugeAccountingPipeline),
+            patch("app.service.get_settings", return_value=priced_settings),
+        ):
+            execute_analysis(run_id)
+
+        with self.Session() as db:
+            run = db.get(AnalysisRunRow, run_id)
+            self.assertEqual("cancelled", run.status)
+            self.assertEqual((0, 0), (run.prompt_tokens, run.completion_tokens))
+            self.assertEqual(0, run.estimated_cost_usd)
+            self.assertIsNone(db.get(AnalysisDiagnosticRow, run_id))
+
+    def test_huge_optional_provider_counter_hides_only_call_series(self):
+        pipeline = SimpleNamespace(
+            interrupted_model_usage=lambda: {
+                "logical_calls": 1,
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "charged_tokens": 23,
+                "provider_calls": [
+                    {
+                        "status": "success",
+                        "category": "success",
+                        "attempt": 1,
+                        "elapsed_ms": 10 ** 1000,
+                        "input_chars": 321,
+                        "response_chars": 45,
+                        "prompt_tokens": 11,
+                        "completion_tokens": 7,
+                        "total_tokens": 18,
+                        "http_status": 200,
+                    }
+                ],
+            }
+        )
+        usage = _interrupted_review_agent_usage(pipeline)
+        self.assertIsNotNone(usage)
+        self.assertEqual(
+            (11, 7),
+            (usage["prompt_tokens"], usage["completion_tokens"]),
+        )
+        self.assertIsNone(usage["provider_calls"])
 
     def test_completed_run_cannot_be_claimed_or_emit_more_events(self):
         _, _, run_id = self.create_snapshotted_run()

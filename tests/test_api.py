@@ -25,6 +25,57 @@ settings.openai_api_key = ""
 
 
 class ApiFlowTests(unittest.TestCase):
+    def test_cancelled_run_exposes_agent_token_lower_bound_qualifier(self):
+        with TestClient(app) as client:
+            with SessionLocal() as db:
+                project = ProjectRow(name="取消用量 API")
+                db.add(project)
+                db.flush()
+                run = AnalysisRunRow(
+                    project_id=project.id,
+                    status="cancelled",
+                    prompt_tokens=11,
+                    completion_tokens=7,
+                )
+                db.add(run)
+                db.flush()
+                db.add(
+                    AnalysisDiagnosticRow(
+                        run_id=run.id,
+                        payload={
+                            "usage_accounting": {
+                                "completeness": "lower_bound",
+                                "scope": "review_agent_completed_calls_only",
+                                "terminal_status": "cancelled",
+                                "logical_calls": 1,
+                                "prompt_tokens": 11,
+                                "completion_tokens": 7,
+                                "charged_tokens": 23,
+                                "charged_token_semantics": (
+                                    "conservative_internal_budget_debit"
+                                ),
+                                "provider_calls": None,
+                            }
+                        },
+                    )
+                )
+                db.commit()
+                run_id = run.id
+
+            response = client.get(f"/api/v1/analysis-runs/{run_id}")
+            self.assertEqual(200, response.status_code)
+            payload = response.json()
+            self.assertEqual(
+                18, payload["prompt_tokens"] + payload["completion_tokens"]
+            )
+            self.assertEqual(
+                "lower_bound", payload["usage_accounting"]["completeness"]
+            )
+            self.assertEqual(
+                "review_agent_completed_calls_only",
+                payload["usage_accounting"]["scope"],
+            )
+
     def test_legacy_diagnostics_do_not_invent_zero_empty_responses(self):
         with TestClient(app) as client:
             with SessionLocal() as db:

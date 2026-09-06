@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.domain import ConsistencyIssue, ParsedDirective
+from app.domain import ConsistencyIssue, ParsedDirective, _safe_review_agent_run
 from app.model_extractor import ModelEnhancedExtractor
 from app.pipeline import AnalysisPipeline, DocumentInput
 from app.provider import OpenAICompatibleProvider, safe_thinking_configuration
@@ -142,10 +142,7 @@ def _execution_classification(execution: dict | None) -> tuple[bool, bool]:
         repair_complete = bool(
             execution["repair_failed"] is False
             and execution["repair_post_invalid"] == 0
-            and (
-                execution["recovered_invalid_records"] == 0
-                or execution.get("repair_succeeded") is True
-            )
+            and _recovery_coverage_complete(execution)
         )
     else:
         # Legacy reports have no final-disposition fields; preserve the old
@@ -165,6 +162,104 @@ def _execution_classification(execution: dict | None) -> tuple[bool, bool]:
         and repair_complete
     )
     return participating, complete
+
+
+def _complete_agent_recovered_count(execution: dict) -> int | None:
+    """Return fully-audited Agent recoveries, or None for incomplete evidence."""
+
+    if not (
+        execution.get("review_agent_attempted") is True
+        and execution.get("review_agent_succeeded") is True
+        and execution.get("review_agent_abstained") is False
+        and execution.get("review_agent_runs_truncated") is False
+    ):
+        return None
+    runs = execution.get("review_agent_runs")
+    total_runs = execution.get("review_agent_total_runs")
+    if (
+        not isinstance(runs, list)
+        or not runs
+        or type(total_runs) is not int
+        or total_runs != len(runs)
+    ):
+        return None
+
+    recovered = 0
+    for run in runs:
+        if not isinstance(run, dict):
+            return None
+        trace = run.get("trace")
+        if (
+            run.get("protocol") != "application_json_tools_v1"
+            or run.get("orchestrator") != "langgraph_stategraph"
+            or run.get("final_reason") != "completed"
+            or type(run.get("recovered_records")) is not int
+            or run["recovered_records"] <= 0
+            or run.get("unresolved_records") != 0
+            or run.get("abstained_records") != 0
+            or run.get("trace_truncated") is not False
+            or not isinstance(trace, list)
+            or run.get("total_trace_events") != len(trace)
+        ):
+            return None
+        accepted_patches = 0
+        prior_reads: list[dict[str, Any]] = []
+        for event in trace:
+            if not isinstance(event, dict):
+                return None
+            if event.get("action") == "READ_SPAN" and event.get(
+                "validator_reason"
+            ) == "read_ok":
+                prior_reads.append(event)
+            elif (
+                event.get("action") == "PATCH_RECORDS"
+                and event.get("validator_reason") == "patch_ok"
+                and event.get("final") == "accepted"
+            ):
+                if not any(
+                    read.get("candidate_hash") == event.get("candidate_hash")
+                    and read.get("doc_ref") == event.get("doc_ref")
+                    and read.get("line_start") == event.get("line_start")
+                    and read.get("line_end") == event.get("line_end")
+                    and read.get("span_hash") == event.get("span_hash")
+                    for read in prior_reads
+                ):
+                    return None
+                accepted_patches += 1
+        if accepted_patches != run["recovered_records"]:
+            return None
+        recovered += run["recovered_records"]
+    return recovered
+
+
+def _recovery_coverage_complete(execution: dict) -> bool:
+    recovered = execution["recovered_invalid_records"]
+    if recovered == 0:
+        return True
+
+    fixed_repair_succeeded = execution.get("repair_succeeded") is True
+    agent_participation_claimed = bool(
+        execution.get("review_agent_attempted") is True
+        or execution.get("review_agent_succeeded") is True
+        or execution.get("review_agent_abstained") is True
+        or execution.get("review_agent_runs")
+        or execution.get("review_agent_total_runs")
+        or execution.get("review_agent_runs_truncated") is True
+    )
+    agent_recovered = _complete_agent_recovered_count(execution)
+    if agent_recovered is None:
+        # Preserve the established fixed semantic-repair classification for
+        # reports with no evidence that the Agent participated. Once Agent
+        # participation is claimed, missing or unsafe trace data fails closed.
+        return fixed_repair_succeeded and not agent_participation_claimed
+    if fixed_repair_succeeded:
+        fixed_repair_count = execution.get("repair_pre_invalid")
+        return (
+            type(fixed_repair_count) is int
+            and fixed_repair_count >= 0
+            and fixed_repair_count + agent_recovered == recovered
+        )
+    return agent_recovered == recovered
 
 
 def _provider_stats(pipeline: AnalysisPipeline) -> dict:
@@ -206,7 +301,7 @@ def _effective_provider_configuration(provider: Any) -> dict:
     runtime_provider = _runtime_provider(provider)
     retry_policy = getattr(runtime_provider, "retry_policy", None)
     model_hash = _model_identifier_sha256(getattr(settings, "openai_model", None))
-    return {
+    configuration = {
         "model_identifier_kind": "sha256" if model_hash else None,
         "model_identifier_sha256": model_hash,
         "timeout_seconds": getattr(settings, "provider_timeout_seconds", None),
@@ -233,6 +328,23 @@ def _effective_provider_configuration(provider: Any) -> dict:
         ),
         "thinking": safe_thinking_configuration(settings),
     }
+    for name in (
+        "enable_review_agent",
+        "review_agent_max_decision_rounds",
+        "review_agent_max_tool_calls",
+        "review_agent_max_span_chars",
+        "review_agent_max_span_reads",
+        "review_agent_max_read_requests_per_action",
+        "review_agent_max_read_lines",
+        "review_agent_context_radius_lines",
+        "review_agent_token_budget",
+        "review_agent_timeout_seconds",
+        "review_agent_total_deadline_seconds",
+        "review_agent_max_completion_tokens",
+        "review_agent_max_response_bytes",
+    ):
+        configuration[name] = getattr(settings, name, None)
+    return configuration
 
 
 def _safe_model_execution(execution: Any) -> dict | None:
@@ -253,10 +365,14 @@ def _safe_model_execution(execution: Any) -> dict | None:
         "repair_attempted",
         "repair_succeeded",
         "repair_failed",
+        "repair_pre_invalid",
         "repair_post_invalid",
         "repair_salvaged",
         "repair_dropped",
         "repair_final_path",
+        "review_agent_attempted",
+        "review_agent_succeeded",
+        "review_agent_abstained",
         "reason_codes",
     )
     safe = {key: execution[key] for key in safe_fields if key in execution}
@@ -281,12 +397,30 @@ def _safe_model_execution(execution: Any) -> dict | None:
             safe_call = {
                 key: row[key] for key in provider_call_fields if key in row
             }
-            if row.get("purpose") in {"extract", "repair"}:
+            if row.get("purpose") in {"extract", "repair", "agent"}:
                 safe_call["purpose"] = row["purpose"]
             safe_calls.append(safe_call)
         safe["provider_calls"] = safe_calls
     elif provider_calls is None and "provider_calls" in execution:
         safe["provider_calls"] = None
+    review_agent_runs = execution.get("review_agent_runs")
+    source_runs = review_agent_runs if isinstance(review_agent_runs, list) else []
+    safe_runs = [_safe_review_agent_run(row) for row in source_runs[:8]]
+    reported_run_total = execution.get("review_agent_total_runs")
+    total_runs = max(
+        len(source_runs),
+        reported_run_total
+        if type(reported_run_total) is int and reported_run_total >= 0
+        else 0,
+    )
+    if isinstance(review_agent_runs, list):
+        safe["review_agent_runs"] = safe_runs
+        safe["review_agent_total_runs"] = total_runs
+        safe["review_agent_runs_truncated"] = bool(
+            execution.get("review_agent_runs_truncated") is True
+            or len(source_runs) > 8
+            or total_runs > len(safe_runs)
+        )
     document_fields = ("document_id", "document_name", *safe_fields)
     documents = execution.get("documents")
     if isinstance(documents, list):
@@ -1239,7 +1373,7 @@ def run_acceptance(
             "human_annotated": False,
             "annotation_status": "Developer-authored expected manifest; not independent human or blind annotation.",
             "answer_isolation": "Only documents and their declared role/scope enter the pipeline; manifest expectations are scorer-only.",
-            "metric_scope": "Acceptance metrics include only attempts whose structured execution shows all chunks succeeded with zero failed or skipped chunks, zero final unresolved invalid records, zero repair post-invalid records, no repair failure, conserved observed/recovered/unresolved counts, and zero empty responses. Legacy execution without final-disposition counters falls back to the observed invalid count and reason codes. Final records still require verified model provenance; a schema-valid empty response does not prove semantic coverage.",
+            "metric_scope": "Acceptance metrics include only attempts whose structured execution shows all chunks succeeded with zero failed or skipped chunks, zero final unresolved invalid records, zero repair post-invalid records, no repair failure, conserved observed/recovered/unresolved counts, and zero empty responses. Agent recoveries additionally require complete, untruncated application-JSON-tool traces with successful final disposition and exact recovery coverage; fixed semantic repair remains a separate path. Legacy execution without final-disposition counters falls back to the observed invalid count and reason codes. Final records still require verified model provenance; a schema-valid empty response does not prove semantic coverage.",
             "provenance_contract": "Every matched semantic and clarification must have explicit model in its final directive sources; every conflict must be deterministic-derived from evidence_sources containing model. Missing, duplicate, unsupported or legacy provenance is unknown and fails closed.",
             "semantic_match_contract": "One-to-one match on exact document/line, expected semantic class and rule eligibility, then normalized lexical F1 >= 0.18. This fixed scorer is not a semantic judge.",
             "prompts_or_raw_response_bodies_recorded": False,

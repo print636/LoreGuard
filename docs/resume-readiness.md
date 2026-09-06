@@ -6,6 +6,8 @@ LoreGuard 当前目标是形成一个可以公开体验、指标诚实、本人�
 
 2026-09-06 当前 checkpoint：semantic trust、冻结输入快照、幂等认领、worker lease/heartbeat、typed diagnostics、受限语义标签 repair、batch 失败域、Provider response cap 与 thinking 配置等工程边界已经实现并进入自动回归；Phase 1/complex runner 共用的安全计数包装也已覆盖派生 repair 调用，Compose 的 API/worker thinking 空白配置会归一为 `None`。这些内容只说明代码状态，不自动成为简历成果。新中转/模型虽在 `thinking=disabled` 下通过 preflight，但冻结 Phase 1 `full × 1` 严格 gate 为 **0/3**；详情见 [脱敏 checkpoint](provider-phase1-checkpoint-20260906.md)。在真实 AI gate 重新通过前，不更新简历能力表述。
 
+受限 Agent 第一阶段代码也已接入：LangGraph 1.2.11 `StateGraph` 编排默认关闭，通过应用层 JSON 协议提供 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`，并非已验证的原生 `tool_calls`。30 个冻结任务 × 3 次重复得到的 90 次 execution 全部来自 Mock scorer，只覆盖安全边界、离线回放和动态动作路径；尚无真实模型 Agent 验收，不能声称 Agent 有收益或把它写成简历成绩。固定语义标签 repair 是独立的非 Agent 补救路径；真实 Evidence RAG 也尚未完成。参见 [第一阶段说明](review-agent-phase1.md)、[冻结 manifest](../data/agent-acceptance-v1/manifest.json) 与 [离线 runner](../scripts/run_agent_acceptance.py)。
+
 ## 已满足
 
 - 公开 GitHub 仓库、独立 `main` 分支和可复现 GitHub Actions；自动化后端测试及前端生产构建可重复运行。
@@ -19,10 +21,10 @@ LoreGuard 当前目标是形成一个可以公开体验、指标诚实、本人�
 
 ## 当前阻塞项
 
-针对 Agent 应用开发方向重新评估后，不能再认为仅剩录屏与学习。下列项目工作已列入 [Evidence RAG 与受限审查 Agent 交付计划](agent-rag-delivery-plan.md)，尚未实现：
+针对 Agent 应用开发方向重新评估后，不能再认为仅剩录屏与学习。下列项目工作已列入 [Evidence RAG 与受限审查 Agent 交付计划](agent-rag-delivery-plan.md)，尚未完成：
 
 1. 真正参与下游模型查证的语义检索、pgvector 持久化与独立检索收益评测；现有 `consumed` 标签不能证明候选影响了裁决。
-2. 带受限工具调用、主动补查/停止/弃答、可追溯执行记录的单 Agent；多智能体只做有对照的可选实验，不作为投递硬门槛。
+2. 单 Agent 第一阶段已有受限读取/补丁/弃答与安全 trace，但仍缺真实模型冻结验收，以及相对基线/一次检索的恢复率、安全弃答、降级率、延迟和成本对照；Mock 90 次不能替代。多智能体只做有对照的可选实验，不作为投递硬门槛。
 3. 当前新中转/模型的冻结 Phase 1 真实 AI gate：`full × 1` 为 0/3，存在词面/证据拒绝、未解决无效记录和 batch 协议失败；修复后还需完成 `full × 3` 稳定性复验。HTTP 200 或 Provider 调用成功不能替代这一门槛。
 4. PostgreSQL、Redis、FastAPI、Celery worker、Web/Nginx 与 Prometheus 的 Compose 全链路已在 GitHub Actions 实机 smoke 通过；新增链路仍需验证，有限负载测试和公网 Demo 尚未完成。
 5. 项目内门槛完成后，再进入用户体验学习、演示录屏和简历更新；用户学习不能替代项目未完成项。
@@ -33,6 +35,7 @@ LoreGuard 当前目标是形成一个可以公开体验、指标诚实、本人�
 
 - 复杂原创验收集可重复运行，五类问题均包含非低级正例与困难反例，预期证据固定且误差明细可审计。
 - 在不针对单个已知样例继续硬编码的前提下，当前目标中转/模型的真实完整轮次覆盖率 ≥ 90%，Precision ≥ 0.75、Recall ≥ 0.60、证据命中率 ≥ 0.85。历史固定回归曾达到，但 2026-09-06 当前栈 `full × 1` 严格结果为 0/3，历史成绩不得代替当前复验；任何后续通过仍必须声明开发者可见和非盲测边界。
+- 若以 Agent 能力进入事实清单，必须用真实模型 trace 重跑冻结 Agent 套件，并公开恢复、弃答、安全违规、动态路径、覆盖/降级、延迟和 Token；当前 Mock scorer 通过不满足此门槛。
 - 新用户可从 README 在干净环境完成启动，并通过页面完成创建/导入/分析/查看证据/反馈/版本比较。
 - GitHub Actions 通过、无密钥泄漏；Docker/Compose 或替代公开部署至少有一种经过实际验证。
 - 用户可以脱离文档完成 1 分钟摘要、5 分钟架构讲解，并回答模型降级、SSE、RAG/规则分工、误报和成本追问。

@@ -437,6 +437,84 @@ th {
 .reviewCoverage.limited { background: #282318; }
 .reviewCoverage.unknown { border-style: dashed; }
 
+.diagnosticGrid > .repairDiagnostic,
+.diagnosticGrid > .agentDiagnostic {
+  border-left: 3px solid #5f8d7a;
+}
+
+.diagnosticGrid > .repairDiagnostic.succeeded,
+.diagnosticGrid > .agentDiagnostic.succeeded {
+  border-left-color: #74df9f;
+}
+
+.diagnosticGrid > .repairDiagnostic.incomplete,
+.diagnosticGrid > .agentDiagnostic.abstained,
+.diagnosticGrid > .agentDiagnostic.failed,
+.diagnosticGrid > .agentDiagnostic.mixed,
+.diagnosticGrid > .repairDiagnostic.unknown,
+.diagnosticGrid > .agentDiagnostic.unknown {
+  border-left-color: #d8c988;
+}
+
+.agentRuns {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 0 !important;
+  background: transparent !important;
+}
+
+.agentRun {
+  padding: 12px;
+  border: 1px solid #29463c;
+  background: #0a1814;
+}
+
+.agentRun > b,
+.agentRun > strong,
+.agentRun > small,
+.agentTrace li b,
+.agentTrace li small {
+  display: block;
+}
+
+.agentRun > strong {
+  margin-top: 7px;
+  color: #8de0af;
+  font-size: 13px;
+}
+
+.agentRun > small {
+  margin-top: 7px;
+  line-height: 1.6;
+}
+
+.records details.agentTrace {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-color: #29463c;
+}
+
+.agentTrace summary {
+  color: #9db2a9;
+  font-size: 12px;
+}
+
+.agentTrace ol {
+  margin: 10px 0 0;
+  padding-left: 22px;
+}
+
+.agentTrace li {
+  padding: 7px 0;
+  color: #b7c8c1;
+}
+
+.agentTrace li small {
+  margin-top: 3px;
+  color: #8fa39b;
+}
+
 .summary {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }

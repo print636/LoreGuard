@@ -105,6 +105,21 @@ class AnalysisPipeline:
             retriever = HybridRetriever()
         self.retriever = retriever
 
+    def interrupted_model_usage(self) -> dict | None:
+        """Return content-free Agent accounting after an interrupted run.
+
+        Completed runs use ``PipelineResult`` as their accounting boundary.
+        This narrow escape hatch exists only because cooperative cancellation
+        can happen immediately after an upstream Agent response and before a
+        ``PipelineResult`` exists.  The service revalidates and labels this as
+        an incomplete lower bound before persisting it.
+        """
+        getter = getattr(self.extractor, "review_agent_safe_accounting", None)
+        if not callable(getter):
+            return None
+        accounting = getter()
+        return accounting if isinstance(accounting, dict) else None
+
     def run(
         self,
         documents: list[DocumentInput],
@@ -233,6 +248,23 @@ class AnalysisPipeline:
             and all(isinstance(row.get("provider_calls"), list) for row in model_documents)
             else None
         )
+        review_agent_runs = [
+            run
+            for row in model_documents
+            for run in row.get("review_agent_runs", [])
+        ]
+        review_agent_total_runs = sum(
+            int(row.get("review_agent_total_runs", 0) or 0)
+            for row in model_documents
+        )
+        review_agent_runs_truncated = (
+            any(
+                row.get("review_agent_runs_truncated", False)
+                for row in model_documents
+            )
+            or len(review_agent_runs) > 8
+            or review_agent_total_runs > len(review_agent_runs)
+        )
         for row in model_documents:
             # The run-level series below is the sole persisted telemetry series.
             # Keeping a second copy per document invites accidental double sums.
@@ -290,6 +322,21 @@ class AnalysisPipeline:
                     )
                 },
                 "repair_final_path": _aggregate_repair_final_path(model_documents),
+                "review_agent_attempted": any(
+                    row.get("review_agent_attempted", False)
+                    for row in model_documents
+                ),
+                "review_agent_succeeded": any(
+                    row.get("review_agent_succeeded", False)
+                    for row in model_documents
+                ),
+                "review_agent_abstained": any(
+                    row.get("review_agent_abstained", False)
+                    for row in model_documents
+                ),
+                "review_agent_runs": review_agent_runs[:8],
+                "review_agent_total_runs": review_agent_total_runs,
+                "review_agent_runs_truncated": review_agent_runs_truncated,
                 "repair": {
                     "attempted": any(
                         row.get("repair_attempted", False)
@@ -445,6 +492,12 @@ def _safe_execution_dict(execution) -> dict:
         "repair_salvaged": 0,
         "repair_dropped": 0,
         "repair_final_path": "not_needed",
+        "review_agent_attempted": False,
+        "review_agent_succeeded": False,
+        "review_agent_abstained": False,
+        "review_agent_runs": [],
+        "review_agent_total_runs": 0,
+        "review_agent_runs_truncated": False,
         "repair": {
             "attempted": False,
             "succeeded": False,

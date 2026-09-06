@@ -33,6 +33,16 @@ def estimate_repair_request_tokens(system_prompt: str, user_prompt: str) -> int:
     return max(1, input_estimate) + 256
 
 
+def estimate_review_agent_request_tokens(system_prompt: str, user_prompt: str) -> int:
+    """Conservative admission estimate for one bounded Agent decision.
+
+    The output reserve is intentionally larger than the label-only repair
+    reserve because one decision may request several read or patch actions.
+    """
+    input_estimate = (len(system_prompt) + len(user_prompt) + 1) // 2
+    return max(1, input_estimate) + 768
+
+
 def configured_cost_usd(
     prompt_tokens: int,
     completion_tokens: int,

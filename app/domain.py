@@ -39,6 +39,43 @@ _PROVIDER_TELEMETRY_CATEGORIES = {
 }
 
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_SAFE_AGENT_HASH = re.compile(r"^[a-f0-9]{64}$")
+_SAFE_AGENT_DOC_REF = re.compile(r"^[A-Za-z0-9._-]{1,16}$")
+_SAFE_AGENT_FIELD = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_SAFE_AGENT_ACTIONS = {
+    "DECISION",
+    "READ_SPAN",
+    "PATCH_RECORDS",
+    "ABSTAIN",
+    "FINALIZE",
+}
+_SAFE_AGENT_FINALS = {"continue", "accepted", "abstained", "rejected"}
+_SAFE_AGENT_REASONS = {
+    "accepted_protocol",
+    "read_ok",
+    "patch_ok",
+    "explicit_abstain",
+    "invalid_json",
+    "invalid_action",
+    "unknown_tool",
+    "cross_document",
+    "evidence_range",
+    "span_budget",
+    "span_count_budget",
+    "tool_budget",
+    "token_budget",
+    "deadline",
+    "provider_error",
+    "response_too_large",
+    "repeated_loop",
+    "patch_field_forbidden",
+    "patch_duplicate_candidate",
+    "patch_validation_failed",
+    "read_required",
+    "invalid_span",
+    "round_limit",
+    "completed",
+}
 
 
 def _optional_nonnegative_int(value: Any) -> int | None:
@@ -48,6 +85,101 @@ def _optional_nonnegative_int(value: Any) -> int | None:
 
 def _optional_request_id(value: Any) -> str | None:
     return value if isinstance(value, str) and _SAFE_REQUEST_ID.fullmatch(value) else None
+
+
+def _safe_review_agent_trace(row: Any) -> dict[str, Any]:
+    source = row if isinstance(row, dict) else {}
+    action = source.get("action")
+    final = source.get("final")
+    reason = source.get("validator_reason")
+    candidate_hash = source.get("candidate_hash")
+    doc_ref = source.get("doc_ref")
+    span_hash = source.get("span_hash")
+    fields = source.get("fields")
+    return {
+        "action": action if action in _SAFE_AGENT_ACTIONS else "FINALIZE",
+        "round": _optional_nonnegative_int(source.get("round")) or 0,
+        "candidate_hash": (
+            candidate_hash
+            if isinstance(candidate_hash, str)
+            and _SAFE_AGENT_HASH.fullmatch(candidate_hash)
+            else None
+        ),
+        "doc_ref": (
+            doc_ref
+            if isinstance(doc_ref, str) and _SAFE_AGENT_DOC_REF.fullmatch(doc_ref)
+            else None
+        ),
+        "line_start": _optional_nonnegative_int(source.get("line_start")),
+        "line_end": _optional_nonnegative_int(source.get("line_end")),
+        "span_hash": (
+            span_hash
+            if isinstance(span_hash, str) and _SAFE_AGENT_HASH.fullmatch(span_hash)
+            else None
+        ),
+        "fields": [
+            field
+            for field in fields if isinstance(field, str) and _SAFE_AGENT_FIELD.fullmatch(field)
+        ][:20]
+        if isinstance(fields, list)
+        else [],
+        "validator_reason": (
+            reason if reason in _SAFE_AGENT_REASONS else "invalid_action"
+        ),
+        "prompt_tokens": _optional_nonnegative_int(source.get("prompt_tokens")) or 0,
+        "completion_tokens": (
+            _optional_nonnegative_int(source.get("completion_tokens")) or 0
+        ),
+        "elapsed_ms": _optional_nonnegative_int(source.get("elapsed_ms")) or 0,
+        "final": final if final in _SAFE_AGENT_FINALS else "rejected",
+    }
+
+
+def _safe_review_agent_run(row: Any) -> dict[str, Any]:
+    source = row if isinstance(row, dict) else {}
+    reason = source.get("final_reason")
+    trace = source.get("trace")
+    trace_length = len(trace) if isinstance(trace, list) else 0
+    reported_trace_total = _optional_nonnegative_int(
+        source.get("total_trace_events")
+    )
+    total_trace_events = max(trace_length, reported_trace_total or 0)
+    return {
+        "protocol": (
+            "application_json_tools_v1"
+            if source.get("protocol") == "application_json_tools_v1"
+            else "unknown"
+        ),
+        "orchestrator": (
+            "langgraph_stategraph"
+            if source.get("orchestrator") == "langgraph_stategraph"
+            else "unknown"
+        ),
+        **{
+            key: _optional_nonnegative_int(source.get(key)) or 0
+            for key in (
+                "decision_rounds",
+                "tool_calls",
+                "span_chars",
+                "span_read_count",
+                "prompt_tokens",
+                "completion_tokens",
+                "charged_tokens",
+                "recovered_records",
+                "unresolved_records",
+                "abstained_records",
+            )
+        },
+        "final_reason": reason if reason in _SAFE_AGENT_REASONS else "invalid_action",
+        "total_trace_events": total_trace_events,
+        "trace_truncated": bool(source.get("trace_truncated") is True)
+        or total_trace_events > min(trace_length, 64),
+        "trace": (
+            [_safe_review_agent_trace(trace_row) for trace_row in trace[:64]]
+            if isinstance(trace, list)
+            else []
+        ),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +197,7 @@ class ProviderCallDiagnostics:
     total_tokens: int | None
     http_status: int | None
     request_id: str | None
-    purpose: Literal["extract", "repair"] = "extract"
+    purpose: Literal["extract", "repair", "agent"] = "extract"
 
     @classmethod
     def from_telemetry(
@@ -73,7 +205,7 @@ class ProviderCallDiagnostics:
         telemetry: Any,
         *,
         succeeded: bool,
-        purpose: Literal["extract", "repair"] = "extract",
+        purpose: Literal["extract", "repair", "agent"] = "extract",
     ) -> ProviderCallDiagnostics | None:
         if telemetry is None:
             return None
@@ -180,6 +312,12 @@ class ModelExecutionDiagnostics:
     repair_salvaged: int = 0
     repair_dropped: int = 0
     repair_final_path: str = "not_needed"
+    review_agent_attempted: bool = False
+    review_agent_succeeded: bool = False
+    review_agent_abstained: bool = False
+    # Each entry is produced by ReviewAgentRun.safe_dict(), whose persistence
+    # boundary is a positive allowlist with no prompt, raw response or text.
+    review_agent_runs: list[dict[str, Any]] = field(default_factory=list)
     reason_codes: list[str] = field(default_factory=list)
     provider_calls: list[ProviderCallDiagnostics] | None = field(default_factory=list)
 
@@ -235,7 +373,7 @@ class ModelExecutionDiagnostics:
         telemetry: Any,
         *,
         succeeded: bool,
-        purpose: Literal["extract", "repair"] = "extract",
+        purpose: Literal["extract", "repair", "agent"] = "extract",
     ) -> None:
         if self.provider_calls is None:
             return
@@ -289,6 +427,14 @@ class ModelExecutionDiagnostics:
             "repair_dropped": self.repair_dropped,
             "repair_final_path": self.repair_final_path,
             "repair": repair,
+            "review_agent_attempted": self.review_agent_attempted,
+            "review_agent_succeeded": self.review_agent_succeeded,
+            "review_agent_abstained": self.review_agent_abstained,
+            "review_agent_runs": [
+                _safe_review_agent_run(row) for row in self.review_agent_runs[:8]
+            ],
+            "review_agent_total_runs": len(self.review_agent_runs),
+            "review_agent_runs_truncated": len(self.review_agent_runs) > 8,
             "reason_codes": list(self.reason_codes),
             "provider_calls": (
                 [row.safe_dict() for row in self.provider_calls]

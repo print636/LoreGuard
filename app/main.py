@@ -99,6 +99,15 @@ def serialize_run(row: AnalysisRunRow, db=None) -> dict:
     payload["estimated_cost_usd"] = row.estimated_cost_usd if prices_configured else None
     if db is not None:
         payload["input_documents"] = run_input_metadata(db, row.id)
+        diagnostic = db.get(AnalysisDiagnosticRow, row.id)
+        usage_accounting = (
+            diagnostic.payload.get("usage_accounting")
+            if diagnostic and isinstance(diagnostic.payload, dict)
+            else None
+        )
+        # Additive API qualifier: callers must not interpret interrupted
+        # Agent-only token counters as a complete analysis-run total.
+        payload["usage_accounting"] = usage_accounting
         execution = db.get(AnalysisRunExecutionRow, row.id)
         payload["attempt_no"] = execution.attempt_no if execution else None
         payload["retried_from"] = execution.retried_from_run_id if execution else None
@@ -204,7 +213,10 @@ def enforce_daily_model_budget(db) -> None:
             )
         ).where(
             AnalysisRunRow.created_at >= day_start,
-            AnalysisRunRow.status.in_(("running", "completed")),
+            # Cancelled runs can contain an explicitly qualified lower-bound
+            # Agent usage record. Those consumed tokens still count against
+            # the local daily safety budget.
+            AnalysisRunRow.status.in_(("running", "completed", "cancelled")),
         )
     ) or 0
     if settings.daily_token_budget <= 0 or daily_usage >= settings.daily_token_budget:

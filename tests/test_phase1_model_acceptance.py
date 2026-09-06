@@ -291,6 +291,142 @@ class Phase1ModelAcceptanceTests(unittest.TestCase):
             with self.subTest(updates=updates):
                 self.assertFalse(_execution_classification({**repaired, **updates})[1])
 
+    def test_execution_gate_accepts_fully_audited_agent_only_recovery(self):
+        candidate_hash = "a" * 64
+        span_hash = "b" * 64
+        run = {
+            "protocol": "application_json_tools_v1",
+            "orchestrator": "langgraph_stategraph",
+            "decision_rounds": 2,
+            "tool_calls": 2,
+            "span_chars": 16,
+            "span_read_count": 1,
+            "prompt_tokens": 20,
+            "completion_tokens": 10,
+            "charged_tokens": 30,
+            "recovered_records": 1,
+            "unresolved_records": 0,
+            "abstained_records": 0,
+            "final_reason": "completed",
+            "trace": [
+                {
+                    "action": "READ_SPAN",
+                    "round": 1,
+                    "candidate_hash": candidate_hash,
+                    "doc_ref": "d1",
+                    "line_start": 1,
+                    "line_end": 1,
+                    "span_hash": span_hash,
+                    "fields": [],
+                    "validator_reason": "read_ok",
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "elapsed_ms": 1,
+                    "final": "continue",
+                    "text": "must-not-survive",
+                },
+                {
+                    "action": "PATCH_RECORDS",
+                    "round": 2,
+                    "candidate_hash": candidate_hash,
+                    "doc_ref": "d1",
+                    "line_start": 1,
+                    "line_end": 1,
+                    "span_hash": span_hash,
+                    "fields": ["value"],
+                    "validator_reason": "patch_ok",
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "elapsed_ms": 1,
+                    "final": "accepted",
+                    "patch_value": "must-not-survive",
+                },
+            ],
+        }
+        execution = {
+            "enabled": True,
+            "configured": True,
+            "total_chunks": 1,
+            "attempted_chunks": 1,
+            "succeeded_chunks": 1,
+            "failed_chunks": 0,
+            "skipped_chunks": 0,
+            "invalid_records": 1,
+            "unresolved_invalid_records": 0,
+            "recovered_invalid_records": 1,
+            "empty_response_chunks": 0,
+            "repair_attempted": False,
+            "repair_succeeded": False,
+            "repair_failed": False,
+            "repair_pre_invalid": 0,
+            "repair_post_invalid": 0,
+            "repair_final_path": "not_needed",
+            "review_agent_attempted": True,
+            "review_agent_succeeded": True,
+            "review_agent_abstained": False,
+            "review_agent_runs": [run],
+            "review_agent_total_runs": 1,
+            "review_agent_runs_truncated": False,
+            "reason_codes": ["lexical_support", "review_agent_recovered"],
+            "provider_calls": [
+                {"purpose": "agent", "status": "success", "prompt": "secret"}
+            ],
+        }
+        safe = _safe_model_execution(execution)
+        self.assertEqual((True, True), _execution_classification(safe))
+        self.assertEqual("agent", safe["provider_calls"][0]["purpose"])
+        self.assertNotIn("must-not-survive", json.dumps(safe))
+        self.assertNotIn("secret", json.dumps(safe))
+
+        for mutation in (
+            {"review_agent_runs_truncated": True},
+            {"review_agent_abstained": True},
+            {"review_agent_total_runs": 2},
+            {
+                "review_agent_runs": [
+                    {**run, "final_reason": "round_limit"}
+                ]
+            },
+            {
+                "review_agent_runs": [
+                    {**run, "trace_truncated": True, "total_trace_events": 3}
+                ]
+            },
+            {
+                "review_agent_runs": [
+                    {**run, "trace": run["trace"][1:]}
+                ]
+            },
+        ):
+            with self.subTest(mutation=mutation):
+                unsafe = _safe_model_execution({**execution, **mutation})
+                self.assertEqual((True, False), _execution_classification(unsafe))
+
+        mixed = {
+            **execution,
+            "invalid_records": 2,
+            "recovered_invalid_records": 2,
+            "repair_attempted": True,
+            "repair_succeeded": True,
+            "repair_pre_invalid": 1,
+            "repair_final_path": "repaired",
+        }
+        self.assertEqual(
+            (True, True), _execution_classification(_safe_model_execution(mixed))
+        )
+        for mutation in (
+            {"review_agent_runs": [], "review_agent_total_runs": 0},
+            {"review_agent_runs_truncated": True},
+            {
+                "review_agent_runs": [
+                    {**run, "trace_truncated": True, "total_trace_events": 3}
+                ]
+            },
+        ):
+            with self.subTest(mixed_agent_mutation=mutation):
+                unsafe = _safe_model_execution({**mixed, **mutation})
+                self.assertEqual((True, False), _execution_classification(unsafe))
+
     def test_perfect_manifest_projection_passes_all_frozen_gates(self):
         for case in self.manifest["cases"]:
             result = perfect_result(case)
@@ -629,6 +765,22 @@ class Phase1ModelAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             {"configured": False, "mode": None}, configuration["thinking"]
         )
+        for name in (
+            "enable_review_agent",
+            "review_agent_max_decision_rounds",
+            "review_agent_max_tool_calls",
+            "review_agent_max_span_chars",
+            "review_agent_max_span_reads",
+            "review_agent_max_read_requests_per_action",
+            "review_agent_max_read_lines",
+            "review_agent_context_radius_lines",
+            "review_agent_token_budget",
+            "review_agent_timeout_seconds",
+            "review_agent_total_deadline_seconds",
+            "review_agent_max_completion_tokens",
+            "review_agent_max_response_bytes",
+        ):
+            self.assertIn(name, configuration)
         settings = pipeline.extractor.provider.settings
         self.assertEqual(11.0, settings.provider_timeout_seconds)
         self.assertEqual(4, settings.provider_max_attempts)

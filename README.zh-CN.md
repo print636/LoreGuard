@@ -10,6 +10,7 @@
 - 本地项目列表、文档版本历史和运行历史；刷新页面后可恢复最近任务与结果
 - 无 API Key 抽取明确中文句式，并展示抽取记录与未抽取提示
 - 配置 OpenAI-compatible 模型后，从普通中文故事中结构化抽取 8 类叙事记录；模型失败自动保留基线结果
+- 实验性的受限证据修复 Agent 已接入但默认关闭；它只完成第一阶段代码与 Mock 安全/动态路径回归，尚未通过真实模型验收
 - 模型输入按全局行号分块，支持行重叠、超长单行和逐块失败隔离；全文基线不分块
 - 仅依据明确“又名/简称/化名/代号”声明做项目级实体别名归一化，保留映射轨迹与歧义警告
 - 本地 keyword + 稳定 SHA-256 字符 n-gram + canonical entity graph 混合检索，候选短名单由检查器消费并留下分数轨迹
@@ -68,6 +69,10 @@ set DAILY_TOKEN_BUDGET=100000
 模型逐分块调用前会用保守 Token 估算与本次已用额度执行门控；兼容 Provider 不返回 usage 时也按保守估算扣减内部预算。超出单次额度后停止后续模型分块，但全文基线仍会继续。每日额度在创建或重试分析时检查，当前是本地单数据库的非原子配额；多实例生产环境仍需 Redis 或事务式配额服务。写接口另有单进程滑动窗口限流，429 响应包含 `Retry-After`。
 
 模型模式以持久化的结构化执行记录判定，不依赖警告文字。页面会显示逻辑调用成功、失败、跳过和拒绝记录数；任何分块被跳过或记录被拒绝都不能算完整成功。旧运行缺少这些计数时显示“覆盖情况未知”。`python scripts/check_provider.py` 可经生产调用路径测试当前配置，只输出安全状态、耗时与 Token，不输出密钥或上游响应正文。
+
+受限 Agent 第一阶段使用 LangGraph 1.2.11 `StateGraph` 编排，仅在显式设置 `ENABLE_REVIEW_AGENT=true` 时启用，默认关闭。模型每轮返回应用层 JSON 动作 `READ_SPAN`、`PATCH_RECORDS` 或 `ABSTAIN`；这不是、也未冒充 Provider 原生 `tool_calls` / function calling。服务端绑定冻结文档和证据范围、校验 span 与补丁，并只持久化不含 Prompt、原始响应、证据正文、Key 或 endpoint 的安全 trace。固定的 modality/source_scope/certainty 标签 repair pass 是另一条非 Agent 路径，不能混称为 Agent。
+
+当前冻结 Agent 验收集有 30 个开发者可见任务，每个重复 3 次；已有 90 次结果全部来自 Mock oracle/scorer，只验证 scorer、协议、安全边界和动态动作路径，不是 90 次真实模型调用，也不能证明 Agent 带来收益。真实模型 Agent 验收和真正把语义检索证据送入下游决策的 Evidence RAG 均未完成。详细边界见 [`docs/review-agent-phase1.md`](docs/review-agent-phase1.md)，冻结任务见 [`data/agent-acceptance-v1/manifest.json`](data/agent-acceptance-v1/manifest.json)，离线 runner 见 [`scripts/run_agent_acceptance.py`](scripts/run_agent_acceptance.py)。
 
 只有同时配置 `MODEL_INPUT_PRICE_PER_MILLION` 和 `MODEL_OUTPUT_PRICE_PER_MILLION` 时才计算估算成本；未配置时 API/UI 显示“未配置”，不会把未知价格误报为 0 美元。
 
@@ -147,6 +152,7 @@ python scripts/run_complex_v3_evaluation.py --require-perfect
 python scripts/run_complex_model_evaluation.py --suite full --repeats 3 --max-total-tokens 350000
 python scripts/run_model_stability.py --case advanced --repeats 3 --max-total-tokens 15000
 python scripts/run_model_stability.py --case long-smoke-2k --repeats 5 --max-total-tokens 100000
+python scripts/run_agent_acceptance.py --mock-oracle --require-gates
 ```
 
 两套报告含义不同：
@@ -155,6 +161,7 @@ python scripts/run_model_stability.py --case long-smoke-2k --repeats 5 --max-tot
 - `artifacts/natural-evaluation-report.json`：固定 seed 生成的合成自然中文 test 集，共 60 例，其中 30 例无预期问题。状态建模前为 Precision 0.625、Recall 1.000、F1 0.769；加入角色/路线许可、显式知识来源和 actor 规则例外后，当前固定回归为 1.000/1.000/1.000。该 test 已被开发者查看，after 只能作为回归参考，不能称为无偏提升。
 - `artifacts/state-modeling-v2/`：保存 natural dev、原 test 和 50 例 challenge-v2 的 before/after 完整报告及误差。challenge-v2 after 为 Precision 0.962、Recall 1.000、F1 0.980，仍保留 1 个移动许可措辞误报；它同样是开发者可见合成数据，不是盲测或人工标注。
 - `artifacts/complex-v3-evaluation.json`：14 例原创、多文档复杂验收场景，共 10 个固定预期问题；五类问题均有正例与困难反例。当前无模型固定基线 TP 10、FP 0、FN 0，证据对精确命中率 1.0。该数据由开发者编写且可见，只能作为可审计回归，不能估计开放故事或生产准确率。
+- `data/agent-acceptance-v1/`：30 个开发者可见冻结任务，3 类 persona 各 10 个，每任务重复 3 次。`--mock-oracle` 生成的 90 次 execution 仅用于验证离线 scorer、三类动态路径和安全约束；runner 当前不会调用生产 Agent，这些数字不得写成真实 Agent 评测或能力成绩。
 
 完整数据位于 `data/evaluation-natural/`：40 个 dev 场景和 60 个 test 场景的 `scenario_id` 不重叠。它是模板生成的 `synthetic natural-language` 数据，不是人工标注集，也不能外推为生产准确率。评测 harness 运行 test 时只打开 `test.jsonl`，测试样本不进入 Prompt 或调参示例。
 
@@ -225,7 +232,7 @@ python scripts/run_long_text_smoke.py
 - 当前已验证模型抽取协议、降级机制、工程安全边界和一次冻结真实 Phase 1 运行；但当前新中转/模型的严格 gate 为 0/3，且尚未完成真实长篇人工标注评测，不能宣称开放文本准确率或当前模型能力达标。
 - `document_context` 与运行输入上下文采用附加关联表兼容旧 SQLite；旧文档读取为安全默认 `chapter/global` 并标记上下文并非显式保存。`create_all` 只是当前本地兼容引导，不替代正式数据库迁移框架。
 - 版本差异只在当前项目和同名文档边界内运行，不调用模型。默认每个版本最多处理前 20,000 行/2,000,000 字符并最多返回 4,000 行差异，超限会在响应和页面显式提示。
-- LangGraph、向量列与 OpenTelemetry 链路属于下一阶段，不列为本版完成事实。
+- LangGraph 1.2.11 `StateGraph` 的受限修复循环已作为默认关闭的第一阶段代码接入，但尚无真实模型 Agent 验收，不能列作已证明收益或简历成绩；真实 embedding/向量列、Evidence RAG 与 OpenTelemetry 完整链路仍属于后续阶段。
 - 详细完成度见 [`docs/completion-status.md`](docs/completion-status.md)，学习顺序见 [`docs/learning-guide.md`](docs/learning-guide.md)。
 - 长篇容量的当前硬限制、实用范围和百万字扩展路线见 [`docs/scalability-roadmap.md`](docs/scalability-roadmap.md)。
 

@@ -1,8 +1,8 @@
 # Evidence RAG 与受限审查 Agent 交付计划
 
-更新：2026-09-04。状态：P0 部分实现，其余仍为计划；未完成项不能作为已完成项目经历。
+更新：2026-09-06。状态：P0 核心正确性边界已实现；P2 的受限 Agent 第一阶段代码已接入且默认关闭，但只通过 Mock 安全/动态路径回归，尚未通过真实模型验收；P1 的真实 Evidence RAG 与 P4 仍未完成。未完成或未实测项不能作为已完成项目经历。
 
-增量状态：P0 的结构化模型执行记录与保守旧运行展示已实现，并同步到评测器；P0 其余任务与 P1/P2/P4 仍未完成，不因此宣布项目交付就绪。
+增量状态：P0 已覆盖冻结输入、幂等认领、lease/heartbeat、跨进程取消检查点、typed diagnostics 和保守旧运行展示。受限 Agent 现有实现比原 P2 设想更窄，只处理通过核心 schema/证据边界但需要词面支持修复的候选；它不是 Evidence RAG，也不因此宣布项目交付就绪。
 
 ## 目标与边界
 
@@ -14,9 +14,10 @@
 
 - `retrieval.py` 的向量是字符 n-gram 哈希，不是学习得到的语义 embedding。
 - `pipeline.py` 的 `check_with_candidates` 目前按记录类型兼容性设置 `consumed`，最终仍调用 `detect_issues(directives)` 检查全部记录；该计数不证明候选改变了裁决，也没有检索结果回送模型的闭环。
-- `provider.py` 目前是固定 system/user 的结构化抽取，没有工具调用消息循环。LangGraph、受限 Agent 和多智能体均未完成。
-- 工程组件启动和测试通过不等于高并发高可用。运行输入未在提交时固定版本；worker 缺少明显的原子执行认领；取消需要重新读取外部状态；共享配额目前不是原子预留。
-- 2026-09-04 重新运行现有 98 项测试通过。这是当前回归证据，不替代上述新增风险测试。
+- 主抽取仍是固定 system/user 的结构化抽取；另有 LangGraph 1.2.11 `StateGraph` 编排的受限修复循环。它使用应用层 JSON 动作，不使用、也未验证 Provider 原生 `tool_calls/tool_call_id`。
+- 运行输入快照、原子认领、终态幂等和 worker lease/heartbeat 已补齐并有自动回归；共享配额仍不是多实例原子预留，工程测试通过也不等于高并发高可用。
+- 固定 semantic label repair pass 只修补 modality/source_scope/certainty，是非 Agent 路径；不得把其调用或恢复结果计入 Agent 经验。
+- 冻结 Agent 套件的 30 个任务 × 3 次重复目前全部使用 Mock oracle/scorer。安全失败闭合与动态路径测试通过只证明实现边界可回归，不能替代真实模型效果验收。
 
 RAG 不以向量数据库为定义条件，但必须证明检索内容进入下游模型推理/生成。将已有精确规则保留为独立通路是合理的；把未实际影响输出的短名单标成已消费则需要纠正。
 
@@ -45,16 +46,21 @@ RAG 不以向量数据库为定义条件，但必须证明检索内容进入下�
 
 ### P2：一个真正有用的受限 Agent + 工具调用
 
-- 使用 LangGraph 编排审查状态，但明确固定工作流节点不自动等于 Agent。模型必须能根据已取回证据选择补查、改写查询、停止或弃答。
-- 首批工具只读：`search_evidence`、`read_evidence_span`、`get_entity_timeline`、`find_rule_exceptions`。项目/版本范围由服务端绑定，不能由模型扩大；工具不提供任意 SQL、shell、文件系统或外网访问。
-- 先验证现有兼容 Provider 的原生 `tools/tool_calls/tool_call_id` 支持。若只能结构化 JSON 路由，明确标成应用层工具协议，不冒充已经验证的原生 function calling。
-- 每次审查最多 3 轮补查、8 次工具调用，并设总时间/Token/并发预算；参数无效、重复调用、未知工具、429、超时、空结果与中途取消均明确终止或降级。
-- 工具输出及故事文本均为不可信数据；验证证据 ID 确实来自本次运行允许的工具结果。模型返回的原文仍由服务器回填。
-- 两条结果通路分开：现有五类规则维持确定性结论；语义补查给出有证据的“需人工复核”建议或“证据不足”。模型不得无审计删除确定性问题，也不得把带两条引用等同于逻辑已成立。
-- 页面显示调用了什么工具、取得哪些证据、采用/驳回/弃答的简短理由、耗时及成本；不保存或展示模型私有思维链。
-- 提供一次运行的审查轨迹导出和离线重放测试入口，服务于调试、评测和研发提效。
+第一阶段代码状态：
 
-验收：至少 20 个冻结任务，含必须二次补查才能找到例外的任务和证据不足任务；不能所有案例都执行同一条预写调用顺序。比较现有基线、一次检索、受限 Agent 的误报、漏报、证据正确性、弃答与成本，证明补查有实际作用。有效完整模型运行达到既有 P ≥ 0.75、R ≥ 0.60、证据命中率 ≥ 0.85 门槛，同时单独公开模型覆盖率与降级率。冻结后发现错误需披露是否用于修复，不包装成人工盲测。
+- 已使用 LangGraph 1.2.11 `StateGraph` 编排 `decide -> execute -> decide/finalize`。是否构成动态 Agent 取决于模型依据服务端校验结果和读取结果选择动作，不是因为采用了 LangGraph；功能由 `ENABLE_REVIEW_AGENT` 控制且默认关闭。
+- 可选动作限定为 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`。当前是应用层 JSON 工具协议，Provider 原生 `tools/tool_calls/tool_call_id` 未验证、未使用，不能称为原生 function calling。
+- `READ_SPAN` 只能读取候选附近、同一冻结文档和 scope 的有界行范围；`PATCH_RECORDS` 必须携带服务端签发且绑定候选/文档/行范围的 span，不能修改 kind、文档归属、role/scope 或证据行号；验证失败和 `ABSTAIN` 均不生成确定性记录。
+- 整个 analysis run 共享最多 2 个模型决策轮和 6 次工具动作，同时限制 span 数/字符、单次行数、Token、deadline、取消检查点和响应字节数。故事文本和工具结果一律视为不可信数据。
+- 安全 trace 仅保留动作、轮次、哈希、行号、字段名、原因码、Token、耗时和终态，并有 Run/trace 截断标记；不保存或展示 Prompt、思维链、原始响应、故事/工具正文、补丁值、Key 或 endpoint。页面将其与固定语义标签 repair 分开显示。
+
+当前验证边界：
+
+- [冻结 manifest](../data/agent-acceptance-v1/manifest.json) 含 30 个开发者可见任务，3 类 persona 各 10 个，每任务重复 3 次，共 90 次 execution；30 个初始候选均由生产校验路径证明只失败于 `lexical_support`，而不是把其他 validator reason 改名伪装。套件覆盖 `READ_SPAN -> PATCH_RECORDS`、直接 `ABSTAIN`、失败补丁后服务端终止等动态路径，以及问句/引用/保守标签、跨文档/scope、越界、未知动作和不允许字段等安全负例。
+- [离线 runner](../scripts/run_agent_acceptance.py) 当前只接受 trace 文件或 `--mock-oracle`；它不会调用生产 Agent。现有 90 次全部是 Mock scorer fixture，只验证 scorer、协议、回放完整性和安全 gate，不能解释成真实模型调用、恢复率、准确率或 Agent 收益。
+- 完整实现边界见 [第一阶段说明](review-agent-phase1.md)。在真实模型冻结验收前，准确表述仅为“实现并在 Mock 中验证了默认关闭的受限工具循环”，不得作为简历成绩。
+
+仍待 P2 验收：用真实模型产生并导入同一冻结套件的 trace，比较基线、一次检索和受限 Agent 的恢复、误报、漏报、证据正确性、安全弃答、覆盖/降级、动态路径、延迟与 Token 成本。不能所有案例都执行同一条预写顺序；冻结后发现错误需披露是否用于修复。只有真实完整运行达到既定 P ≥ 0.75、R ≥ 0.60、证据命中率 ≥ 0.85 等门槛，且安全违规为 0，才能讨论收益。真正的 Evidence RAG 仍属于 P1：当前 `READ_SPAN` 是候选附近有界读取，不是 embedding/pgvector 语义召回，也没有搜索工具闭环。
 
 ### P3：轻量多智能体实验（可选，不阻塞投递）
 

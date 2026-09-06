@@ -42,6 +42,23 @@ class Settings(BaseSettings):
     # configures a base or repair-specific cap.
     semantic_repair_max_completion_tokens: int | None = Field(default=None, ge=64)
     semantic_repair_max_response_bytes: int = Field(default=64_000, ge=1)
+    # The evidence-repair Agent is opt-in while its frozen evaluation suite is
+    # being built. These are defense-in-depth ceilings, not tuning knobs that
+    # can be raised without bound by a deployment environment.
+    enable_review_agent: bool = False
+    review_agent_max_decision_rounds: int = Field(default=2, ge=1, le=2)
+    review_agent_max_tool_calls: int = Field(default=6, ge=1, le=6)
+    review_agent_max_span_chars: int = Field(default=4_000, ge=1, le=8_000)
+    review_agent_max_span_reads: int = Field(default=40, ge=1, le=40)
+    review_agent_max_read_requests_per_action: int = Field(default=40, ge=1, le=40)
+    review_agent_max_read_lines: int = Field(default=12, ge=1, le=20)
+    review_agent_context_radius_lines: int = Field(default=20, ge=0, le=50)
+    review_agent_token_budget: int = Field(default=8_000, ge=256, le=12_000)
+    review_agent_timeout_seconds: float = Field(default=15.0, gt=0, le=30.0)
+    review_agent_total_deadline_seconds: float = Field(default=30.0, gt=0, le=60.0)
+    # Remain capability-neutral for relays that reject max_tokens.
+    review_agent_max_completion_tokens: int | None = Field(default=None, ge=64)
+    review_agent_max_response_bytes: int = Field(default=64_000, ge=1, le=128_000)
     per_run_token_budget: int = 20_000
     daily_token_budget: int = 100_000
     model_input_price_per_million: float | None = None
@@ -57,6 +74,14 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_empty_provider_thinking_mode(cls, value):
         """Compose's unset interpolation is an empty string, meaning no opt-in."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("review_agent_max_completion_tokens", mode="before")
+    @classmethod
+    def normalize_empty_review_agent_completion_limit(cls, value):
+        """An unset Compose interpolation keeps the relay-neutral None default."""
         if isinstance(value, str) and not value.strip():
             return None
         return value

@@ -40,6 +40,27 @@ MISSING_SNAPSHOT_ERROR = (
     "请从项目重新发起分析以使用当前活动版本"
 )
 
+_SAFE_INTERRUPTED_PROVIDER_CATEGORIES = {
+    "success",
+    "not_configured",
+    "provider",
+    "rate_limit",
+    "upstream_5xx",
+    "unauthorized",
+    "forbidden",
+    "nonretry_http",
+    "body_json",
+    "response_shape",
+    "empty_content",
+    "usage_shape",
+    "truncated",
+    "content_json",
+    "connect_timeout",
+    "read_timeout",
+    "transport",
+}
+_SIGNED_64_MAX = (1 << 63) - 1
+
 
 class WorkerLeaseLost(RuntimeError):
     pass
@@ -562,6 +583,181 @@ def _owned_run_clause(run_id: str, worker_token: str):
     )
 
 
+def _optional_nonnegative_int(
+    value, *, maximum: int = _SIGNED_64_MAX
+) -> int | None:
+    return value if type(value) is int and 0 <= value <= maximum else None
+
+
+def _interrupted_usage_limits() -> dict[str, int]:
+    """Derive finite persistence limits from the bounded Agent settings."""
+    settings = get_settings()
+    decision_rounds = min(
+        _SIGNED_64_MAX,
+        max(1, int(settings.review_agent_max_decision_rounds)),
+    )
+    run_budget = max(0, int(settings.per_run_token_budget))
+    agent_budget = max(0, int(settings.review_agent_token_budget))
+    effective_budget = max(1, min(run_budget, agent_budget))
+    # One provider response may legitimately overshoot a pre-call estimate.
+    # Four bounded rounds-worth leaves headroom without accepting arbitrary
+    # provider-controlled integers into cost arithmetic or the database.
+    token_count = min(
+        _SIGNED_64_MAX,
+        effective_budget * max(4, decision_rounds + 2),
+    )
+    response_chars = min(
+        _SIGNED_64_MAX,
+        max(1, int(settings.review_agent_max_response_bytes)),
+    )
+    input_basis = max(
+        response_chars,
+        int(settings.model_batch_max_chars),
+        int(settings.model_chunk_max_chars),
+        int(settings.review_agent_max_span_chars),
+    )
+    input_chars = min(
+        _SIGNED_64_MAX, input_basis * max(8, decision_rounds + 2)
+    )
+    elapsed_ms = min(
+        _SIGNED_64_MAX,
+        max(
+            1,
+            int(settings.review_agent_total_deadline_seconds * 1000)
+            * max(4, decision_rounds + 2),
+        ),
+    )
+    return {
+        "logical_calls": decision_rounds,
+        "token_count": token_count,
+        "attempt": 1,
+        "elapsed_ms": elapsed_ms,
+        "input_chars": input_chars,
+        "response_chars": response_chars,
+    }
+
+
+def _safe_interrupted_provider_call(row, limits: dict[str, int]) -> dict | None:
+    """Re-allowlist already content-free telemetry at the DB boundary."""
+    if not isinstance(row, dict):
+        return None
+    status = row.get("status")
+    category = row.get("category")
+    if status not in {"success", "failure"}:
+        return None
+    if category not in _SAFE_INTERRUPTED_PROVIDER_CATEGORIES:
+        category = "provider"
+    integer_limits = {
+        "attempt": limits["attempt"],
+        "elapsed_ms": limits["elapsed_ms"],
+        "input_chars": limits["input_chars"],
+        "response_chars": limits["response_chars"],
+        "prompt_tokens": limits["token_count"],
+        "completion_tokens": limits["token_count"],
+        "total_tokens": limits["token_count"],
+    }
+    normalized = {
+        key: _optional_nonnegative_int(row.get(key), maximum=maximum)
+        for key, maximum in integer_limits.items()
+    }
+    if any(
+        row.get(key) is not None and normalized[key] is None
+        for key in integer_limits
+    ):
+        # One impossible per-call counter makes this optional series
+        # unavailable; aggregate counters are validated independently.
+        return None
+    http_status = _optional_nonnegative_int(row.get("http_status"), maximum=599)
+    if row.get("http_status") is not None and http_status is None:
+        return None
+    if http_status is not None and not 100 <= http_status <= 599:
+        http_status = None
+    safe = {
+        "status": status,
+        "category": category,
+        **normalized,
+        "http_status": http_status,
+        # Request IDs are provider-controlled opaque strings and are not
+        # needed to prove interrupted usage. Dropping them entirely avoids a
+        # credential-like value passing a permissive identifier regex.
+        "request_id": None,
+        # This interrupted ledger is exclusively populated by Review Agent
+        # calls. Never trust a caller-provided purpose at persistence time.
+        "purpose": "agent",
+    }
+    return safe
+
+
+def _interrupted_review_agent_usage(pipeline) -> dict | None:
+    """Build a safe, explicitly incomplete lower-bound usage diagnostic."""
+    getter = getattr(pipeline, "interrupted_model_usage", None)
+    if not callable(getter):
+        return None
+    try:
+        source = getter()
+    except Exception:
+        # Accounting must never prevent cancellation from reaching a durable
+        # terminal state. A broken custom extractor simply has no proof.
+        return None
+    if not isinstance(source, dict):
+        return None
+    limits = _interrupted_usage_limits()
+    counters = {
+        "logical_calls": _optional_nonnegative_int(
+            source.get("logical_calls"), maximum=limits["logical_calls"]
+        ),
+        **{
+            key: _optional_nonnegative_int(
+                source.get(key), maximum=limits["token_count"]
+            )
+            for key in (
+                "prompt_tokens",
+                "completion_tokens",
+                "charged_tokens",
+            )
+        },
+    }
+    if any(value is None for value in counters.values()):
+        return None
+    logical_calls = counters["logical_calls"]
+    prompt_tokens = counters["prompt_tokens"]
+    completion_tokens = counters["completion_tokens"]
+    charged_tokens = counters["charged_tokens"]
+    if (
+        not logical_calls
+        or charged_tokens < prompt_tokens + completion_tokens
+    ):
+        return None
+
+    raw_calls = source.get("provider_calls")
+    provider_calls = None
+    if isinstance(raw_calls, list):
+        sanitized = [
+            _safe_interrupted_provider_call(row, limits) for row in raw_calls
+        ]
+        # A partial or malformed series is unavailable, not a fake complete
+        # list. Aggregate lower-bound counters remain independently valid.
+        if (
+            all(row is not None for row in sanitized)
+            and len(sanitized) == logical_calls
+        ):
+            provider_calls = sanitized
+    elif raw_calls is not None:
+        provider_calls = None
+
+    return {
+        "completeness": "lower_bound",
+        "scope": "review_agent_completed_calls_only",
+        "terminal_status": "cancelled",
+        "logical_calls": logical_calls,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "charged_tokens": charged_tokens,
+        "charged_token_semantics": "conservative_internal_budget_debit",
+        "provider_calls": provider_calls,
+    }
+
+
 def _finalize_terminal(
     run_id: str,
     worker_token: str,
@@ -569,6 +765,7 @@ def _finalize_terminal(
     *,
     error: str | None,
     message: str,
+    interrupted_usage: dict | None = None,
 ) -> bool:
     with SessionLocal() as db:
         conditions = [
@@ -578,10 +775,28 @@ def _finalize_terminal(
         ]
         if status == "completed":
             conditions.append(AnalysisRunRow.cancel_requested.is_(False))
+        values = {
+            "status": status,
+            "error": error,
+            "completed_at": utc_now_naive(),
+        }
+        if status == "cancelled" and interrupted_usage is not None:
+            values.update(
+                prompt_tokens=interrupted_usage["prompt_tokens"],
+                completion_tokens=interrupted_usage["completion_tokens"],
+                estimated_cost_usd=(
+                    configured_cost_usd(
+                        interrupted_usage["prompt_tokens"],
+                        interrupted_usage["completion_tokens"],
+                        get_settings(),
+                    )
+                    or 0
+                ),
+            )
         changed = db.execute(
             update(AnalysisRunRow)
             .where(*conditions)
-            .values(status=status, error=error, completed_at=utc_now_naive())
+            .values(**values)
         ).rowcount
         if changed != 1:
             db.rollback()
@@ -591,6 +806,14 @@ def _finalize_terminal(
                 run_id=run_id, stage=status, progress=100, message=message
             )
         )
+        if status == "cancelled" and interrupted_usage is not None:
+            diagnostic = db.get(AnalysisDiagnosticRow, run_id)
+            payload = dict(diagnostic.payload) if diagnostic else {}
+            payload["usage_accounting"] = interrupted_usage
+            if diagnostic:
+                diagnostic.payload = payload
+            else:
+                db.add(AnalysisDiagnosticRow(run_id=run_id, payload=payload))
         db.execute(
             update(AnalysisRunExecutionRow)
             .where(
@@ -710,6 +933,7 @@ def execute_analysis(
         return
     heartbeat = (heartbeat_factory or ExecutionLeaseHeartbeat)(run_id, token)
     heartbeat.start()
+    pipeline = None
     try:
         _checkpoint(run_id, token, heartbeat)
         with SessionLocal() as db:
@@ -847,12 +1071,18 @@ def execute_analysis(
             )
             db.commit()
     except AnalysisCancelled:
+        interrupted_usage = (
+            _interrupted_review_agent_usage(pipeline)
+            if pipeline is not None
+            else None
+        )
         _finalize_terminal(
             run_id,
             token,
             "cancelled",
             error=None,
             message="任务已按取消请求停止",
+            interrupted_usage=interrupted_usage,
         )
     except WorkerLeaseHeartbeatError:
         if raise_on_failure:

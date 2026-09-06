@@ -8,6 +8,16 @@
 
 本轮工程实现与回归已覆盖 semantic trust、运行输入快照、幂等认领、worker lease/heartbeat、跨进程取消检查点、typed diagnostics、无效记录最终处置与受限语义标签 repair pass、批量抽取失败域、Provider 成功响应硬字节上限和显式 thinking 模式。这些是工程 checkpoint，不是简历成果；repair pass 是受限结构化补救调用，不是 Agent。Phase 1 与 complex runner 已改为共用安全 `CountingProvider`，主调用和派生 repair 调用均计数，Mock 回归已通过。Compose 已将 thinking 配置接入 API/worker，空白值归一为 `None`。当前真实 AI-first gate 仍未通过。
 
+## 受限 Agent 第一阶段状态
+
+- 已接入 LangGraph 1.2.11 `StateGraph` 的有界 `decide -> execute -> decide/finalize` 循环，开发环境只有显式设置 `ENABLE_REVIEW_AGENT=true` 才启用，默认关闭。
+- 当前动作只有 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`。模型通过应用层 JSON 工具协议选择动作；当前没有验证或使用 Provider 原生 `tool_calls`，因此不能写成原生 function calling。
+- 服务端限制文档/scope、证据行范围、span、可修改字段、决策轮、工具次数、Token、deadline 与响应字节数；安全 trace 不持久化 Prompt、原始响应、工具/故事正文、补丁值、Key 或 endpoint。前端将固定语义标签 repair 和受限 Agent 分开显示。
+- 冻结套件含 30 个开发者可见任务、3 类 persona 各 10 个，每任务重复 3 次；每个初始候选都经生产 schema、文档/行号、非空证据和词面校验路径证明只失败于 `lexical_support`。当前 90 次 execution 全部由 Mock oracle/scorer 生成，只证明离线 scorer、安全失败闭合和至少三种动态动作路径能够回归，不是 90 次真实模型 Agent 调用。
+- 尚未执行真实模型 Agent 验收，所以不能声称 Agent 已提高恢复率、准确率或产品价值，也不能作为简历成绩。真实 Evidence RAG 仍未完成；当前 Agent 只读取候选附近的有界冻结原文，不等于语义检索闭环。
+
+实现与边界见 [受限 Agent 第一阶段说明](review-agent-phase1.md)；冻结任务见 [manifest](../data/agent-acceptance-v1/manifest.json)，离线 trace scorer 见 [runner](../scripts/run_agent_acceptance.py)。
+
 ## 已完成并可体验
 
 - 项目创建/选择、自然文本粘贴、Markdown/TXT/JSON 多文件上传、同名自动版本化及活动/历史版本查询。
@@ -22,7 +32,7 @@
 - 模型记录逐条隔离校验，部分非法记录不会拖垮同一文档中的有效记录；无明确时间的物品持有/使用可作为无时态状态参与检查。
 - 新增证据约束的候选归一化层，覆盖“取出物品后盖下/使用”以及“在规则范围内仍发动被禁能力”；该层不增加模型调用费用，也不把模型判断直接转换为问题。
 - 高级原创回归场景在关闭模型时可稳定检出事实、时空、知识、物品和世界规则五类问题，且每类一条；该结论只覆盖固定回归样本，不代表开放文本总体准确率。
-- 分析任务持久化实际抽取记录和 Prompt/Completion Token 用量；读取记录不会再次调用模型。
+- 完成的分析任务持久化实际抽取记录和 Prompt/Completion Token 用量；读取记录不会再次调用模型。若 Provider 返回后立即取消、尚未形成完整 `PipelineResult`，只持久化已完成 Review Agent 调用的 Token/安全遥测，并在诊断和状态 API 中显式标记为 `lower_bound` / `review_agent_completed_calls_only`，不将其冒充完整运行总量。
 - 五类状态检查：事实、同刻多地点、角色知识、物品持有、世界规则。
 - 每个问题包含原文、行号、解释、置信度、严重度和建议。
 - 项目运行历史、后台分析、持久化 SSE 断线恢复、终态错误、状态受限的取消/重试。
@@ -58,7 +68,8 @@
 - 独立世界观、人工盲标且未参与规则修复的真实长故事评测；当前高分仅覆盖开发者可见固定回归。
 - 当前新中转/模型通过最小 Provider preflight，但冻结 Phase 1 `full × 1` 严格 gate 为 0/3；需先解决词面/证据拒绝和 batch 协议失败，再重新达到完整覆盖并执行三轮稳定性验收。
 - pgvector 实际向量列、真实 embedding 与跨段语义召回；当前只使用本地稳定哈希 n-gram 近似向量。
-- LangGraph 编排、OpenTelemetry 完整链路、Redis/事务式生产配额与多实例限流、多用户鉴权。
+- 受限 Agent 的真实模型冻结验收、与基线/一次检索的收益对照、真实动态路径稳定性、延迟与成本结果；现有 30 任务/90 次仅为 Mock scorer 回归。
+- OpenTelemetry 完整链路、Redis/事务式生产配额与多实例限流、多用户鉴权。
 - 项目/文档删除与多人协作权限；关系图目前是通用 JSON 状态记录的运行级投影，尚非可跨版本查询的规范化知识图谱。当前版本差异是文本行级比较，不包含语义实体或问题清单的跨版本差异。
 - 公网 Demo、真实 P95 压测和两分钟录屏。
 

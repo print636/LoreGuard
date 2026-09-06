@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+import time
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -15,6 +16,7 @@ from .domain import (
     EvidenceSpan,
     ModelExecutionDiagnostics,
     ParsedDirective,
+    ProviderCallDiagnostics,
     SemanticModality,
     SourceScope,
     apply_semantic_quality_gate_with_provenance,
@@ -23,6 +25,7 @@ from .chunking import DocumentChunk, chunk_document, numbered_chunk
 from .parser import ParsedDocument
 from .pipeline import BaselineExtractor, DocumentInput
 from .provider import OpenAICompatibleProvider, ProviderError, RetryPolicy
+from .review_agent import AgentCandidate, BoundedReviewAgent
 from .usage import (
     estimate_batch_request_tokens,
     estimate_repair_request_tokens,
@@ -181,6 +184,7 @@ _SEMANTIC_LABEL_FIELDS = frozenset({"modality", "source_scope", "certainty"})
 class _RepairCandidate:
     repair_index: int
     source_record_index: int
+    doc_ref: str
     raw_record: dict[str, Any]
     raw_hash: str
     error_codes: tuple[str, ...]
@@ -639,6 +643,23 @@ class ModelEnhancedExtractor:
         self._circuit_open = False
         self._checkpoint = lambda: None
         self._repair_attempted_run = False
+        self._review_agent_decision_rounds_used = 0
+        self._review_agent_tool_calls_used = 0
+        self._review_agent_span_chars_used = 0
+        self._review_agent_span_reads_used = 0
+        self._review_agent_charged_tokens_used = 0
+        self._review_agent_deadline: float | None = None
+        self._review_agent_safe_accounting: dict[str, Any] = {
+            "logical_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "charged_tokens": 0,
+            "provider_calls": [],
+        }
+
+    def _monotonic(self) -> float:
+        clock = getattr(self.provider, "monotonic", time.perf_counter)
+        return clock()
 
     def begin_run(self, checkpoint=None) -> None:
         self._run_tokens_used = 0
@@ -646,6 +667,25 @@ class ModelEnhancedExtractor:
         self._circuit_open = False
         self._checkpoint = checkpoint or (lambda: None)
         self._repair_attempted_run = False
+        self._review_agent_decision_rounds_used = 0
+        self._review_agent_tool_calls_used = 0
+        self._review_agent_span_chars_used = 0
+        self._review_agent_span_reads_used = 0
+        self._review_agent_charged_tokens_used = 0
+        # Start the shared Agent deadline lazily at its first invocation. Main
+        # extraction may legitimately take longer and is governed separately.
+        self._review_agent_deadline = None
+        self._review_agent_safe_accounting = {
+            "logical_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "charged_tokens": 0,
+            "provider_calls": [],
+        }
+
+    def review_agent_safe_accounting(self) -> dict[str, Any]:
+        """Return content-free call accounting, including interrupted calls."""
+        return deepcopy(self._review_agent_safe_accounting)
 
     def _bounded_repair_provider(self) -> Any:
         settings = self.provider.settings
@@ -702,8 +742,9 @@ class ModelEnhancedExtractor:
         *,
         source_record_index: int,
         repair_index: int,
+        doc_ref: str = "d1",
     ) -> tuple[ParsedDirective | None, _RepairCandidate | None, str | None]:
-        """Validate a record, isolating only semantic-label-only failures."""
+        """Validate a record and isolate only the two Agent-safe failure classes."""
         try:
             record = RECORD_ADAPTER.validate_python(raw_record)
         except ValidationError as exc:
@@ -726,6 +767,7 @@ class ModelEnhancedExtractor:
             candidate = _RepairCandidate(
                 repair_index=repair_index,
                 source_record_index=source_record_index,
+                doc_ref=doc_ref,
                 raw_record=deepcopy(raw_record),
                 raw_hash=_stable_raw_hash(raw_record),
                 error_codes=error_codes,
@@ -736,7 +778,36 @@ class ModelEnhancedExtractor:
             )
             return None, candidate, None
 
-        candidate = self._to_directive(document, chunk, record)
+        try:
+            candidate = self._to_directive(document, chunk, record)
+        except ValueError as exc:
+            if not (
+                self.provider.settings.enable_review_agent
+                and str(exc) == "模型记录缺少原文词面支持"
+            ):
+                raise
+            # The Agent may see lexical failures only after Pydantic schema,
+            # source range, non-empty evidence and server context have passed.
+            # Disabling the feature preserves the legacy rejection path.
+            provisional = self._to_directive(
+                document, chunk, record, require_lexical_support=False
+            )
+            return (
+                None,
+                _RepairCandidate(
+                    repair_index=repair_index,
+                    source_record_index=source_record_index,
+                    doc_ref=doc_ref,
+                    raw_record=deepcopy(raw_record),
+                    raw_hash=_stable_raw_hash(raw_record),
+                    error_codes=("lexical_support",),
+                    document=document,
+                    chunk=chunk,
+                    provisional_record=record,
+                    provisional_directive=provisional,
+                ),
+                None,
+            )
         assessed, semantic_reason = assess_directive(candidate)
         if assessed is None:
             raise ValueError("模型记录未通过语义质量门")
@@ -799,6 +870,73 @@ class ModelEnhancedExtractor:
         return None
 
     def _resolve_repair(
+        self,
+        candidates: list[_RepairCandidate],
+        *,
+        accounting_document: ParsedDocument,
+        executions: list[ModelExecutionDiagnostics],
+    ) -> dict[int, ParsedDirective]:
+        if not candidates:
+            return {}
+        if not self.provider.settings.enable_review_agent:
+            return self._resolve_fixed_repair(
+                candidates,
+                accounting_document=accounting_document,
+                executions=executions,
+            )
+
+        ordered_document_ids = list(
+            dict.fromkeys(candidate.document.id for candidate in candidates)
+        )
+        all_execution_by_id = dict(
+            zip(ordered_document_ids, executions, strict=True)
+        )
+        lexical = [
+            candidate
+            for candidate in candidates
+            if "lexical_support" in candidate.error_codes
+        ]
+        label_only = [
+            candidate
+            for candidate in candidates
+            if "lexical_support" not in candidate.error_codes
+        ]
+        resolved: dict[int, ParsedDirective] = {}
+        if label_only:
+            label_document_ids = list(
+                dict.fromkeys(candidate.document.id for candidate in label_only)
+            )
+            resolved.update(
+                self._resolve_fixed_repair(
+                    label_only,
+                    accounting_document=accounting_document,
+                    executions=[
+                        all_execution_by_id[document_id]
+                        for document_id in label_document_ids
+                    ],
+                )
+            )
+        if lexical:
+            lexical_document_ids = list(
+                dict.fromkeys(candidate.document.id for candidate in lexical)
+            )
+            lexical_executions = [
+                all_execution_by_id[document_id]
+                for document_id in lexical_document_ids
+            ]
+            resolved.update(
+                self._resolve_with_review_agent(
+                    lexical,
+                    accounting_document=accounting_document,
+                    executions=lexical_executions,
+                    execution_by_id=dict(
+                        zip(lexical_document_ids, lexical_executions, strict=True)
+                    ),
+                )
+            )
+        return resolved
+
+    def _resolve_fixed_repair(
         self,
         candidates: list[_RepairCandidate],
         *,
@@ -943,6 +1081,180 @@ class ModelEnhancedExtractor:
                 )
             return finish_failed("repair_failed", attempted=True)
 
+    def _resolve_with_review_agent(
+        self,
+        candidates: list[_RepairCandidate],
+        *,
+        accounting_document: ParsedDocument,
+        executions: list[ModelExecutionDiagnostics],
+        execution_by_id: dict[str, ModelExecutionDiagnostics],
+    ) -> dict[int, ParsedDirective]:
+        """Run one bounded model-directed tool loop over attributed candidates."""
+        for execution in executions:
+            execution.review_agent_attempted = True
+            execution.note("review_agent_attempted")
+
+        agent_candidates = [
+            AgentCandidate(
+                index=candidate.repair_index,
+                doc_ref=candidate.doc_ref,
+                raw_hash=candidate.raw_hash,
+                raw_record=deepcopy(candidate.raw_record),
+                error_codes=candidate.error_codes,
+                document=candidate.document,
+                line_start=candidate.provisional_directive.evidence.line_start,
+                line_end=candidate.provisional_directive.evidence.line_end,
+                evidence_text=candidate.provisional_directive.evidence.text,
+            )
+            for candidate in candidates
+        ]
+        candidate_by_index = {
+            candidate.repair_index: candidate for candidate in candidates
+        }
+
+        def validate_patch(
+            agent_candidate: AgentCandidate, fields: dict[str, Any]
+        ) -> ParsedDirective:
+            source = candidate_by_index[agent_candidate.index]
+            if _stable_raw_hash(source.raw_record) != source.raw_hash:
+                raise ValueError("agent_candidate_mutated")
+            patched = deepcopy(source.raw_record)
+            patched.update(fields)
+            # Immutable identity/range/context cannot enter fields through the
+            # ReviewAgent allowlist; assert them again at this trust boundary.
+            if (
+                patched.get("kind") != source.raw_record.get("kind")
+                or patched.get("source_line_start")
+                != source.raw_record.get("source_line_start")
+                or patched.get("source_line_end")
+                != source.raw_record.get("source_line_end")
+                or {
+                    "doc_ref",
+                    "role",
+                    "scope",
+                    "document_role",
+                    "story_scope",
+                }.intersection(fields)
+            ):
+                raise ValueError("agent_immutable_field")
+            record = RECORD_ADAPTER.validate_python(patched)
+            directive = self._to_directive(source.document, source.chunk, record)
+            assessed, _ = assess_directive(directive)
+            if assessed is None:
+                raise ValueError("agent_semantic_quality")
+            eligible_for_deterministic_rules(assessed)
+            return assessed
+
+        remaining_tokens = min(
+            max(0, self.provider.settings.per_run_token_budget - self._run_tokens_used),
+            max(
+                0,
+                self.provider.settings.review_agent_token_budget
+                - self._review_agent_charged_tokens_used,
+            ),
+        )
+        accounting_execution = executions[0]
+
+        def account_provider_call(
+            telemetry: Any,
+            succeeded: bool,
+            prompt_tokens: int,
+            completion_tokens: int,
+            charged_tokens: int,
+        ) -> None:
+            """Count a completed Agent call in the run-local interruption ledger.
+
+            The service owns the durable database boundary.  This callback runs
+            before the post-provider cancellation checkpoint so the service can
+            persist the known lower bound even when the Agent is interrupted.
+            """
+            accounting_document.prompt_tokens += prompt_tokens
+            accounting_document.completion_tokens += completion_tokens
+            self._run_tokens_used += charged_tokens
+            self._review_agent_charged_tokens_used += charged_tokens
+            safe_accounting = self._review_agent_safe_accounting
+            safe_accounting["logical_calls"] += 1
+            safe_accounting["prompt_tokens"] += prompt_tokens
+            safe_accounting["completion_tokens"] += completion_tokens
+            safe_accounting["charged_tokens"] += charged_tokens
+            safe_provider_calls = safe_accounting["provider_calls"]
+            if safe_provider_calls is not None:
+                safe_call = ProviderCallDiagnostics.from_telemetry(
+                    telemetry, succeeded=succeeded, purpose="agent"
+                )
+                if safe_call is None:
+                    safe_accounting["provider_calls"] = None
+                else:
+                    safe_provider_calls.append(safe_call.safe_dict())
+            accounting_execution.record_provider_call(
+                telemetry, succeeded=succeeded, purpose="agent"
+            )
+
+        try:
+            if self._review_agent_deadline is None:
+                self._review_agent_deadline = (
+                    self._monotonic()
+                    + self.provider.settings.review_agent_total_deadline_seconds
+                )
+            run = BoundedReviewAgent(
+                provider=self.provider,
+                candidates=agent_candidates,
+                patch_validator=validate_patch,
+                provider_accounting=account_provider_call,
+                checkpoint=self._checkpoint,
+                remaining_run_tokens=remaining_tokens,
+                remaining_decision_rounds=max(
+                    0,
+                    self.provider.settings.review_agent_max_decision_rounds
+                    - self._review_agent_decision_rounds_used,
+                ),
+                remaining_tool_calls=max(
+                    0,
+                    self.provider.settings.review_agent_max_tool_calls
+                    - self._review_agent_tool_calls_used,
+                ),
+                remaining_span_chars=max(
+                    0,
+                    self.provider.settings.review_agent_max_span_chars
+                    - self._review_agent_span_chars_used,
+                ),
+                remaining_span_reads=max(
+                    0,
+                    self.provider.settings.review_agent_max_span_reads
+                    - self._review_agent_span_reads_used,
+                ),
+                absolute_deadline=self._review_agent_deadline,
+            ).run()
+        except ValueError:
+            # Constructor failures are server-side contract failures. They do
+            # not expose exception text and cannot promote any candidate.
+            for candidate in candidates:
+                _add_execution_counter(
+                    execution_by_id[candidate.document.id],
+                    "unresolved_invalid_records",
+                )
+            for execution in executions:
+                execution.review_agent_abstained = True
+                execution.note("review_agent_contract")
+            return {}
+
+        self._review_agent_decision_rounds_used += run.decision_rounds
+        self._review_agent_tool_calls_used += run.tool_calls
+        self._review_agent_span_chars_used += run.span_chars
+        self._review_agent_span_reads_used += run.span_read_count
+        accounting_execution.review_agent_runs.append(run.safe_dict())
+        for candidate in candidates:
+            execution = execution_by_id[candidate.document.id]
+            if candidate.repair_index in run.recovered:
+                _add_execution_counter(execution, "recovered_invalid_records")
+                execution.review_agent_succeeded = True
+                execution.note("review_agent_recovered")
+            else:
+                _add_execution_counter(execution, "unresolved_invalid_records")
+                execution.review_agent_abstained = True
+                execution.note("review_agent_abstained")
+        return run.recovered
+
     def extract_batch(
         self, documents: list[DocumentInput]
     ) -> list[ParsedDocument] | None:
@@ -1079,6 +1391,7 @@ class ModelEnhancedExtractor:
                                 raw_record,
                                 source_record_index=record_index,
                                 repair_index=next_repair_index,
+                                doc_ref=ref,
                             )
                         )
                     except ValidationError as exc:
@@ -1123,7 +1436,11 @@ class ModelEnhancedExtractor:
                         repair_candidates.append(repair_candidate)
                         repair_locations[next_repair_index] = location
                         executions[doc_index].invalid_records += 1
-                        executions[doc_index].note("semantic_labels_quarantined")
+                        if "lexical_support" in repair_candidate.error_codes:
+                            executions[doc_index].note("lexical_support")
+                        else:
+                            executions[doc_index].note("semantic_labels_quarantined")
+                            executions[doc_index].note("schema_validation")
                         next_repair_index += 1
                     elif assessed is not None:
                         validated_records[location] = assessed
@@ -1177,7 +1494,21 @@ class ModelEnhancedExtractor:
                         for repair_index, location in repair_locations.items()
                         if location[0] == doc_index
                     )
-                    if execution.repair_succeeded:
+                    if execution.review_agent_attempted:
+                        if repaired_count:
+                            workflow = (
+                                "固定语义修复与受限证据修复 Agent"
+                                if execution.repair_attempted
+                                else "受限证据修复 Agent"
+                            )
+                            staged_warnings.append(
+                                f"{workflow} 已校验恢复 {repaired_count} 条隔离候选"
+                            )
+                        else:
+                            staged_warnings.append(
+                                "受限证据修复 Agent 已弃答；隔离候选未进入确定性规则"
+                            )
+                    elif execution.repair_succeeded:
                         staged_warnings.append(
                             f"语义标签 repair pass 已原子修复 {repaired_count} 条隔离候选"
                         )
@@ -1391,10 +1722,23 @@ class ModelEnhancedExtractor:
                         if repair_candidate is not None:
                             repair_candidates.append(repair_candidate)
                             execution.invalid_records += 1
-                            execution.note("semantic_labels_quarantined")
-                            execution.note("schema_validation")
+                            if "lexical_support" in repair_candidate.error_codes:
+                                execution.note("lexical_support")
+                            else:
+                                execution.note("semantic_labels_quarantined")
+                                execution.note("schema_validation")
+                            waiting = (
+                                "受限证据修复 Agent"
+                                if self.provider.settings.enable_review_agent
+                                else "repair pass"
+                            )
+                            reason_label = (
+                                "lexical_support"
+                                if "lexical_support" in repair_candidate.error_codes
+                                else "schema_validation"
+                            )
                             parsed.warnings.append(
-                                f"模型记录 #{index}（分块 {chunk.id}）的语义标签未通过 schema_validation，已隔离等待 repair pass"
+                                f"模型记录 #{index}（分块 {chunk.id}）未通过 {reason_label}，已隔离等待 {waiting}"
                             )
                             continue
                         if semantic_reason:
@@ -1458,7 +1802,21 @@ class ModelEnhancedExtractor:
                     )
                     chunk_directives.extend(resolved.values())
                     invalid_count += len(repair_candidates) - len(resolved)
-                    if execution.repair_succeeded:
+                    if execution.review_agent_attempted:
+                        if resolved:
+                            workflow = (
+                                "固定语义修复与受限证据修复 Agent"
+                                if execution.repair_attempted
+                                else "受限证据修复 Agent"
+                            )
+                            parsed.warnings.append(
+                                f"{workflow} 已校验恢复 {len(resolved)} 条隔离候选"
+                            )
+                        else:
+                            parsed.warnings.append(
+                                "受限证据修复 Agent 已弃答；隔离候选未进入确定性规则"
+                            )
+                    elif execution.repair_succeeded:
                         parsed.warnings.append(
                             f"语义标签 repair pass 已原子修复 {len(resolved)} 条隔离候选"
                         )
@@ -1600,7 +1958,11 @@ class ModelEnhancedExtractor:
 
     @staticmethod
     def _to_directive(
-        document: DocumentInput, chunk: DocumentChunk, record: ExtractionRecord
+        document: DocumentInput,
+        chunk: DocumentChunk,
+        record: ExtractionRecord,
+        *,
+        require_lexical_support: bool = True,
     ) -> ParsedDirective:
         lines = document.content.splitlines()
         start, end = record.source_line_start, record.source_line_end
@@ -1620,7 +1982,7 @@ class ModelEnhancedExtractor:
         )
         if not evidence.text:
             raise ValueError("模型返回了空证据区间")
-        if not _evidence_supports(record, evidence.text):
+        if require_lexical_support and not _evidence_supports(record, evidence.text):
             raise ValueError("模型记录缺少原文词面支持")
         attrs = _attrs(record, start)
         if document.role:

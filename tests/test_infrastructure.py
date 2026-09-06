@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -62,6 +63,36 @@ class TokenBudgetTests(unittest.TestCase):
         interpolation = "PROVIDER_THINKING_MODE: ${PROVIDER_THINKING_MODE:-}"
         self.assertIn(interpolation, api_block)
         self.assertIn(interpolation, worker_block)
+
+    def test_compose_passes_bounded_review_agent_configuration_to_api_and_worker(self):
+        compose = yaml.safe_load(
+            (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        )
+        expected = {
+            "ENABLE_REVIEW_AGENT": "${ENABLE_REVIEW_AGENT:-false}",
+            "REVIEW_AGENT_MAX_DECISION_ROUNDS": "${REVIEW_AGENT_MAX_DECISION_ROUNDS:-2}",
+            "REVIEW_AGENT_MAX_TOOL_CALLS": "${REVIEW_AGENT_MAX_TOOL_CALLS:-6}",
+            "REVIEW_AGENT_MAX_SPAN_CHARS": "${REVIEW_AGENT_MAX_SPAN_CHARS:-4000}",
+            "REVIEW_AGENT_MAX_SPAN_READS": "${REVIEW_AGENT_MAX_SPAN_READS:-40}",
+            "REVIEW_AGENT_MAX_READ_REQUESTS_PER_ACTION": "${REVIEW_AGENT_MAX_READ_REQUESTS_PER_ACTION:-40}",
+            "REVIEW_AGENT_MAX_READ_LINES": "${REVIEW_AGENT_MAX_READ_LINES:-12}",
+            "REVIEW_AGENT_CONTEXT_RADIUS_LINES": "${REVIEW_AGENT_CONTEXT_RADIUS_LINES:-20}",
+            "REVIEW_AGENT_TOKEN_BUDGET": "${REVIEW_AGENT_TOKEN_BUDGET:-8000}",
+            "REVIEW_AGENT_TIMEOUT_SECONDS": "${REVIEW_AGENT_TIMEOUT_SECONDS:-15}",
+            "REVIEW_AGENT_TOTAL_DEADLINE_SECONDS": "${REVIEW_AGENT_TOTAL_DEADLINE_SECONDS:-30}",
+            "REVIEW_AGENT_MAX_COMPLETION_TOKENS": "${REVIEW_AGENT_MAX_COMPLETION_TOKENS:-}",
+            "REVIEW_AGENT_MAX_RESPONSE_BYTES": "${REVIEW_AGENT_MAX_RESPONSE_BYTES:-64000}",
+        }
+        for service_name in ("api", "worker"):
+            environment = compose["services"][service_name]["environment"]
+            self.assertEqual(expected, {key: environment.get(key) for key in expected})
+
+        with patch.dict(
+            os.environ, {"REVIEW_AGENT_MAX_COMPLETION_TOKENS": ""}, clear=True
+        ):
+            self.assertIsNone(
+                Settings(_env_file=None).review_agent_max_completion_tokens
+            )
 
     def test_exact_conservative_budget_allows_request_and_one_less_rejects(self):
         document = DocumentInput(id="doc", name="doc.md", content="普通叙述没有结构化状态。")
