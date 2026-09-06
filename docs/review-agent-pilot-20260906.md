@@ -41,8 +41,8 @@ runner 默认选择 v2；历史复现必须显式指定 `--benchmark-version v1`
 
 full 的 holdout 自身必须出现三种运行成功的语义路径：`READ_SPAN -> PATCH_RECORDS`、`READ_SPAN -> ABSTAIN`、直接 `ABSTAIN`。三个开发任务不能替 holdout 凑路径覆盖。每次 checkpoint 同时冻结 manifest、文档、通用 Prompt、评测实现和依赖，并对 execution 内容做链式哈希；resume 发现改写即拒绝继续。
 
-首次 v2 真实 full 运行前的最终审计又发现一个覆盖空洞：原 `nw-10` 只是另一条明显无关问题，与已有“整条记录换身”负例等价。最终 revision `post-pilot-semantic-relabel-v2-final-pre-real` 将它替换为双问句歧义：同一候选混入原文中两个均未回答的问题，存在两个合法 fingerprint，模型不能靠选择其中一个来修复，必须弃答。此次修订发生在任何 v2 full 真实结果产生之前；30 个任务、3 类 persona 各 10 个、3 个 development/tuned 与 27 个 holdout 的划分均未改变。该审计修订同样属于开发过程，不能让 v2 变成盲测。
+首次 v2 Agent 阶段真实 Provider full 运行前的最终审计又发现一个覆盖空洞：原 `nw-10` 只是另一条明显无关问题，与已有“整条记录换身”负例等价。最终 revision `post-pilot-semantic-relabel-v2-final-pre-real` 将它替换为双问句歧义：同一候选混入原文中两个均未回答的问题，存在两个合法 fingerprint，模型不能靠选择其中一个来修复，必须弃答。此次修订发生在任何 v2 Agent 阶段真实 Provider full 结果产生之前；30 个任务、3 类 persona 各 10 个、3 个 development/tuned 与 27 个 holdout 的划分均未改变。该审计修订同样属于开发过程，不能让 v2 变成盲测。
 
-Mock/scripted harness 只能产生工程回归证据。报告必须通过 `real_provider_connected` gate 才可能具备模型质量声明资格。v2 尚未完成真实 81 次 holdout 验收，因此当前只能说“真实开发 pilot 暴露并修正了 benchmark 标签问题”，不能声称受限 Agent 已证明有效或达到简历门槛。
+Mock/scripted harness 只能产生工程回归证据。报告必须通过 `real_provider_connected` gate 才可能具备模型质量声明资格。本页所述 pilot 之后，commit `bcbfab8` 上的 v2 Agent 阶段真实 Provider `full × 3` 已完成 90/90 次要求执行和其中 81 次 holdout；主抽取候选为冻结合成注入，运行成功轨迹中没有直接 `ABSTAIN` 路径，完整 gate 为 `passed=false`。结果与声明边界见 [v2 full 脱敏 checkpoint](review-agent-v2-full-checkpoint-20260906.md)。因此仍不能声称受限 Agent 已证明有效、端到端抽取已评测或达到简历门槛。
 
 随后两组 30 秒配置的 v2 development/tuned 脱敏诊断仍未通过 pilot 总门槛，且已继续用于通用评测与 Prompt 修正，不能充当 holdout。复核确认两类通用问题：其一，旧 scorer 把较大的生产 READ 错误要求为必须被较小的 oracle 目标 span 包含；现在改为先独立重建服务端 `read_window`，再判断读取是否完整覆盖至少一个 oracle 目标，安全授权违规与评测未命中分别记账。其二，模型可能把值未变化的字段连同真正修正字段一起提交；生产 validator 不静默删除这些字段，surface patch hash 仍严格判为非最小补丁，同时通用 Prompt 明确只准提交值发生变化的最小字段。`evidence_range` 预检拒绝另增加仅含尝试行号和允许窗口的安全诊断，以便区分模型猜错行号与 Provider/协议故障；它仍是失败路径，不会被计入动态成功路径。

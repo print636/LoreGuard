@@ -1,6 +1,6 @@
 # 受限证据修复 Agent（第一阶段）
 
-状态：代码已接入，默认关闭。2026-09-06 已完成 v1 的 3 任务真实 Provider 开发 pilot；`thinking=disabled/enabled` 两组均未通过。pilot 暴露出 benchmark 错标后已建立独立 v2，但 27 任务 × 3 轮的 holdout 尚未运行；因此不能写成默认交付能力或已证明收益。
+状态：代码已接入，默认关闭。2026-09-06 已完成 v1 的 3 任务真实 Provider 开发 pilot；pilot 暴露出 benchmark 错标后建立独立 v2。commit `bcbfab8` 上的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由冻结 manifest 合成注入；全部 90 次要求执行已经完成，其中 holdout 为 81 次，但完整 gate 为 `passed=false`，且没有直接 `ABSTAIN` 成功路径。因此它既不能写成默认交付能力或已证明收益，也不能作为端到端真实模型抽取评测。
 
 ## 为什么这是 Agent，而不是把固定流程改名
 
@@ -46,7 +46,7 @@ v1 的三个开发任务曾用 outcome-first scorer 在 `thinking=disabled` 和 
 - 旧“可恢复”任务需要同时替换时间、地点和人物，实质是把候选换成另一个事件，应该弃答；
 - disabled 组有一项 Provider 运行失败；安全降级不能计为语义弃答。enabled 组的 3/3 仅表示运行完成，不表示质量通过。
 
-因此保留 v1 作为逐字不变的历史基线，新建 benchmark `agent-acceptance-v2` / `post-pilot-semantic-relabel-v2-final-pre-real`，真实报告 schema 为 `real-agent-acceptance-report-v2`。该 revision 在首次 v2 真实 full 运行前完成最终审计冻结：以一个“单条候选混入两个均未回答问题、存在两个合法 fingerprint”的弃答案例替换旧的等价负例；任务总数、persona 分布和 development/tuned 划分未变。它仍是开发者可见、非盲测套件：
+因此保留 v1 作为逐字不变的历史基线，新建 benchmark `agent-acceptance-v2` / `post-pilot-semantic-relabel-v2-final-pre-real`，真实报告 schema 为 `real-agent-acceptance-report-v2`。该 revision 在首次 v2 Agent 阶段真实 Provider full 运行前完成最终审计冻结：以一个“单条候选混入两个均未回答问题、存在两个合法 fingerprint”的弃答案例替换旧的等价负例；任务总数、persona 分布和 development/tuned 划分未变。它仍是开发者可见、非盲测套件：
 
 - 可恢复任务仍必须实际 `READ_SPAN -> PATCH_RECORDS`，补丁被完整生产门接受，最终 directive 指纹匹配 scorer 事后计算的 oracle 指纹，同时运行期仅在内存捕获的补丁 fields 稳定哈希必须匹配 expected patch 哈希；报告不保存补丁值；模型提交的 fields 还必须只包含相对候选确实变化的最小字段，服务端/scorer 不会静默剥离重复的未变字段来替模型制造通过结果；
 - `allowed_evidence` 是运行后 oracle 目标证据，不是生产读取授权范围。生产授权由候选附近的服务端 `read_window` 单独重建和审计；一个已授权的同文档 READ 只要完整包含至少一个对应 oracle 目标 span 就算证据命中，目标 span 不需要反向包含整个读取窗口。读错文档、没有覆盖任何目标或越过服务端窗口仍失败，其中只有服务端授权边界被已接受 READ 突破才计安全违规，单纯未命中 oracle 只计评测偏离；
@@ -61,4 +61,4 @@ v1 的三个开发任务曾用 outcome-first scorer 在 `thinking=disabled` 和 
 
 ## 启用方式与下一门槛
 
-开发环境显式设置 `ENABLE_REVIEW_AGENT=true` 才会启用。真实 runner 还要求显式 `--execute`，默认选择 v2；历史复现必须显式 `--benchmark-version v1`。pilot 为 3 个 development/tuned 任务各 1 次，full 强制 30 个任务各 3 次。诊断慢速 Provider 时可显式传入 `--agent-timeout-seconds 30 --agent-total-deadline-seconds 60`；省略参数就继续使用部署配置，runner 不会静默改变产品默认的 15/30 秒边界，报告会记录实际生效值。启用不代表达到简历表述门槛；仍需完成修订后 81 次 holdout 的恢复率、弃答安全、降级率、延迟与成本对照评测。详见 [2026-09-06 pilot 记录](review-agent-pilot-20260906.md)。
+开发环境显式设置 `ENABLE_REVIEW_AGENT=true` 才会启用。真实 runner 还要求显式 `--execute`，默认选择 v2；历史复现必须显式 `--benchmark-version v1`。pilot 为 3 个 development/tuned 任务各 1 次，full 强制 30 个任务各 3 次。runner 在主抽取阶段合成注入冻结候选，只有 Agent 阶段调用真实 Provider。诊断慢速 Provider 时可显式传入 `--agent-timeout-seconds 30 --agent-total-deadline-seconds 60`；省略参数就继续使用部署配置，runner 不会静默改变产品默认的 15/30 秒边界，报告会记录实际生效值。启用或完成执行不代表达到简历表述门槛；本次 v2 full 的 holdout 运行成功 74/81，恢复 26/51、主动弃答 24/30，且缺少直接 `ABSTAIN` 成功路径，完整 gate 失败。详见 [2026-09-06 pilot 记录](review-agent-pilot-20260906.md) 与 [v2 full 脱敏 checkpoint](review-agent-v2-full-checkpoint-20260906.md)。

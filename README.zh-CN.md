@@ -10,7 +10,7 @@
 - 本地项目列表、文档版本历史和运行历史；刷新页面后可恢复最近任务与结果
 - 无 API Key 抽取明确中文句式，并展示抽取记录与未抽取提示
 - 配置 OpenAI-compatible 模型后，从普通中文故事中结构化抽取 8 类叙事记录；模型失败自动保留基线结果
-- 实验性的受限证据修复 Agent 已接入但默认关闭；它只完成第一阶段代码与 Mock 安全/动态路径回归，尚未通过真实模型验收
+- 实验性的受限证据修复 Agent 已接入但默认关闭；已完成主抽取候选冻结合成注入、仅 Agent 阶段调用真实 Provider 的验收，但质量 gate 未通过，当前只证明实现与安全边界
 - 模型输入按全局行号分块，支持行重叠、超长单行和逐块失败隔离；全文基线不分块
 - 仅依据明确“又名/简称/化名/代号”声明做项目级实体别名归一化，保留映射轨迹与歧义警告
 - 本地 keyword + 稳定 SHA-256 字符 n-gram + canonical entity graph 混合检索，候选短名单由检查器消费并留下分数轨迹
@@ -72,7 +72,7 @@ set DAILY_TOKEN_BUDGET=100000
 
 受限 Agent 第一阶段使用 LangGraph 1.2.11 `StateGraph` 编排，仅在显式设置 `ENABLE_REVIEW_AGENT=true` 时启用，默认关闭。模型每轮返回应用层 JSON 动作 `READ_SPAN`、`PATCH_RECORDS` 或 `ABSTAIN`；这不是、也未冒充 Provider 原生 `tool_calls` / function calling。服务端绑定冻结文档和证据范围、校验 span 与补丁，并只持久化不含 Prompt、原始响应、证据正文、Key 或 endpoint 的安全 trace。固定的 modality/source_scope/certainty 标签 repair pass 是另一条非 Agent 路径，不能混称为 Agent。
 
-当前冻结 Agent 验收集有 30 个开发者可见任务，每个重复 3 次；已有 90 次结果全部来自 Mock oracle/scorer，只验证 scorer、协议、安全边界和动态动作路径，不是 90 次真实模型调用，也不能证明 Agent 带来收益。真实模型 Agent 验收和真正把语义检索证据送入下游决策的 Evidence RAG 均未完成。详细边界见 [`docs/review-agent-phase1.md`](docs/review-agent-phase1.md)，冻结任务见 [`data/agent-acceptance-v1/manifest.json`](data/agent-acceptance-v1/manifest.json)，离线 runner 见 [`scripts/run_agent_acceptance.py`](scripts/run_agent_acceptance.py)。
+冻结 Agent 验收集有 30 个开发者可见任务，每个重复 3 次。Mock oracle/scorer 的 90 次结果只验证工程边界；commit `bcbfab8` 的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由 runner 按冻结 manifest 合成注入，并非端到端真实模型抽取评测。该运行记录全部 90 次要求执行，严格正确 59/90，其中 holdout 81 次运行成功 74 次、7 次 `read_timeout`，恢复 26/51、主动弃答 24/30。共有 12 次补丁通过生产校验但不符合评测 oracle；服务端接受的安全违规为 0。运行成功轨迹中没有直接 `ABSTAIN` 路径，要求的三路径覆盖 gate 也失败，完整结果为 `passed=false`，所以不能声称 Agent、主抽取或产品质量收益。当前没有多智能体，真正把语义检索证据送入下游决策的 Evidence RAG 也未完成。详细边界见 [`docs/review-agent-phase1.md`](docs/review-agent-phase1.md)，脱敏结果见 [`docs/review-agent-v2-full-checkpoint-20260906.md`](docs/review-agent-v2-full-checkpoint-20260906.md)，冻结任务见 [`data/agent-acceptance-v2/manifest.json`](data/agent-acceptance-v2/manifest.json)，离线 runner 见 [`scripts/run_agent_acceptance.py`](scripts/run_agent_acceptance.py)。
 
 只有同时配置 `MODEL_INPUT_PRICE_PER_MILLION` 和 `MODEL_OUTPUT_PRICE_PER_MILLION` 时才计算估算成本；未配置时 API/UI 显示“未配置”，不会把未知价格误报为 0 美元。
 
@@ -162,6 +162,7 @@ python scripts/run_agent_acceptance.py --mock-oracle --require-gates
 - `artifacts/state-modeling-v2/`：保存 natural dev、原 test 和 50 例 challenge-v2 的 before/after 完整报告及误差。challenge-v2 after 为 Precision 0.962、Recall 1.000、F1 0.980，仍保留 1 个移动许可措辞误报；它同样是开发者可见合成数据，不是盲测或人工标注。
 - `artifacts/complex-v3-evaluation.json`：14 例原创、多文档复杂验收场景，共 10 个固定预期问题；五类问题均有正例与困难反例。当前无模型固定基线 TP 10、FP 0、FN 0，证据对精确命中率 1.0。该数据由开发者编写且可见，只能作为可审计回归，不能估计开放故事或生产准确率。
 - `data/agent-acceptance-v1/`：30 个开发者可见冻结任务，3 类 persona 各 10 个，每任务重复 3 次。`--mock-oracle` 生成的 90 次 execution 仅用于验证离线 scorer、三类动态路径和安全约束；runner 当前不会调用生产 Agent，这些数字不得写成真实 Agent 评测或能力成绩。
+- `data/agent-acceptance-v2/`：修正 pilot 暴露的语义标签问题后冻结的 Agent 评测套件。Agent 阶段真实 Provider `full × 3` 已完成但 `passed=false`；主抽取候选为冻结合成注入，仓库只公开[脱敏聚合结论](docs/review-agent-v2-full-checkpoint-20260906.md)，不提交 Prompt、响应正文、凭据或故事运行产物。
 
 完整数据位于 `data/evaluation-natural/`：40 个 dev 场景和 60 个 test 场景的 `scenario_id` 不重叠。它是模板生成的 `synthetic natural-language` 数据，不是人工标注集，也不能外推为生产准确率。评测 harness 运行 test 时只打开 `test.jsonl`，测试样本不进入 Prompt 或调参示例。
 
@@ -232,7 +233,7 @@ python scripts/run_long_text_smoke.py
 - 当前已验证模型抽取协议、降级机制、工程安全边界和一次冻结真实 Phase 1 运行；但当前新中转/模型的严格 gate 为 0/3，且尚未完成真实长篇人工标注评测，不能宣称开放文本准确率或当前模型能力达标。
 - `document_context` 与运行输入上下文采用附加关联表兼容旧 SQLite；旧文档读取为安全默认 `chapter/global` 并标记上下文并非显式保存。`create_all` 只是当前本地兼容引导，不替代正式数据库迁移框架。
 - 版本差异只在当前项目和同名文档边界内运行，不调用模型。默认每个版本最多处理前 20,000 行/2,000,000 字符并最多返回 4,000 行差异，超限会在响应和页面显式提示。
-- LangGraph 1.2.11 `StateGraph` 的受限修复循环已作为默认关闭的第一阶段代码接入，但尚无真实模型 Agent 验收，不能列作已证明收益或简历成绩；真实 embedding/向量列、Evidence RAG 与 OpenTelemetry 完整链路仍属于后续阶段。
+- LangGraph 1.2.11 `StateGraph` 的受限修复循环已作为默认关闭的第一阶段代码接入；v2 Agent 阶段真实 Provider full 已执行但完整 gate 失败，且主抽取候选为冻结合成注入，不能列作已证明收益、端到端抽取成绩或简历成绩。它不是原生 `tool_calls`，也没有多智能体；真实 embedding/向量列、Evidence RAG 与 OpenTelemetry 完整链路仍属于后续阶段。
 - 详细完成度见 [`docs/completion-status.md`](docs/completion-status.md)，学习顺序见 [`docs/learning-guide.md`](docs/learning-guide.md)。
 - 长篇容量的当前硬限制、实用范围和百万字扩展路线见 [`docs/scalability-roadmap.md`](docs/scalability-roadmap.md)。
 

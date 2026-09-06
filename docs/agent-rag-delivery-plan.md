@@ -1,6 +1,6 @@
 # Evidence RAG 与受限审查 Agent 交付计划
 
-更新：2026-09-06。状态：P0 核心正确性边界已实现；P2 的受限 Agent 第一阶段代码已接入且默认关闭。v1 的 3 任务真实 Provider 开发 pilot 两组均失败并暴露 benchmark 错标，v2 的 81 次 holdout 尚未运行；P1 的真实 Evidence RAG 与 P4 仍未完成。未完成或未实测项不能作为已完成项目经历。
+更新：2026-09-06。状态：P0 核心正确性边界已实现；P2 的受限 Agent 第一阶段代码已接入且默认关闭。commit `bcbfab8` 上的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由冻结 manifest 合成注入，不是端到端真实模型抽取评测；90/90 次要求执行已完成，但完整 gate 为 `passed=false`。P1 的真实 Evidence RAG 与 P4 仍未完成。未完成、未通过或未实测项不能作为已完成项目经历。
 
 增量状态：P0 已覆盖冻结输入、幂等认领、lease/heartbeat、跨进程取消检查点、typed diagnostics 和保守旧运行展示。受限 Agent 现有实现比原 P2 设想更窄，只处理通过核心 schema/证据边界但需要词面支持修复的候选；它不是 Evidence RAG，也不因此宣布项目交付就绪。
 
@@ -17,7 +17,7 @@
 - 主抽取仍是固定 system/user 的结构化抽取；另有 LangGraph 1.2.11 `StateGraph` 编排的受限修复循环。它使用应用层 JSON 动作，不使用、也未验证 Provider 原生 `tool_calls/tool_call_id`。
 - 运行输入快照、原子认领、终态幂等和 worker lease/heartbeat 已补齐并有自动回归；共享配额仍不是多实例原子预留，工程测试通过也不等于高并发高可用。
 - 固定 semantic label repair pass 只修补 modality/source_scope/certainty，是非 Agent 路径；不得把其调用或恢复结果计入 Agent 经验。
-- 冻结 Agent 套件的 90 次完整 Mock oracle/scorer 只证明实现边界可回归。v1 的 3 项真实 Provider pilot 也只是已用于调优的开发证据，不能替代 v2 holdout 效果验收。
+- 冻结 Agent 套件的 90 次完整 Mock oracle/scorer 只证明实现边界可回归。v1 的 3 项真实 Provider pilot 只是已用于调优的开发证据。v2 Agent 阶段真实 Provider full 已完成，主抽取候选由冻结 manifest 合成注入；holdout 运行成功 74/81，7 次为 `read_timeout`，可恢复题正确 26/51，不可恢复题主动弃答正确 24/30，因此既未通过 Agent 质量验收，也不能评价端到端抽取质量。
 
 RAG 不以向量数据库为定义条件，但必须证明检索内容进入下游模型推理/生成。将已有精确规则保留为独立通路是合理的；把未实际影响输出的短名单标成已消费则需要纠正。
 
@@ -56,11 +56,12 @@ RAG 不以向量数据库为定义条件，但必须证明检索内容进入下�
 
 当前验证边界：
 
-- [v2 冻结 manifest](../data/agent-acceptance-v2/manifest.json) 含 30 个开发者可见任务，3 类 persona 各 10 个，每任务重复 3 次，共 90 次 execution；30 个初始候选均由生产校验路径证明只失败于 `lexical_support`，而不是把其他 validator reason 改名伪装。v1 开发 pilot 使用的 3 项已标为 development/tuned，其余 27 项是 full 报告必须单列 gate 的 holdout，且 holdout 自身必须覆盖三种运行成功语义路径。可恢复项要求 `READ_SPAN -> accepted PATCH_RECORDS` 与 scorer 事后 oracle 指纹匹配；不可恢复项必须由模型实际 `ABSTAIN`。Provider/协议失败和坏补丁 containment 均不计质量成功。Mock/scripted harness 还必须失败 `real_provider_connected` gate。详见 [pilot 记录](review-agent-pilot-20260906.md)。
+- [v2 冻结 manifest](../data/agent-acceptance-v2/manifest.json) 含 30 个开发者可见任务，3 类 persona 各 10 个，每任务重复 3 次，共 90 次 execution；30 个初始候选均由生产校验路径证明只失败于 `lexical_support`，而不是把其他 validator reason 改名伪装。v1 开发 pilot 使用的 3 项已标为 development/tuned，其余 27 项是 full 报告单列的 holdout。可恢复项要求 `READ_SPAN -> accepted PATCH_RECORDS` 与 scorer 事后 oracle 指纹匹配；不可恢复项必须由模型实际 `ABSTAIN`。Provider/协议失败和坏补丁 containment 均不计质量成功。Mock/scripted harness 还必须失败 `real_provider_connected` gate。
+- commit `bcbfab8` 的 Agent 阶段真实 Provider full 已记录 90/90 次要求执行，严格正确 59/90。holdout 81 次中 74 次运行成功、7 次 `read_timeout`；恢复 26/51（0.509804），弃答 24/30（0.8）。31 次严格失败分成互不重叠的 12 次被生产校验接受但不符合 oracle 的错误补丁（9 次 `oracle_patch_mismatch`、3 次 `oracle_unrecoverable_patch`）、9 次可恢复题读取后过度弃答、7 次 timeout、3 次 outcome 正确但读取未覆盖 oracle 证据。`trace_replay=false` 仅有后 3 次，原因都是 `read_misses_oracle_evidence`；7 次 timeout trace 均可重放。服务端接受的安全违规为 0。运行成功轨迹中没有直接 `ABSTAIN` 路径，因此要求的三路径覆盖 gate 失败。development/tuned 组为 9/9，恢复与弃答率均为 1.0，但不能替代 holdout。完整报告 `passed=false`，详见 [v2 full checkpoint](review-agent-v2-full-checkpoint-20260906.md)。
 - [离线 runner](../scripts/run_agent_acceptance.py) 只接受 trace 文件或 `--mock-oracle`；它不会调用生产 Agent。真实 runner 虽走同一生产 Agent 路径，但 scripted harness 会被 `real_provider_connected` gate 显式拦截。
-- 完整实现边界见 [第一阶段说明](review-agent-phase1.md) 与 [pilot 记录](review-agent-pilot-20260906.md)。在 v2 真实 holdout 验收前，不得声称 Agent 质量成绩。
+- 完整实现边界见 [第一阶段说明](review-agent-phase1.md)、[pilot 记录](review-agent-pilot-20260906.md) 与 [v2 full checkpoint](review-agent-v2-full-checkpoint-20260906.md)。v2 Agent 阶段真实 Provider holdout 已执行但未通过；它没有评测主抽取，在新的独立质量结果达标前不得声称 Agent 或端到端质量成绩。
 
-仍待 P2 验收：用真实模型产生并导入同一冻结套件的 trace，比较基线、一次检索和受限 Agent 的恢复、误报、漏报、证据正确性、安全弃答、覆盖/降级、动态路径、延迟与 Token 成本。不能所有案例都执行同一条预写顺序；冻结后发现错误需披露是否用于修复。只有真实完整运行达到既定 P ≥ 0.75、R ≥ 0.60、证据命中率 ≥ 0.85 等门槛，且安全违规为 0，才能讨论收益。真正的 Evidence RAG 仍属于 P1：当前 `READ_SPAN` 是候选附近有界读取，不是 embedding/pgvector 语义召回，也没有搜索工具闭环。
+仍待 P2 验收：针对本次暴露的恢复不足、坏补丁和 `read_timeout` 做通用改进，并比较基线、一次检索和受限 Agent 的恢复、误报、漏报、证据正确性、安全弃答、覆盖/降级、动态路径、延迟与 Token 成本。不能针对单个任务硬编码；本次 holdout 结果若用于修改 Prompt 或实现，后续同套件只能算开发回归，新的泛化质量声明需要另行冻结未参与调优的测试集。只有真实完整运行达到既定 P ≥ 0.75、R ≥ 0.60、证据命中率 ≥ 0.85 等门槛，且安全违规为 0，才能讨论收益。真正的 Evidence RAG 仍属于 P1：当前 `READ_SPAN` 是候选附近有界读取，不是 embedding/pgvector 语义召回，也没有搜索工具闭环。当前实现也没有多智能体。
 
 ### P3：轻量多智能体实验（可选，不阻塞投递）
 

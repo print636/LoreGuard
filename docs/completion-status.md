@@ -13,10 +13,11 @@
 - 已接入 LangGraph 1.2.11 `StateGraph` 的有界 `decide -> execute -> decide/finalize` 循环，开发环境只有显式设置 `ENABLE_REVIEW_AGENT=true` 才启用，默认关闭。
 - 当前动作只有 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`。模型通过应用层 JSON 工具协议选择动作；当前没有验证或使用 Provider 原生 `tool_calls`，因此不能写成原生 function calling。
 - 服务端限制文档/scope、证据行范围、span、可修改字段、决策轮、工具次数、Token、deadline 与响应字节数；安全 trace 不持久化 Prompt、原始响应、工具/故事正文、补丁值、Key 或 endpoint。前端将固定语义标签 repair 和受限 Agent 分开显示。
-- v2 冻结套件含 30 个开发者可见任务、3 类 persona 各 10 个，每任务重复 3 次；每个初始候选都经生产 schema、文档/行号、非空证据和词面校验路径证明只失败于 `lexical_support`。90 次 Mock oracle/scorer 只证明工程回归，不是 90 次真实模型 Agent 调用。
-- v1 的 3 任务真实 Provider 开发 pilot 已运行，`thinking=disabled/enabled` 两组均失败并暴露 benchmark 错标；该 3 项已归入 development/tuned。v2 的 81 次 holdout 尚未执行，所以不能声称 Agent 已提高恢复率、准确率或产品价值，也不能作为简历成绩。真实 Evidence RAG 仍未完成；当前 Agent 只读取候选附近的有界冻结原文，不等于语义检索闭环。
+- v2 冻结套件含 30 个开发者可见任务、3 类 persona 各 10 个，每任务重复 3 次；每个初始候选都经生产 schema、文档/行号、非空证据和词面校验路径证明只失败于 `lexical_support`。此前的 90 次 Mock oracle/scorer 只证明工程回归，不是 90 次真实模型 Agent 调用。
+- commit `bcbfab8` 上的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider；主抽取候选由 runner 按冻结 manifest 合成注入，不是端到端真实模型抽取评测。该运行完成全部 90/90 次要求执行，严格正确 59/90；其中 27 个 holdout 任务共 81 次。holdout 运行成功 74/81，另外 7 次均为 `read_timeout`；可恢复题正确 26/51（0.509804），不可恢复题主动弃答正确 24/30（0.8）。31 次严格失败可分为互不重叠的四组：12 次被生产校验接受但不符合 oracle 的错误补丁（9 次 `oracle_patch_mismatch`、3 次 `oracle_unrecoverable_patch`）、9 次可恢复题读取后过度弃答、7 次 `read_timeout`，以及 3 次 outcome 正确但读取未覆盖 oracle 证据。后 3 次的 `trace_replay=false` 原因均为 `read_misses_oracle_evidence`；7 次 timeout trace 均可重放，不能将两类失败混同。服务端接受的安全违规为 0。运行成功轨迹中没有直接 `ABSTAIN` 路径，要求的三路径覆盖 gate 未通过。3 个 development/tuned 任务的 9/9 次执行及其恢复/弃答率均为 1.0，但该组已参与开发，不能代表泛化能力。完整 gate 为 `passed=false`，所以这次运行是 Agent 阶段失败诊断证据，不是 Agent、主抽取或产品质量收益成绩。
+- 当前 Agent 是 LangGraph `StateGraph` 编排的受限应用层 JSON 动作循环，只提供 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`；它不是 Provider 原生 `tool_calls`，没有多智能体，也没有 Evidence RAG。当前有界邻域读取不是 embedding/pgvector 语义召回。
 
-实现与边界见 [受限 Agent 第一阶段说明](review-agent-phase1.md)；冻结任务见 [v2 manifest](../data/agent-acceptance-v2/manifest.json)，pilot 结果见 [开发记录](review-agent-pilot-20260906.md)，离线 trace scorer 见 [runner](../scripts/run_agent_acceptance.py)。
+实现与边界见 [受限 Agent 第一阶段说明](review-agent-phase1.md)；冻结任务见 [v2 manifest](../data/agent-acceptance-v2/manifest.json)，pilot 过程见 [开发记录](review-agent-pilot-20260906.md)，本次 full 脱敏结果见 [v2 full checkpoint](review-agent-v2-full-checkpoint-20260906.md)，离线 trace scorer 见 [runner](../scripts/run_agent_acceptance.py)。
 
 ## 已完成并可体验
 
@@ -68,7 +69,7 @@
 - 独立世界观、人工盲标且未参与规则修复的真实长故事评测；当前高分仅覆盖开发者可见固定回归。
 - 当前新中转/模型通过最小 Provider preflight，但冻结 Phase 1 `full × 1` 严格 gate 为 0/3；需先解决词面/证据拒绝和 batch 协议失败，再重新达到完整覆盖并执行三轮稳定性验收。
 - pgvector 实际向量列、真实 embedding 与跨段语义召回；当前只使用本地稳定哈希 n-gram 近似向量。
-- 受限 Agent 的 v2 真实 81 次 holdout、与基线/一次检索的收益对照、真实动态路径稳定性、延迟与成本结果；现有 90 次 Mock 与 3 项已调优 pilot 均不能替代。
+- 受限 Agent 的 v2 Agent 阶段真实 Provider 81 次 holdout 已执行但未通过完整 gate；主抽取候选由冻结 manifest 合成注入。仍缺达到门槛的独立 Agent 质量结果，以及与基线/一次检索的收益、延迟和成本对照。当前失败结果、90 次 Mock 和 3 项已调优 development 结果都不能作为 Agent 或端到端抽取质量成绩。
 - OpenTelemetry 完整链路、Redis/事务式生产配额与多实例限流、多用户鉴权。
 - 项目/文档删除与多人协作权限；关系图目前是通用 JSON 状态记录的运行级投影，尚非可跨版本查询的规范化知识图谱。当前版本差异是文本行级比较，不包含语义实体或问题清单的跨版本差异。
 - 公网 Demo、真实 P95 压测和两分钟录屏。
