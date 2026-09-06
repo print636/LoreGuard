@@ -426,7 +426,7 @@ class RealAgentAcceptanceTests(unittest.TestCase):
     def test_final_provider_messages_exclude_scorer_answers_and_other_documents(self):
         task = self.tasks["gp-09-cross-branch-merge"]
         provider = RecordedAgentProvider(task)
-        execute_production_task(
+        artifact = execute_production_task(
             sanitize_execution_task(task),
             provider,
             suite_root=DEFAULT_SUITE_ROOT,
@@ -450,6 +450,19 @@ class RealAgentAcceptanceTests(unittest.TestCase):
         second_user = provider.prompt_pairs[1][1]
         self.assertNotIn("洛岚在灯塔顶层查看潮位", first_user)
         self.assertIn("洛岚在灯塔顶层查看潮位", second_user)
+        first_payload = json.loads(first_user)
+        second_payload = json.loads(second_user)
+        literal_fields = second_payload["tool_observations"][0][
+            "literal_fields_already_present"
+        ]
+        self.assertTrue(set(literal_fields).issubset(
+            first_payload["candidates"][0]["patch_field_allowlist"]
+        ))
+        self.assertTrue(all(isinstance(field, str) for field in literal_fields))
+        self.assertNotIn(
+            "literal_fields_already_present",
+            json.dumps(artifact, ensure_ascii=False),
+        )
 
     def test_recorded_pilot_drives_production_path_but_cannot_claim_model_quality(self):
         artifacts = []

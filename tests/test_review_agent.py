@@ -220,6 +220,99 @@ class ReviewAgentUnitTests(unittest.TestCase):
         self.assertEqual("read_ok", second_prompt["tool_observations"][0]["result"])
         self.assertIn("林澈的身份是领航员", second_prompt["tool_observations"][0]["text"])
 
+    def test_read_observation_marks_only_allowlisted_literal_fields(self):
+        marker = "MALICIOUS_FIELD_MUST_NOT_BECOME_FEEDBACK"
+        base = {
+            "kind": "event",
+            "source_line_start": 1,
+            "source_line_end": 1,
+            "modality": "asserted",
+            "source_scope": "narrator",
+            "certainty": "certain",
+        }
+        cases = (
+            (
+                "第三日，林澈与叶岚抵达钟楼。",
+                {
+                    **base,
+                    "id": "evt-1",
+                    "time": "第三日",
+                    "location": "钟楼",
+                    "participants": ["林澈", "叶岚"],
+                },
+                ["location", "participants", "time"],
+            ),
+            (
+                f"林澈看见{marker}。",
+                {
+                    **base,
+                    "id": "",
+                    "time": 3,
+                    "location": "",
+                    "participants": ["林澈", 7],
+                    "malicious_field": marker,
+                },
+                [],
+            ),
+            (
+                "林澈抵达钟楼。",
+                {
+                    **base,
+                    "id": "evt-2",
+                    "time": None,
+                    "location": "钟楼",
+                    "participants": ["林澈", "苏晚"],
+                },
+                ["location"],
+            ),
+            (
+                "林澈抵达钟楼。",
+                {
+                    **base,
+                    "id": "evt-3",
+                    "location": "钟楼",
+                    "participants": ["林澈", ""],
+                },
+                ["location"],
+            ),
+            (
+                " 林澈抵达。",
+                {
+                    **base,
+                    "id": " ",
+                    "time": "\t",
+                    "location": " ",
+                    "participants": ["林澈", "   "],
+                },
+                [],
+            ),
+        )
+        for evidence, raw, expected in cases:
+            observed = []
+
+            def inspect_observation(_system, user):
+                observation = json.loads(user)["tool_observations"][-1]
+                observed.extend(observation["literal_fields_already_present"])
+                return {
+                    "actions": [
+                        {
+                            "action": "ABSTAIN",
+                            "candidate_indexes": [1],
+                            "reason_code": "insufficient_evidence",
+                        }
+                    ]
+                }
+
+            with self.subTest(expected=expected):
+                run, _ = self.run_agent(
+                    [{"actions": [read_action()]}, inspect_observation],
+                    candidates=[candidate(evidence=evidence, raw=raw)],
+                )
+                self.assertEqual(expected, observed)
+                persisted_trace = json.dumps(run.safe_dict(), ensure_ascii=False)
+                self.assertNotIn(evidence, persisted_trace)
+                self.assertNotIn(marker, persisted_trace)
+
     def test_candidate_prompt_discloses_exact_server_read_bounds(self):
         run, provider = self.run_agent(
             [
@@ -288,6 +381,8 @@ class ReviewAgentUnitTests(unittest.TestCase):
         self.assertIn("只能列出相对候选值确实发生变化的最小字段", AGENT_SYSTEM_PROMPT)
         self.assertIn("不得重复提交值未变化的字段", AGENT_SYSTEM_PROMPT)
         self.assertIn("limits.max_read_lines", AGENT_SYSTEM_PROMPT)
+        self.assertIn("literal_fields_already_present", AGENT_SYSTEM_PROMPT)
+        self.assertIn("未列出的字段不代表一定错误", AGENT_SYSTEM_PROMPT)
 
     def test_trace_line_numbers_are_bounded_at_product_and_persistence_layers(self):
         huge = MAX_SAFE_AGENT_LINE_NUMBER + 1

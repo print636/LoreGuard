@@ -39,7 +39,9 @@ PATCH_RECORDS 不能修改 kind、doc_ref、source_line_start、source_line_end�
 line_start/line_end 必须落在服务端给出的 read_window（含首尾）内，且 line_start <= line_end。不要猜测或
 扩展行号；每个请求还不得超过输入 limits.max_read_lines 指定的最大行数。第一轮先 READ，
 但如果仅从候选字段和 validator reason 就已能明确判断无法安全修复，第一轮可以直接 ABSTAIN；其他
-情况第一轮必须先 READ。收到 READ_SPAN 后，下一轮只能使用返回的原样 span_id 提交 PATCH_RECORDS，或提交
+情况第一轮必须先 READ。READ_SPAN 返回的 literal_fields_already_present 是服务端正向确认已经与已读原文
+逐字一致的候选字段名；这些字段不应出现在 PATCH，除非确实把它们改成不同值。未列出的字段不代表一定错误，
+仍须对照原文判断。收到 READ_SPAN 后，下一轮只能使用返回的原样 span_id 提交 PATCH_RECORDS，或提交
 ABSTAIN；不要再次 READ，也不要把工具原文复制到 JSON 的非 fields 字段。第二轮必须逐条对照工具返回的原文，
 检查该 kind 的每个核心内容字段：例如 fact 的
 subject/predicate/value，event 的 time/location/participants，knows/claims_knows 的 character/fact，
@@ -399,6 +401,27 @@ def _safe_line_number(value: Any) -> int | None:
         if type(value) is int and 1 <= value <= MAX_SAFE_AGENT_LINE_NUMBER
         else None
     )
+
+
+def _literal_fields_already_present(
+    candidate: AgentCandidate, span: str
+) -> list[str]:
+    """Return only allowlisted fields positively supported verbatim by a span."""
+
+    present: list[str] = []
+    for field_name in sorted(_PATCH_FIELDS_BY_KIND.get(candidate.kind, frozenset())):
+        value = candidate.raw_record.get(field_name)
+        if isinstance(value, str):
+            if value.strip() and value in span:
+                present.append(field_name)
+            continue
+        if not isinstance(value, list) or not value:
+            continue
+        if not all(isinstance(item, str) for item in value):
+            continue
+        if all(item.strip() and item in span for item in value):
+            present.append(field_name)
+    return present
 
 
 def _sha256_text(value: str) -> str:
@@ -1184,6 +1207,9 @@ class BoundedReviewAgent:
                             "line_end": request.line_end,
                             "span_id": span_id,
                             "text": span,
+                            "literal_fields_already_present": (
+                                _literal_fields_already_present(candidate, span)
+                            ),
                             "result": "read_ok",
                         }
                     )
