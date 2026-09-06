@@ -25,6 +25,13 @@ from .db import (
     SessionLocal,
 )
 from .domain import AnalysisCancelled
+from .evidence_chunks import SnapshotDocumentKey
+from .evidence_rag import EvidenceDocument
+from .issue_evidence_review import (
+    IssueEvidenceReviewUsageAccumulator,
+    IssueEvidenceReviewer,
+    failed_issue_evidence_review,
+)
 from .pipeline import AnalysisPipeline, DocumentInput
 from .time_utils import utc_now_naive
 from .usage import configured_cost_usd
@@ -758,6 +765,106 @@ def _interrupted_review_agent_usage(pipeline) -> dict | None:
     }
 
 
+def _combined_interrupted_usage(
+    pipeline,
+    issue_review_usage: IssueEvidenceReviewUsageAccumulator,
+    *,
+    terminal_status: str,
+) -> dict | None:
+    """Combine independently content-free completed-call ledgers."""
+    agent = _interrupted_review_agent_usage(pipeline) if pipeline is not None else None
+    evidence = issue_review_usage.safe_dict(terminal_status=terminal_status)
+    parts = [row for row in (agent, evidence) if row is not None]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        # Preserve the established Review Agent lower-bound contract when no
+        # evidence-review call participated in this terminal attempt.
+        return dict(parts[0])
+    calls: list[dict] | None = []
+    for row in parts:
+        row_calls = row.get("provider_calls")
+        if not isinstance(row_calls, list):
+            calls = None
+            break
+        calls.extend(row_calls)
+    return {
+        "completeness": "completed_calls",
+        "scope": "combined_model_usage",
+        "terminal_status": terminal_status,
+        "logical_calls": sum(int(row["logical_calls"]) for row in parts),
+        "prompt_tokens": sum(int(row["prompt_tokens"]) for row in parts),
+        "completion_tokens": sum(int(row["completion_tokens"]) for row in parts),
+        "charged_tokens": sum(int(row["charged_tokens"]) for row in parts),
+        "charged_token_semantics": "conservative_internal_budget_debit",
+        "provider_calls": calls,
+    }
+
+
+def _merge_usage_accounting(
+    previous: dict | None,
+    current: dict | None,
+    *,
+    terminal_status: str,
+) -> dict | None:
+    """Add two already-sanitized attempt ledgers without overwriting either."""
+
+    def valid(row: object) -> bool:
+        if not isinstance(row, dict):
+            return False
+        values = [
+            row.get("logical_calls"),
+            row.get("prompt_tokens"),
+            row.get("completion_tokens"),
+            row.get("charged_tokens"),
+        ]
+        return (
+            all(
+                type(value) is int
+                and 0 <= value <= _SIGNED_64_MAX // 4
+                for value in values
+            )
+            and values[3] >= values[1] + values[2]
+        )
+
+    older = previous if valid(previous) else None
+    newer = current if valid(current) else None
+    if older is None:
+        if newer is None:
+            return None
+        result = dict(newer)
+        result["terminal_status"] = terminal_status
+        return result
+    if newer is None:
+        result = dict(older)
+        result["terminal_status"] = terminal_status
+        return result
+    sums = {
+        key: int(older[key]) + int(newer[key])
+        for key in (
+            "logical_calls",
+            "prompt_tokens",
+            "completion_tokens",
+            "charged_tokens",
+        )
+    }
+    return {
+        "completeness": (
+            "lower_bound"
+            if "lower_bound"
+            in {older.get("completeness"), newer.get("completeness")}
+            else "completed_calls"
+        ),
+        "scope": "combined_model_usage",
+        "terminal_status": terminal_status,
+        **sums,
+        "charged_token_semantics": "conservative_internal_budget_debit",
+        # Aggregate counters remain exact. A multi-attempt per-call series is
+        # intentionally unavailable instead of pretending it is complete.
+        "provider_calls": None,
+    }
+
+
 def _finalize_terminal(
     run_id: str,
     worker_token: str,
@@ -768,6 +875,13 @@ def _finalize_terminal(
     interrupted_usage: dict | None = None,
 ) -> bool:
     with SessionLocal() as db:
+        diagnostic = db.get(AnalysisDiagnosticRow, run_id)
+        existing_payload = dict(diagnostic.payload) if diagnostic else {}
+        cumulative_usage = _merge_usage_accounting(
+            existing_payload.get("usage_accounting"),
+            interrupted_usage,
+            terminal_status=status,
+        )
         conditions = [
             AnalysisRunRow.id == run_id,
             AnalysisRunRow.status.not_in(TERMINAL_STATUSES),
@@ -780,14 +894,14 @@ def _finalize_terminal(
             "error": error,
             "completed_at": utc_now_naive(),
         }
-        if status == "cancelled" and interrupted_usage is not None:
+        if status in {"cancelled", "failed"} and cumulative_usage is not None:
             values.update(
-                prompt_tokens=interrupted_usage["prompt_tokens"],
-                completion_tokens=interrupted_usage["completion_tokens"],
+                prompt_tokens=cumulative_usage["prompt_tokens"],
+                completion_tokens=cumulative_usage["completion_tokens"],
                 estimated_cost_usd=(
                     configured_cost_usd(
-                        interrupted_usage["prompt_tokens"],
-                        interrupted_usage["completion_tokens"],
+                        cumulative_usage["prompt_tokens"],
+                        cumulative_usage["completion_tokens"],
                         get_settings(),
                     )
                     or 0
@@ -806,10 +920,9 @@ def _finalize_terminal(
                 run_id=run_id, stage=status, progress=100, message=message
             )
         )
-        if status == "cancelled" and interrupted_usage is not None:
-            diagnostic = db.get(AnalysisDiagnosticRow, run_id)
-            payload = dict(diagnostic.payload) if diagnostic else {}
-            payload["usage_accounting"] = interrupted_usage
+        if status in {"cancelled", "failed"} and cumulative_usage is not None:
+            payload = existing_payload
+            payload["usage_accounting"] = cumulative_usage
             if diagnostic:
                 diagnostic.payload = payload
             else:
@@ -826,7 +939,13 @@ def _finalize_terminal(
         return True
 
 
-def _release_failed_attempt(run_id: str, worker_token: str, error: str) -> None:
+def _release_failed_attempt(
+    run_id: str,
+    worker_token: str,
+    error: str,
+    *,
+    interrupted_usage: dict | None = None,
+) -> None:
     """Release a retriable attempt without creating a terminal SSE event."""
     with SessionLocal() as db:
         changed = db.execute(
@@ -841,6 +960,41 @@ def _release_failed_attempt(run_id: str, worker_token: str, error: str) -> None:
         if changed != 1:
             db.rollback()
             return
+        diagnostic = db.get(AnalysisDiagnosticRow, run_id)
+        payload = dict(diagnostic.payload) if diagnostic else {}
+        cumulative_usage = _merge_usage_accounting(
+            payload.get("usage_accounting"),
+            interrupted_usage,
+            terminal_status="running",
+        )
+        if cumulative_usage is not None:
+            payload["usage_accounting"] = cumulative_usage
+            if diagnostic:
+                diagnostic.payload = payload
+            else:
+                db.add(AnalysisDiagnosticRow(run_id=run_id, payload=payload))
+            # Keep the run's reported counters aligned with the accumulated
+            # ledger while it waits in queued backoff. Daily debit can then add
+            # only the conservative charged-minus-reported delta.
+            db.execute(
+                update(AnalysisRunRow)
+                .where(
+                    AnalysisRunRow.id == run_id,
+                    _owned_run_clause(run_id, worker_token),
+                )
+                .values(
+                    prompt_tokens=cumulative_usage["prompt_tokens"],
+                    completion_tokens=cumulative_usage["completion_tokens"],
+                    estimated_cost_usd=(
+                        configured_cost_usd(
+                            cumulative_usage["prompt_tokens"],
+                            cumulative_usage["completion_tokens"],
+                            get_settings(),
+                        )
+                        or 0
+                    ),
+                )
+            )
         db.execute(
             update(AnalysisRunExecutionRow)
             .where(
@@ -934,10 +1088,20 @@ def execute_analysis(
     heartbeat = (heartbeat_factory or ExecutionLeaseHeartbeat)(run_id, token)
     heartbeat.start()
     pipeline = None
+    issue_review_usage = IssueEvidenceReviewUsageAccumulator()
+    previous_usage: dict | None = None
     try:
         _checkpoint(run_id, token, heartbeat)
         with SessionLocal() as db:
             documents, input_metadata = _load_verified_snapshot(db, run_id)
+            previous_diagnostic = db.get(AnalysisDiagnosticRow, run_id)
+            if previous_diagnostic and isinstance(previous_diagnostic.payload, dict):
+                candidate_usage = previous_diagnostic.payload.get("usage_accounting")
+                previous_usage = _merge_usage_accounting(
+                    None,
+                    candidate_usage if isinstance(candidate_usage, dict) else None,
+                    terminal_status="running",
+                )
             pipeline = AnalysisPipeline()
 
             def on_stage(stage: str, progress: int, message: str) -> None:
@@ -950,6 +1114,98 @@ def execute_analysis(
                 checkpoint=lambda: _checkpoint(run_id, token, heartbeat),
             )
             _checkpoint(run_id, token, heartbeat)
+            review_result = None
+            settings = get_settings()
+            if settings.enable_issue_evidence_review:
+                emit(
+                    db,
+                    run_id,
+                    "evidence_review",
+                    82,
+                    "正在用冻结版本的检索证据复核规则问题",
+                )
+                run = db.get(AnalysisRunRow, run_id)
+                try:
+                    frozen_documents = tuple(
+                        EvidenceDocument(
+                            snapshot=SnapshotDocumentKey(
+                                project_id=run.project_id,
+                                document_id=metadata["document_id"],
+                                document_version=metadata["document_version"],
+                                content_sha256=metadata["content_sha256"],
+                            ),
+                            content=document.content,
+                        )
+                        for document, metadata in zip(
+                            documents, input_metadata, strict=True
+                        )
+                    )
+                    review_result = IssueEvidenceReviewer(
+                        session_factory=SessionLocal,
+                        settings=settings,
+                        checkpoint=lambda: _checkpoint(run_id, token, heartbeat),
+                        usage_accounting=issue_review_usage.record,
+                    ).review(
+                        documents=frozen_documents,
+                        issues=tuple(result.issues),
+                        remaining_run_tokens=max(
+                            0,
+                            settings.per_run_token_budget
+                            - result.prompt_tokens
+                            - result.completion_tokens
+                            - (
+                                int(previous_usage["charged_tokens"])
+                                if previous_usage is not None
+                                else 0
+                            ),
+                        ),
+                    )
+                except (AnalysisCancelled, WorkerLeaseLost):
+                    raise
+                except Exception:
+                    # The reviewer is an optional annotation path.  Its own
+                    # unexpected defect must be explicit, content-free and
+                    # unable to erase the deterministic report.
+                    review_result = failed_issue_evidence_review()
+                result.diagnostics["ai_evidence_review"] = review_result.diagnostics
+                completed_usage = issue_review_usage.safe_dict(
+                    terminal_status="completed"
+                )
+                if completed_usage is not None:
+                    result.diagnostics["ai_evidence_review"][
+                        "usage_accounting"
+                    ] = completed_usage
+                    result.prompt_tokens += issue_review_usage.prompt_tokens
+                    result.completion_tokens += issue_review_usage.completion_tokens
+                else:
+                    # Compatibility for injected legacy/test reviewers that do
+                    # not expose the immediate accounting callback.
+                    result.prompt_tokens += review_result.prompt_tokens
+                    result.completion_tokens += review_result.completion_tokens
+                emit(
+                    db,
+                    run_id,
+                    "evidence_review",
+                    88,
+                    (
+                        f"证据复核已注释 {len(review_result.annotations)} 条规则问题"
+                        if review_result.annotations
+                        else "证据复核未生成注释，规则问题保持原样"
+                    ),
+                )
+                _checkpoint(run_id, token, heartbeat)
+            cumulative_usage = _merge_usage_accounting(
+                previous_usage,
+                issue_review_usage.safe_dict(terminal_status="completed"),
+                terminal_status="completed",
+            )
+            if cumulative_usage is not None:
+                result.diagnostics["usage_accounting"] = cumulative_usage
+                if previous_usage is not None:
+                    result.prompt_tokens += int(previous_usage["prompt_tokens"])
+                    result.completion_tokens += int(
+                        previous_usage["completion_tokens"]
+                    )
             report_started = perf_counter()
             db.execute(delete(IssueRow).where(IssueRow.run_id == run_id))
             db.execute(
@@ -970,6 +1226,11 @@ def execute_analysis(
                     )
                 )
             for issue in result.issues:
+                extra = dict(issue.metadata)
+                if review_result is not None:
+                    annotation = review_result.annotations.get(str(issue.id))
+                    if annotation is not None:
+                        extra["ai_evidence_review"] = annotation
                 db.add(
                     IssueRow(
                         run_id=run_id,
@@ -980,7 +1241,7 @@ def execute_analysis(
                         explanation=issue.explanation,
                         evidence=[span.model_dump() for span in issue.evidence],
                         suggestion=issue.suggestion,
-                        extra=issue.metadata,
+                        extra=extra,
                     )
                 )
 
@@ -1071,10 +1332,10 @@ def execute_analysis(
             )
             db.commit()
     except AnalysisCancelled:
-        interrupted_usage = (
-            _interrupted_review_agent_usage(pipeline)
-            if pipeline is not None
-            else None
+        interrupted_usage = _combined_interrupted_usage(
+            pipeline,
+            issue_review_usage,
+            terminal_status="cancelled",
         )
         _finalize_terminal(
             run_id,
@@ -1094,12 +1355,18 @@ def execute_analysis(
         try:
             _checkpoint(run_id, token, heartbeat)
         except AnalysisCancelled:
+            interrupted_usage = _combined_interrupted_usage(
+                pipeline,
+                issue_review_usage,
+                terminal_status="cancelled",
+            )
             _finalize_terminal(
                 run_id,
                 token,
                 "cancelled",
                 error=None,
                 message="任务已按取消请求停止",
+                interrupted_usage=interrupted_usage,
             )
             return
         except WorkerLeaseHeartbeatError:
@@ -1112,15 +1379,31 @@ def execute_analysis(
         except WorkerLeaseLost:
             return
         if finalize_failure:
+            interrupted_usage = _combined_interrupted_usage(
+                pipeline,
+                issue_review_usage,
+                terminal_status="failed",
+            )
             _finalize_terminal(
                 run_id,
                 token,
                 "failed",
                 error=str(exc),
                 message="分析失败，可调用重试接口恢复",
+                interrupted_usage=interrupted_usage,
             )
         else:
-            _release_failed_attempt(run_id, token, str(exc))
+            interrupted_usage = _combined_interrupted_usage(
+                pipeline,
+                issue_review_usage,
+                terminal_status="running",
+            )
+            _release_failed_attempt(
+                run_id,
+                token,
+                str(exc),
+                interrupted_usage=interrupted_usage,
+            )
         if raise_on_failure:
             raise
     finally:

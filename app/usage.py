@@ -43,6 +43,22 @@ def estimate_review_agent_request_tokens(system_prompt: str, user_prompt: str) -
     return max(1, input_estimate) + 768
 
 
+def estimate_issue_evidence_review_tokens(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    completion_reserve: int,
+) -> int:
+    """Conservative admission debit for one evidence-review batch.
+
+    This is an internal budget guard, not a tokenizer claim.  The configured
+    completion ceiling is reserved in full so a provider that reports no usage
+    cannot make a large review look free.
+    """
+    input_estimate = (len(system_prompt) + len(user_prompt) + 1) // 2
+    return max(1, input_estimate) + max(64, completion_reserve)
+
+
 def configured_cost_usd(
     prompt_tokens: int,
     completion_tokens: int,

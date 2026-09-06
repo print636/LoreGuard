@@ -197,29 +197,34 @@ def enforce_daily_model_budget(db) -> None:
     reservation.  The per-run gate remains the hard fallback for concurrent
     local jobs.
     """
-    model_requested = settings.enable_model_extraction and bool(
-        settings.openai_api_key.strip()
-    )
+    model_requested = (
+        settings.enable_model_extraction or settings.enable_issue_evidence_review
+    ) and bool(settings.openai_api_key.strip())
     if not model_requested:
         return
     now = utc_now_naive()
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    daily_usage = db.scalar(
+    usage_rows = db.execute(
         select(
-            func.coalesce(
-                func.sum(
-                    AnalysisRunRow.prompt_tokens + AnalysisRunRow.completion_tokens
-                ),
-                0,
-            )
-        ).where(
+            AnalysisRunRow.prompt_tokens,
+            AnalysisRunRow.completion_tokens,
+            AnalysisDiagnosticRow.payload,
+        )
+        .outerjoin(
+            AnalysisDiagnosticRow,
+            AnalysisDiagnosticRow.run_id == AnalysisRunRow.id,
+        )
+        .where(
             AnalysisRunRow.created_at >= day_start,
             # Cancelled runs can contain an explicitly qualified lower-bound
             # Agent usage record. Those consumed tokens still count against
             # the local daily safety budget.
-            AnalysisRunRow.status.in_(("running", "completed", "cancelled")),
+            AnalysisRunRow.status.in_(
+                ("queued", "running", "completed", "failed", "cancelled")
+            ),
         )
-    ) or 0
+    ).all()
+    daily_usage = sum(_conservative_run_token_debit(*row) for row in usage_rows)
     if settings.daily_token_budget <= 0 or daily_usage >= settings.daily_token_budget:
         seconds_to_reset = max(
             1, int(86400 - (now - day_start).total_seconds())
@@ -229,6 +234,39 @@ def enforce_daily_model_budget(db) -> None:
             f"当日模型 Token 预算已用尽（{daily_usage}/{settings.daily_token_budget}）",
             headers={"Retry-After": str(seconds_to_reset)},
         )
+
+
+def _conservative_run_token_debit(
+    prompt_tokens: object,
+    completion_tokens: object,
+    diagnostic_payload: object,
+) -> int:
+    """Use reported usage plus any proven conservative review debit delta."""
+    reported = sum(
+        value if type(value) is int and value >= 0 else 0
+        for value in (prompt_tokens, completion_tokens)
+    )
+    if not isinstance(diagnostic_payload, dict):
+        return reported
+    accounting = diagnostic_payload.get("usage_accounting")
+    if not isinstance(accounting, dict):
+        review = diagnostic_payload.get("ai_evidence_review")
+        if isinstance(review, dict):
+            nested = review.get("usage_accounting")
+            accounting = nested if isinstance(nested, dict) else review
+    if not isinstance(accounting, dict):
+        return reported
+    charged = accounting.get("charged_tokens")
+    review_reported = sum(
+        value if type(value) is int and value >= 0 else 0
+        for value in (
+            accounting.get("prompt_tokens"),
+            accounting.get("completion_tokens"),
+        )
+    )
+    if type(charged) is not int or charged < review_reported:
+        return reported
+    return reported + charged - review_reported
 
 
 def prepare_document_version(

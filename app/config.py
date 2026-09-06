@@ -81,6 +81,32 @@ class Settings(BaseSettings):
     # Remain capability-neutral for relays that reject max_tokens.
     review_agent_max_completion_tokens: int | None = Field(default=None, ge=64)
     review_agent_max_response_bytes: int = Field(default=64_000, ge=1, le=128_000)
+    # Optional post-rule evidence review.  This is deliberately separate from
+    # the extraction repair Agent: it may annotate a finding, but it can never
+    # rewrite or remove the deterministic finding itself.
+    enable_issue_evidence_review: bool = False
+    issue_evidence_review_max_issues: int = Field(default=8, ge=1, le=8)
+    issue_evidence_review_top_k: int = Field(default=6, ge=1, le=6)
+    issue_evidence_review_batch_size: int = Field(default=4, ge=1, le=4)
+    issue_evidence_review_max_evidence_chars: int = Field(
+        default=6_000, ge=256, le=6_000
+    )
+    issue_evidence_review_token_budget: int = Field(
+        default=6_000, ge=256, le=6_000
+    )
+    issue_evidence_review_timeout_seconds: float = Field(
+        default=20.0, gt=0, le=20.0
+    )
+    issue_evidence_review_total_deadline_seconds: float = Field(
+        default=45.0, gt=0, le=45.0
+    )
+    issue_evidence_review_max_completion_tokens: int = Field(
+        default=1_400, ge=64, le=1_400
+    )
+    issue_evidence_review_max_response_bytes: int = Field(
+        default=64_000, ge=1, le=64_000
+    )
+    issue_evidence_review_require_hybrid: bool = True
     per_run_token_budget: int = 20_000
     daily_token_budget: int = 100_000
     model_input_price_per_million: float | None = None

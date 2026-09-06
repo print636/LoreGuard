@@ -329,7 +329,7 @@ class ProviderCallDiagnostics:
     total_tokens: int | None
     http_status: int | None
     request_id: str | None
-    purpose: Literal["extract", "repair", "agent"] = "extract"
+    purpose: Literal["extract", "repair", "agent", "evidence_review"] = "extract"
 
     @classmethod
     def from_telemetry(
@@ -337,7 +337,9 @@ class ProviderCallDiagnostics:
         telemetry: Any,
         *,
         succeeded: bool,
-        purpose: Literal["extract", "repair", "agent"] = "extract",
+        purpose: Literal[
+            "extract", "repair", "agent", "evidence_review"
+        ] = "extract",
     ) -> ProviderCallDiagnostics | None:
         if telemetry is None:
             return None
@@ -505,7 +507,9 @@ class ModelExecutionDiagnostics:
         telemetry: Any,
         *,
         succeeded: bool,
-        purpose: Literal["extract", "repair", "agent"] = "extract",
+        purpose: Literal[
+            "extract", "repair", "agent", "evidence_review"
+        ] = "extract",
     ) -> None:
         if self.provider_calls is None:
             return
