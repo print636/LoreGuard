@@ -18,6 +18,7 @@ from sqlalchemy import func, select, update
 from .config import get_settings
 from .db import AnalysisDiagnosticRow, AnalysisRecordRow, AnalysisRunExecutionRow, AnalysisRunInputRow, AnalysisRunRow, DocumentContextRow, DocumentRow, FeedbackRow, IssueRow, ProjectRow, RunEventRow, SessionLocal, init_db
 from .document_diff import build_document_diff
+from .docx_import import DocxImportError, extract_docx_text
 from .domain import CertaintyLevel, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
 from .evaluation import run_evaluation
 from .projections import project_graph, project_timeline, record_sort_key
@@ -588,12 +589,18 @@ async def upload_document(
     data = await file.read(settings.max_upload_bytes + 1)
     if len(data) > settings.max_upload_bytes:
         raise HTTPException(413, "文件超过上传限制")
-    if not file.filename or not file.filename.lower().endswith((".md", ".txt", ".json")):
-        raise HTTPException(415, "仅支持 Markdown、TXT 与 JSON")
-    try:
-        content = data.decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(400, "文件必须为 UTF-8 编码")
+    if not file.filename or not file.filename.lower().endswith((".md", ".txt", ".json", ".docx")):
+        raise HTTPException(415, "仅支持 Markdown、TXT、JSON 与标准 DOCX")
+    if file.filename.lower().endswith(".docx"):
+        try:
+            content = extract_docx_text(data, max_text_bytes=settings.max_upload_bytes)
+        except DocxImportError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from None
+    else:
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(400, "Markdown、TXT 与 JSON 文件必须为 UTF-8 编码") from None
     with SessionLocal() as db:
         if not db.get(ProjectRow, project_id):
             raise HTTPException(404, "项目不存在")
