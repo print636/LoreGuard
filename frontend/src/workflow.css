@@ -3,6 +3,98 @@
   margin-top: 10px;
 }
 
+.providerConnection {
+  margin-top: 28px;
+  padding: 22px;
+  border: 1px solid #426b5c;
+  border-left: 5px solid #5f8d7a;
+  background: #0b1915;
+}
+
+.providerConnection.ready { border-left-color: #74df9f; }
+.providerConnection.warning { border-left-color: #d8c988; }
+.providerConnection.error { border-left-color: #dc8c81; }
+
+.providerConnectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.providerConnectionHead h2 {
+  margin: 5px 0 8px;
+  font-size: 24px;
+}
+
+.providerConnectionHead p:not(.eyebrow) {
+  margin: 0;
+  color: #a8bbb3;
+  line-height: 1.55;
+}
+
+.providerCheckButton {
+  flex: 0 0 auto;
+}
+
+.providerMetrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 18px;
+}
+
+.providerMetrics > div {
+  min-width: 0;
+  padding: 12px;
+  background: #0d1d18;
+  border: 1px solid #29463c;
+}
+
+.providerMetrics small,
+.providerMetrics b {
+  display: block;
+}
+
+.providerMetrics small {
+  margin-bottom: 5px;
+  color: #8fa39b;
+}
+
+.providerMetrics b {
+  overflow-wrap: anywhere;
+}
+
+.providerSuggestions {
+  margin: 14px 0 0;
+  padding-left: 21px;
+  color: #d8c988;
+  line-height: 1.55;
+}
+
+.providerSetup {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #29463c;
+}
+
+.providerSetup summary {
+  cursor: pointer;
+  color: #8de0af;
+  font-weight: 600;
+}
+
+.providerSetup p {
+  margin-bottom: 0;
+  color: #9db2a9;
+  line-height: 1.65;
+}
+
+.providerSetup code {
+  color: #dce9e4;
+  overflow-wrap: anywhere;
+}
+
 .tokenWarn {
   color: #d8c988;
   line-height: 1.55;
@@ -635,8 +727,14 @@ th {
   .quickMode,
   .tables,
   .status,
-  .diffControls {
+  .diffControls,
+  .providerMetrics {
     grid-template-columns: 1fr;
+  }
+
+  .providerConnectionHead {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .summary {

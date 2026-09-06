@@ -83,6 +83,8 @@ set DAILY_TOKEN_BUDGET=100000
 
 模型模式以持久化的结构化执行记录判定，不依赖警告文字。页面会显示逻辑调用成功、失败、跳过和拒绝记录数；任何分块被跳过或记录被拒绝都不能算完整成功。旧运行缺少这些计数时显示“覆盖情况未知”。`python scripts/check_provider.py` 可经生产调用路径测试当前配置，只输出安全状态、耗时与 Token，不输出密钥或上游响应正文。
 
+首页“模型连接”卡会被动读取服务端是否已配置，但不会自动请求模型。只有用户点击“测试模型连接”时才会发起一次可能消耗少量 Token 的最小 JSON 检查；页面仅显示配置状态、JSON 合同、错误分类、延迟、Token 和固定建议，不显示 endpoint、Key、Prompt 或模型原始响应。浏览器不提供 Key 输入框，也不使用浏览器存储保存凭据：请只在本地未提交的 `.env` 中配置 `ENABLE_MODEL_EXTRACTION`、`OPENAI_BASE_URL`、`OPENAI_API_KEY` 与 `OPENAI_MODEL`，修改后同时重启 API 和 Celery worker。
+
 受限 Agent 第一阶段使用 LangGraph 1.2.11 `StateGraph` 编排，仅在显式设置 `ENABLE_REVIEW_AGENT=true` 时启用，默认关闭。模型每轮返回应用层 JSON 动作 `READ_SPAN`、`PATCH_RECORDS` 或 `ABSTAIN`；这不是、也未冒充 Provider 原生 `tool_calls` / function calling。服务端绑定冻结文档和证据范围、校验 span 与补丁，并只持久化不含 Prompt、原始响应、证据正文、Key 或 endpoint 的安全 trace。固定的 modality/source_scope/certainty 标签 repair pass 是另一条非 Agent 路径，不能混称为 Agent。
 
 冻结 Agent 验收集有 30 个开发者可见任务，每个重复 3 次。Mock oracle/scorer 的 90 次结果只验证工程边界；commit `bcbfab8` 的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由 runner 按冻结 manifest 合成注入，并非端到端真实模型抽取评测。该运行记录全部 90 次要求执行，严格正确 59/90，其中 holdout 81 次运行成功 74 次、7 次 `read_timeout`，恢复 26/51、主动弃答 24/30。共有 12 次补丁通过生产校验但不符合评测 oracle；服务端接受的安全违规为 0。运行成功轨迹中没有直接 `ABSTAIN` 路径，要求的三路径覆盖 gate 也失败，完整结果为 `passed=false`，所以不能声称 Agent、主抽取或产品质量收益。当前没有多智能体，真正把语义检索证据送入下游决策的 Evidence RAG 也未完成。详细边界见 [`docs/review-agent-phase1.md`](docs/review-agent-phase1.md)，脱敏结果见 [`docs/review-agent-v2-full-checkpoint-20260906.md`](docs/review-agent-v2-full-checkpoint-20260906.md)，冻结任务见 [`data/agent-acceptance-v2/manifest.json`](data/agent-acceptance-v2/manifest.json)，离线 runner 见 [`scripts/run_agent_acceptance.py`](scripts/run_agent_acceptance.py)。

@@ -299,9 +299,48 @@ def _provider_check_suggestions(category: str) -> list[str]:
         return ["服务已响应，请稍后重试；若持续失败，请检查额度和服务状态。"]
     if category in {"connect_timeout", "read_timeout", "transport"}:
         return ["检查到模型服务的网络连通性后重试。"]
+    if category == "invalid_response":
+        return ["模型服务已连通，但返回内容不符合最小 JSON 协议；请检查模型的 JSON 输出兼容性。"]
     if category == "success":
         return []
     return ["检查模型兼容性与访问权限后重试。"]
+
+
+def _provider_check_metric(value: object) -> int | None:
+    """Allowlist a bounded non-negative integer for the public preflight."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 0 or value > 2_147_483_647:
+        return None
+    return value
+
+
+def _provider_check_metrics(
+    telemetry: object | None,
+    *,
+    fallback_elapsed_ms: object | None = None,
+) -> dict[str, object]:
+    elapsed_ms = _provider_check_metric(
+        getattr(telemetry, "elapsed_ms", fallback_elapsed_ms)
+    )
+    prompt_tokens = _provider_check_metric(
+        getattr(telemetry, "prompt_tokens", None)
+    )
+    completion_tokens = _provider_check_metric(
+        getattr(telemetry, "completion_tokens", None)
+    )
+    return {
+        "latency_ms": elapsed_ms,
+        "token_usage": {
+            "prompt": prompt_tokens,
+            "completion": completion_tokens,
+            "total": (
+                prompt_tokens + completion_tokens
+                if prompt_tokens is not None and completion_tokens is not None
+                else None
+            ),
+        },
+    }
 
 
 @app.post("/api/v1/model/provider-check")
@@ -314,6 +353,7 @@ def check_model_provider() -> dict:
         return {
             "status": category,
             "configured": False,
+            "json_contract_ok": None,
             "reachable": False,
             "authorized": False,
             "category": category,
@@ -321,6 +361,7 @@ def check_model_provider() -> dict:
             "request_id": None,
             "thinking": thinking,
             "suggestions": _provider_check_suggestions(category),
+            **_provider_check_metrics(None),
         }
 
     try:
@@ -333,9 +374,11 @@ def check_model_provider() -> dict:
         http_status = exc.http_status
         reachable = http_status is not None
         authorized = False if category in {"unauthorized", "forbidden"} else None
+        telemetry = getattr(exc, "telemetry", None)
         return {
             "status": category,
             "configured": True,
+            "json_contract_ok": None,
             "reachable": reachable,
             "authorized": authorized,
             "category": category,
@@ -343,6 +386,10 @@ def check_model_provider() -> dict:
             "request_id": sanitize_request_id(exc.request_id),
             "thinking": thinking,
             "suggestions": _provider_check_suggestions(category),
+            **_provider_check_metrics(
+                telemetry,
+                fallback_elapsed_ms=getattr(exc, "elapsed_ms", None),
+            ),
         }
 
     category = "success"
@@ -356,6 +403,7 @@ def check_model_provider() -> dict:
     return {
         "status": category,
         "configured": True,
+        "json_contract_ok": contract_ok,
         "reachable": True,
         "authorized": True,
         "category": category,
@@ -365,6 +413,7 @@ def check_model_provider() -> dict:
         ),
         "thinking": thinking,
         "suggestions": _provider_check_suggestions(category),
+        **_provider_check_metrics(telemetry),
     }
 
 

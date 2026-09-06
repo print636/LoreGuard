@@ -140,11 +140,17 @@ class ApiFlowTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual("forbidden", payload["status"])
         self.assertEqual("forbidden", payload["category"])
+        self.assertIsNone(payload["json_contract_ok"])
         self.assertEqual(403, payload["http_status"])
         self.assertTrue(payload["reachable"])
         self.assertFalse(payload["authorized"])
         self.assertEqual("cf-safe-ray", payload["request_id"])
         self.assertEqual(expected_thinking, payload["thinking"])
+        self.assertEqual(0, payload["latency_ms"])
+        self.assertEqual(
+            {"prompt": None, "completion": None, "total": None},
+            payload["token_usage"],
+        )
         serialized = json.dumps(payload, ensure_ascii=False)
         for secret in (
             settings.openai_api_key,
@@ -165,6 +171,12 @@ class ApiFlowTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual("not_configured", payload["category"])
         self.assertFalse(payload["configured"])
+        self.assertIsNone(payload["json_contract_ok"])
+        self.assertIsNone(payload["latency_ms"])
+        self.assertEqual(
+            {"prompt": None, "completion": None, "total": None},
+            payload["token_usage"],
+        )
         self.assertIsNone(payload["request_id"])
 
     def test_provider_check_distinguishes_unauthorized_from_upstream_outage(self):
@@ -207,6 +219,9 @@ class ApiFlowTests(unittest.TestCase):
         telemetry = SimpleNamespace(
             http_status=200,
             request_id="bad id with spaces",
+            elapsed_ms=321,
+            prompt_tokens=9,
+            completion_tokens=4,
             endpoint="https://private.invalid/v1",
             headers={"Authorization": "private-key"},
             response_body="private-response",
@@ -218,6 +233,12 @@ class ApiFlowTests(unittest.TestCase):
                 response = client.post("/api/v1/model/provider-check")
         payload = response.json()
         self.assertEqual("success", payload["status"])
+        self.assertTrue(payload["json_contract_ok"])
+        self.assertEqual(321, payload["latency_ms"])
+        self.assertEqual(
+            {"prompt": 9, "completion": 4, "total": 13},
+            payload["token_usage"],
+        )
         self.assertTrue(payload["authorized"])
         self.assertIsNone(payload["request_id"])
         serialized = json.dumps(payload)
@@ -229,6 +250,33 @@ class ApiFlowTests(unittest.TestCase):
             "bad id with spaces",
         ):
             self.assertNotIn(secret, serialized)
+
+    def test_provider_check_marks_invalid_json_contract_without_raw_content(self):
+        telemetry = SimpleNamespace(
+            http_status=200,
+            request_id=None,
+            elapsed_ms=87,
+            prompt_tokens=6,
+            completion_tokens=3,
+        )
+        result = SimpleNamespace(
+            text='{"status":"not-the-contract","private":"do-not-return"}',
+            telemetry=telemetry,
+        )
+        provider = SimpleNamespace(configured=True, complete=lambda *_: result)
+        with patch("app.main.OpenAICompatibleProvider", return_value=provider):
+            with TestClient(app) as client:
+                response = client.post("/api/v1/model/provider-check")
+
+        payload = response.json()
+        self.assertEqual("invalid_response", payload["category"])
+        self.assertFalse(payload["json_contract_ok"])
+        self.assertTrue(payload["reachable"])
+        self.assertTrue(payload["authorized"])
+        self.assertEqual(87, payload["latency_ms"])
+        self.assertEqual(9, payload["token_usage"]["total"])
+        self.assertNotIn("do-not-return", json.dumps(payload))
+        self.assertIn("JSON", " ".join(payload["suggestions"]))
 
     def test_provider_check_reports_only_allowlisted_thinking_configuration(self):
         result = SimpleNamespace(text='{"status":"ok"}', telemetry=None)
