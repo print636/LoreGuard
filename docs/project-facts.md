@@ -1,20 +1,36 @@
-# 项目事实清单（更新至 2026-09-07）
+# 项目事实清单
 
-可在简历中表述：
+更新：2026-09-07。本文件是简历和面试表述的唯一保守事实源。计划、Mock 结果和未通过门槛不得改写成完成成果。
 
-- 已实现 FastAPI 端到端 API和 SQLite 本地模式；PostgreSQL、Redis、FastAPI、Celery worker、Web/Nginx、Prometheus 主分析 Compose 链路已由 GitHub Actions 实机 smoke 验证。
-- 已实现 Markdown、TXT、JSON 与标准 DOCX 导入及文档版本字段；DOCX 将主文档段落、显式换行和表格转换为稳定纯文本行，限制压缩成员、展开量、XML、压缩比与输出大小，不执行宏或外部关系。
-- 已实现事实冲突、同刻多地点、知识越权、物品持有、世界规则五类确定性检查。
-- 已实现证据片段、严重度、置信度、建议、反馈、取消、重试和可恢复 SSE 事件流。
-- 已建立 80 条显式指令规则回归；其 100% 结果只代表规则接线正确。
-- 已建立 100 条模板生成的合成自然中文案例（40 dev / 60 test，正负样本各半）及 50 条 challenge-v2。状态建模前原 test P/R/F1 为 0.625/1.000/0.769；当前固定回归为 1.000/1.000/1.000，challenge-v2 after 为 0.962/1.000/0.980。三者均非人工盲测，不能写成生产准确率或无偏提升。
-- 已建立 14 例原创、多文档复杂验收集，每例至少 4 份文档，五类问题均覆盖正例和困难反例；无模型固定基线 TP 10、FP 0、FN 0、证据对精确命中率 1.0。该数据由开发者编写且可见，只能表述为开发回归结果。
-- 历史上曾使用 OpenAI-compatible 模型对上述 14 例执行 3 轮真实模型增强回归：42/42 完整无降级、171/171 次调用成功，类别和严格完整证据评分均为 TP 30、FP 0、FN 0，预测集合三轮一致；P95 84.97 秒。该数据来自不同中转/模型和较早覆盖协议，只能写成“历史固定开发回归”，不能简化为当前模型成绩或生产准确率 100%。
-- 历史固定 2000 字单文档真实模型 5 次延迟测试为首进度 P95 5.9 ms、端到端 P50 6.30 s / P95 7.94 s；它是旧模型栈在当时机器上的开发测量，不是当前栈成绩或生产 SLA。
-- 已实现默认关闭的 LangGraph `StateGraph` 受限证据修复 Agent，使用应用层 JSON 动作 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`，并由服务端限制文档、窗口、span、补丁字段、轮次、Token 和 deadline。它不是 Provider 原生 `tool_calls`，没有多智能体，也不是 Evidence RAG。
-- commit `bcbfab8` 的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由冻结 manifest 合成注入，并非端到端真实模型抽取评测。它完成 90/90 次要求执行但严格正确 59/90；holdout 运行成功 74/81、恢复 26/51、主动弃答 24/30，且没有观察到直接 `ABSTAIN` 成功路径，三路径覆盖 gate 失败，完整结果为 `passed=false`。因此只能作为 Agent 阶段失败诊断和安全边界事实，不能写成 Agent、主抽取或产品质量收益成绩。完整口径见 [v2 full 脱敏 checkpoint](review-agent-v2-full-checkpoint-20260906.md)。
-- 已提供 React 审查界面、Docker Compose、GitHub Actions、Prometheus 指标入口和中英文 README。
+## 可在简历中表述
 
-工程 checkpoint（暂不进入简历）：已实现独立显式配置的 OpenAI-compatible embedding client、中文行号分块、版本化 embedding profile、精确 snapshot chunk/vector schema 和 Alembic 迁移；本机 Compose 已验证真实 PostgreSQL `vector` 列、pgvector 排序、snapshot/profile 隔离与跨项目归属约束。尚未运行真实 embedding，向量检索没有接入主分析消费者，也没有混合检索收益评测，所以这些事实不能包装成已完成的 Evidence RAG 或简历成果。
+- 独立完成面向游戏编剧与叙事设计的剧情一致性审查平台，支持 Markdown、TXT、JSON、DOCX 导入、文档版本管理、异步分析、证据化问题报告、反馈审计、关系图和保守时间线。
+- 使用 FastAPI、SQLAlchemy、PostgreSQL/pgvector、Redis/Celery、React/TypeScript、Docker Compose、GitHub Actions 和 Prometheus 构建端到端工程链路。
+- 设计 OpenAI-compatible 模型网关与 Pydantic 结构化输出合同；实现超时、429/5xx、非法 JSON、响应大小、Token 预算、取消与降级处理，模型失败时保留确定性基线。
+- 实现固定 revision 的中文 BGE embedding、行号感知分块、版本化 embedding profile、PostgreSQL 精确余弦检索和 keyword+dense RRF；按项目、文档、版本、内容哈希、chunker 与 profile 隔离，并验证索引复用不重复调用 embedding。
+- 首次冻结 retrieval holdout 含 28 问、55 条期望证据；混合 Recall@5 45/55（81.82%）、All-evidence@5 20/28（71.43%）、MRR 0.8452，三次热运行 P95 557.476 ms，隔离泄漏、失败和降级均为 0。必须同时说明低词面 Recall@5 为 23/29（79.31%），差 1 条未过门槛，整体 gate 为 `false`。
+- 实现默认关闭的 `IssueEvidenceReviewer`，将获授权的 RAG 证据交给模型复核，并用服务端签发引用与 allowlist 校验；结果只作为 `ai_evidence_review` 注释持久化，不删除或改写规则 issue。
+- 真实 12 例 × 3 次 A/B 中，local-context 4/12，rag-evidence 7/12；情境例外 1/4 → 3/4、黄金证据覆盖 0/12 → 8/12，RAG 引用 106/106 在 allowlist，0 排除来源泄漏，36 次无失败/降级，P95 6.445 秒。只有在同时说明 absolute gate false、`insufficient_evidence` 0/4 时才可引用这些数字。
+- 实现默认关闭的 LangGraph 1.2.11 `StateGraph` 受限修复循环，使用应用层 JSON 动作 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`，并限制范围、字段、轮次、Token、deadline 与响应字节；它不是原生 `tool_calls`。
+- 实现运行输入冻结、幂等认领、worker lease/heartbeat、跨进程取消检查点、持久化 SSE 续传与安全诊断；不能据此宣称生产高并发或 exactly-once 模型计费。
+- 本机 Compose 实测 2 个 Celery worker 处理 20 个相同冻结输入任务：20/20 完成、0 失败、问题集合一致，约 9.7 秒收敛；只能称为队列与隔离烟测，不能称为高并发压测或 SLA。
 
-暂不可表述为已完成：公网在线 Demo、真实用户数据验证、人工录制演示视频、Agent 模型质量收益、Provider 原生 `tool_calls`、多智能体、真实 embedding 已运行、向量检索已接入主分析、完整 Evidence RAG、向量数据库线上压测和生产级 OpenTelemetry 链路。
+## 面试时必须主动说明
+
+- 确定性规则是最终问题来源。Evidence Reviewer 在规则 issue 之后运行，只提供模型证据意见；AI 不能静默删除或修改问题。
+- `retrieval.py` 的稳定字符 n-gram 是确定性主路的本地候选信号；真实 BGE/pgvector/RRF 是独立 Evidence RAG 通路，两者不能混称。
+- Retrieval holdout 只差低词面 1 条，但仍是 gate 失败；混合 Recall 与 dense 相同，不能声称显著优于两种基线。
+- Reviewer A/B 显示 RAG 对情境例外和证据覆盖有帮助，但总体 7/12，信息不足类 0/4，不能声称模型质量达标。
+- 全部评测集均为原创、开发者可见、非人工盲测；指标不能外推到开放故事、商业游戏剧情或生产环境。
+- 修复 Agent、Evidence Reviewer 和固定语义 repair 是不同机制；项目没有多智能体，也没有 Provider 原生 function calling。
+
+## 不可表述为已完成
+
+- 公网在线 Demo、真实用户数据验证、人工盲测、商业游戏语料验证、长篇生产容量或高并发 SLA。
+- Retrieval 全门槛通过、混合检索显著领先、Evidence Reviewer 质量达标或模型能够可靠识别信息不足。
+- Agent 质量收益、端到端真实模型抽取收益、原生 `tool_calls`、多智能体、HNSW、图数据库、Kubernetes 或完整生产级 OpenTelemetry。
+- 任何 API Key、服务地址、Prompt、原文、note、原始响应或内部运行产物。
+
+## 下一步不是继续扩功能
+
+代码已达到当前简历工程展示停止线。后续工作是亲自体验、理解实现、准备 1/5/15 分钟讲解、整理追问与更新一页中文简历，然后开始投递。未来若依据失败样本改动检索或 Prompt，必须保留本次结果并使用新版本冻结集重新验证。

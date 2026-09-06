@@ -14,8 +14,14 @@ flowchart LR
   C --> R[关键词 + 稳定 n-gram + 实体图]
   R --> E[确定性规则引擎]
   E --> G[证据化问题报告]
+  E -.显式开启.-> ER[IssueEvidenceReviewer]
+  ER --> RR[关键词 + BGE 向量 RRF]
+  RR --> PGV[(PostgreSQL / pgvector)]
+  RR --> ER
+  ER --> A[独立 AI 证据注释]
+  A --> G
   G --> DB
-  API --> M[Prometheus / OTel]
+  API --> M[Prometheus / 结构化诊断]
 ```
 
 - 当前首版把规范化后的 8 类状态统一保存为带 `kind/attrs/evidence` 的通用 JSON 记录，并按已完成运行投影关系图和时间线；尚未建立规范化的实体表、关系表或图数据库。这样保持本地部署简单，也避免把检索相似度误当成已成立的剧情关系。
@@ -26,8 +32,10 @@ flowchart LR
 - Provider 对超时、429、5xx、空响应和非法 JSON 执行有限指数退避；字段非法或证据越界同样降级。默认 2 次 × 30 秒；一个分块终态失败即停止当前文档剩余模型分块，一个文档出现终态失败后打开本次运行熔断，后续文档直接使用全文基线。错误消息不包含 Key 或响应正文。
 - 模型与基线通过规范化的类型、字段和证据区间去重；一次分析的最终记录持久化，展示层不会触发二次模型费用。
 - 项目级 alias map 只读取明确“又名/简称/化名/代号”声明。归一化只改结构化实体字段，不改证据正文；循环或一名多主保留原名并警告。
-- 本地混合候选排序使用关键词、SHA-256 稳定桶字符 n-gram 余弦和共享 canonical entity graph 三分。`CandidatePair` 被持久化为 trace；当前 `consumed` 仅表示类型兼容，实际裁决仍调用全量 `detect_issues`，不能用此标签证明候选被模型或规则实际消费。目前没有检索增强模型闭环，也不生成新的模糊语义 issue。纠正计数及接入 Evidence RAG 的计划见 [后续交付计划](agent-rag-delivery-plan.md)。
-- 已建立与主分析解耦、默认关闭的 Evidence RAG 数据底座：独立显式配置的 OpenAI-compatible embedding client、面向中文叙事的确定性行号分块、包含模型版本/维度的 embedding profile，以及按项目、文档、版本和内容哈希精确隔离的 chunk/vector schema。数据库升级由 Alembic 管理；本机 Compose 已验证真实 PostgreSQL `vector` 列、pgvector 余弦排序、profile/snapshot 隔离和跨项目归属约束。该底座尚未发起真实 embedding 调用，也没有主分析检索消费者或混合检索收益评测，因此不是已完成的 Evidence RAG。
+- 本地候选排序继续使用关键词、SHA-256 稳定桶字符 n-gram 余弦和共享 canonical entity graph 三分。`CandidatePair.consumed` 仅表示类型兼容，确定性裁决仍调用全量 `detect_issues`；这条主路没有被向量相似度替代。
+- Evidence RAG 是与确定性裁决解耦、默认关闭的后置通路：独立显式配置的 OpenAI-compatible embedding client、中文确定性行号分块、版本化 embedding profile，以及按项目、文档、版本、内容哈希和 chunker 精确隔离的 chunk/vector schema；PostgreSQL 使用真实 `vector` 列并执行精确余弦搜索，关键词与 dense 候选通过 RRF 合并。真实固定 BGE embedding、索引复用、pgvector 检索和隔离负例均已运行。
+- `IssueEvidenceReviewer` 在规则引擎已经产生 issue 后才工作。它从本次运行冻结快照中检索获授权证据，用服务端签发的引用标签调用同一结构化模型合同，并把 `supports_issue`、`contextual_exception` 或 `insufficient_evidence` 保存到 issue 的 `metadata.ai_evidence_review`。它不会删除、改写 issue 的类别、严重度、证据或建议；检索、模型或校验失败时保留原规则报告并记录降级诊断。
+- Evidence Reviewer 由 `ENABLE_ISSUE_EVIDENCE_REVIEW` 显式开启，默认 `false`；默认还要求真正的 hybrid 检索。Key、endpoint、Prompt、原文和模型原始响应不进入持久化注释或公开评测报告。
 - 模型/基线合并后还有一层不调用模型的候选归一化：把“取出工具并执行操作”映射为 `uses`，把范围内能力禁用规则和实际发动行为映射为共享 canonical key。该层只依据服务端原文证据生成状态，仍由规则引擎比较两侧证据后产生 issue。
 - 基线对带“日志显示/记录记载”等报告前缀的显式时间—人物—地点句单独解析，报告来源不会再被并入人物名；地点在会面、检查等动作前保守截断。
 - 持续身体状态使用 `body_state:<方向><部位族>` canonical key 对齐“失去肢体”与“完好同侧末端”，恢复、幻象和伪装措辞不进入该冲突候选。
@@ -47,4 +55,4 @@ flowchart LR
 
 ## 当前扩展边界
 
-`NarrativeExtractor`、`ConsistencyChecker` 与 Provider 是独立边界。当前已有主抽取分块、显式别名归一化和上述 embedding/pgvector 存储底座，但尚无真实 embedding 运行、向量结果进入主分析的消费闭环、混合检索收益评测、隐含实体消歧、跨块上下文摘要、置信度校准和真实模型长文人工标注评测；这些仍是模型增强 Alpha 的主要风险，不能用 Mock、数据库 smoke 或生成型 smoke 替代。
+`NarrativeExtractor`、`ConsistencyChecker`、Embedding Provider、Evidence Retriever 与 Chat Provider 是独立边界。当前已经形成“规则 issue → 授权快照检索 → 模型证据复核 → 独立注释”的真实消费闭环，但没有把概率模型变成事实裁决者。首次冻结 retrieval holdout 的混合 Recall@5 为 81.82%、All-evidence@5 为 71.43%、低词面 Recall@5 为 79.31%，最后一项差 1 条未过门槛；12 例 Evidence Reviewer A/B 从 4/12 提升至 7/12，但绝对 gate 失败且 `insufficient_evidence` 为 0/4。隐含实体消歧、查询分解、跨块摘要、置信度校准、真实长文人工盲测和生产高并发仍是明确边界，不作为当前继续扩功能的理由。

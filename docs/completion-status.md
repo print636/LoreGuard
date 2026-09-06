@@ -1,84 +1,72 @@
-# 当前完成度与非完成项
+# 当前完成度与诚实边界
 
-更新时间：2026-09-07
+更新：2026-09-07。
 
-## 2026-09-06 checkpoint
+LoreGuard 已达到当前“AI 应用后端/游戏平台研发”简历项目的工程展示停止线。代码主线已覆盖真实 embedding、pgvector 检索、后置模型消费、异步任务、SSE、失败降级、安全引用与冻结评测；从现在起优先进行本人体验、学习、讲解和投递，不再继续堆叠功能。这里的“达到停止线”不代表所有质量 gate 通过，也不代表商业生产就绪。
 
-当前新中转/模型在 `thinking=disabled` 下通过生产路径 preflight：JSON 契约成功，耗时 4.76 秒，Prompt / Completion Token 为 27 / 5。但冻结 Phase 1 `full × 1` 的严格 gate 为 **0/3**。三次正式 Provider 调用都一次成功、HTTP 200、无空响应，仍因大量词面/证据拒绝、未解决无效记录以及第三案的 batch 协议失败而没有完整覆盖。HTTP 成功只能证明传输和最小协议，不能证明模型可用于当前产品语义契约。逐案脱敏数字及额外一次不可计量的 runner 中断调用见 [Provider / Phase 1 checkpoint](provider-phase1-checkpoint-20260906.md)。默认 JSON 报告位于 Git 忽略的 `artifacts/`，不作为仓库制品提交。
+## 已完成并进入回归的能力
 
-本轮工程实现与回归已覆盖 semantic trust、运行输入快照、幂等认领、worker lease/heartbeat、跨进程取消检查点、typed diagnostics、无效记录最终处置与受限语义标签 repair pass、批量抽取失败域、Provider 成功响应硬字节上限和显式 thinking 模式。这些是工程 checkpoint，不是简历成果；repair pass 是受限结构化补救调用，不是 Agent。Phase 1 与 complex runner 已改为共用安全 `CountingProvider`，主调用和派生 repair 调用均计数，Mock 回归已通过。Compose 已将 thinking 配置接入 API/worker，空白值归一为 `None`。当前真实 AI-first gate 仍未通过。
+### 产品与后端闭环
 
-## 受限 Agent 第一阶段状态
+- React/Vite 工作台与 FastAPI API；Markdown、TXT、JSON、DOCX 多文件导入。
+- 项目、文档版本、冻结运行输入、运行历史、问题、反馈审计、关系图、保守时间线和同名文档版本差异。
+- 本地线程与 Redis/Celery 两种执行模式；任务认领、lease/heartbeat、取消、重试、失败恢复、持久化 SSE 断线续传。
+- PostgreSQL/SQLite 数据层、Alembic、Docker Compose、GitHub Actions、Prometheus 和结构化诊断。
 
-- 已接入 LangGraph 1.2.11 `StateGraph` 的有界 `decide -> execute -> decide/finalize` 循环，开发环境只有显式设置 `ENABLE_REVIEW_AGENT=true` 才启用，默认关闭。
-- 当前动作只有 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`。模型通过应用层 JSON 工具协议选择动作；当前没有验证或使用 Provider 原生 `tool_calls`，因此不能写成原生 function calling。
-- 服务端限制文档/scope、证据行范围、span、可修改字段、决策轮、工具次数、Token、deadline 与响应字节数；安全 trace 不持久化 Prompt、原始响应、工具/故事正文、补丁值、Key 或 endpoint。前端将固定语义标签 repair 和受限 Agent 分开显示。
-- v2 冻结套件含 30 个开发者可见任务、3 类 persona 各 10 个，每任务重复 3 次；每个初始候选都经生产 schema、文档/行号、非空证据和词面校验路径证明只失败于 `lexical_support`。此前的 90 次 Mock oracle/scorer 只证明工程回归，不是 90 次真实模型 Agent 调用。
-- commit `bcbfab8` 上的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider；主抽取候选由 runner 按冻结 manifest 合成注入，不是端到端真实模型抽取评测。该运行完成全部 90/90 次要求执行，严格正确 59/90；其中 27 个 holdout 任务共 81 次。holdout 运行成功 74/81，另外 7 次均为 `read_timeout`；可恢复题正确 26/51（0.509804），不可恢复题主动弃答正确 24/30（0.8）。31 次严格失败可分为互不重叠的四组：12 次被生产校验接受但不符合 oracle 的错误补丁（9 次 `oracle_patch_mismatch`、3 次 `oracle_unrecoverable_patch`）、9 次可恢复题读取后过度弃答、7 次 `read_timeout`，以及 3 次 outcome 正确但读取未覆盖 oracle 证据。后 3 次的 `trace_replay=false` 原因均为 `read_misses_oracle_evidence`；7 次 timeout trace 均可重放，不能将两类失败混同。服务端接受的安全违规为 0。运行成功轨迹中没有直接 `ABSTAIN` 路径，要求的三路径覆盖 gate 未通过。3 个 development/tuned 任务的 9/9 次执行及其恢复/弃答率均为 1.0，但该组已参与开发，不能代表泛化能力。完整 gate 为 `passed=false`，所以这次运行是 Agent 阶段失败诊断证据，不是 Agent、主抽取或产品质量收益成绩。
-- 当前 Agent 是 LangGraph `StateGraph` 编排的受限应用层 JSON 动作循环，只提供 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`；它不是 Provider 原生 `tool_calls`，没有多智能体，也没有 Evidence RAG。当前有界邻域读取不是 embedding/pgvector 语义召回。
+### 确定性规则与模型抽取
 
-实现与边界见 [受限 Agent 第一阶段说明](review-agent-phase1.md)；冻结任务见 [v2 manifest](../data/agent-acceptance-v2/manifest.json)，pilot 过程见 [开发记录](review-agent-pilot-20260906.md)，本次 full 脱敏结果见 [v2 full checkpoint](review-agent-v2-full-checkpoint-20260906.md)，离线 trace scorer 见 [runner](../scripts/run_agent_acceptance.py)。
+- 无模型时，BaselineExtractor 与规则引擎仍可独立生成证据化问题报告。
+- 配置模型后，OpenAI-compatible Provider 抽取 8 类状态记录；Pydantic 严格校验并由服务端按全局行号回填证据。
+- 超时、429/5xx、空响应、非法 JSON、响应过大、无效记录、Token 预算和取消均有明确失败/降级路径；模型失败不删除基线结果。
+- 五类确定性问题、显式别名、角色知识来源、规则例外、移动许可、物品使用和持续状态等已有自动回归。开发者可见的固定回归不得外推为开放文本准确率。
 
-## Evidence RAG 数据底座 checkpoint
+### 真实 Evidence RAG
 
-- 已实现独立显式配置、不会继承主抽取 chat 配置的 OpenAI-compatible embedding client，以及保留规范化字符区间和原文行号的中文确定性分块。
-- 已实现版本化 embedding profile，以及按项目、文档、文档版本、内容哈希和 chunker 版本精确隔离的 chunk/vector schema；SQLite 明确使用 JSON 作为本地存储替代，PostgreSQL 使用真实 `vector` 列。
-- 已用 Alembic 覆盖空库、旧 `create_all` 库和此前 WIP schema 的保守升级；本机 Compose 已实际通过 pgvector 余弦排序、snapshot/profile 隔离和跨项目归属失败闭合 smoke。
-- 这些结果只证明 client、分块、迁移和存储底座。当前没有运行真实 embedding 请求，向量结果尚未接入主分析检索消费者，也没有关键词-only 与混合检索的收益评测。因此 Evidence RAG 仍未完成，这一 checkpoint 不得写成简历成果。
+- 独立 embedding Provider、固定 BGE 模型 revision、中文行号分块、版本化 profile 和精确 snapshot schema 已实现。
+- PostgreSQL 使用真实 `vector` 列与精确余弦检索；keyword-only、dense-only、keyword+dense RRF 三种策略走同一冻结输入与 Top-5 合同。
+- 项目、文档、版本、内容哈希、chunker 和 profile 全部进入检索过滤；旧版本、错误文档、错误项目和错误 profile 与合法数据同库验证，未发生越界返回。
+- 首次冻结 holdout：28 问、55 条期望证据。混合 Recall@5 为 45/55（81.82%），All-evidence@5 为 20/28（71.43%），MRR 0.8452，低词面 Recall@5 为 23/29（79.31%）；失败、降级、隔离泄漏和三次热运行排名不稳定均为 0，P95 557.476 ms。
+- 总 gate 为 `false`，唯一绝对门槛失败项是低词面召回差 1 条证据；混合检索相对 keyword/dense 的预设增益声明也不成立。详见 [Evidence Retrieval v1 Holdout](evidence-retrieval-v1-holdout.md)。
 
-## 已完成并可体验
+### 后置 Evidence Reviewer
 
-- 项目创建/选择、自然文本粘贴、Markdown/TXT/JSON/标准 DOCX 多文件上传、同名自动版本化及活动/历史版本查询；DOCX 仅提取主文档段落与表格，并受压缩包/XML 资源上限保护。
-- 无 API Key 中文明确句式抽取，并公开展示每条抽取结果和未抽取提示。
-- OpenAI-compatible 模型已进入主分析流水线，可结构化抽取 8 类叙事记录；Pydantic 验证字段并将证据绑定到原文行。
-- 模型失败采用默认 2×30 秒有限重试、当前文档短路和运行级文档熔断；已验证模型局部失败时确定性基线仍能生成完整证据报告。熔断时延边界已有 Mock 回归，但尚未在故意制造的真实 Provider 故障上单独计时。
-- 模型与基线结果去重合并；未配置 Key 或发生超时、429、5xx、非法/空响应、结构校验失败时自动降级。
-- 运行事件与持久化诊断明确区分完整模型增强、部分分块降级、模型未参与/已降级和主动基线四种状态，避免把基线兜底后的正确结果误报成完整模型能力。
-- 模式判断已改为每文档/运行级结构化计数：逻辑调用、成功/失败/跳过分块、无效记录和安全原因码；预算不足、分块上限和部分无效记录不再漏判。旧运行缺少计数时显示覆盖情况未知，警告文案变化不会影响新模式或评测分母。
-- Provider 连接检查通过生产 JSON 调用路径，不再打印上游响应片段；调用网关拒绝重定向，并以异常类型代替可能含上游数据的异常文本。
-- 相同主体/值/时间/原文证据下，模型谓词额外携带的“是/为”会保守对齐到已有基线谓词，避免同一冲突重复展示；不同事实不按证据对粗暴合并。2026-09-04 的历史调用记录见 [切换验收](provider-validation-20260904.md)，2026-09-06 新中转/模型的当前结论见 [Phase 1 checkpoint](provider-phase1-checkpoint-20260906.md)；两者不可互相沿用成绩。
-- 模型记录逐条隔离校验，部分非法记录不会拖垮同一文档中的有效记录；无明确时间的物品持有/使用可作为无时态状态参与检查。
-- 新增证据约束的候选归一化层，覆盖“取出物品后盖下/使用”以及“在规则范围内仍发动被禁能力”；该层不增加模型调用费用，也不把模型判断直接转换为问题。
-- 高级原创回归场景在关闭模型时可稳定检出事实、时空、知识、物品和世界规则五类问题，且每类一条；该结论只覆盖固定回归样本，不代表开放文本总体准确率。
-- 完成的分析任务持久化实际抽取记录和 Prompt/Completion Token 用量；读取记录不会再次调用模型。若 Provider 返回后立即取消、尚未形成完整 `PipelineResult`，只持久化已完成 Review Agent 调用的 Token/安全遥测，并在诊断和状态 API 中显式标记为 `lower_bound` / `review_agent_completed_calls_only`，不将其冒充完整运行总量。
-- 五类状态检查：事实、同刻多地点、角色知识、物品持有、世界规则。
-- 每个问题包含原文、行号、解释、置信度、严重度和建议。
-- 项目运行历史、后台分析、持久化 SSE 断线恢复、终态错误、状态受限的取消/重试。
-- 人工反馈最新状态、相同反馈防重复提交及反馈审计历史。
-- React 本地项目工作台、简单/复杂原创样例、多文件上传、版本与运行历史、刷新恢复、问题过滤和带备注反馈。
-- 同一项目内同名文档的任意两个版本可做行级差异比较，返回版本元数据、增删/未变行摘要和上下文 hunk；大文档输入或展示超限时明确标识截断，且整个过程不调用模型。
-- 已完成运行可投影为 Cytoscape 关系图和保守时间线；支持记录类别过滤、只看问题关系、原文证据详情及问题联动高亮。投影不触发模型调用，超出 500 节点/1000 边会明确提示截断。
-- 模型长文全局行号分块、1 行 overlap、超长单行切片、分块上限 warning 和逐块独立降级；基线始终处理全文。
-- 显式声明驱动的项目级别名 map、实体字段主名化与 alias trace；循环和一名多主不合并。
-- 可复现的本地 keyword + SHA-256 n-gram + canonical entity graph 三分候选排序及 trace。复核确认 `consumed` 仅按类型兼容标记，精确规则仍检查全部记录，尚不能证明短名单影响裁决或形成 RAG。
-- 运行诊断持久化及 API/UI 摘要，覆盖 chunk、alias 与 retrieval 计数。
-- 运行诊断包含分块、抽取、索引、检查、报告、总耗时和首个进度耗时，使用单调时钟测量。
-- 单次模型 Token 预算、每日本地 Token 阈值、可选模型单价与单进程写请求滑动窗口限流；无 usage 时按保守估算做内部门控，未知价格显示为未配置。
-- 模型重复评测器可区分模型参与与完整无降级轮次，记录严格完整证据评分、三轮预测集合稳定性、P50/P95、Token、错误轮次和预算停止；报告不保存 Prompt、响应正文、Key 或 endpoint。
-- 历史 complex-v3 真实模型完整 14 例 × 3 轮复测为 42/42 完整无降级、171/171 次逻辑调用成功；类别级及严格完整证据级均为 TP 30、FP 0、FN 0，三轮预测集合稳定率 1.0，P95 84.97 秒。它使用不同中转/模型和较早版本的覆盖协议，只能作为开发者可见历史回归，不能移作 2026-09-06 当前栈成绩。
-- 历史固定 2000 字单文档真实模型延迟测试 5/5 次模型参与，首进度 P95 5.9 ms、端到端 P50 6.30 s / P95 7.94 s，总计 11,799 Token；该数据使用旧中转/模型，只保留为当时短文本延迟记录，不代表当前栈、生产 SLA 或准确率。
-- SQLite 单机体验；PostgreSQL、Redis、FastAPI、Celery worker、Web/Nginx 和 Prometheus 的主分析 Compose 链路已在 GitHub Actions 实机启动，并通过复杂样例、五类问题、关系图、时间线和 SSE 终态 smoke。另一本机 Compose smoke 已验证真实 PostgreSQL `vector` 列及 pgvector 排序/隔离，但主分析仍未消费这些向量。
-- 80 条显式指令规则回归，只验证规则引擎接线，不作为自然文本准确率。
-- 100 条固定模板生成的合成自然中文案例，按 scenario 隔离为 40 dev / 60 test；包含 50 个困难负样本并保存预期证据行。
-- 已用结构化状态建模处理合法移动许可、显式知识来源和 actor 规则例外；移动许可绑定角色/路线/有效期，规则例外绑定 actor/canonical key/有效状态。
-- 无模型 natural test 状态建模前为 TP 30、FP 18、FN 0、P 0.625/R 1.000/F1 0.769；当前固定回归为 TP 30、FP 0、FN 0、P/R/F1 1.000。该 test 已被查看，只能作为回归参考。
-- 新增 50 例开发者可见 challenge-v2：before P 0.625/R 1.000/F1 0.769，after P 0.962/R 1.000/F1 0.980，仍有 1 个移动许可误报。它不是人工标注或盲测。
-- 新增 14 例原创“潮痕群岛”复杂多文档验收集，每例至少 4 份文档，五类问题均有正例与困难反例；无模型固定基线 TP 10、FP 0、FN 0、证据对精确命中率 1.0。它由开发者编写且可见，不是人工盲测或生产准确率。
-- 自然语言事实会保留句首精确时间，使统一规则层能区分同一时点冲突与跨时点状态迁移，不依赖具体状态词特例。
-- 评测 harness、指标单测、预算/限流 Mock 测试、无模型 API 工作流 smoke 和前端生产构建；自动化测试数量以当前 CI 输出为准。
-- 普通叙述未被确定性基线抽取时按文档汇总数量和最多 5 个示例行号，不再为长文逐行堆叠相同提示。
-- 24,418 字原创生成型长文 smoke：4 文档、7 分块、10 条记录、五类各 1 个问题且无额外问题，本机最近一次约 137 ms；不作为人工准确率或生产压测。
+- `IssueEvidenceReviewer` 在确定性规则已经产出 issue 后运行，将获授权的 RAG 证据交给结构化 Chat Provider 复核。
+- Reviewer 只追加 `metadata.ai_evidence_review`；不会删除或修改规则 issue 的类别、严重度、证据、解释或建议。模型、检索或引用校验失败时，规则报告原样保留。
+- 功能由 `ENABLE_ISSUE_EVIDENCE_REVIEW=true` 显式开启，默认关闭；需要 PostgreSQL、真实 embedding 与 Chat Provider，默认要求 hybrid 检索。
+- 冻结 12 例、每例 3 次的真实 A/B：local-context 4/12，rag-evidence 7/12；情境例外 1/4 → 3/4，黄金证据覆盖 0/12 → 8/12。RAG 的 106/106 条引用通过 allowlist，排除来源泄漏为 0，36 次运行无失败或降级，P95 6.445 秒。
+- Absolute gate 为 `false`：总体未达 10/12、覆盖未达 11/12，且 `insufficient_evidence` 为 0/4。详见 [Issue Review v1 结果](issue-review-v1-result-20260907.md)。
 
-## 仍未完成，不能写进简历
+### 受限修复 Agent
 
-- 任意中文开放文本的可靠语义抽取及真实人工标注评测。
-- 真实复杂中文故事上的人工标注准确率、召回率、模型分块长文实测与误报标定。
-- 独立世界观、人工盲标且未参与规则修复的真实长故事评测；当前高分仅覆盖开发者可见固定回归。
-- 当前新中转/模型通过最小 Provider preflight，但冻结 Phase 1 `full × 1` 严格 gate 为 0/3；需先解决词面/证据拒绝和 batch 协议失败，再重新达到完整覆盖并执行三轮稳定性验收。
-- 真实 embedding 调用、把精确 snapshot/profile 向量检索接入主分析、跨段语义召回与混合检索收益评测；当前主分析判断仍只使用本地稳定哈希 n-gram 候选排序，已验证的 PostgreSQL vector 底座不能替代上述闭环。
-- 受限 Agent 的 v2 Agent 阶段真实 Provider 81 次 holdout 已执行但未通过完整 gate；主抽取候选由冻结 manifest 合成注入。仍缺达到门槛的独立 Agent 质量结果，以及与基线/一次检索的收益、延迟和成本对照。当前失败结果、90 次 Mock 和 3 项已调优 development 结果都不能作为 Agent 或端到端抽取质量成绩。
-- OpenTelemetry 完整链路、Redis/事务式生产配额与多实例限流、多用户鉴权。
-- 项目/文档删除与多人协作权限；关系图目前是通用 JSON 状态记录的运行级投影，尚非可跨版本查询的规范化知识图谱。当前版本差异是文本行级比较，不包含语义实体或问题清单的跨版本差异。
-- 公网 Demo、真实 P95 压测和两分钟录屏。
+- LangGraph 1.2.11 `StateGraph` 受限循环提供 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`，默认关闭；这是应用层 JSON 动作，不是 Provider 原生 `tool_calls`。
+- v2 `full × 3` 只对冻结合成候选执行真实 Agent 阶段，并非端到端真实模型抽取。严格正确 59/90，完整 gate 失败；服务端接受的安全违规为 0。
+- 固定语义标签 repair、修复 Agent 与 Evidence Reviewer 是三条独立路径，不能合并称为多智能体。
 
-因此当前版本是“模型增强抽取已接通、工程安全边界较完整、规则判断可用的本地 Alpha”，不是完整商业产品。许可与例外已进入状态模型，但当前新中转/模型尚未通过冻结 Phase 1 严格 gate；固定模板或历史模型高分都不能替代当前栈复验和独立人工盲测。
+## 当前验证状态
+
+- 自动测试、前端构建和 Compose 主链路已经覆盖核心行为；具体数量随提交变化，不用测试数量代替产品质量。
+- 本机已经真实运行固定 TEI/BGE embedding、PostgreSQL/pgvector、三策略 retrieval holdout 和 Evidence Reviewer A/B。
+- 最新 Compose 端到端验收中，内置原创样例产生 5 类规则问题，5/5 都得到真实 `keyword+dense-rrf`、模型 verdict 与获授权引用；索引 2 个文档，Reviewer 无跳过、拒绝批次或降级，随后反馈写入和历史读取成功。
+- 关闭模型后使用 2 个 Celery worker 并发提交 20 个相同冻结输入任务，20/20 完成、0 失败且问题集合一致，约 9.7 秒收敛。该结果只证明本机队列与状态隔离烟测，不是生产高并发 SLA。
+- API Key、服务地址、Prompt、原文、note 与模型原始响应不进入公开结果文档或提交记录。
+- 所有质量数据均来自开发者可见的原创冻结集，不是人工盲测、真实用户语料或生产准确率。
+
+## 简历可以写
+
+- 完成 FastAPI、SQLAlchemy、PostgreSQL/pgvector、Redis/Celery、SSE、Docker Compose、CI、Prometheus 的全栈工程闭环。
+- 实现真实 BGE embedding、精确余弦检索、RRF 融合、版本/profile 隔离、索引复用和安全降级。
+- 将 RAG 证据接入后置模型 Reviewer，并通过服务端引用 allowlist 保证只消费获授权快照；Reviewer 只做注释，不覆盖规则结果。
+- 建立冻结评测与 A/B，诚实报告 retrieval holdout 的 81.82% Recall@5、71.43% All-evidence@5，以及低词面 79.31% 差一条未过门槛。
+- 实现默认关闭的受限 LangGraph 动作循环，但不把它包装为原生 function calling 或多智能体。
+
+## 不能写成已完成成果
+
+- “混合检索显著优于关键词和 dense 基线”“retrieval 全部门槛通过”。
+- “Evidence Reviewer 达到 10/12 或生产可用”“模型能可靠判断信息不足”；真实结果是 7/12、`insufficient_evidence` 0/4、absolute gate false。
+- 人工盲测、开放文本准确率、长篇商业剧情验证、高并发 C 端生产容量或公网 SLA。
+- Provider 原生 `tool_calls`、多智能体、HNSW/IVFFlat、图数据库、完整 OpenTelemetry 或生产多租户。
+- 受限 Agent 的质量收益或端到端抽取成绩；现有 Agent gate 失败且候选为冻结合成注入。
+
+## 当前停止线
+
+项目本身不再继续扩功能。下一阶段是用户亲自体验、理解代码和架构、复述真实权衡、准备项目讲稿与一页中文简历，并开始投递。未来优化应由真实体验或新冻结数据驱动，不覆盖本次失败结果。

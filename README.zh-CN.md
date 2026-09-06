@@ -14,6 +14,8 @@
 - 模型输入按全局行号分块，支持行重叠、超长单行和逐块失败隔离；全文基线不分块
 - 仅依据明确“又名/简称/化名/代号”声明做项目级实体别名归一化，保留映射轨迹与歧义警告
 - 本地 keyword + 稳定 SHA-256 字符 n-gram + canonical entity graph 三路候选排序并留下分数轨迹；当前 `consumed` 只表示候选类型与检查器兼容，最终仍由规则引擎检查全量记录，不能证明候选排序影响了裁决
+- 可选 Evidence RAG 已真实运行固定 BGE embedding、PostgreSQL/pgvector 精确余弦检索与 keyword+dense RRF，并按项目、文档、版本、内容哈希、chunker 和 profile 隔离
+- 可选 `IssueEvidenceReviewer` 将获授权的 RAG 证据交给模型复核，并把结论作为独立注释附在规则问题上；它不会删除、改写或替代规则结果，默认关闭
 - 检查事实冲突、同时间多地点、知识越权、非持有者使用物品、世界规则冲突
 - 每个问题返回两处证据、行号、严重度、置信度和修订建议
 - 本地线程/Celery 两种后台执行方式、受状态约束的取消/重试与可断线续传的持久化 SSE 进度流
@@ -50,9 +52,11 @@ docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.r
 docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.rag.yml --profile rag-smoke run --rm tei-smoke
 ```
 
+上面的命令只启动和验证本地向量能力，不会自动调用聊天模型。要在页面体验 AI 证据复核，请把 `.env.example` 复制为不提交的 `.env`，填写服务端模型配置并设置 `ENABLE_ISSUE_EVIDENCE_REVIEW=true`，再将命令中的 `--env-file .env.example` 改为 `--env-file .env`。分析完成后，在问题卡片查看“AI 复核”、`hybrid` 标识和获授权引用；该注释不会删除或改写规则问题。
+
 overlay 使用固定 digest 的 TEI 1.9.3 CPU 镜像和固定 revision 的 `BAAI/bge-small-zh-v1.5`，明确采用 float32、CLS pooling、512 维向量及 `auto-truncate=false`。TEI 不映射宿主机端口，只允许 Compose 私网内的 API、worker 和显式 smoke 服务访问；本地 TEI 无需 Key，`EMBEDDING_API_KEY` 保持为空且绝不继承 `OPENAI_API_KEY`。模型文件首次启动时从 Hugging Face 下载到具名卷 `tei_model_cache`，后续复用缓存；首次运行需要网络，实际磁盘、内存和 CPU 延迟取决于机器，不能据此宣称生产吞吐。
 
-`tei-smoke` 会真实检查 `/health`、`/info` 返回的模型 SHA、512 维有限且 L2 归一化的向量、batch/single 近似一致、固定中文相关性排序，以及超出模型输入上限时确实拒绝而非静默截断。[TEI 项目](https://github.com/huggingface/text-embeddings-inference)采用 Apache-2.0，固定 [BGE 模型卡](https://huggingface.co/BAAI/bge-small-zh-v1.5)标注 MIT；实际部署仍需自行复核两者许可。该 overlay 只证明本地 embedding 基础设施可运行：当前主分析仍未消费这些向量，不能据此声称 Evidence RAG 已完成。
+`tei-smoke` 会真实检查 `/health`、`/info` 返回的模型 SHA、512 维有限且 L2 归一化的向量、batch/single 近似一致、固定中文相关性排序，以及超出模型输入上限时确实拒绝而非静默截断。[TEI 项目](https://github.com/huggingface/text-embeddings-inference)采用 Apache-2.0，固定 [BGE 模型卡](https://huggingface.co/BAAI/bge-small-zh-v1.5)标注 MIT；实际部署仍需自行复核两者许可。该固定运行时已经由检索评测和可选 Evidence Reviewer 消费，但相关结果只代表小型冻结集，不代表生产吞吐或开放文本质量。
 
 ### 本地开发
 
@@ -77,19 +81,19 @@ set PER_RUN_TOKEN_BUDGET=20000
 set DAILY_TOKEN_BUDGET=100000
 ```
 
-模型 Key 只从服务端环境变量或本地未提交的 `.env` 读取，并且只有显式设置 `ENABLE_MODEL_EXTRACTION=true` 才会调用模型，避免开发和测试意外产生费用。请勿把 Key 写入源码、前端、README 或提交记录。`PROVIDER_THINKING_MODE` 默认不配置，因此通用 OpenAI-compatible 请求不会携带 `thinking`；只有显式设置为 `disabled` 或 `enabled` 时才发送顶层 `thinking={"type": ...}`。Compose 会把该配置同时传入 API 与 worker，空白值统一归一为 `None`。模型抽取支持 `fact`、`event`、`knows`、`claims_knows`、`item`、`uses`、`world_rule` 与 `world_assert`。超时、429、5xx、空响应、非法 JSON、字段校验失败或证据行号越界时，系统会记录非敏感警告并降级到 `BaselineExtractor`；基线与模型结果会去重合并。默认单次请求最多尝试 2 次、每次 30 秒；某分块终态失败后停止当前文档剩余模型分块，一个文档出现终态失败后开启本次运行熔断，后续文档直接走全文基线，避免兼容服务异常时串行等待数分钟。运行事件和诊断会明确区分“完整模型增强”“模型增强（部分分块已降级）”“确定性基线（模型未参与或已降级）”与主动关闭模型的“确定性基线”，结果正确时也不会掩盖模型失败。
+模型 Key 只从服务端环境变量或本地未提交的 `.env` 读取。只有显式启用 `ENABLE_MODEL_EXTRACTION=true` 或 `ENABLE_ISSUE_EVIDENCE_REVIEW=true` 的能力才会调用聊天模型，避免开发和测试意外产生费用。请勿把 Key 写入源码、前端、README 或提交记录。`PROVIDER_THINKING_MODE` 默认不配置，因此通用 OpenAI-compatible 请求不会携带 `thinking`；只有显式设置为 `disabled` 或 `enabled` 时才发送顶层 `thinking={"type": ...}`。Compose 会把该配置同时传入 API 与 worker，空白值统一归一为 `None`。模型抽取支持 `fact`、`event`、`knows`、`claims_knows`、`item`、`uses`、`world_rule` 与 `world_assert`。超时、429、5xx、空响应、非法 JSON、字段校验失败或证据行号越界时，系统会记录非敏感警告并降级到 `BaselineExtractor`；基线与模型结果会去重合并。默认单次请求最多尝试 2 次、每次 30 秒；某分块终态失败后停止当前文档剩余模型分块，一个文档出现终态失败后开启本次运行熔断，后续文档直接走全文基线，避免兼容服务异常时串行等待数分钟。运行事件和诊断会明确区分“完整模型增强”“模型增强（部分分块已降级）”“确定性基线（模型未参与或已降级）”与主动关闭模型的“确定性基线”，结果正确时也不会掩盖模型失败。
 
 模型逐分块调用前会用保守 Token 估算与本次已用额度执行门控；兼容 Provider 不返回 usage 时也按保守估算扣减内部预算。超出单次额度后停止后续模型分块，但全文基线仍会继续。每日额度在创建或重试分析时检查，当前是本地单数据库的非原子配额；多实例生产环境仍需 Redis 或事务式配额服务。写接口另有单进程滑动窗口限流，429 响应包含 `Retry-After`。
 
 模型模式以持久化的结构化执行记录判定，不依赖警告文字。页面会显示逻辑调用成功、失败、跳过和拒绝记录数；任何分块被跳过或记录被拒绝都不能算完整成功。旧运行缺少这些计数时显示“覆盖情况未知”。`python scripts/check_provider.py` 可经生产调用路径测试当前配置，只输出安全状态、耗时与 Token，不输出密钥或上游响应正文。
 
-首页“模型连接”卡会被动读取服务端是否已配置，但不会自动请求模型。只有用户点击“测试模型连接”时才会发起一次可能消耗少量 Token 的最小 JSON 检查；页面仅显示配置状态、JSON 合同、错误分类、延迟、Token 和固定建议，不显示 endpoint、Key、Prompt 或模型原始响应。浏览器不提供 Key 输入框，也不使用浏览器存储保存凭据：请只在本地未提交的 `.env` 中配置 `ENABLE_MODEL_EXTRACTION`、`OPENAI_BASE_URL`、`OPENAI_API_KEY` 与 `OPENAI_MODEL`，修改后同时重启 API 和 Celery worker。
+首页“模型连接”卡会被动读取服务端是否已配置，但不会自动请求模型。只有用户点击“测试模型连接”时才会发起一次可能消耗少量 Token 的最小 JSON 检查；页面仅显示配置状态、JSON 合同、错误分类、延迟、Token 和固定建议，不显示 endpoint、Key、Prompt 或模型原始响应。浏览器不提供 Key 输入框，也不使用浏览器存储保存凭据：请只在本地未提交的 `.env` 中配置 `ENABLE_MODEL_EXTRACTION`、`ENABLE_ISSUE_EVIDENCE_REVIEW`、`OPENAI_BASE_URL`、`OPENAI_API_KEY` 与 `OPENAI_MODEL`，修改后同时重启 API 和 Celery worker。
 
 受限 Agent 第一阶段使用 LangGraph 1.2.11 `StateGraph` 编排，仅在显式设置 `ENABLE_REVIEW_AGENT=true` 时启用，默认关闭。模型每轮返回应用层 JSON 动作 `READ_SPAN`、`PATCH_RECORDS` 或 `ABSTAIN`；这不是、也未冒充 Provider 原生 `tool_calls` / function calling。服务端绑定冻结文档和证据范围、校验 span 与补丁，并只持久化不含 Prompt、原始响应、证据正文、Key 或 endpoint 的安全 trace。固定的 modality/source_scope/certainty 标签 repair pass 是另一条非 Agent 路径，不能混称为 Agent。
 
-冻结 Agent 验收集有 30 个开发者可见任务，每个重复 3 次。Mock oracle/scorer 的 90 次结果只验证工程边界；commit `bcbfab8` 的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由 runner 按冻结 manifest 合成注入，并非端到端真实模型抽取评测。该运行记录全部 90 次要求执行，严格正确 59/90，其中 holdout 81 次运行成功 74 次、7 次 `read_timeout`，恢复 26/51、主动弃答 24/30。共有 12 次补丁通过生产校验但不符合评测 oracle；服务端接受的安全违规为 0。运行成功轨迹中没有直接 `ABSTAIN` 路径，要求的三路径覆盖 gate 也失败，完整结果为 `passed=false`，所以不能声称 Agent、主抽取或产品质量收益。当前没有多智能体，真正把语义检索证据送入下游决策的 Evidence RAG 也未完成。详细边界见 [`docs/review-agent-phase1.md`](docs/review-agent-phase1.md)，脱敏结果见 [`docs/review-agent-v2-full-checkpoint-20260906.md`](docs/review-agent-v2-full-checkpoint-20260906.md)，冻结任务见 [`data/agent-acceptance-v2/manifest.json`](data/agent-acceptance-v2/manifest.json)，离线 runner 见 [`scripts/run_agent_acceptance.py`](scripts/run_agent_acceptance.py)。
+冻结 Agent 验收集有 30 个开发者可见任务，每个重复 3 次。Mock oracle/scorer 的 90 次结果只验证工程边界；commit `bcbfab8` 的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由 runner 按冻结 manifest 合成注入，并非端到端真实模型抽取评测。该运行记录全部 90 次要求执行，严格正确 59/90，其中 holdout 81 次运行成功 74 次、7 次 `read_timeout`，恢复 26/51、主动弃答 24/30。共有 12 次补丁通过生产校验但不符合评测 oracle；服务端接受的安全违规为 0。运行成功轨迹中没有直接 `ABSTAIN` 路径，要求的三路径覆盖 gate 也失败，完整结果为 `passed=false`，所以不能声称 Agent、主抽取或产品质量收益。当前没有多智能体。Evidence Reviewer 是另一条已经接通真实 RAG 的受限复核消费者，不等同于这个修复 Agent。详细边界见 [`docs/review-agent-phase1.md`](docs/review-agent-phase1.md)，脱敏结果见 [`docs/review-agent-v2-full-checkpoint-20260906.md`](docs/review-agent-v2-full-checkpoint-20260906.md)，冻结任务见 [`data/agent-acceptance-v2/manifest.json`](data/agent-acceptance-v2/manifest.json)，离线 runner 见 [`scripts/run_agent_acceptance.py`](scripts/run_agent_acceptance.py)。
 
-Evidence RAG 数据底座已实现独立显式配置的 OpenAI-compatible embedding client、中文行号感知分块、版本化 embedding profile、精确到项目/文档版本/内容哈希的 snapshot schema，以及 Alembic 迁移。本机 Docker Compose 已验证真实 PostgreSQL `vector` 列、pgvector 距离排序与 profile/snapshot 隔离；但尚未运行真实 embedding，尚未接入主分析检索消费者，也未完成混合检索相对现有候选排序的收益评测，因此 Evidence RAG 仍未完成，不能作为简历成果。
+Evidence RAG 已实现独立显式配置的 OpenAI-compatible embedding client、中文行号感知分块、版本化 embedding profile、精确 snapshot schema、Alembic、真实 BGE embedding、PostgreSQL/pgvector 精确余弦检索与 keyword+dense RRF。首次冻结 holdout 的混合 Recall@5 为 81.82%、All-evidence@5 为 71.43%、低词面 Recall@5 为 79.31%；最后一项差 1 条证据未过预设门槛，因此整体 gate 为 `false`，也不声称混合检索优于两种基线。`IssueEvidenceReviewer` 默认关闭；只有显式设置 `ENABLE_ISSUE_EVIDENCE_REVIEW=true` 并同时配置模型、embedding 与 PostgreSQL 才会执行。它只写入 `ai_evidence_review` 注释，不修改规则 issue。真实 A/B 结果见 [`docs/issue-review-v1-result-20260907.md`](docs/issue-review-v1-result-20260907.md)。
 
 只有同时配置 `MODEL_INPUT_PRICE_PER_MILLION` 和 `MODEL_OUTPUT_PRICE_PER_MILLION` 时才计算估算成本；未配置时 API/UI 显示“未配置”，不会把未知价格误报为 0 美元。
 
@@ -156,7 +160,7 @@ React/Vite ──HTTP/SSE── FastAPI
                Redis/Celery
 ```
 
-生产环境通过 `USE_CELERY=true` 将任务交给 Celery；本地演示默认使用后台线程。`NarrativeExtractor` 与 `ConsistencyChecker` 是可替换接口。当前主分析候选排序仍使用本地可复现的字符 n-gram，不消费 embedding。独立的 Evidence RAG 数据底座已具备 embedding client、中文行号分块、版本化 profile、精确 snapshot schema、Alembic 迁移和真实 PostgreSQL `vector` 列，并通过本机 Compose 的 pgvector 排序与隔离 smoke；真实 embedding、主链路消费和收益评测尚未完成。
+生产环境通过 `USE_CELERY=true` 将任务交给 Celery；本地演示默认使用后台线程。`NarrativeExtractor` 与 `ConsistencyChecker` 是可替换接口。确定性规则主路仍使用本地可复现的候选排序；真实 embedding/pgvector/RRF 作为独立的可选 Evidence RAG 通路，由后置 `IssueEvidenceReviewer` 消费。复核结果只作为规则 issue 的 AI 注释持久化，不反向修改规则结论。
 
 ## 与 ConStory-Bench 的关系
 
@@ -182,6 +186,8 @@ python scripts/run_agent_acceptance.py --mock-oracle --require-gates
 - `artifacts/complex-v3-evaluation.json`：14 例原创、多文档复杂验收场景，共 10 个固定预期问题；五类问题均有正例与困难反例。当前无模型固定基线 TP 10、FP 0、FN 0，证据对精确命中率 1.0。该数据由开发者编写且可见，只能作为可审计回归，不能估计开放故事或生产准确率。
 - `data/agent-acceptance-v1/`：30 个开发者可见冻结任务，3 类 persona 各 10 个，每任务重复 3 次。`--mock-oracle` 生成的 90 次 execution 仅用于验证离线 scorer、三类动态路径和安全约束；runner 当前不会调用生产 Agent，这些数字不得写成真实 Agent 评测或能力成绩。
 - `data/agent-acceptance-v2/`：修正 pilot 暴露的语义标签问题后冻结的 Agent 评测套件。Agent 阶段真实 Provider `full × 3` 已完成但 `passed=false`；主抽取候选为冻结合成注入，仓库只公开[脱敏聚合结论](docs/review-agent-v2-full-checkpoint-20260906.md)，不提交 Prompt、响应正文、凭据或故事运行产物。
+- `data/evidence-retrieval-v1/`：44 个原创中文检索问题，其中首次冻结 holdout 为 28 问、55 条期望证据。混合 Recall@5 81.82%、All-evidence@5 71.43%、低词面 Recall@5 79.31%；低词面少 1 条未过门槛，完整结论见 [`docs/evidence-retrieval-v1-holdout.md`](docs/evidence-retrieval-v1-holdout.md)。
+- `data/issue-review-v1/`：12 例原创、开发者可见的证据复核 A/B，每例真实调用 3 次。local-context 为 4/12，rag-evidence 为 7/12；绝对 gate 仍为 `false`。只公开脱敏聚合结果，见 [`docs/issue-review-v1-result-20260907.md`](docs/issue-review-v1-result-20260907.md)。
 
 完整数据位于 `data/evaluation-natural/`：40 个 dev 场景和 60 个 test 场景的 `scenario_id` 不重叠。它是模板生成的 `synthetic natural-language` 数据，不是人工标注集，也不能外推为生产准确率。评测 harness 运行 test 时只打开 `test.jsonl`，测试样本不进入 Prompt 或调参示例。
 
@@ -252,7 +258,7 @@ python scripts/run_long_text_smoke.py
 - 当前已验证模型抽取协议、降级机制、工程安全边界和一次冻结真实 Phase 1 运行；但当前新中转/模型的严格 gate 为 0/3，且尚未完成真实长篇人工标注评测，不能宣称开放文本准确率或当前模型能力达标。
 - `document_context` 与运行输入上下文采用附加关联表兼容旧 SQLite；旧文档读取为安全默认 `chapter/global` 并标记上下文并非显式保存。数据库升级现由 Alembic 管理，覆盖空库、旧 `create_all` 库和此前 WIP schema 的保守升级；残缺或约束不完整的同名表会拒绝采用，不再以 `create_all` 充当正式升级路径。
 - 版本差异只在当前项目和同名文档边界内运行，不调用模型。默认每个版本最多处理前 20,000 行/2,000,000 字符并最多返回 4,000 行差异，超限会在响应和页面显式提示。
-- LangGraph 1.2.11 `StateGraph` 的受限修复循环已作为默认关闭的第一阶段代码接入；v2 Agent 阶段真实 Provider full 已执行但完整 gate 失败，且主抽取候选为冻结合成注入，不能列作已证明收益、端到端抽取成绩或简历成绩。它不是原生 `tool_calls`，也没有多智能体。embedding/pgvector 数据底座与真实 `vector` 列已实现并通过本机 Compose smoke；真实 embedding、主分析检索消费、混合检索收益评测、完整 Evidence RAG 与 OpenTelemetry 链路仍属于后续阶段。
+- LangGraph 1.2.11 `StateGraph` 的受限修复循环已作为默认关闭的第一阶段代码接入；v2 Agent 阶段真实 Provider full 已执行但完整 gate 失败，且主抽取候选为冻结合成注入，不能列作已证明收益或端到端抽取成绩。它不是原生 `tool_calls`，也没有多智能体。真实 embedding、pgvector、RRF 和后置 Evidence Reviewer 已完成工程闭环与冻结 A/B；两套 gate 的失败项必须同时公开。项目已达到当前简历工程展示的停止线，后续优先进入本人体验、学习、讲解和投递，不再以扩功能推迟投递。
 - 详细完成度见 [`docs/completion-status.md`](docs/completion-status.md)，学习顺序见 [`docs/learning-guide.md`](docs/learning-guide.md)。
 - 长篇容量的当前硬限制、实用范围和百万字扩展路线见 [`docs/scalability-roadmap.md`](docs/scalability-roadmap.md)。
 
