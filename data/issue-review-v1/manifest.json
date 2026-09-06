@@ -1,0 +1,360 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "issue-review-v1",
+  "language": "zh-CN",
+  "status": "frozen",
+  "license": "MIT",
+  "provenance": "全部世界观、人物、规则、章节、候选问题与标注均为本仓开发者原创；未使用商业游戏语料，未调用外部模型生成或修订。",
+  "evaluation_boundary": "开发者可见的冻结小样本，用于评估规则问题的受约束 AI 证据复核；不是盲测、开放文本能力或生产质量证明。",
+  "answer_isolation": "执行阶段只能读取移除 expected 字段后的样本包；预测原子落盘后，评分阶段才可读取 expected。holdout 首次正式运行后不得在 v1 上调样本、Prompt 或配置。",
+  "verdicts": {
+    "supports_issue": "获授权证据足以支持候选问题。",
+    "contextual_exception": "表面冲突由规则例外、同一身份、梦境/回忆边界或互斥剧情分支解释。",
+    "insufficient_evidence": "获授权证据不足，不能把假设、缺失事实、传闻、旧版或错误来源当成确定冲突。"
+  },
+  "splits": {
+    "dev": {"case_count": 6, "tuning_allowed": true},
+    "holdout": {"case_count": 6, "tuning_allowed": false}
+  },
+  "worlds": [
+    {
+      "world_id": "glass-tide",
+      "project_id": "issue-review-dev-glass-tide",
+      "split": "dev",
+      "documents": [
+        {"document_id": "gt-canon", "version": 2, "role": "canon", "active": true, "authorized_for_review": true, "path": "worlds/glass-tide/canon-v2.md"},
+        {"document_id": "gt-chapter", "version": 1, "role": "chapter", "active": true, "authorized_for_review": true, "path": "worlds/glass-tide/chapter-current-v1.md"},
+        {"document_id": "gt-operations", "version": 1, "role": "operations_record", "active": true, "authorized_for_review": true, "path": "worlds/glass-tide/operations-v1.md"}
+      ]
+    },
+    {
+      "world_id": "ember-opera",
+      "project_id": "issue-review-holdout-ember-opera",
+      "split": "holdout",
+      "documents": [
+        {"document_id": "eo-canon", "version": 3, "role": "canon", "active": true, "authorized_for_review": true, "path": "worlds/ember-opera/canon-v3.md"},
+        {"document_id": "eo-chapter", "version": 1, "role": "chapter", "active": true, "authorized_for_review": true, "path": "worlds/ember-opera/chapter-current-v1.md"},
+        {"document_id": "eo-records", "version": 1, "role": "audit_record", "active": true, "authorized_for_review": true, "path": "worlds/ember-opera/records-v1.md"},
+        {"document_id": "eo-route-ember", "version": 1, "role": "exclusive_branch", "active": true, "authorized_for_review": true, "path": "worlds/ember-opera/route-ember-v1.md", "branch_id": "ember-gate"},
+        {"document_id": "eo-route-paper", "version": 1, "role": "exclusive_branch", "active": true, "authorized_for_review": true, "path": "worlds/ember-opera/route-paper-v1.md", "branch_id": "paper-moon"},
+        {"document_id": "eo-fog-rule", "version": 3, "role": "current_rule_index", "active": true, "authorized_for_review": true, "path": "worlds/ember-opera/fog-bridge-v3.md"},
+        {"document_id": "eo-fog-rule", "version": 2, "role": "stale_canon", "active": false, "authorized_for_review": false, "path": "worlds/ember-opera/fog-bridge-v2.md"},
+        {"document_id": "eo-foreign-guide", "version": 1, "role": "foreign_source", "active": true, "authorized_for_review": false, "path": "worlds/ember-opera/foreign-stage-guide-v1.md"}
+      ]
+    }
+  ],
+  "evidence": [
+    {"evidence_id": "GT-CAN-01", "world_id": "glass-tide", "document_id": "gt-canon", "version": 2, "start_line": 1, "end_line": 1},
+    {"evidence_id": "GT-CAN-02", "world_id": "glass-tide", "document_id": "gt-canon", "version": 2, "start_line": 2, "end_line": 2},
+    {"evidence_id": "GT-CAN-03", "world_id": "glass-tide", "document_id": "gt-canon", "version": 2, "start_line": 3, "end_line": 3},
+    {"evidence_id": "GT-CAN-04", "world_id": "glass-tide", "document_id": "gt-canon", "version": 2, "start_line": 4, "end_line": 4},
+    {"evidence_id": "GT-CAN-05", "world_id": "glass-tide", "document_id": "gt-canon", "version": 2, "start_line": 5, "end_line": 5},
+    {"evidence_id": "GT-CAN-06", "world_id": "glass-tide", "document_id": "gt-canon", "version": 2, "start_line": 6, "end_line": 6},
+    {"evidence_id": "GT-CAN-07", "world_id": "glass-tide", "document_id": "gt-canon", "version": 2, "start_line": 7, "end_line": 7},
+    {"evidence_id": "GT-CH-01", "world_id": "glass-tide", "document_id": "gt-chapter", "version": 1, "start_line": 1, "end_line": 1},
+    {"evidence_id": "GT-CH-02", "world_id": "glass-tide", "document_id": "gt-chapter", "version": 1, "start_line": 2, "end_line": 2},
+    {"evidence_id": "GT-CH-03", "world_id": "glass-tide", "document_id": "gt-chapter", "version": 1, "start_line": 3, "end_line": 3},
+    {"evidence_id": "GT-CH-04", "world_id": "glass-tide", "document_id": "gt-chapter", "version": 1, "start_line": 4, "end_line": 4},
+    {"evidence_id": "GT-CH-05", "world_id": "glass-tide", "document_id": "gt-chapter", "version": 1, "start_line": 5, "end_line": 5},
+    {"evidence_id": "GT-CH-06", "world_id": "glass-tide", "document_id": "gt-chapter", "version": 1, "start_line": 6, "end_line": 6},
+    {"evidence_id": "GT-OPS-01", "world_id": "glass-tide", "document_id": "gt-operations", "version": 1, "start_line": 1, "end_line": 1},
+    {"evidence_id": "GT-OPS-02", "world_id": "glass-tide", "document_id": "gt-operations", "version": 1, "start_line": 2, "end_line": 2},
+    {"evidence_id": "GT-OPS-03", "world_id": "glass-tide", "document_id": "gt-operations", "version": 1, "start_line": 3, "end_line": 3},
+    {"evidence_id": "GT-OPS-04", "world_id": "glass-tide", "document_id": "gt-operations", "version": 1, "start_line": 4, "end_line": 4},
+    {"evidence_id": "GT-OPS-05", "world_id": "glass-tide", "document_id": "gt-operations", "version": 1, "start_line": 5, "end_line": 5},
+    {"evidence_id": "GT-OPS-06", "world_id": "glass-tide", "document_id": "gt-operations", "version": 1, "start_line": 6, "end_line": 6},
+    {"evidence_id": "GT-OPS-07", "world_id": "glass-tide", "document_id": "gt-operations", "version": 1, "start_line": 7, "end_line": 7},
+    {"evidence_id": "EO-CAN-01", "world_id": "ember-opera", "document_id": "eo-canon", "version": 3, "start_line": 1, "end_line": 1},
+    {"evidence_id": "EO-CAN-02", "world_id": "ember-opera", "document_id": "eo-canon", "version": 3, "start_line": 2, "end_line": 2},
+    {"evidence_id": "EO-CAN-03", "world_id": "ember-opera", "document_id": "eo-canon", "version": 3, "start_line": 3, "end_line": 3},
+    {"evidence_id": "EO-CAN-04", "world_id": "ember-opera", "document_id": "eo-canon", "version": 3, "start_line": 4, "end_line": 4},
+    {"evidence_id": "EO-CAN-05", "world_id": "ember-opera", "document_id": "eo-canon", "version": 3, "start_line": 5, "end_line": 5},
+    {"evidence_id": "EO-CAN-06", "world_id": "ember-opera", "document_id": "eo-canon", "version": 3, "start_line": 6, "end_line": 6},
+    {"evidence_id": "EO-CAN-07", "world_id": "ember-opera", "document_id": "eo-canon", "version": 3, "start_line": 7, "end_line": 7},
+    {"evidence_id": "EO-CH-01", "world_id": "ember-opera", "document_id": "eo-chapter", "version": 1, "start_line": 1, "end_line": 1},
+    {"evidence_id": "EO-CH-02", "world_id": "ember-opera", "document_id": "eo-chapter", "version": 1, "start_line": 2, "end_line": 2},
+    {"evidence_id": "EO-CH-03", "world_id": "ember-opera", "document_id": "eo-chapter", "version": 1, "start_line": 3, "end_line": 3},
+    {"evidence_id": "EO-CH-04", "world_id": "ember-opera", "document_id": "eo-chapter", "version": 1, "start_line": 4, "end_line": 4},
+    {"evidence_id": "EO-CH-05", "world_id": "ember-opera", "document_id": "eo-chapter", "version": 1, "start_line": 5, "end_line": 5},
+    {"evidence_id": "EO-CH-06", "world_id": "ember-opera", "document_id": "eo-chapter", "version": 1, "start_line": 6, "end_line": 6},
+    {"evidence_id": "EO-REC-01", "world_id": "ember-opera", "document_id": "eo-records", "version": 1, "start_line": 1, "end_line": 1},
+    {"evidence_id": "EO-REC-02", "world_id": "ember-opera", "document_id": "eo-records", "version": 1, "start_line": 2, "end_line": 2},
+    {"evidence_id": "EO-REC-03", "world_id": "ember-opera", "document_id": "eo-records", "version": 1, "start_line": 3, "end_line": 3},
+    {"evidence_id": "EO-REC-04", "world_id": "ember-opera", "document_id": "eo-records", "version": 1, "start_line": 4, "end_line": 4},
+    {"evidence_id": "EO-REC-05", "world_id": "ember-opera", "document_id": "eo-records", "version": 1, "start_line": 5, "end_line": 5},
+    {"evidence_id": "EO-REC-06", "world_id": "ember-opera", "document_id": "eo-records", "version": 1, "start_line": 6, "end_line": 6},
+    {"evidence_id": "EO-REC-07", "world_id": "ember-opera", "document_id": "eo-records", "version": 1, "start_line": 7, "end_line": 7},
+    {"evidence_id": "EO-REC-08", "world_id": "ember-opera", "document_id": "eo-records", "version": 1, "start_line": 8, "end_line": 8},
+    {"evidence_id": "EO-BRA-01", "world_id": "ember-opera", "document_id": "eo-route-ember", "version": 1, "start_line": 1, "end_line": 1},
+    {"evidence_id": "EO-BRB-01", "world_id": "ember-opera", "document_id": "eo-route-paper", "version": 1, "start_line": 1, "end_line": 1},
+    {"evidence_id": "EO-FOG-03", "world_id": "ember-opera", "document_id": "eo-fog-rule", "version": 3, "start_line": 1, "end_line": 1},
+    {"evidence_id": "EO-OLD-01", "world_id": "ember-opera", "document_id": "eo-fog-rule", "version": 2, "start_line": 1, "end_line": 1},
+    {"evidence_id": "EO-WRONG-01", "world_id": "ember-opera", "document_id": "eo-foreign-guide", "version": 1, "start_line": 1, "end_line": 1}
+  ],
+  "cases": [
+    {
+      "case_id": "GT-D-01",
+      "split": "dev",
+      "world_id": "glass-tide",
+      "labels": ["knowledge_overreach", "cross_document_timeline"],
+      "candidate_issue": {
+        "issue_type": "knowledge_overreach",
+        "rule_category": "character_knowledge",
+        "severity": "high",
+        "summary": "璃舟在首次接触蓝皮调度簿之前说出了受限的封潮口令。",
+        "detector_basis": "规则引擎在角色对白中抽取到受限口令，并据此生成知识时序候选问题。"
+      },
+      "current_evidence_ids": ["GT-CH-01"],
+      "retrievable_evidence_ids": ["GT-CAN-03", "GT-OPS-01", "GT-OPS-02"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "supports_issue",
+        "citation_evidence_ids": ["GT-CH-01", "GT-CAN-03", "GT-OPS-01"],
+        "rationale": "受限知识、20:40 的使用、21:10 的首次阅读和统一校准时点共同形成完整时间链。",
+        "required_reasoning_tags": ["temporal_order", "knowledge_acquisition"]
+      }
+    },
+    {
+      "case_id": "GT-D-02",
+      "split": "dev",
+      "world_id": "glass-tide",
+      "labels": ["unique_object", "sealed_state", "cross_document_timeline"],
+      "candidate_issue": {
+        "issue_type": "object_state_conflict",
+        "rule_category": "inventory_and_identity",
+        "severity": "high",
+        "summary": "唯一的 M-17 在持续封库期间又被维修蜂群接入东侧泵组。",
+        "detector_basis": "规则引擎从维修日志抽取到序列号 M-17 的接入状态，并生成物件状态候选问题。"
+      },
+      "current_evidence_ids": ["GT-CH-02"],
+      "retrievable_evidence_ids": ["GT-CAN-04", "GT-OPS-03"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "supports_issue",
+        "citation_evidence_ids": ["GT-CH-02", "GT-CAN-04", "GT-OPS-03"],
+        "rationale": "语料排除了复制品和远程替代，且封存窗口覆盖零点五分的使用记录。",
+        "required_reasoning_tags": ["object_identity", "interval_overlap"]
+      }
+    },
+    {
+      "case_id": "GT-D-03",
+      "split": "dev",
+      "world_id": "glass-tide",
+      "labels": ["rule_exception", "compound_authorization"],
+      "candidate_issue": {
+        "issue_type": "world_rule_conflict",
+        "rule_category": "restricted_area",
+        "severity": "medium",
+        "summary": "非潮务人员唐沂在黑潮警报期间进入了下层系泊廊。",
+        "detector_basis": "规则引擎观察到非潮务编制角色在黑潮警报期间进入受限区域。"
+      },
+      "current_evidence_ids": ["GT-CH-03"],
+      "retrievable_evidence_ids": ["GT-CAN-01", "GT-OPS-04"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "contextual_exception",
+        "citation_evidence_ids": ["GT-CH-03", "GT-CAN-01", "GT-OPS-04"],
+        "rationale": "唐沂同时持有两件有效凭证且执行已登记抢险，完整满足规则中的合取例外。",
+        "required_reasoning_tags": ["exception_rule", "and_condition"]
+      }
+    },
+    {
+      "case_id": "GT-D-04",
+      "split": "dev",
+      "world_id": "glass-tide",
+      "labels": ["alias", "identity_resolution"],
+      "candidate_issue": {
+        "issue_type": "authorization_conflict",
+        "rule_category": "identity_permission",
+        "severity": "medium",
+        "summary": "玄雁并非首席档案官黎澄，却独自启用了只对黎澄授权的苍白灯。",
+        "detector_basis": "规则引擎发现执行者字符串“玄雁”与授权主体字符串“黎澄”不完全一致。"
+      },
+      "current_evidence_ids": ["GT-CH-04"],
+      "retrievable_evidence_ids": ["GT-CAN-02", "GT-OPS-05"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "contextual_exception",
+        "citation_evidence_ids": ["GT-CH-04", "GT-CAN-02"],
+        "rationale": "身份登记明确玄雁就是黎澄，章节中的呼号签名并未产生第二个未授权角色。",
+        "required_reasoning_tags": ["alias_resolution", "identity_equivalence"]
+      }
+    },
+    {
+      "case_id": "GT-D-05",
+      "split": "dev",
+      "world_id": "glass-tide",
+      "labels": ["question", "hypothesis", "modality"],
+      "candidate_issue": {
+        "issue_type": "world_rule_conflict",
+        "rule_category": "gate_security",
+        "severity": "low",
+        "summary": "把反潮镜转向内侧可以让无通行牌者绕过潮门。",
+        "detector_basis": "规则引擎从涉及反潮镜与无牌通行的句子中抽取出机制性陈述。"
+      },
+      "current_evidence_ids": ["GT-CH-05"],
+      "retrievable_evidence_ids": ["GT-CAN-05", "GT-OPS-06"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "insufficient_evidence",
+        "citation_evidence_ids": ["GT-CH-05", "GT-CAN-05"],
+        "rationale": "原句是未执行、未回答的设问；按叙事事实标准，它不能形成确定事实或冲突。",
+        "required_reasoning_tags": ["speech_act", "epistemic_modality"]
+      }
+    },
+    {
+      "case_id": "GT-D-06",
+      "split": "dev",
+      "world_id": "glass-tide",
+      "labels": ["missing_counterfact", "knowledge_acquisition"],
+      "candidate_issue": {
+        "issue_type": "knowledge_overreach",
+        "rule_category": "character_knowledge",
+        "severity": "medium",
+        "summary": "河笺在获得三段式信标密钥知识之前就完成了解码。",
+        "detector_basis": "规则引擎观察到角色首次出场即完成受限技术动作，并生成知识时序候选问题。"
+      },
+      "current_evidence_ids": ["GT-CH-06"],
+      "retrievable_evidence_ids": ["GT-CAN-07", "GT-OPS-07"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "insufficient_evidence",
+        "citation_evidence_ids": ["GT-CH-06", "GT-OPS-07"],
+        "rationale": "只能证明河笺会解码，不能证明她此前不会或在该场景前没有获得知识；缺失的是冲突的另一侧。",
+        "required_reasoning_tags": ["missing_evidence", "burden_of_proof"]
+      }
+    },
+    {
+      "case_id": "EO-H-01",
+      "split": "holdout",
+      "world_id": "ember-opera",
+      "labels": ["same_time_two_locations", "cross_document_timeline"],
+      "candidate_issue": {
+        "issue_type": "location_conflict",
+        "rule_category": "spatiotemporal_consistency",
+        "severity": "high",
+        "summary": "止垣在 17:00 至 17:12 同时位于东礼堂舞台和封闭的西侧密室。",
+        "detector_basis": "规则引擎在场景叙述与轨迹记录中发现止垣于重叠时间窗关联两个地点。"
+      },
+      "current_evidence_ids": ["EO-CH-01"],
+      "retrievable_evidence_ids": ["EO-CAN-01", "EO-REC-01", "EO-REC-02"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "supports_issue",
+        "citation_evidence_ids": ["EO-CH-01", "EO-CAN-01", "EO-REC-01"],
+        "rationale": "两处记录时间重叠，且语料排除了追踪环拆卸、替身和投影等常见解释。",
+        "required_reasoning_tags": ["interval_overlap", "location_exclusivity"]
+      }
+    },
+    {
+      "case_id": "EO-H-02",
+      "split": "holdout",
+      "world_id": "ember-opera",
+      "labels": ["world_rule", "authorization", "temporal_order"],
+      "candidate_issue": {
+        "issue_type": "world_rule_conflict",
+        "rule_category": "contract_mutation",
+        "severity": "high",
+        "summary": "档案吏在终场钟后删除铃契姓名，却没有提前完成静默钥双人反签。",
+        "detector_basis": "规则引擎观察到铃契姓名删除行为与终场钟、静默钥和反签状态同时出现。"
+      },
+      "current_evidence_ids": ["EO-CH-02"],
+      "retrievable_evidence_ids": ["EO-CAN-02", "EO-REC-03"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "supports_issue",
+        "citation_evidence_ids": ["EO-CH-02", "EO-CAN-02"],
+        "rationale": "章节明确删除发生在终场钟之后，并同时否定静默钥与双人反签，规则例外不可用。",
+        "required_reasoning_tags": ["temporal_boundary", "exception_negation"]
+      }
+    },
+    {
+      "case_id": "EO-H-03",
+      "split": "holdout",
+      "world_id": "ember-opera",
+      "labels": ["dream", "memory_replay", "diegetic_layer"],
+      "candidate_issue": {
+        "issue_type": "character_state_conflict",
+        "rule_category": "life_state",
+        "severity": "high",
+        "summary": "已经下葬的桑迟在第七夜复生，并在现实中与妹妹交谈。",
+        "detector_basis": "规则引擎在葬礼后的章节中抽取到桑迟说话和递交物件的动作。"
+      },
+      "current_evidence_ids": ["EO-CH-03"],
+      "retrievable_evidence_ids": ["EO-CAN-03", "EO-REC-04"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "contextual_exception",
+        "citation_evidence_ids": ["EO-CH-03", "EO-REC-04"],
+        "rationale": "该段发生在梦匣生成的逝者记忆回放层，不属于现实时间线中的复生。",
+        "required_reasoning_tags": ["narrative_layer", "memory_replay"]
+      }
+    },
+    {
+      "case_id": "EO-H-04",
+      "split": "holdout",
+      "world_id": "ember-opera",
+      "labels": ["exclusive_branch", "object_ownership"],
+      "candidate_issue": {
+        "issue_type": "object_state_conflict",
+        "rule_category": "branch_state",
+        "severity": "medium",
+        "summary": "唯一的赤羽面具同时由琴师佩戴并被舞监封存在证物柜。",
+        "detector_basis": "规则引擎在两个章节中抽取到赤羽面具由不同角色持有的状态。"
+      },
+      "current_evidence_ids": ["EO-BRA-01", "EO-BRB-01"],
+      "retrievable_evidence_ids": ["EO-CAN-04", "EO-REC-05"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "contextual_exception",
+        "citation_evidence_ids": ["EO-BRA-01", "EO-BRB-01", "EO-CAN-04"],
+        "rationale": "两种归属分别属于选择点后的互斥分支，不能合并成同一条连续时间线。",
+        "required_reasoning_tags": ["branch_scope", "mutual_exclusion"]
+      }
+    },
+    {
+      "case_id": "EO-H-05",
+      "split": "holdout",
+      "world_id": "ember-opera",
+      "labels": ["hearsay", "unverified_source", "same_time_two_locations"],
+      "candidate_issue": {
+        "issue_type": "location_conflict",
+        "rule_category": "spatiotemporal_consistency",
+        "severity": "medium",
+        "summary": "摄政官昨夜同时在北塔与南池出现。",
+        "detector_basis": "规则引擎从对白中抽取到摄政官同夜关联北塔和南池两处地点。"
+      },
+      "current_evidence_ids": ["EO-CH-04"],
+      "retrievable_evidence_ids": ["EO-CAN-05", "EO-REC-06"],
+      "excluded_evidence_ids": [],
+      "expected": {
+        "verdict": "insufficient_evidence",
+        "citation_evidence_ids": ["EO-CH-04", "EO-REC-06"],
+        "rationale": "唯一来源是二手匿名传闻，且三个可用于佐证的权威记录都缺失，不能确认任一地点事实。",
+        "required_reasoning_tags": ["source_reliability", "missing_corroboration"]
+      }
+    },
+    {
+      "case_id": "EO-H-06",
+      "split": "holdout",
+      "world_id": "ember-opera",
+      "labels": ["stale_version", "wrong_source", "source_isolation"],
+      "candidate_issue": {
+        "issue_type": "authorization_conflict",
+        "rule_category": "bridge_access",
+        "severity": "medium",
+        "summary": "末弦未佩戴月纹印通过雾桥，违反了现行通行规则。",
+        "detector_basis": "规则引擎发现末弦无月纹印通过雾桥，并将两份同名设施规范关联到该行为。"
+      },
+      "current_evidence_ids": ["EO-CH-05", "EO-CH-06"],
+      "retrievable_evidence_ids": ["EO-FOG-03", "EO-CAN-06", "EO-CAN-07", "EO-REC-07", "EO-REC-08"],
+      "excluded_evidence_ids": ["EO-OLD-01", "EO-WRONG-01"],
+      "expected": {
+        "verdict": "insufficient_evidence",
+        "citation_evidence_ids": ["EO-CH-05", "EO-FOG-03", "EO-CAN-07"],
+        "rationale": "两份所谓规则分别过期和来源错误，不能进入有效证据；现行《夜航附录》又未收录，所以既不能判违规也不能判合规。",
+        "required_reasoning_tags": ["version_isolation", "source_isolation", "missing_current_rule"]
+      }
+    }
+  ]
+}

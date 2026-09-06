@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "issue-review-v1",
+  "frozen_at": "2026-09-07",
+  "freeze_policy": "修改 manifest、README 或任一语料文件必须升级数据集版本；不得在同一 v1 标识下重写哈希。freeze.json 不递归记录自身哈希。",
+  "generation_policy": "本版本在查看任何未来模型输出前一次性设计和冻结，未调用外部模型或 API。",
+  "counts": {
+    "cases": 12,
+    "dev_cases": 6,
+    "holdout_cases": 6,
+    "supports_issue_cases": 4,
+    "contextual_exception_cases": 4,
+    "insufficient_evidence_cases": 4,
+    "evidence": 46,
+    "documents": 11
+  },
+  "coverage": {
+    "supports_issue": ["knowledge_overreach", "unique_object_sealed_state", "same_time_two_locations", "post_boundary_unauthorized_mutation"],
+    "contextual_exception": ["compound_rule_exception", "identity_alias", "dream_memory_replay", "mutually_exclusive_branch"],
+    "insufficient_evidence": ["question_hypothesis", "missing_counterfact", "hearsay", "stale_version_and_wrong_source"]
+  },
+  "frozen_files": [
+    {"path": "manifest.json", "sha256": "2e216d6452917d08dec0b909012dde6fe39caa1b967847b79f49a204c7febcee", "bytes": 22210, "line_count": 360},
+    {"path": "README.md", "sha256": "e604204844967f1b14b5aac57705c2ef4ac5588fffce55189ff3b82f02c7cd7f", "bytes": 3331, "line_count": 42},
+    {"path": "worlds/ember-opera/canon-v3.md", "sha256": "513389fe3f9f6f8bdd961286056012bcb72c39d0383b76e78817ad6a051b02b2", "bytes": 1239, "line_count": 7},
+    {"path": "worlds/ember-opera/chapter-current-v1.md", "sha256": "847049a40e47478ff000bd1fb7ea8ba6368e6fc596f33b44cae2fd1f619d9fc8", "bytes": 908, "line_count": 6},
+    {"path": "worlds/ember-opera/fog-bridge-v2.md", "sha256": "c2425f3db5e9df37f7caf9dfb495635c6ea77d30eddba8570411cf526e1c90d1", "bytes": 109, "line_count": 1},
+    {"path": "worlds/ember-opera/fog-bridge-v3.md", "sha256": "fd27376e7386ae046ce7f2b152ff65217093fdd6eb862c5d7c843e4ab43d3125", "bytes": 214, "line_count": 1},
+    {"path": "worlds/ember-opera/foreign-stage-guide-v1.md", "sha256": "4a7bd7e382c8ee3b6949f25f4e3b1e6a92324c72c56ece057e9b57a2482fea98", "bytes": 136, "line_count": 1},
+    {"path": "worlds/ember-opera/records-v1.md", "sha256": "3cf1ad9f274a4fe824e4c668fd851e2428b799d8896bea8ab27b43cc1169920f", "bytes": 1302, "line_count": 8},
+    {"path": "worlds/ember-opera/route-ember-v1.md", "sha256": "95895d605fbc37b60d9d91bd63494ff9c9a2ed6acd74f8ac76dc7483b0813815", "bytes": 142, "line_count": 1},
+    {"path": "worlds/ember-opera/route-paper-v1.md", "sha256": "f5df6ac8b664a8513e0b94b1e2d542b191a35b26cb8f7aeeafa6e939a66b4018", "bytes": 148, "line_count": 1},
+    {"path": "worlds/glass-tide/canon-v2.md", "sha256": "4758bee026455734c7f0a2ef5a6d57ad3a1daf7b58b6878568dbe158ab3df83f", "bytes": 1108, "line_count": 7},
+    {"path": "worlds/glass-tide/chapter-current-v1.md", "sha256": "88159551bb1cfe2b57e1c142a4a1ce92bc2a8213116ee731aaf69ada723ea6b9", "bytes": 866, "line_count": 6},
+    {"path": "worlds/glass-tide/operations-v1.md", "sha256": "172065fa8907ca4c1e4dc93226509a5c1eca3a05a72ee9b75b92080a01ff5883", "bytes": 1077, "line_count": 7}
+  ]
+}
