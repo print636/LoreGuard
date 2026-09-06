@@ -15,6 +15,25 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
     enable_model_extraction: bool = False
+    # Evidence embeddings are an independent, opt-in capability.  Do not fall
+    # back to the chat/extraction credential or model: deployments commonly
+    # route the two APIs to different providers and trust boundaries.
+    enable_embeddings: bool = False
+    embedding_api_key: str = Field(default="", max_length=4_096)
+    embedding_base_url: str = Field(default="", max_length=2_048)
+    embedding_model: str = Field(default="", max_length=255)
+    embedding_model_revision: str = Field(default="unspecified", max_length=120)
+    embedding_profile_namespace: str = Field(default="default", max_length=80)
+    embedding_dimensions: int | None = Field(default=None, ge=1, le=16_000)
+    embedding_allow_insecure_http: bool = False
+    embedding_timeout_seconds: float = Field(default=10.0, gt=0, le=30.0)
+    embedding_max_attempts: int = Field(default=2, ge=1, le=4)
+    embedding_total_deadline_seconds: float = Field(default=20.0, gt=0, le=60.0)
+    embedding_max_response_bytes: int = Field(
+        default=4 * 1024 * 1024, ge=1, le=16 * 1024 * 1024
+    )
+    embedding_batch_max_items: int = Field(default=64, ge=1, le=256)
+    embedding_batch_max_chars: int = Field(default=120_000, ge=1, le=500_000)
     provider_timeout_seconds: float = 30
     provider_max_attempts: int = 2
     # Generic OpenAI-compatible behavior is capability-neutral by default.
@@ -82,6 +101,14 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_empty_review_agent_completion_limit(cls, value):
         """An unset Compose interpolation keeps the relay-neutral None default."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("embedding_dimensions", mode="before")
+    @classmethod
+    def normalize_empty_embedding_dimensions(cls, value):
+        """An unset dimension keeps the embedding capability unconfigured."""
         if isinstance(value, str) and not value.strip():
             return None
         return value

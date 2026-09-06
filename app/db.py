@@ -1,9 +1,28 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, create_engine
+from alembic import command
+from alembic.config import Config
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    event,
+)
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from .config import get_settings
@@ -29,6 +48,9 @@ class ProjectRow(Base):
 
 class DocumentRow(Base):
     __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("project_id", "id", name="uq_documents_project_id_id"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
@@ -169,11 +191,138 @@ class FeedbackRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
+class EmbeddingProfileRow(Base):
+    """A versioned embedding-space identity; never stores credentials or URLs."""
+
+    __tablename__ = "embedding_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_kind",
+            "provider_namespace",
+            "model_identifier",
+            "model_revision",
+            "dimensions",
+            "normalized",
+            name="uq_embedding_profile_identity",
+        ),
+        CheckConstraint(
+            "dimensions > 0 AND dimensions <= 16000",
+            name="ck_embedding_profile_dimensions",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    provider_kind: Mapped[str] = mapped_column(String(40))
+    provider_namespace: Mapped[str] = mapped_column(String(80))
+    model_identifier: Mapped[str] = mapped_column(String(255))
+    model_revision: Mapped[str] = mapped_column(String(120))
+    dimensions: Mapped[int] = mapped_column(Integer)
+    normalized: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class EvidenceChunkRow(Base):
+    """Deterministic chunk bound to one exact document snapshot."""
+
+    __tablename__ = "evidence_chunks"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id", "document_id"],
+            ["documents.project_id", "documents.id"],
+            name="fk_evidence_chunk_document_owner",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "document_id",
+            "document_version",
+            "content_sha256",
+            "chunker_version",
+            "ordinal",
+            name="uq_evidence_chunk_snapshot_ordinal",
+        ),
+        CheckConstraint("document_version > 0", name="ck_evidence_chunk_version"),
+        CheckConstraint("ordinal >= 0", name="ck_evidence_chunk_ordinal"),
+        CheckConstraint("line_start > 0", name="ck_evidence_chunk_line_start"),
+        CheckConstraint("line_end >= line_start", name="ck_evidence_chunk_line_end"),
+        CheckConstraint("char_start >= 0", name="ck_evidence_chunk_char_start"),
+        CheckConstraint("char_end > char_start", name="ck_evidence_chunk_char_end"),
+        CheckConstraint(
+            "length(content_sha256) = 64", name="ck_evidence_chunk_content_hash"
+        ),
+        CheckConstraint(
+            "length(text_sha256) = 64", name="ck_evidence_chunk_text_hash"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    document_id: Mapped[str] = mapped_column(String(36), index=True)
+    document_version: Mapped[int] = mapped_column(Integer)
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    chunker_version: Mapped[str] = mapped_column(String(80))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    text_sha256: Mapped[str] = mapped_column(String(64))
+    char_start: Mapped[int] = mapped_column(Integer)
+    char_end: Mapped[int] = mapped_column(Integer)
+    line_start: Mapped[int] = mapped_column(Integer)
+    line_end: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class EvidenceEmbeddingRow(Base):
+    """Vector for a chunk/profile pair.
+
+    PostgreSQL gets a real pgvector column.  SQLite's JSON variant exists only
+    for deterministic local and unit-test storage; it is not a similarity
+    search implementation.
+    """
+
+    __tablename__ = "evidence_embeddings"
+    __table_args__ = (
+        CheckConstraint(
+            "dimensions > 0 AND dimensions <= 16000",
+            name="ck_evidence_embedding_dimensions",
+        ),
+    )
+    chunk_id: Mapped[str] = mapped_column(
+        ForeignKey("evidence_chunks.id", ondelete="CASCADE"), primary_key=True
+    )
+    profile_id: Mapped[str] = mapped_column(
+        ForeignKey("embedding_profiles.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+    dimensions: Mapped[int] = mapped_column(Integer)
+    vector: Mapped[list[float]] = mapped_column(
+        Vector().with_variant(JSON(), "sqlite")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+def enable_sqlite_foreign_keys(target_engine: Engine) -> None:
+    """Enable SQLite FK enforcement for application and explicit test engines."""
+
+    @event.listens_for(target_engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+
+
 settings = get_settings()
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args)
+if settings.database_url.startswith("sqlite"):
+    enable_sqlite_foreign_keys(engine)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 def init_db() -> None:
-    Base.metadata.create_all(engine)
+    """Upgrade product databases through versioned, additive migrations."""
+
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    config.attributes["database_url"] = settings.database_url
+    command.upgrade(config, "head")

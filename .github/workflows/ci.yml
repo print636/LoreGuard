@@ -3,6 +3,12 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite:////tmp/loreguard-ci.db
+      OPENAI_API_KEY: ""
+      ENABLE_MODEL_EXTRACTION: "false"
+      ENABLE_REVIEW_AGENT: "false"
+      ENABLE_EMBEDDINGS: "false"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

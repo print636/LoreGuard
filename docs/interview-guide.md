@@ -15,7 +15,7 @@ LoreGuard 是给游戏编剧和叙事设计团队使用的一致性审查平台�
 
 ## 高频追问
 
-- 当前有 RAG 吗？还没有检索内容回送模型的闭环。已有关键词、稳定 n-gram 与实体关系候选排序，不是真实 embedding；候选 trace 的类型兼容计数也不证明影响了裁决。Evidence RAG 已列入交付计划，不能提前写成完成经验。未来仍保留规则，因为向量相似不等于时序与状态冲突。
+- 当前有 RAG 吗？还没有完整 Evidence RAG。主分析仍使用关键词、稳定 n-gram 与实体关系候选排序，候选 trace 的类型兼容计数不证明影响了裁决。独立数据底座已经实现显式配置的 OpenAI-compatible embedding client、中文行号分块、版本化 profile、精确 snapshot schema 和 Alembic，本机 Compose 也验证了真实 PostgreSQL `vector` 列及 pgvector 排序/隔离；但尚未运行真实 embedding、没有主分析检索消费者，也没有混合检索收益评测，所以不能写成 RAG 完成经验。未来仍保留规则，因为向量相似不等于时序与状态冲突。
 - 当前有 Agent 吗？有一个默认关闭的第一阶段受限 Agent：LangGraph `StateGraph` 编排模型在 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN` 三种应用层 JSON 动作间选择，服务端控制文档窗口、span、补丁字段、轮次、Token 和 deadline。它不是 Provider 原生 `tool_calls`，没有多智能体，也不是 Evidence RAG。v2 Agent 阶段真实 Provider full 完成 90/90 次要求执行，但主抽取候选为冻结合成注入，holdout 仅 74/81 运行成功，可恢复题 26/51、主动弃答 24/30，且没有直接 `ABSTAIN` 成功路径，完整 gate 失败，因此不能声称 Agent 或端到端抽取质量收益。
 - 真实 Agent 验收说明了什么？90 次执行中严格正确 59 次。31 次失败分成互不重叠的四组：12 次被生产校验接受但不符合 oracle 的错误补丁、9 次可恢复题读取后过度弃答、7 次 `read_timeout`、3 次 outcome 正确但未覆盖 oracle 证据。只有后 3 次是 `trace_replay=false/read_misses_oracle_evidence`，timeout trace 都可重放。服务端接受的安全违规为 0，说明边界在本套件中没有被突破，但不说明输出质量达标。development/tuned 的 9/9 不能代表泛化，失败的 full 结果也不能包装成简历成绩。
 - 如何控制误报？权威来源优先级、时间范围、实体消歧、阈值校准和人工反馈分层统计。

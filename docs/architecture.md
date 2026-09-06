@@ -27,6 +27,7 @@ flowchart LR
 - 模型与基线通过规范化的类型、字段和证据区间去重；一次分析的最终记录持久化，展示层不会触发二次模型费用。
 - 项目级 alias map 只读取明确“又名/简称/化名/代号”声明。归一化只改结构化实体字段，不改证据正文；循环或一名多主保留原名并警告。
 - 本地混合候选排序使用关键词、SHA-256 稳定桶字符 n-gram 余弦和共享 canonical entity graph 三分。`CandidatePair` 被持久化为 trace；当前 `consumed` 仅表示类型兼容，实际裁决仍调用全量 `detect_issues`，不能用此标签证明候选被模型或规则实际消费。目前没有检索增强模型闭环，也不生成新的模糊语义 issue。纠正计数及接入 Evidence RAG 的计划见 [后续交付计划](agent-rag-delivery-plan.md)。
+- 已建立与主分析解耦、默认关闭的 Evidence RAG 数据底座：独立显式配置的 OpenAI-compatible embedding client、面向中文叙事的确定性行号分块、包含模型版本/维度的 embedding profile，以及按项目、文档、版本和内容哈希精确隔离的 chunk/vector schema。数据库升级由 Alembic 管理；本机 Compose 已验证真实 PostgreSQL `vector` 列、pgvector 余弦排序、profile/snapshot 隔离和跨项目归属约束。该底座尚未发起真实 embedding 调用，也没有主分析检索消费者或混合检索收益评测，因此不是已完成的 Evidence RAG。
 - 模型/基线合并后还有一层不调用模型的候选归一化：把“取出工具并执行操作”映射为 `uses`，把范围内能力禁用规则和实际发动行为映射为共享 canonical key。该层只依据服务端原文证据生成状态，仍由规则引擎比较两侧证据后产生 issue。
 - 基线对带“日志显示/记录记载”等报告前缀的显式时间—人物—地点句单独解析，报告来源不会再被并入人物名；地点在会面、检查等动作前保守截断。
 - 持续身体状态使用 `body_state:<方向><部位族>` canonical key 对齐“失去肢体”与“完好同侧末端”，恢复、幻象和伪装措辞不进入该冲突候选。
@@ -46,4 +47,4 @@ flowchart LR
 
 ## 当前扩展边界
 
-`NarrativeExtractor`、`ConsistencyChecker` 与 Provider 是独立边界。当前已有按文档分块和显式别名归一化，但尚无真实 embedding/pgvector、隐含实体消歧、跨块上下文摘要、置信度校准和真实模型长文人工标注评测；这些仍是模型增强 Alpha 的主要风险，不能用 Mock 或生成型 smoke 替代。
+`NarrativeExtractor`、`ConsistencyChecker` 与 Provider 是独立边界。当前已有主抽取分块、显式别名归一化和上述 embedding/pgvector 存储底座，但尚无真实 embedding 运行、向量结果进入主分析的消费闭环、混合检索收益评测、隐含实体消歧、跨块上下文摘要、置信度校准和真实模型长文人工标注评测；这些仍是模型增强 Alpha 的主要风险，不能用 Mock、数据库 smoke 或生成型 smoke 替代。

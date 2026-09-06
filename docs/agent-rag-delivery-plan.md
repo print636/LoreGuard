@@ -1,6 +1,6 @@
 # Evidence RAG 与受限审查 Agent 交付计划
 
-更新：2026-09-06。状态：P0 核心正确性边界已实现；P2 的受限 Agent 第一阶段代码已接入且默认关闭。commit `bcbfab8` 上的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由冻结 manifest 合成注入，不是端到端真实模型抽取评测；90/90 次要求执行已完成，但完整 gate 为 `passed=false`。P1 的真实 Evidence RAG 与 P4 仍未完成。未完成、未通过或未实测项不能作为已完成项目经历。
+更新：2026-09-07。状态：P0 核心正确性边界已实现；P1 已完成 embedding/pgvector 数据底座，但真实 embedding、主分析检索消费和收益评测尚未完成；P2 的受限 Agent 第一阶段代码已接入且默认关闭。commit `bcbfab8` 上的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由冻结 manifest 合成注入，不是端到端真实模型抽取评测；90/90 次要求执行已完成，但完整 gate 为 `passed=false`。完整 Evidence RAG 与 P4 仍未完成。未完成、未通过或未实测项不能作为已完成项目经历。
 
 增量状态：P0 已覆盖冻结输入、幂等认领、lease/heartbeat、跨进程取消检查点、typed diagnostics 和保守旧运行展示。受限 Agent 现有实现比原 P2 设想更窄，只处理通过核心 schema/证据边界但需要词面支持修复的候选；它不是 Evidence RAG，也不因此宣布项目交付就绪。
 
@@ -15,6 +15,7 @@
 - `retrieval.py` 的向量是字符 n-gram 哈希，不是学习得到的语义 embedding。
 - `pipeline.py` 的 `check_with_candidates` 目前按记录类型兼容性设置 `consumed`，最终仍调用 `detect_issues(directives)` 检查全部记录；该计数不证明候选改变了裁决，也没有检索结果回送模型的闭环。
 - 主抽取仍是固定 system/user 的结构化抽取；另有 LangGraph 1.2.11 `StateGraph` 编排的受限修复循环。它使用应用层 JSON 动作，不使用、也未验证 Provider 原生 `tool_calls/tool_call_id`。
+- 独立显式配置的 OpenAI-compatible embedding client、中文行号分块、版本化 profile、精确 snapshot chunk/vector schema 和 Alembic 已实现。本机 Compose 已验证真实 PostgreSQL `vector` 列、pgvector 排序和 snapshot/profile 隔离，但没有运行真实 embedding，也没有主分析消费者或检索收益评测。
 - 运行输入快照、原子认领、终态幂等和 worker lease/heartbeat 已补齐并有自动回归；共享配额仍不是多实例原子预留，工程测试通过也不等于高并发高可用。
 - 固定 semantic label repair pass 只修补 modality/source_scope/certainty，是非 Agent 路径；不得把其调用或恢复结果计入 Agent 经验。
 - 冻结 Agent 套件的 90 次完整 Mock oracle/scorer 只证明实现边界可回归。v1 的 3 项真实 Provider pilot 只是已用于调优的开发证据。v2 Agent 阶段真实 Provider full 已完成，主抽取候选由冻结 manifest 合成注入；holdout 运行成功 74/81，7 次为 `read_timeout`，可恢复题正确 26/51，不可恢复题主动弃答正确 24/30，因此既未通过 Agent 质量验收，也不能评价端到端抽取质量。
@@ -35,8 +36,8 @@ RAG 不以向量数据库为定义条件，但必须证明检索内容进入下�
 
 ### P1：真实且能解释收益的 Evidence RAG
 
-- 引入独立 `EmbeddingProvider` 接口；先验证中文本地模型与可用 embedding 服务的许可证、资源需求、维度、延迟，锁定实际采用的模型和版本。现有 chat Key 可用不代表 embedding 可用。
-- PostgreSQL/pgvector 真实保存文档分块向量，包含项目、文档版本、原文行区间、内容哈希、embedding 模型及维度；提供可重复迁移与索引重建入口。不能依赖 `create_all` 升级既有数据库。
+- 已引入独立、显式 opt-in 且不继承 chat 配置的 `EmbeddingProvider` client；仍需真实调用并验证中文 embedding 服务的许可证、资源需求、维度、延迟，锁定实际采用的模型和版本。现有 chat Key 可用不代表 embedding 可用。
+- PostgreSQL/pgvector 的分块向量 schema、项目/文档版本/内容哈希/原文行区间隔离、模型 profile 和 Alembic 升级已完成，并通过本机 Compose 排序/隔离 smoke；仍需真实 embedding 结果写入、可重复索引重建入口及消费者接线。
 - 关键词、语义向量、实体关系召回融合（优先使用可解释的 rank fusion）；检索必须先限定项目与本次运行版本，不能把其他项目/旧版本原文泄漏给模型。
 - 小数据先精确向量检索；HNSW 作为可配置选项，使用真实查询计划和召回/延迟对照证明价值，不为简历强行启用近似索引。
 - 把召回的带引用 ID 原文交给下游模型补查；记录 query、命中文档/版本、得分与实际消费的 evidence ID，避免只建立无人使用的向量表。
@@ -61,7 +62,7 @@ RAG 不以向量数据库为定义条件，但必须证明检索内容进入下�
 - [离线 runner](../scripts/run_agent_acceptance.py) 只接受 trace 文件或 `--mock-oracle`；它不会调用生产 Agent。真实 runner 虽走同一生产 Agent 路径，但 scripted harness 会被 `real_provider_connected` gate 显式拦截。
 - 完整实现边界见 [第一阶段说明](review-agent-phase1.md)、[pilot 记录](review-agent-pilot-20260906.md) 与 [v2 full checkpoint](review-agent-v2-full-checkpoint-20260906.md)。v2 Agent 阶段真实 Provider holdout 已执行但未通过；它没有评测主抽取，在新的独立质量结果达标前不得声称 Agent 或端到端质量成绩。
 
-仍待 P2 验收：针对本次暴露的恢复不足、坏补丁和 `read_timeout` 做通用改进，并比较基线、一次检索和受限 Agent 的恢复、误报、漏报、证据正确性、安全弃答、覆盖/降级、动态路径、延迟与 Token 成本。不能针对单个任务硬编码；本次 holdout 结果若用于修改 Prompt 或实现，后续同套件只能算开发回归，新的泛化质量声明需要另行冻结未参与调优的测试集。只有真实完整运行达到既定 P ≥ 0.75、R ≥ 0.60、证据命中率 ≥ 0.85 等门槛，且安全违规为 0，才能讨论收益。真正的 Evidence RAG 仍属于 P1：当前 `READ_SPAN` 是候选附近有界读取，不是 embedding/pgvector 语义召回，也没有搜索工具闭环。当前实现也没有多智能体。
+仍待 P2 验收：针对本次暴露的恢复不足、坏补丁和 `read_timeout` 做通用改进，并比较基线、一次检索和受限 Agent 的恢复、误报、漏报、证据正确性、安全弃答、覆盖/降级、动态路径、延迟与 Token 成本。不能针对单个任务硬编码；本次 holdout 结果若用于修改 Prompt 或实现，后续同套件只能算开发回归，新的泛化质量声明需要另行冻结未参与调优的测试集。只有真实完整运行达到既定 P ≥ 0.75、R ≥ 0.60、证据命中率 ≥ 0.85 等门槛，且安全违规为 0，才能讨论收益。真正的 Evidence RAG 仍属于 P1：当前 `READ_SPAN` 是候选附近有界读取，不是 embedding/pgvector 语义召回；已完成的 vector 存储底座尚未运行真实 embedding，也没有搜索/主分析消费闭环或收益评测。当前实现也没有多智能体。
 
 ### P3：轻量多智能体实验（可选，不阻塞投递）
 

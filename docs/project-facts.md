@@ -1,8 +1,8 @@
-# 项目事实清单（更新至 2026-09-06）
+# 项目事实清单（更新至 2026-09-07）
 
 可在简历中表述：
 
-- 已实现 FastAPI 端到端 API和 SQLite 本地模式；PostgreSQL、Redis、FastAPI、Celery worker、Web/Nginx、Prometheus Compose 链路已由 GitHub Actions 实机 smoke 验证。pgvector 镜像存在，但不能表述为已使用真实向量列。
+- 已实现 FastAPI 端到端 API和 SQLite 本地模式；PostgreSQL、Redis、FastAPI、Celery worker、Web/Nginx、Prometheus 主分析 Compose 链路已由 GitHub Actions 实机 smoke 验证。
 - 已实现 Markdown、TXT、JSON 导入与文档版本字段。
 - 已实现事实冲突、同刻多地点、知识越权、物品持有、世界规则五类确定性检查。
 - 已实现证据片段、严重度、置信度、建议、反馈、取消、重试和可恢复 SSE 事件流。
@@ -15,4 +15,6 @@
 - commit `bcbfab8` 的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由冻结 manifest 合成注入，并非端到端真实模型抽取评测。它完成 90/90 次要求执行但严格正确 59/90；holdout 运行成功 74/81、恢复 26/51、主动弃答 24/30，且没有观察到直接 `ABSTAIN` 成功路径，三路径覆盖 gate 失败，完整结果为 `passed=false`。因此只能作为 Agent 阶段失败诊断和安全边界事实，不能写成 Agent、主抽取或产品质量收益成绩。完整口径见 [v2 full 脱敏 checkpoint](review-agent-v2-full-checkpoint-20260906.md)。
 - 已提供 React 审查界面、Docker Compose、GitHub Actions、Prometheus 指标入口和中英文 README。
 
-暂不可表述为已完成：公网在线 Demo、真实用户数据验证、人工录制演示视频、Agent 模型质量收益、Provider 原生 `tool_calls`、多智能体、真实 embedding/pgvector Evidence RAG、向量数据库线上压测和生产级 OpenTelemetry 链路。
+工程 checkpoint（暂不进入简历）：已实现独立显式配置的 OpenAI-compatible embedding client、中文行号分块、版本化 embedding profile、精确 snapshot chunk/vector schema 和 Alembic 迁移；本机 Compose 已验证真实 PostgreSQL `vector` 列、pgvector 排序、snapshot/profile 隔离与跨项目归属约束。尚未运行真实 embedding，向量检索没有接入主分析消费者，也没有混合检索收益评测，所以这些事实不能包装成已完成的 Evidence RAG 或简历成果。
+
+暂不可表述为已完成：公网在线 Demo、真实用户数据验证、人工录制演示视频、Agent 模型质量收益、Provider 原生 `tool_calls`、多智能体、真实 embedding 已运行、向量检索已接入主分析、完整 Evidence RAG、向量数据库线上压测和生产级 OpenTelemetry 链路。

@@ -1,0 +1,10 @@
+node_modules
+dist
+.pnpm-store
+.vite
+.cache
+coverage
+*.log
+.env
+.env.*
+!.env.example

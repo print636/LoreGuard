@@ -1,6 +1,6 @@
 # 当前完成度与非完成项
 
-更新时间：2026-09-06
+更新时间：2026-09-07
 
 ## 2026-09-06 checkpoint
 
@@ -18,6 +18,13 @@
 - 当前 Agent 是 LangGraph `StateGraph` 编排的受限应用层 JSON 动作循环，只提供 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`；它不是 Provider 原生 `tool_calls`，没有多智能体，也没有 Evidence RAG。当前有界邻域读取不是 embedding/pgvector 语义召回。
 
 实现与边界见 [受限 Agent 第一阶段说明](review-agent-phase1.md)；冻结任务见 [v2 manifest](../data/agent-acceptance-v2/manifest.json)，pilot 过程见 [开发记录](review-agent-pilot-20260906.md)，本次 full 脱敏结果见 [v2 full checkpoint](review-agent-v2-full-checkpoint-20260906.md)，离线 trace scorer 见 [runner](../scripts/run_agent_acceptance.py)。
+
+## Evidence RAG 数据底座 checkpoint
+
+- 已实现独立显式配置、不会继承主抽取 chat 配置的 OpenAI-compatible embedding client，以及保留规范化字符区间和原文行号的中文确定性分块。
+- 已实现版本化 embedding profile，以及按项目、文档、文档版本、内容哈希和 chunker 版本精确隔离的 chunk/vector schema；SQLite 明确使用 JSON 作为本地存储替代，PostgreSQL 使用真实 `vector` 列。
+- 已用 Alembic 覆盖空库、旧 `create_all` 库和此前 WIP schema 的保守升级；本机 Compose 已实际通过 pgvector 余弦排序、snapshot/profile 隔离和跨项目归属失败闭合 smoke。
+- 这些结果只证明 client、分块、迁移和存储底座。当前没有运行真实 embedding 请求，向量结果尚未接入主分析检索消费者，也没有关键词-only 与混合检索的收益评测。因此 Evidence RAG 仍未完成，这一 checkpoint 不得写成简历成果。
 
 ## 已完成并可体验
 
@@ -50,7 +57,7 @@
 - 模型重复评测器可区分模型参与与完整无降级轮次，记录严格完整证据评分、三轮预测集合稳定性、P50/P95、Token、错误轮次和预算停止；报告不保存 Prompt、响应正文、Key 或 endpoint。
 - 历史 complex-v3 真实模型完整 14 例 × 3 轮复测为 42/42 完整无降级、171/171 次逻辑调用成功；类别级及严格完整证据级均为 TP 30、FP 0、FN 0，三轮预测集合稳定率 1.0，P95 84.97 秒。它使用不同中转/模型和较早版本的覆盖协议，只能作为开发者可见历史回归，不能移作 2026-09-06 当前栈成绩。
 - 历史固定 2000 字单文档真实模型延迟测试 5/5 次模型参与，首进度 P95 5.9 ms、端到端 P50 6.30 s / P95 7.94 s，总计 11,799 Token；该数据使用旧中转/模型，只保留为当时短文本延迟记录，不代表当前栈、生产 SLA 或准确率。
-- SQLite 单机体验；PostgreSQL、Redis、FastAPI、Celery worker、Web/Nginx 和 Prometheus 的 Compose 全链路已在 GitHub Actions 实机启动，并通过复杂样例、五类问题、关系图、时间线和 SSE 终态 smoke。pgvector 镜像已部署，但主链路仍未使用真实向量列。
+- SQLite 单机体验；PostgreSQL、Redis、FastAPI、Celery worker、Web/Nginx 和 Prometheus 的主分析 Compose 链路已在 GitHub Actions 实机启动，并通过复杂样例、五类问题、关系图、时间线和 SSE 终态 smoke。另一本机 Compose smoke 已验证真实 PostgreSQL `vector` 列及 pgvector 排序/隔离，但主分析仍未消费这些向量。
 - 80 条显式指令规则回归，只验证规则引擎接线，不作为自然文本准确率。
 - 100 条固定模板生成的合成自然中文案例，按 scenario 隔离为 40 dev / 60 test；包含 50 个困难负样本并保存预期证据行。
 - 已用结构化状态建模处理合法移动许可、显式知识来源和 actor 规则例外；移动许可绑定角色/路线/有效期，规则例外绑定 actor/canonical key/有效状态。
@@ -68,7 +75,7 @@
 - 真实复杂中文故事上的人工标注准确率、召回率、模型分块长文实测与误报标定。
 - 独立世界观、人工盲标且未参与规则修复的真实长故事评测；当前高分仅覆盖开发者可见固定回归。
 - 当前新中转/模型通过最小 Provider preflight，但冻结 Phase 1 `full × 1` 严格 gate 为 0/3；需先解决词面/证据拒绝和 batch 协议失败，再重新达到完整覆盖并执行三轮稳定性验收。
-- pgvector 实际向量列、真实 embedding 与跨段语义召回；当前只使用本地稳定哈希 n-gram 近似向量。
+- 真实 embedding 调用、把精确 snapshot/profile 向量检索接入主分析、跨段语义召回与混合检索收益评测；当前主分析判断仍只使用本地稳定哈希 n-gram 候选排序，已验证的 PostgreSQL vector 底座不能替代上述闭环。
 - 受限 Agent 的 v2 Agent 阶段真实 Provider 81 次 holdout 已执行但未通过完整 gate；主抽取候选由冻结 manifest 合成注入。仍缺达到门槛的独立 Agent 质量结果，以及与基线/一次检索的收益、延迟和成本对照。当前失败结果、90 次 Mock 和 3 项已调优 development 结果都不能作为 Agent 或端到端抽取质量成绩。
 - OpenTelemetry 完整链路、Redis/事务式生产配额与多实例限流、多用户鉴权。
 - 项目/文档删除与多人协作权限；关系图目前是通用 JSON 状态记录的运行级投影，尚非可跨版本查询的规范化知识图谱。当前版本差异是文本行级比较，不包含语义实体或问题清单的跨版本差异。

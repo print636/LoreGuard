@@ -13,7 +13,7 @@
 - 实验性的受限证据修复 Agent 已接入但默认关闭；已完成主抽取候选冻结合成注入、仅 Agent 阶段调用真实 Provider 的验收，但质量 gate 未通过，当前只证明实现与安全边界
 - 模型输入按全局行号分块，支持行重叠、超长单行和逐块失败隔离；全文基线不分块
 - 仅依据明确“又名/简称/化名/代号”声明做项目级实体别名归一化，保留映射轨迹与歧义警告
-- 本地 keyword + 稳定 SHA-256 字符 n-gram + canonical entity graph 混合检索，候选短名单由检查器消费并留下分数轨迹
+- 本地 keyword + 稳定 SHA-256 字符 n-gram + canonical entity graph 三路候选排序并留下分数轨迹；当前 `consumed` 只表示候选类型与检查器兼容，最终仍由规则引擎检查全量记录，不能证明候选排序影响了裁决
 - 检查事实冲突、同时间多地点、知识越权、非持有者使用物品、世界规则冲突
 - 每个问题返回两处证据、行号、严重度、置信度和修订建议
 - 本地线程/Celery 两种后台执行方式、受状态约束的取消/重试与可断线续传的持久化 SSE 进度流
@@ -73,6 +73,8 @@ set DAILY_TOKEN_BUDGET=100000
 受限 Agent 第一阶段使用 LangGraph 1.2.11 `StateGraph` 编排，仅在显式设置 `ENABLE_REVIEW_AGENT=true` 时启用，默认关闭。模型每轮返回应用层 JSON 动作 `READ_SPAN`、`PATCH_RECORDS` 或 `ABSTAIN`；这不是、也未冒充 Provider 原生 `tool_calls` / function calling。服务端绑定冻结文档和证据范围、校验 span 与补丁，并只持久化不含 Prompt、原始响应、证据正文、Key 或 endpoint 的安全 trace。固定的 modality/source_scope/certainty 标签 repair pass 是另一条非 Agent 路径，不能混称为 Agent。
 
 冻结 Agent 验收集有 30 个开发者可见任务，每个重复 3 次。Mock oracle/scorer 的 90 次结果只验证工程边界；commit `bcbfab8` 的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由 runner 按冻结 manifest 合成注入，并非端到端真实模型抽取评测。该运行记录全部 90 次要求执行，严格正确 59/90，其中 holdout 81 次运行成功 74 次、7 次 `read_timeout`，恢复 26/51、主动弃答 24/30。共有 12 次补丁通过生产校验但不符合评测 oracle；服务端接受的安全违规为 0。运行成功轨迹中没有直接 `ABSTAIN` 路径，要求的三路径覆盖 gate 也失败，完整结果为 `passed=false`，所以不能声称 Agent、主抽取或产品质量收益。当前没有多智能体，真正把语义检索证据送入下游决策的 Evidence RAG 也未完成。详细边界见 [`docs/review-agent-phase1.md`](docs/review-agent-phase1.md)，脱敏结果见 [`docs/review-agent-v2-full-checkpoint-20260906.md`](docs/review-agent-v2-full-checkpoint-20260906.md)，冻结任务见 [`data/agent-acceptance-v2/manifest.json`](data/agent-acceptance-v2/manifest.json)，离线 runner 见 [`scripts/run_agent_acceptance.py`](scripts/run_agent_acceptance.py)。
+
+Evidence RAG 数据底座已实现独立显式配置的 OpenAI-compatible embedding client、中文行号感知分块、版本化 embedding profile、精确到项目/文档版本/内容哈希的 snapshot schema，以及 Alembic 迁移。本机 Docker Compose 已验证真实 PostgreSQL `vector` 列、pgvector 距离排序与 profile/snapshot 隔离；但尚未运行真实 embedding，尚未接入主分析检索消费者，也未完成混合检索相对现有候选排序的收益评测，因此 Evidence RAG 仍未完成，不能作为简历成果。
 
 只有同时配置 `MODEL_INPUT_PRICE_PER_MILLION` 和 `MODEL_OUTPUT_PRICE_PER_MILLION` 时才计算估算成本；未配置时 API/UI 显示“未配置”，不会把未知价格误报为 0 美元。
 
@@ -137,7 +139,7 @@ React/Vite ──HTTP/SSE── FastAPI
                Redis/Celery
 ```
 
-生产环境通过 `USE_CELERY=true` 将任务交给 Celery；本地演示默认使用后台线程。`NarrativeExtractor` 与 `ConsistencyChecker` 是可替换接口。当前混合检索是本地可复现字符 n-gram 近似向量，不是真实 embedding；Compose 虽预置 pgvector 镜像，主链路尚未创建或使用向量列。
+生产环境通过 `USE_CELERY=true` 将任务交给 Celery；本地演示默认使用后台线程。`NarrativeExtractor` 与 `ConsistencyChecker` 是可替换接口。当前主分析候选排序仍使用本地可复现的字符 n-gram，不消费 embedding。独立的 Evidence RAG 数据底座已具备 embedding client、中文行号分块、版本化 profile、精确 snapshot schema、Alembic 迁移和真实 PostgreSQL `vector` 列，并通过本机 Compose 的 pgvector 排序与隔离 smoke；真实 embedding、主链路消费和收益评测尚未完成。
 
 ## 与 ConStory-Bench 的关系
 
@@ -231,9 +233,9 @@ python scripts/run_long_text_smoke.py
 - 大模型输出不是事实来源；所有问题必须绑定输入文档中的证据。
 - 在线 Demo 应启用访客限额、文件大小限制和每日 Token 预算。
 - 当前已验证模型抽取协议、降级机制、工程安全边界和一次冻结真实 Phase 1 运行；但当前新中转/模型的严格 gate 为 0/3，且尚未完成真实长篇人工标注评测，不能宣称开放文本准确率或当前模型能力达标。
-- `document_context` 与运行输入上下文采用附加关联表兼容旧 SQLite；旧文档读取为安全默认 `chapter/global` 并标记上下文并非显式保存。`create_all` 只是当前本地兼容引导，不替代正式数据库迁移框架。
+- `document_context` 与运行输入上下文采用附加关联表兼容旧 SQLite；旧文档读取为安全默认 `chapter/global` 并标记上下文并非显式保存。数据库升级现由 Alembic 管理，覆盖空库、旧 `create_all` 库和此前 WIP schema 的保守升级；残缺或约束不完整的同名表会拒绝采用，不再以 `create_all` 充当正式升级路径。
 - 版本差异只在当前项目和同名文档边界内运行，不调用模型。默认每个版本最多处理前 20,000 行/2,000,000 字符并最多返回 4,000 行差异，超限会在响应和页面显式提示。
-- LangGraph 1.2.11 `StateGraph` 的受限修复循环已作为默认关闭的第一阶段代码接入；v2 Agent 阶段真实 Provider full 已执行但完整 gate 失败，且主抽取候选为冻结合成注入，不能列作已证明收益、端到端抽取成绩或简历成绩。它不是原生 `tool_calls`，也没有多智能体；真实 embedding/向量列、Evidence RAG 与 OpenTelemetry 完整链路仍属于后续阶段。
+- LangGraph 1.2.11 `StateGraph` 的受限修复循环已作为默认关闭的第一阶段代码接入；v2 Agent 阶段真实 Provider full 已执行但完整 gate 失败，且主抽取候选为冻结合成注入，不能列作已证明收益、端到端抽取成绩或简历成绩。它不是原生 `tool_calls`，也没有多智能体。embedding/pgvector 数据底座与真实 `vector` 列已实现并通过本机 Compose smoke；真实 embedding、主分析检索消费、混合检索收益评测、完整 Evidence RAG 与 OpenTelemetry 链路仍属于后续阶段。
 - 详细完成度见 [`docs/completion-status.md`](docs/completion-status.md)，学习顺序见 [`docs/learning-guide.md`](docs/learning-guide.md)。
 - 长篇容量的当前硬限制、实用范围和百万字扩展路线见 [`docs/scalability-roadmap.md`](docs/scalability-roadmap.md)。
 
