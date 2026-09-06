@@ -78,6 +78,58 @@ _SAFE_AGENT_REASONS = {
     "round_limit",
     "completed",
 }
+_SAFE_PROTOCOL_STAGES = {
+    "json",
+    "envelope",
+    "actions",
+    "action_row",
+    "action_name",
+    "action_schema",
+}
+_SAFE_PROTOCOL_ROOT_SHAPES = {
+    "unparsed",
+    "object",
+    "array",
+    "string",
+    "number",
+    "boolean",
+    "null",
+}
+_SAFE_PROTOCOL_ACTION_NAMES = {"READ_SPAN", "PATCH_RECORDS", "ABSTAIN"}
+_SAFE_PROTOCOL_SCHEMA_LOCATION_PARTS = {
+    "*",
+    "action",
+    "actions",
+    "requests",
+    "patches",
+    "candidate_index",
+    "candidate_indexes",
+    "doc_ref",
+    "line_start",
+    "line_end",
+    "span_id",
+    "fields",
+    "reason_code",
+    "unknown_field",
+}
+_SAFE_PROTOCOL_SCHEMA_ERROR_TYPES = {
+    "missing",
+    "extra_forbidden",
+    "literal_error",
+    "list_type",
+    "dict_type",
+    "int_type",
+    "int_parsing",
+    "string_type",
+    "string_too_short",
+    "string_too_long",
+    "greater_than_equal",
+    "less_than_equal",
+    "too_short",
+    "too_long",
+    "string_pattern_mismatch",
+    "validation_error",
+}
 
 
 def _optional_nonnegative_int(value: Any) -> int | None:
@@ -87,6 +139,66 @@ def _optional_nonnegative_int(value: Any) -> int | None:
 
 def _optional_request_id(value: Any) -> str | None:
     return value if isinstance(value, str) and _SAFE_REQUEST_ID.fullmatch(value) else None
+
+
+def _safe_protocol_diagnostic(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    stage = value.get("stage")
+    root_shape = value.get("root_shape")
+    action_count = value.get("action_count")
+    action_names = value.get("action_names")
+    locations = value.get("schema_error_locations")
+    error_types = value.get("schema_error_types")
+
+    def safe_location(location: Any) -> str:
+        if not isinstance(location, str):
+            return "unknown_field"
+        location = location[:256]
+        return ".".join(
+            part
+            if part in _SAFE_PROTOCOL_SCHEMA_LOCATION_PARTS
+            else "unknown_field"
+            for part in location.split(".")[:6]
+        ) or "unknown_field"
+
+    return {
+        "stage": (
+            stage
+            if isinstance(stage, str) and stage in _SAFE_PROTOCOL_STAGES
+            else "action_schema"
+        ),
+        "root_shape": (
+            root_shape
+            if isinstance(root_shape, str)
+            and root_shape in _SAFE_PROTOCOL_ROOT_SHAPES
+            else "unparsed"
+        ),
+        "action_count": (
+            min(action_count, 7)
+            if type(action_count) is int and action_count >= 0
+            else None
+        ),
+        "action_names": [
+            name
+            if isinstance(name, str) and name in _SAFE_PROTOCOL_ACTION_NAMES
+            else "unknown"
+            for name in action_names[:6]
+        ]
+        if isinstance(action_names, list)
+        else [],
+        "schema_error_locations": [safe_location(row) for row in locations[:8]]
+        if isinstance(locations, list)
+        else [],
+        "schema_error_types": [
+            row
+            if isinstance(row, str) and row in _SAFE_PROTOCOL_SCHEMA_ERROR_TYPES
+            else "validation_error"
+            for row in error_types[:8]
+        ]
+        if isinstance(error_types, list)
+        else [],
+    }
 
 
 def _safe_review_agent_trace(row: Any) -> dict[str, Any]:
@@ -134,6 +246,9 @@ def _safe_review_agent_trace(row: Any) -> dict[str, Any]:
         ),
         "elapsed_ms": _optional_nonnegative_int(source.get("elapsed_ms")) or 0,
         "final": final if final in _SAFE_AGENT_FINALS else "rejected",
+        "protocol_diagnostic": _safe_protocol_diagnostic(
+            source.get("protocol_diagnostic")
+        ),
     }
 
 

@@ -18,7 +18,11 @@ from app.domain import (
 from app.model_extractor import ModelEnhancedExtractor
 from app.pipeline import AnalysisPipeline, DocumentInput
 from app.provider import ModelResult, OpenAICompatibleProvider, ProviderError
-from app.review_agent import AgentCandidate, BoundedReviewAgent
+from app.review_agent import (
+    AgentCandidate,
+    BoundedReviewAgent,
+    ProtocolParseDiagnostic,
+)
 
 
 def settings(**overrides) -> Settings:
@@ -212,6 +216,153 @@ class ReviewAgentUnitTests(unittest.TestCase):
         )
         self.assertEqual("read_ok", second_prompt["tool_observations"][0]["result"])
         self.assertIn("林澈的身份是领航员", second_prompt["tool_observations"][0]["text"])
+
+    def test_candidate_prompt_discloses_exact_server_read_bounds(self):
+        run, provider = self.run_agent(
+            [
+                {
+                    "actions": [
+                        {
+                            "action": "ABSTAIN",
+                            "candidate_indexes": [1],
+                            "reason_code": "insufficient_evidence",
+                        }
+                    ]
+                }
+            ],
+            configured_settings=settings(
+                enable_review_agent=True,
+                review_agent_context_radius_lines=0,
+            ),
+        )
+        self.assertEqual("explicit_abstain", run.final_reason)
+        payload = json.loads(provider.calls[0][1])
+        disclosed = payload["candidates"][0]
+        self.assertEqual(2, disclosed["document_line_count"])
+        self.assertEqual(
+            {"line_start": 1, "line_end": 1}, disclosed["read_window"]
+        )
+
+    def test_read_must_be_fully_contained_in_disclosed_window(self):
+        run, provider = self.run_agent(
+            [{"actions": [read_action(line_start=1, line_end=2)]}],
+            configured_settings=settings(
+                enable_review_agent=True,
+                review_agent_context_radius_lines=0,
+            ),
+        )
+        disclosed = json.loads(provider.calls[0][1])["candidates"][0]
+        self.assertEqual(
+            {"line_start": 1, "line_end": 1}, disclosed["read_window"]
+        )
+        self.assertEqual("evidence_range", run.final_reason)
+        self.assertEqual(0, run.tool_calls)
+        self.assertEqual(0, run.span_read_count)
+
+    def test_invalid_action_persists_only_allowlisted_parse_diagnostics(self):
+        marker = "DO_NOT_PERSIST_STORY_OR_SECRET_KEY"
+        run, _ = self.run_agent(
+            [
+                {
+                    "actions": [
+                        {
+                            "action": "ABSTAIN",
+                            "candidate_indexes": [1],
+                            "reason_code": "unsafe_patch",
+                            "untrusted_field_name": marker,
+                        }
+                    ]
+                }
+            ]
+        )
+        self.assertEqual("invalid_action", run.final_reason)
+        event = run.safe_dict()["trace"][0]
+        self.assertEqual("invalid_action", event["validator_reason"])
+        self.assertEqual(
+            {
+                "stage": "action_schema",
+                "root_shape": "object",
+                "action_count": 1,
+                "action_names": ["ABSTAIN"],
+                "schema_error_locations": ["unknown_field"],
+                "schema_error_types": ["extra_forbidden"],
+            },
+            event["protocol_diagnostic"],
+        )
+        self.assertNotIn(marker, json.dumps(run.safe_dict(), ensure_ascii=False))
+
+    def test_invalid_envelope_diagnostic_does_not_relax_protocol(self):
+        run, _ = self.run_agent(
+            [{"actions": [read_action()], "explanation": "not allowed"}]
+        )
+        self.assertEqual("invalid_action", run.final_reason)
+        diagnostic = run.safe_dict()["trace"][0]["protocol_diagnostic"]
+        self.assertEqual("envelope", diagnostic["stage"])
+        self.assertEqual("object", diagnostic["root_shape"])
+        self.assertEqual(0, run.tool_calls)
+
+    def test_protocol_diagnostic_object_rejects_nested_and_oversized_values(self):
+        marker = "DO_NOT_PERSIST_NESTED_VALUE"
+        oversized = (marker + ".") * 10_000
+        diagnostic = ProtocolParseDiagnostic(
+            stage=[marker],  # type: ignore[arg-type]
+            root_shape={"nested": marker},  # type: ignore[arg-type]
+            action_names=([marker], {"nested": marker}, "ABSTAIN"),  # type: ignore[arg-type]
+            schema_error_locations=(oversized, {"nested": marker}),  # type: ignore[arg-type]
+            schema_error_types=([marker], {"nested": marker}, "missing"),  # type: ignore[arg-type]
+        )
+        safe = diagnostic.safe_dict()
+        serialized = json.dumps(safe, ensure_ascii=False)
+        self.assertNotIn(marker, serialized)
+        self.assertLess(len(serialized), 1_000)
+        self.assertEqual("action_schema", safe["stage"])
+        self.assertEqual("unparsed", safe["root_shape"])
+        self.assertEqual(
+            ["unknown", "unknown", "ABSTAIN"], safe["action_names"]
+        )
+        self.assertEqual(
+            ["validation_error", "validation_error", "missing"],
+            safe["schema_error_types"],
+        )
+
+    def test_protocol_diagnostic_rejects_non_sequence_containers(self):
+        marker = "DO_NOT_PERSIST_CONTAINER_VALUE"
+        for container in (
+            {"nested": marker},
+            {marker},
+            marker,
+            123,
+        ):
+            with self.subTest(container_type=type(container).__name__):
+                diagnostic = ProtocolParseDiagnostic(
+                    stage="action_schema",
+                    root_shape="object",
+                    action_names=container,  # type: ignore[arg-type]
+                    schema_error_locations=container,  # type: ignore[arg-type]
+                    schema_error_types=container,  # type: ignore[arg-type]
+                ).safe_dict()
+                self.assertEqual([], diagnostic["action_names"])
+                self.assertEqual([], diagnostic["schema_error_locations"])
+                self.assertEqual([], diagnostic["schema_error_types"])
+                self.assertNotIn(
+                    marker, json.dumps(diagnostic, ensure_ascii=False)
+                )
+
+    def test_non_string_action_names_fail_closed_without_leaking_values(self):
+        marker = "DO_NOT_PERSIST_UNHASHABLE_ACTION_VALUE"
+        for action_value in ([marker], {"nested": marker}):
+            with self.subTest(action_type=type(action_value).__name__):
+                run, _ = self.run_agent(
+                    [{"actions": [{"action": action_value}]}]
+                )
+                self.assertEqual("unknown_tool", run.final_reason)
+                self.assertEqual(0, run.tool_calls)
+                diagnostic = run.safe_dict()["trace"][0]["protocol_diagnostic"]
+                self.assertEqual("action_name", diagnostic["stage"])
+                self.assertEqual(["unknown"], diagnostic["action_names"])
+                self.assertNotIn(
+                    marker, json.dumps(run.safe_dict(), ensure_ascii=False)
+                )
 
     def test_model_can_abstain_without_a_read(self):
         run, _ = self.run_agent(
@@ -723,6 +874,7 @@ class ReviewAgentUnitTests(unittest.TestCase):
 
     def test_persistable_trace_contains_hashes_not_sensitive_text(self):
         marker = "DO_NOT_PERSIST_STORY_OR_SECRET_KEY"
+        oversized = (marker + ".") * 10_000
         run, _ = self.run_agent(
             [
                 {
@@ -754,6 +906,26 @@ class ReviewAgentUnitTests(unittest.TestCase):
                             **run.safe_dict()["trace"][0],
                             "raw_response": marker,
                             "patch_value": marker,
+                            "protocol_diagnostic": {
+                                "stage": [marker, {"nested": marker}],
+                                "root_shape": {"nested": [marker]},
+                                "action_count": 999,
+                                "action_names": [
+                                    [marker],
+                                    {"nested": marker},
+                                    "ABSTAIN",
+                                ],
+                                "schema_error_locations": [
+                                    oversized,
+                                    [marker],
+                                    {"nested": marker},
+                                ],
+                                "schema_error_types": [
+                                    [marker],
+                                    {"nested": marker},
+                                    "extra_forbidden",
+                                ],
+                            },
                         }
                     ],
                 }
@@ -761,6 +933,28 @@ class ReviewAgentUnitTests(unittest.TestCase):
         ).safe_dict()
         self.assertNotIn(marker, json.dumps(injected, ensure_ascii=False))
         self.assertNotIn("secret.invalid", json.dumps(injected, ensure_ascii=False))
+        diagnostic = injected["review_agent_runs"][0]["trace"][0][
+            "protocol_diagnostic"
+        ]
+        self.assertEqual("action_schema", diagnostic["stage"])
+        self.assertEqual("unparsed", diagnostic["root_shape"])
+        self.assertEqual(7, diagnostic["action_count"])
+        self.assertEqual(
+            ["unknown", "unknown", "ABSTAIN"], diagnostic["action_names"]
+        )
+        self.assertEqual(
+            [
+                ".".join(["unknown_field"] * 6),
+                "unknown_field",
+                "unknown_field",
+            ],
+            diagnostic["schema_error_locations"],
+        )
+        self.assertEqual(
+            ["validation_error", "validation_error", "extra_forbidden"],
+            diagnostic["schema_error_types"],
+        )
+        self.assertLess(len(json.dumps(diagnostic, ensure_ascii=False)), 1_000)
 
         base_run = run.safe_dict()
         base_event = base_run["trace"][0]

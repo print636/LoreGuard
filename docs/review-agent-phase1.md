@@ -54,8 +54,10 @@ v1 的三个开发任务曾用 outcome-first scorer 在 `thinking=disabled` 和 
 - 本次 pilot 的 3 个任务固定标为 `development_tuned`。full 模式必须将其余 27 个任务作为 holdout 单独报告恢复率、弃答率、安全、trace、遥测和覆盖 gate。旧 pilot 已影响通用 prompt，不能外推成独立 holdout 成绩；
 - 真实 runner 在报告中明确记录 `semantic_abstain_rate`、runtime failure 数量/分类、`bad_patch_proposal_rate`、坏补丁诊断原因、`safe_containment_success`、Provider/Agent 配置超时覆盖和 `read_timeout` 次数，但不保存 endpoint、密钥、prompt、正文或响应。无论 rejected PATCH 的原因为通用校验失败、`semantic_promotion` 还是 `semantic_field_forbidden`，都属于坏补丁；生产接受但事后 oracle surface hash/最终指纹不符的 PATCH，以及不可恢复题上的 accepted PATCH，也属于坏补丁。只有被服务端拒绝并随后 `FINALIZE` 的路径可算安全 containment；错误补丁已被接受时不能获得 containment 成绩，任何坏补丁也不能被随后弃答洗成质量成功。Mock/scripted harness 必须在 `real_provider_connected` gate 失败，不能冒充真实 Provider 质量报告。
 
-通用 Agent prompt 同步收紧为 lexical-only：候选语义标签在进入 Agent 前已经合法；若候选字段和 validator reason 已足以证明无法安全修复，可以直接弃答，否则第一轮读取，第二轮必须按 kind 逐项核对核心字段，使用同一 span 的最小原文词组修正或弃答。仅修改 `modality`、`source_scope`、`certainty` 等标签不能修复 `lexical_support`。这不是针对任务 ID 或 oracle 的提示，也没有放宽服务端校验。
+通用 Agent prompt 同步收紧为 lexical-only：候选语义标签在进入 Agent 前已经合法；若候选字段和 validator reason 已足以证明无法安全修复，可以直接弃答，否则第一轮读取，第二轮必须按 kind 逐项核对核心字段，使用同一 span 的最小原文词组修正或弃答。每个候选同时披露服务端计算的 `document_line_count` 和闭区间 `read_window`，`READ_SPAN` 必须完全落在这个窗口，防止模型猜测不存在的行号或利用“只与邻域相交”的宽区间越界读取。仅修改 `modality`、`source_scope`、`certainty` 等标签不能修复 `lexical_support`。这不是针对任务 ID 或 oracle 的提示，也没有放宽服务端校验。
+
+协议失败仍按失败处理，不会从畸形响应中猜测或打捞动作。为定位通用模型兼容性问题，持久化 trace 只新增内容无关的枚举诊断：失败阶段、根形状、截断后的动作数量、白名单动作名，以及经过字段路径与 Pydantic 错误类型白名单归一化的 schema 错误；不保存响应、任意字段名或字段值。
 
 ## 启用方式与下一门槛
 
-开发环境显式设置 `ENABLE_REVIEW_AGENT=true` 才会启用。真实 runner 还要求显式 `--execute`，默认选择 v2；历史复现必须显式 `--benchmark-version v1`。pilot 为 3 个 development/tuned 任务各 1 次，full 强制 30 个任务各 3 次。启用不代表达到简历表述门槛；仍需完成修订后 81 次 holdout 的恢复率、弃答安全、降级率、延迟与成本对照评测。详见 [2026-09-06 pilot 记录](review-agent-pilot-20260906.md)。
+开发环境显式设置 `ENABLE_REVIEW_AGENT=true` 才会启用。真实 runner 还要求显式 `--execute`，默认选择 v2；历史复现必须显式 `--benchmark-version v1`。pilot 为 3 个 development/tuned 任务各 1 次，full 强制 30 个任务各 3 次。诊断慢速 Provider 时可显式传入 `--agent-timeout-seconds 30 --agent-total-deadline-seconds 60`；省略参数就继续使用部署配置，runner 不会静默改变产品默认的 15/30 秒边界，报告会记录实际生效值。启用不代表达到简历表述门槛；仍需完成修订后 81 次 holdout 的恢复率、弃答安全、降级率、延迟与成本对照评测。详见 [2026-09-06 pilot 记录](review-agent-pilot-20260906.md)。

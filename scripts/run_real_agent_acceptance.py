@@ -100,6 +100,58 @@ FORBIDDEN_REPORT_KEYS = {
     "oracle",
     "document_text",
 }
+SAFE_PROTOCOL_STAGES = {
+    "json",
+    "envelope",
+    "actions",
+    "action_row",
+    "action_name",
+    "action_schema",
+}
+SAFE_PROTOCOL_ROOT_SHAPES = {
+    "unparsed",
+    "object",
+    "array",
+    "string",
+    "number",
+    "boolean",
+    "null",
+}
+SAFE_PROTOCOL_ACTION_NAMES = {"READ_SPAN", "PATCH_RECORDS", "ABSTAIN"}
+SAFE_PROTOCOL_SCHEMA_LOCATION_PARTS = {
+    "*",
+    "action",
+    "actions",
+    "requests",
+    "patches",
+    "candidate_index",
+    "candidate_indexes",
+    "doc_ref",
+    "line_start",
+    "line_end",
+    "span_id",
+    "fields",
+    "reason_code",
+    "unknown_field",
+}
+SAFE_PROTOCOL_SCHEMA_ERROR_TYPES = {
+    "missing",
+    "extra_forbidden",
+    "literal_error",
+    "list_type",
+    "dict_type",
+    "int_type",
+    "int_parsing",
+    "string_type",
+    "string_too_short",
+    "string_too_long",
+    "greater_than_equal",
+    "less_than_equal",
+    "too_short",
+    "too_long",
+    "string_pattern_mismatch",
+    "validation_error",
+}
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -338,6 +390,65 @@ def _safe_provider_call(call: dict[str, Any]) -> dict[str, Any]:
     return {key: call[key] for key in allowed if key in call}
 
 
+def _safe_protocol_diagnostic(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    stage = value.get("stage")
+    root_shape = value.get("root_shape")
+    action_count = value.get("action_count")
+    action_names = value.get("action_names")
+    locations = value.get("schema_error_locations")
+    error_types = value.get("schema_error_types")
+
+    def safe_location(location: Any) -> str:
+        if not isinstance(location, str):
+            return "unknown_field"
+        location = location[:256]
+        return ".".join(
+            part
+            if part in SAFE_PROTOCOL_SCHEMA_LOCATION_PARTS
+            else "unknown_field"
+            for part in location.split(".")[:6]
+        ) or "unknown_field"
+
+    return {
+        "stage": (
+            stage
+            if isinstance(stage, str) and stage in SAFE_PROTOCOL_STAGES
+            else "action_schema"
+        ),
+        "root_shape": (
+            root_shape
+            if isinstance(root_shape, str) and root_shape in SAFE_PROTOCOL_ROOT_SHAPES
+            else "unparsed"
+        ),
+        "action_count": (
+            min(action_count, 7)
+            if type(action_count) is int and action_count >= 0
+            else None
+        ),
+        "action_names": [
+            row
+            if isinstance(row, str) and row in SAFE_PROTOCOL_ACTION_NAMES
+            else "unknown"
+            for row in action_names[:6]
+        ]
+        if isinstance(action_names, list)
+        else [],
+        "schema_error_locations": [safe_location(row) for row in locations[:8]]
+        if isinstance(locations, list)
+        else [],
+        "schema_error_types": [
+            row
+            if isinstance(row, str) and row in SAFE_PROTOCOL_SCHEMA_ERROR_TYPES
+            else "validation_error"
+            for row in error_types[:8]
+        ]
+        if isinstance(error_types, list)
+        else [],
+    }
+
+
 def _safe_agent_run(run: dict[str, Any]) -> dict[str, Any]:
     run_keys = {
         "protocol",
@@ -370,12 +481,20 @@ def _safe_agent_run(run: dict[str, Any]) -> dict[str, Any]:
         "completion_tokens",
         "elapsed_ms",
         "final",
+        "protocol_diagnostic",
     }
     safe = {key: copy.deepcopy(run[key]) for key in run_keys if key in run}
-    safe["trace"] = [
-        {key: copy.deepcopy(event[key]) for key in trace_keys if key in event}
-        for event in run.get("trace") or []
-    ]
+    safe["trace"] = []
+    for event in run.get("trace") or []:
+        safe_event = {
+            key: copy.deepcopy(event[key])
+            for key in trace_keys
+            if key in event and key != "protocol_diagnostic"
+        }
+        safe_event["protocol_diagnostic"] = _safe_protocol_diagnostic(
+            event.get("protocol_diagnostic")
+        )
+        safe["trace"].append(safe_event)
     return safe
 
 
@@ -1497,6 +1616,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--agent-timeout-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Evaluation-only per-decision override (max 30). Omit to preserve "
+            "the deployment Settings value."
+        ),
+    )
+    parser.add_argument(
+        "--agent-total-deadline-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Evaluation-only per-Agent override (max 60). Omit to preserve "
+            "the deployment Settings value."
+        ),
+    )
     return parser
 
 
@@ -1511,6 +1648,22 @@ def main(argv: Iterable[str] | None = None) -> int:
     repeats = args.repeats if args.repeats is not None else (3 if args.suite == "full" else 1)
     if repeats < 1:
         raise SystemExit("--repeats must be at least 1")
+    if args.agent_timeout_seconds is not None and not (
+        0 < args.agent_timeout_seconds <= 30
+    ):
+        raise SystemExit("--agent-timeout-seconds must be in (0, 30]")
+    if args.agent_total_deadline_seconds is not None and not (
+        0 < args.agent_total_deadline_seconds <= 60
+    ):
+        raise SystemExit("--agent-total-deadline-seconds must be in (0, 60]")
+    if (
+        args.agent_timeout_seconds is not None
+        and args.agent_total_deadline_seconds is not None
+        and args.agent_total_deadline_seconds < args.agent_timeout_seconds
+    ):
+        raise SystemExit(
+            "--agent-total-deadline-seconds must be >= --agent-timeout-seconds"
+        )
     if args.suite == "full":
         if manifest_path.name != "manifest.json":
             raise SystemExit("manifest filename must remain manifest.json")
@@ -1523,7 +1676,16 @@ def main(argv: Iterable[str] | None = None) -> int:
     artifact_root = ROOT / "artifacts" / str(load_manifest(suite_root)["suite_id"])
     checkpoint = args.checkpoint or artifact_root / f"{args.suite}.checkpoint.json"
     report = args.report or artifact_root / f"{args.suite}.report.json"
-    settings = Settings()
+    evaluation_overrides = {}
+    if args.agent_timeout_seconds is not None:
+        evaluation_overrides["review_agent_timeout_seconds"] = (
+            args.agent_timeout_seconds
+        )
+    if args.agent_total_deadline_seconds is not None:
+        evaluation_overrides["review_agent_total_deadline_seconds"] = (
+            args.agent_total_deadline_seconds
+        )
+    settings = Settings(**evaluation_overrides)
 
     def provider_factory(_task: dict[str, Any], _repeat: int) -> OpenAICompatibleProvider:
         return OpenAICompatibleProvider(settings)

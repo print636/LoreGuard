@@ -220,8 +220,98 @@ class RealAgentAcceptanceTests(unittest.TestCase):
         legacy = real_runner._parser().parse_args(
             ["--execute", "--benchmark-version", "v1"]
         )
+        diagnostic = real_runner._parser().parse_args(
+            [
+                "--execute",
+                "--agent-timeout-seconds",
+                "30",
+                "--agent-total-deadline-seconds",
+                "60",
+            ]
+        )
         self.assertEqual("v2", current.benchmark_version)
         self.assertEqual("v1", legacy.benchmark_version)
+        self.assertIsNone(current.agent_timeout_seconds)
+        self.assertIsNone(current.agent_total_deadline_seconds)
+        self.assertEqual(30.0, diagnostic.agent_timeout_seconds)
+        self.assertEqual(60.0, diagnostic.agent_total_deadline_seconds)
+
+    def test_real_report_boundary_resanitizes_protocol_diagnostics(self):
+        marker = "DO_NOT_PERSIST_MODEL_OUTPUT"
+        oversized = (marker + ".") * 10_000
+        safe = real_runner._safe_agent_run(
+            {
+                "trace": [
+                    {
+                        "action": "DECISION",
+                        "protocol_diagnostic": {
+                            "stage": [marker, {"nested": marker}],
+                            "root_shape": {"nested": [marker]},
+                            "action_count": 999,
+                            "action_names": [
+                                [marker],
+                                {"nested": marker},
+                                "ABSTAIN",
+                            ],
+                            "schema_error_locations": [
+                                oversized,
+                                [marker],
+                                {"nested": marker},
+                            ],
+                            "schema_error_types": [
+                                [marker],
+                                {"nested": marker},
+                                "extra_forbidden",
+                            ],
+                        },
+                    }
+                ]
+            }
+        )
+        serialized = json.dumps(safe, ensure_ascii=False)
+        self.assertNotIn(marker, serialized)
+        diagnostic = safe["trace"][0]["protocol_diagnostic"]
+        self.assertEqual("action_schema", diagnostic["stage"])
+        self.assertEqual("unparsed", diagnostic["root_shape"])
+        self.assertEqual(7, diagnostic["action_count"])
+        self.assertEqual(
+            ["unknown", "unknown", "ABSTAIN"], diagnostic["action_names"]
+        )
+        self.assertEqual(
+            [
+                ".".join(["unknown_field"] * 6),
+                "unknown_field",
+                "unknown_field",
+            ],
+            diagnostic["schema_error_locations"],
+        )
+        self.assertEqual(
+            ["validation_error", "validation_error", "extra_forbidden"],
+            diagnostic["schema_error_types"],
+        )
+        self.assertLess(len(json.dumps(diagnostic, ensure_ascii=False)), 1_000)
+
+    def test_evaluation_timeout_overrides_are_explicit_and_bounded(self):
+        for arguments, message in (
+            (["--agent-timeout-seconds", "31"], "agent-timeout-seconds"),
+            (
+                ["--agent-total-deadline-seconds", "61"],
+                "agent-total-deadline-seconds",
+            ),
+            (
+                [
+                    "--agent-timeout-seconds",
+                    "30",
+                    "--agent-total-deadline-seconds",
+                    "20",
+                ],
+                "must be >=",
+            ),
+        ):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(
+                SystemExit, message
+            ):
+                real_runner_main(["--execute", *arguments])
 
     def test_agent_prompt_targets_lexical_core_fields_not_label_only_patches(self):
         self.assertIn("只因一个或多个核心字段缺少原文词面支持", AGENT_SYSTEM_PROMPT)
