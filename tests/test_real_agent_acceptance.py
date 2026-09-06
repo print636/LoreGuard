@@ -1006,7 +1006,7 @@ class RealAgentAcceptanceTests(unittest.TestCase):
             next(row for row in source_run["trace"] if row["action"] == "READ_SPAN")
         )
 
-        def forged_rejection(*, start=2, end=2, allowed_start=1, allowed_end=2, span=None):
+        def forged_rejection(*, start=2, end=2, allowed_start=2, allowed_end=2, span=None):
             artifact = copy.deepcopy(genuine)
             rejected = {
                 **source_read,

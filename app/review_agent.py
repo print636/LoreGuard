@@ -35,9 +35,11 @@ AGENT_SYSTEM_PROMPT = """你是 LoreGuard 的受限证据修复 Agent。你面�
 PATCH_RECORDS 不能修改 kind、doc_ref、source_line_start、source_line_end、role 或 scope；fields 只可包含
 服务端给出的 allowlist，并且只能列出相对候选值确实发生变化的最小字段；不得重复提交值未变化的字段。
 补丁必须携带先前 READ_SPAN 返回、且绑定同一候选和证据行范围的 span_id；
-没有有效 span_id 的 PATCH 一律拒绝。每个候选的 document_line_count 是文档实际总行数；READ_SPAN 的
-line_start/line_end 必须落在服务端给出的 read_window（含首尾）内，且 line_start <= line_end。不要猜测或
-扩展行号；每个请求还不得超过输入 limits.max_read_lines 指定的最大行数。第一轮先 READ，
+没有有效 span_id 的 PATCH 一律拒绝。每个候选的 document_line_count 是文档实际总行数；read_available=true
+时，READ_SPAN 的 line_start/line_end 必须落在服务端给出的 read_window（含首尾）内，且
+line_start <= line_end。可以读取该窗口内的子区间；默认先读候选 evidence 行，需要邻近上下文时再读整个
+read_window。不要猜测或扩展行号；每个请求还不得超过输入 limits.max_read_lines 指定的最大行数。
+read_available=false 表示候选证据跨度已超过单次读取上限，禁止 READ，必须直接 ABSTAIN。第一轮先 READ，
 但如果仅从候选字段和 validator reason 就已能明确判断无法安全修复，第一轮可以直接 ABSTAIN；其他
 情况第一轮必须先 READ。READ_SPAN 返回的 literal_fields_already_present 是服务端正向确认已经与已读原文
 逐字一致的候选字段名；这些字段不应出现在 PATCH，除非确实把它们改成不同值。未列出的字段不代表一定错误，
@@ -428,6 +430,61 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def effective_read_window(
+    *,
+    line_count: int,
+    candidate_line_start: int,
+    candidate_line_end: int,
+    context_radius_lines: int,
+    max_read_lines: int,
+) -> tuple[int, int] | None:
+    """Return one stable, candidate-covering window or fail closed.
+
+    The context-radius range is an outer authorization boundary. The returned
+    window is shifted at document edges and never truncates candidate evidence.
+    """
+
+    values = (
+        line_count,
+        candidate_line_start,
+        candidate_line_end,
+        context_radius_lines,
+        max_read_lines,
+    )
+    if not all(type(value) is int for value in values):
+        return None
+    if not (
+        1 <= line_count <= MAX_SAFE_AGENT_LINE_NUMBER
+        and 1 <= candidate_line_start <= candidate_line_end <= line_count
+        and 0 <= context_radius_lines <= 50
+        and 1 <= max_read_lines <= 20
+    ):
+        return None
+    candidate_width = candidate_line_end - candidate_line_start + 1
+    if candidate_width > max_read_lines:
+        return None
+
+    outer_start = max(1, candidate_line_start - context_radius_lines)
+    outer_end = min(line_count, candidate_line_end + context_radius_lines)
+    target_width = min(max_read_lines, outer_end - outer_start + 1)
+    extra = target_width - candidate_width
+    read_start = candidate_line_start - extra // 2
+    read_end = read_start + target_width - 1
+    if read_start < outer_start:
+        read_start = outer_start
+        read_end = read_start + target_width - 1
+    if read_end > outer_end:
+        read_end = outer_end
+        read_start = read_end - target_width + 1
+    if not (
+        outer_start <= read_start <= candidate_line_start
+        and candidate_line_end <= read_end <= outer_end
+        and read_end - read_start + 1 <= max_read_lines
+    ):
+        return None
+    return read_start, read_end
+
+
 @dataclass(frozen=True, slots=True)
 class AgentCandidate:
     index: int
@@ -444,17 +501,28 @@ class AgentCandidate:
     def kind(self) -> str:
         return str(self.raw_record.get("kind", ""))
 
-    def read_window(self, context_radius_lines: int) -> tuple[int, int, int]:
+    def read_window(
+        self, context_radius_lines: int, max_read_lines: int
+    ) -> tuple[tuple[int, int] | None, int]:
         line_count = len(self.document.content.splitlines())
         return (
-            max(1, self.line_start - context_radius_lines),
-            min(line_count, self.line_end + context_radius_lines),
+            effective_read_window(
+                line_count=line_count,
+                candidate_line_start=self.line_start,
+                candidate_line_end=self.line_end,
+                context_radius_lines=context_radius_lines,
+                max_read_lines=max_read_lines,
+            ),
             line_count,
         )
 
-    def prompt_dict(self, context_radius_lines: int) -> dict[str, Any]:
+    def prompt_dict(
+        self, context_radius_lines: int, max_read_lines: int
+    ) -> dict[str, Any]:
         allowed = _PATCH_FIELDS_BY_KIND.get(self.kind, frozenset())
-        read_start, read_end, line_count = self.read_window(context_radius_lines)
+        read_window, line_count = self.read_window(
+            context_radius_lines, max_read_lines
+        )
         core = {
             key: value
             for key, value in self.raw_record.items()
@@ -481,10 +549,12 @@ class AgentCandidate:
                 "sha256": _sha256_text(self.evidence_text),
             },
             "document_line_count": line_count,
-            "read_window": {
-                "line_start": read_start,
-                "line_end": read_end,
-            },
+            "read_available": read_window is not None,
+            "read_window": (
+                {"line_start": read_window[0], "line_end": read_window[1]}
+                if read_window is not None
+                else None
+            ),
             "validator_reasons": list(self.error_codes),
             "patch_field_allowlist": sorted(allowed),
         }
@@ -805,7 +875,10 @@ class BoundedReviewAgent:
                 "max_read_lines": self.settings.review_agent_max_read_lines,
             },
             "candidates": [
-                candidate.prompt_dict(self.settings.review_agent_context_radius_lines)
+                candidate.prompt_dict(
+                    self.settings.review_agent_context_radius_lines,
+                    self.settings.review_agent_max_read_lines,
+                )
                 for index, candidate in self.candidates.items()
                 if index in unresolved
             ],
@@ -1066,16 +1139,18 @@ class BoundedReviewAgent:
                     if request.doc_ref != candidate.doc_ref:
                         return "cross_document", {}, ()
                     lines = candidate.document.content.splitlines()
-                    read_start, read_end, _ = candidate.read_window(
-                        self.settings.review_agent_context_radius_lines
+                    read_window, _ = candidate.read_window(
+                        self.settings.review_agent_context_radius_lines,
+                        self.settings.review_agent_max_read_lines,
                     )
                     if (
-                        request.line_end < request.line_start
+                        read_window is None
+                        or request.line_end < request.line_start
                         or request.line_end > len(lines)
                         or request.line_end - request.line_start + 1
                         > self.settings.review_agent_max_read_lines
-                        or request.line_start < read_start
-                        or request.line_end > read_end
+                        or request.line_start < read_window[0]
+                        or request.line_end > read_window[1]
                     ):
                         return (
                             "evidence_range",
@@ -1088,8 +1163,16 @@ class BoundedReviewAgent:
                                     doc_ref=request.doc_ref,
                                     line_start=request.line_start,
                                     line_end=request.line_end,
-                                    allowed_line_start=read_start,
-                                    allowed_line_end=read_end,
+                                    allowed_line_start=(
+                                        read_window[0]
+                                        if read_window is not None
+                                        else None
+                                    ),
+                                    allowed_line_end=(
+                                        read_window[1]
+                                        if read_window is not None
+                                        else None
+                                    ),
                                     validator_reason="evidence_range",
                                     final="rejected",
                                 ),

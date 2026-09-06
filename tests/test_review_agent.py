@@ -25,6 +25,7 @@ from app.review_agent import (
     BoundedReviewAgent,
     MAX_SAFE_AGENT_LINE_NUMBER,
     ProtocolParseDiagnostic,
+    effective_read_window,
 )
 
 
@@ -190,6 +191,85 @@ class ReviewAgentUnitTests(unittest.TestCase):
         self.assertIsInstance(agent.graph, CompiledStateGraph)
         return agent.run(), provider
 
+    def test_effective_read_window_is_stable_bounded_and_candidate_covering(self):
+        cases = (
+            ((100, 1, 1, 20, 12), (1, 12)),
+            ((100, 100, 100, 20, 12), (89, 100)),
+            ((1, 1, 1, 20, 12), (1, 1)),
+            ((100, 10, 21, 50, 12), (10, 21)),
+            ((100, 50, 50, 2, 12), (48, 52)),
+            ((100, 10, 22, 50, 12), None),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                actual = effective_read_window(
+                    line_count=arguments[0],
+                    candidate_line_start=arguments[1],
+                    candidate_line_end=arguments[2],
+                    context_radius_lines=arguments[3],
+                    max_read_lines=arguments[4],
+                )
+                self.assertEqual(expected, actual)
+                if actual is not None:
+                    self.assertLessEqual(actual[1] - actual[0] + 1, arguments[4])
+                    self.assertLessEqual(actual[0], arguments[1])
+                    self.assertGreaterEqual(actual[1], arguments[2])
+
+    def test_candidate_wider_than_read_limit_is_explicitly_unavailable(self):
+        content = "\n".join(f"第{index}行" for index in range(1, 14))
+        document = DocumentInput(
+            id="document-d1",
+            name="story.md",
+            content=content,
+            role="chapter",
+            scope="route-a",
+        )
+        wide = AgentCandidate(
+            index=1,
+            doc_ref="d1",
+            raw_hash="a" * 64,
+            raw_record={
+                "kind": "fact",
+                "subject": "人物",
+                "predicate": "经历",
+                "value": "长段证据",
+                "source_line_start": 1,
+                "source_line_end": 13,
+            },
+            error_codes=("lexical_support",),
+            document=document,
+            line_start=1,
+            line_end=13,
+            evidence_text=content,
+        )
+        run, provider = self.run_agent(
+            [
+                {
+                    "actions": [
+                        {
+                            "action": "ABSTAIN",
+                            "candidate_indexes": [1],
+                            "reason_code": "insufficient_evidence",
+                        }
+                    ]
+                }
+            ],
+            candidates=[wide],
+        )
+        payload = json.loads(provider.calls[0][1])["candidates"][0]
+        self.assertFalse(payload["read_available"])
+        self.assertIsNone(payload["read_window"])
+        self.assertEqual("explicit_abstain", run.final_reason)
+
+        rejected, _ = self.run_agent(
+            [{"actions": [read_action(line_start=1, line_end=12)]}],
+            candidates=[wide],
+        )
+        self.assertEqual("evidence_range", rejected.final_reason)
+        rejected_read = next(row for row in rejected.trace if row.action == "READ_SPAN")
+        self.assertIsNone(rejected_read.allowed_line_start)
+        self.assertIsNone(rejected_read.allowed_line_end)
+
     def test_model_dynamically_reads_then_patches_successfully(self):
         run, provider = self.run_agent(
             [
@@ -335,6 +415,7 @@ class ReviewAgentUnitTests(unittest.TestCase):
         payload = json.loads(provider.calls[0][1])
         disclosed = payload["candidates"][0]
         self.assertEqual(2, disclosed["document_line_count"])
+        self.assertTrue(disclosed["read_available"])
         self.assertEqual(
             {"line_start": 1, "line_end": 1}, disclosed["read_window"]
         )
@@ -381,6 +462,9 @@ class ReviewAgentUnitTests(unittest.TestCase):
         self.assertIn("只能列出相对候选值确实发生变化的最小字段", AGENT_SYSTEM_PROMPT)
         self.assertIn("不得重复提交值未变化的字段", AGENT_SYSTEM_PROMPT)
         self.assertIn("limits.max_read_lines", AGENT_SYSTEM_PROMPT)
+        self.assertIn("read_available=false", AGENT_SYSTEM_PROMPT)
+        self.assertIn("可以读取该窗口内的子区间", AGENT_SYSTEM_PROMPT)
+        self.assertIn("默认先读候选 evidence 行", AGENT_SYSTEM_PROMPT)
         self.assertIn("literal_fields_already_present", AGENT_SYSTEM_PROMPT)
         self.assertIn("未列出的字段不代表一定错误", AGENT_SYSTEM_PROMPT)
 

@@ -33,6 +33,7 @@ from app.review_agent import (
     AGENT_SYSTEM_PROMPT,
     MAX_SAFE_AGENT_LINE_NUMBER,
     _sha256_text,
+    effective_read_window,
 )
 from scripts.run_agent_acceptance import (
     DEFAULT_SUITE_ROOT,
@@ -738,7 +739,7 @@ def _trace_assessment(
     candidate_source_start = int(task["initial_candidate"]["source_line_start"])
     candidate_source_end = int(task["initial_candidate"]["source_line_end"])
 
-    def server_read_window() -> tuple[int, int, int] | None:
+    def server_read_policy() -> tuple[tuple[int, int] | None, int] | None:
         if candidate_metadata is None:
             return None
         if candidate_doc not in document_lines:
@@ -746,8 +747,13 @@ def _trace_assessment(
             document_lines[candidate_doc] = path.read_text(encoding="utf-8").splitlines()
         line_count = len(document_lines[candidate_doc])
         return (
-            max(1, candidate_source_start - server_context_radius_lines),
-            min(line_count, candidate_source_end + server_context_radius_lines),
+            effective_read_window(
+                line_count=line_count,
+                candidate_line_start=candidate_source_start,
+                candidate_line_end=candidate_source_end,
+                context_radius_lines=server_context_radius_lines,
+                max_read_lines=server_max_read_lines,
+            ),
             line_count,
         )
 
@@ -783,16 +789,17 @@ def _trace_assessment(
                     reasons.append("candidate_hash_mismatch")
                 if not span_matches:
                     reasons.append("span_hash_mismatch")
-                window = server_read_window()
+                policy = server_read_policy()
                 start, end = event.get("line_start"), event.get("line_end")
                 server_authorized = (
                     event.get("doc_ref") == candidate_doc
-                    and window is not None
+                    and policy is not None
+                    and policy[0] is not None
                     and type(start) is int
                     and type(end) is int
-                    and 1 <= start <= end <= window[2]
-                    and start >= window[0]
-                    and end <= window[1]
+                    and 1 <= start <= end <= policy[1]
+                    and start >= policy[0][0]
+                    and end <= policy[0][1]
                     and end - start + 1 <= server_max_read_lines
                 )
                 if not server_authorized:
@@ -805,7 +812,9 @@ def _trace_assessment(
                 # attempted line numbers and the server window without a span
                 # hash or document content, and can never become an accepted
                 # read or a successful semantic path.
-                window = server_read_window()
+                policy = server_read_policy()
+                window = policy[0] if policy is not None else None
+                line_count = policy[1] if policy is not None else 0
                 start, end = event.get("line_start"), event.get("line_end")
                 bounded_attempt = (
                     type(start) is int
@@ -815,22 +824,24 @@ def _trace_assessment(
                 )
                 range_violation = bool(
                     bounded_attempt
-                    and window is not None
                     and (
-                        start > end
-                        or end > window[2]
+                        window is None
+                        or start > end
+                        or end > line_count
                         or start < window[0]
                         or end > window[1]
                         or end - start + 1 > server_max_read_lines
                     )
                 )
+                expected_allowed_start = window[0] if window is not None else None
+                expected_allowed_end = window[1] if window is not None else None
                 if (
                     event.get("validator_reason") != "evidence_range"
                     or event.get("doc_ref") != candidate_doc
                     or not identity_matches
-                    or window is None
-                    or event.get("allowed_line_start") != window[0]
-                    or event.get("allowed_line_end") != window[1]
+                    or policy is None
+                    or event.get("allowed_line_start") != expected_allowed_start
+                    or event.get("allowed_line_end") != expected_allowed_end
                     or event.get("span_hash") is not None
                     or not range_violation
                 ):
