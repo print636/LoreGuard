@@ -4,7 +4,7 @@
 
 ## 固定身份
 
-- 代码提交：`32094a128a6a9cafaf5f70ef02c3e4784b76b370`
+- 评测实现提交：`fb57f30a2ffff0fb5816da785cba3f706fbb6127`。相对首次锁定版本仅增加了经审查的显式进程环境凭据通道；未修改数据、Prompt、模型合同、检索配置、评分或门槛。
 - Manifest SHA-256：`2e216d6452917d08dec0b909012dde6fe39caa1b967847b79f49a204c7febcee`
 - Freeze SHA-256：`d2e418072ecd51ceb8a3183edebed04b7175b42d736a55573741a05a7592f271`
 - Full execution SHA-256：`790bdef30c16531199d7a9890edfab75c9c553b63dc0c53fe6279acc14668dca`
@@ -14,7 +14,7 @@
 - 每例重复：3 次；两组都使用同一聊天模型与结构化输出合同
 - RAG Top-K：6；单次复核 Token 预算：6000；请求超时：20 秒；整条复核 deadline：45 秒
 
-聊天服务地址只以不可逆 fingerprint 进入报告；API Key、地址、Prompt、原文、模型原始响应和 note 不进入公开报告。
+聊天服务地址只以不可逆 fingerprint 进入报告；API Key、地址、Prompt、原文、模型原始响应和 note 不进入公开报告。真实运行通过隔离容器的进程环境注入现有凭据，不生成临时密钥文件；评测程序不读取 `.env`。
 
 ## 运行纪律
 
