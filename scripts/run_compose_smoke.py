@@ -26,7 +26,7 @@ DECLARE
     vector_column_count integer;
 BEGIN
     SELECT version_num INTO current_revision FROM alembic_version;
-    IF current_revision <> '0002_evidence_substrate' THEN
+    IF current_revision <> '0003_embedding_identity' THEN
         RAISE EXCEPTION 'unexpected Alembic revision';
     END IF;
     SELECT count(*) INTO vector_extension_count FROM pg_extension WHERE extname = 'vector';
@@ -54,14 +54,18 @@ VALUES
     ('ci-rag-other-document', 'ci-rag-project', 'other.md', 'decoy', 1, true, now());
 INSERT INTO embedding_profiles
     (id, provider_kind, provider_namespace, model_identifier, model_revision,
-     dimensions, normalized, created_at)
+     deployment_fingerprint, document_transform_identity,
+     query_transform_identity, dimensions, normalized, created_at)
 VALUES
-    ('emb-205c93284bd6f18ae6342d898b642d456278b80805b9ee515b29e04be8d94e41',
-     'openai-compatible', 'ci-a', 'ci-model', 'r1', 2, true, now()),
-    ('emb-15bb244af34bdfc307ba8aa31630216eacb9598b09341bbf3fbd102110aa2b64',
-     'openai-compatible', 'ci-b', 'ci-model', 'r1', 3, true, now()),
-    ('emb-d049c5c918d2def390f2276c80d3cca820b82cb521cd68249c3ace96495f4501',
-     'openai-compatible', 'ci-c', 'ci-model', 'r1', 2, true, now());
+    ('emb-a98ebdc29966c3972c656fe1d405df5e53303aa229c9536b76e943922c769d5e',
+     'openai-compatible', 'ci-a', 'ci-model', 'r1', 'ci-runtime-v1',
+     'raw-v1', 'raw-v1', 2, true, now()),
+    ('emb-5547170f104692d0ca66e38375d4afaca58902e07528fc7a45fcafdb386aa930',
+     'openai-compatible', 'ci-b', 'ci-model', 'r1', 'ci-runtime-v1',
+     'raw-v1', 'raw-v1', 3, true, now()),
+    ('emb-ed00e1e5883ed2c99440d69fe7c3421e19275f008683e161e8b118ee441a63da',
+     'openai-compatible', 'ci-c', 'ci-model', 'r1', 'ci-runtime-v1',
+     'raw-v1', 'raw-v1', 2, true, now());
 INSERT INTO evidence_chunks
     (id, project_id, document_id, document_version, content_sha256,
      chunker_version, ordinal, text, text_sha256, char_start, char_end,
@@ -84,25 +88,25 @@ VALUES
 INSERT INTO evidence_embeddings (chunk_id, profile_id, dimensions, vector, created_at)
 VALUES
     ('chk-' || repeat('a', 64),
-     'emb-205c93284bd6f18ae6342d898b642d456278b80805b9ee515b29e04be8d94e41',
+     'emb-a98ebdc29966c3972c656fe1d405df5e53303aa229c9536b76e943922c769d5e',
      2, '[1,0]'::vector, now()),
     ('chk-' || repeat('b', 64),
-     'emb-205c93284bd6f18ae6342d898b642d456278b80805b9ee515b29e04be8d94e41',
+     'emb-a98ebdc29966c3972c656fe1d405df5e53303aa229c9536b76e943922c769d5e',
      2, '[0.8,0.2]'::vector, now()),
     ('chk-' || repeat('c', 64),
-     'emb-205c93284bd6f18ae6342d898b642d456278b80805b9ee515b29e04be8d94e41',
+     'emb-a98ebdc29966c3972c656fe1d405df5e53303aa229c9536b76e943922c769d5e',
      2, '[0,1]'::vector, now()),
     ('chk-' || repeat('d', 64),
-     'emb-205c93284bd6f18ae6342d898b642d456278b80805b9ee515b29e04be8d94e41',
+     'emb-a98ebdc29966c3972c656fe1d405df5e53303aa229c9536b76e943922c769d5e',
      2, '[1,0]'::vector, now()),
     ('chk-' || repeat('e', 64),
-     'emb-205c93284bd6f18ae6342d898b642d456278b80805b9ee515b29e04be8d94e41',
+     'emb-a98ebdc29966c3972c656fe1d405df5e53303aa229c9536b76e943922c769d5e',
      2, '[1,0]'::vector, now()),
     ('chk-' || repeat('c', 64),
-     'emb-15bb244af34bdfc307ba8aa31630216eacb9598b09341bbf3fbd102110aa2b64',
+     'emb-5547170f104692d0ca66e38375d4afaca58902e07528fc7a45fcafdb386aa930',
      3, '[1,0,0]'::vector, now()),
     ('chk-' || repeat('c', 64),
-     'emb-d049c5c918d2def390f2276c80d3cca820b82cb521cd68249c3ace96495f4501',
+     'emb-ed00e1e5883ed2c99440d69fe7c3421e19275f008683e161e8b118ee441a63da',
      2, '[1,0]'::vector, now());
 
 DO $$
@@ -122,7 +126,7 @@ BEGIN
            AND c.document_version = 1
            AND c.content_sha256 = repeat('1', 64)
            AND e.profile_id =
-               'emb-205c93284bd6f18ae6342d898b642d456278b80805b9ee515b29e04be8d94e41'
+               'emb-a98ebdc29966c3972c656fe1d405df5e53303aa229c9536b76e943922c769d5e'
     )
     SELECT chunk_id INTO nearest_chunk
       FROM candidates
@@ -142,7 +146,7 @@ BEGIN
            AND c.document_version = 1
            AND c.content_sha256 = repeat('1', 64)
            AND e.profile_id =
-               'emb-205c93284bd6f18ae6342d898b642d456278b80805b9ee515b29e04be8d94e41'
+               'emb-a98ebdc29966c3972c656fe1d405df5e53303aa229c9536b76e943922c769d5e'
     )
     SELECT chunk_id INTO decoy_chunk FROM document_filter_omitted
      ORDER BY vector <=> '[1,0]'::vector, chunk_id LIMIT 1;
@@ -158,7 +162,7 @@ BEGIN
            AND c.document_id = 'ci-rag-document'
            AND c.content_sha256 = repeat('1', 64)
            AND e.profile_id =
-               'emb-205c93284bd6f18ae6342d898b642d456278b80805b9ee515b29e04be8d94e41'
+               'emb-a98ebdc29966c3972c656fe1d405df5e53303aa229c9536b76e943922c769d5e'
     )
     SELECT chunk_id INTO decoy_chunk FROM version_filter_omitted
      ORDER BY vector <=> '[1,0]'::vector, chunk_id LIMIT 1;
@@ -174,7 +178,7 @@ BEGIN
            AND c.document_id = 'ci-rag-document'
            AND c.document_version = 1
            AND e.profile_id =
-               'emb-205c93284bd6f18ae6342d898b642d456278b80805b9ee515b29e04be8d94e41'
+               'emb-a98ebdc29966c3972c656fe1d405df5e53303aa229c9536b76e943922c769d5e'
     )
     SELECT chunk_id INTO decoy_chunk FROM content_hash_filter_omitted
      ORDER BY vector <=> '[1,0]'::vector, chunk_id LIMIT 1;
@@ -206,7 +210,7 @@ BEGIN
        AND c.document_version = 1
        AND c.content_sha256 = repeat('1', 64)
        AND e.profile_id =
-           'emb-15bb244af34bdfc307ba8aa31630216eacb9598b09341bbf3fbd102110aa2b64'
+           'emb-5547170f104692d0ca66e38375d4afaca58902e07528fc7a45fcafdb386aa930'
        AND e.dimensions = 3;
     IF different_dimension_count <> 1 THEN
         RAISE EXCEPTION 'different-dimension profile safety decoy is missing';

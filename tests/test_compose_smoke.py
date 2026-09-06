@@ -144,6 +144,7 @@ class ComposeSmokeTests(unittest.TestCase):
                 provider_namespace=namespace,
                 model_identifier="ci-model",
                 model_revision="r1",
+                deployment_fingerprint="ci-runtime-v1",
                 dimensions=dimensions,
             ).profile_id
             profile_ids[namespace] = profile_id

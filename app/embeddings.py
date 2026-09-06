@@ -14,6 +14,8 @@ from .config import Settings
 
 
 _RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+DOCUMENT_TRANSFORM_IDENTITY = "raw-v1"
+QUERY_TRANSFORM_IDENTITY = "raw-v1"
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,9 @@ class EmbeddingProfile:
     provider_namespace: str
     model_identifier: str
     model_revision: str
+    deployment_fingerprint: str
+    document_transform_identity: str
+    query_transform_identity: str
     dimensions: int
     normalized: bool = True
 
@@ -58,6 +63,26 @@ class EmbeddingProfile:
         ):
             raise ValueError("embedding model revision is invalid")
         if (
+            not isinstance(self.deployment_fingerprint, str)
+            or self.deployment_fingerprint != self.deployment_fingerprint.strip()
+            or not self.deployment_fingerprint
+            or self.deployment_fingerprint.lower() == "unspecified"
+            or len(self.deployment_fingerprint) > 160
+        ):
+            raise ValueError("embedding deployment fingerprint is invalid")
+        for value in (
+            self.document_transform_identity,
+            self.query_transform_identity,
+        ):
+            if (
+                not isinstance(value, str)
+                or value != value.strip()
+                or not value
+                or value.lower() == "unspecified"
+                or len(value) > 80
+            ):
+                raise ValueError("embedding transform identity is invalid")
+        if (
             isinstance(self.dimensions, bool)
             or not isinstance(self.dimensions, int)
             or not (1 <= self.dimensions <= 16_000)
@@ -70,6 +95,9 @@ class EmbeddingProfile:
             provider_namespace=self.provider_namespace,
             model_identifier=self.model_identifier,
             model_revision=self.model_revision,
+            deployment_fingerprint=self.deployment_fingerprint,
+            document_transform_identity=self.document_transform_identity,
+            query_transform_identity=self.query_transform_identity,
             dimensions=self.dimensions,
             normalized=self.normalized,
         )
@@ -83,6 +111,9 @@ class EmbeddingProfile:
         provider_namespace: str = "default",
         model_identifier: str,
         model_revision: str,
+        deployment_fingerprint: str,
+        document_transform_identity: str = DOCUMENT_TRANSFORM_IDENTITY,
+        query_transform_identity: str = QUERY_TRANSFORM_IDENTITY,
         dimensions: int,
     ) -> "EmbeddingProfile":
         return cls(
@@ -91,6 +122,9 @@ class EmbeddingProfile:
                 provider_namespace=provider_namespace,
                 model_identifier=model_identifier,
                 model_revision=model_revision,
+                deployment_fingerprint=deployment_fingerprint,
+                document_transform_identity=document_transform_identity,
+                query_transform_identity=query_transform_identity,
                 dimensions=dimensions,
                 normalized=True,
             ),
@@ -98,6 +132,9 @@ class EmbeddingProfile:
             provider_namespace=provider_namespace,
             model_identifier=model_identifier,
             model_revision=model_revision,
+            deployment_fingerprint=deployment_fingerprint,
+            document_transform_identity=document_transform_identity,
+            query_transform_identity=query_transform_identity,
             dimensions=dimensions,
             normalized=True,
         )
@@ -207,6 +244,11 @@ class OpenAICompatibleEmbeddingProvider:
             raise EmbeddingNotConfiguredError("embedding model revision is not configured")
         if settings.embedding_dimensions is None:
             raise EmbeddingNotConfiguredError("embedding dimensions are not configured")
+        deployment_fingerprint = settings.embedding_deployment_fingerprint.strip()
+        if not deployment_fingerprint or deployment_fingerprint.lower() == "unspecified":
+            raise EmbeddingNotConfiguredError(
+                "embedding deployment fingerprint is not configured"
+            )
         self._validated_endpoint()
         self._profile = EmbeddingProfile.openai_compatible(
             provider_namespace=(
@@ -214,6 +256,7 @@ class OpenAICompatibleEmbeddingProvider:
             ),
             model_identifier=settings.embedding_model.strip(),
             model_revision=revision,
+            deployment_fingerprint=deployment_fingerprint,
             dimensions=settings.embedding_dimensions,
         )
         return self._profile
@@ -614,6 +657,9 @@ def _embedding_profile_id(
     provider_namespace: str,
     model_identifier: str,
     model_revision: str,
+    deployment_fingerprint: str,
+    document_transform_identity: str,
+    query_transform_identity: str,
     dimensions: int,
     normalized: bool,
 ) -> str:
@@ -623,6 +669,9 @@ def _embedding_profile_id(
             "provider_namespace": provider_namespace,
             "model_identifier": model_identifier,
             "model_revision": model_revision,
+            "deployment_fingerprint": deployment_fingerprint,
+            "document_transform_identity": document_transform_identity,
+            "query_transform_identity": query_transform_identity,
             "dimensions": dimensions,
             "normalized": normalized,
         },

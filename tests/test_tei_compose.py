@@ -68,9 +68,22 @@ class TeiComposeStructureTests(unittest.TestCase):
         self.assertEqual(2, OVERLAY.count('EMBEDDING_API_KEY: ""'))
         self.assertEqual(2, OVERLAY.count("EMBEDDING_BASE_URL: http://embeddings:80/v1"))
         self.assertEqual(2, OVERLAY.count('EMBEDDING_DIMENSIONS: "512"'))
+        deployment = (
+            "EMBEDDING_DEPLOYMENT_FINGERPRINT: "
+            "tei-sha256-ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07-"
+            "cpu-float32-cls"
+        )
+        self.assertEqual(2, OVERLAY.count(deployment))
         self.assertEqual(2, OVERLAY.count('EMBEDDING_ALLOW_INSECURE_HTTP: "true"'))
         self.assertNotIn("OPENAI_", OVERLAY)
         self.assertIn('ENABLE_EMBEDDINGS: ${ENABLE_EMBEDDINGS:-false}', BASE_COMPOSE)
+        self.assertEqual(
+            2,
+            BASE_COMPOSE.count(
+                "EMBEDDING_DEPLOYMENT_FINGERPRINT: "
+                "${EMBEDDING_DEPLOYMENT_FINGERPRINT:-unspecified}"
+            ),
+        )
         self.assertNotIn("text-embeddings-inference", BASE_COMPOSE)
 
     def test_smoke_is_explicit_and_has_no_host_or_key_configuration(self):

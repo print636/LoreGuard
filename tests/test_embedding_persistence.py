@@ -19,8 +19,12 @@ from app.db import (
 from app.embeddings import EmbeddingProfile
 from app.evidence_chunks import EvidenceChunk, EvidenceChunker, SnapshotDocumentKey
 from app.evidence_store import (
+    SqlAlchemyEvidenceEmbeddingIndex,
+    VectorSearchUnavailable,
     EvidenceStoreError,
+    embedding_coverage,
     list_chunks_for_snapshots,
+    missing_embedding_chunks,
     store_chunks,
     store_embeddings,
 )
@@ -58,7 +62,10 @@ class EvidencePersistenceTests(unittest.TestCase):
             project_id="p", document_id="d", document_version=2, content="第二版事实。角色在黑塔。"
         )
         profile = EmbeddingProfile.openai_compatible(
-            model_identifier="test-embedding", model_revision="r1", dimensions=2
+            model_identifier="test-embedding",
+            model_revision="r1",
+            deployment_fingerprint="unit-runtime-v1",
+            dimensions=2,
         )
         store_embeddings(
             self.session,
@@ -104,7 +111,10 @@ class EvidencePersistenceTests(unittest.TestCase):
             store_chunks(self.session, [forged])
 
         profile = EmbeddingProfile.openai_compatible(
-            model_identifier="test", model_revision="r1", dimensions=2
+            model_identifier="test",
+            model_revision="r1",
+            deployment_fingerprint="unit-runtime-v1",
+            dimensions=2,
         )
         for vector in (
             (1.0,),
@@ -127,7 +137,10 @@ class EvidencePersistenceTests(unittest.TestCase):
         )
         self.assertEqual(len(chunks), 2)
         profile = EmbeddingProfile.openai_compatible(
-            model_identifier="atomic", model_revision="r1", dimensions=2
+            model_identifier="atomic",
+            model_revision="r1",
+            deployment_fingerprint="unit-runtime-v1",
+            dimensions=2,
         )
         with self.assertRaises(EvidenceStoreError):
             store_embeddings(
@@ -152,7 +165,10 @@ class EvidencePersistenceTests(unittest.TestCase):
             project_id="p", document_id="d", document_version=1, content="原始事实。"
         )[0]
         profile = EmbeddingProfile.openai_compatible(
-            model_identifier="collision", model_revision="r1", dimensions=2
+            model_identifier="collision",
+            model_revision="r1",
+            deployment_fingerprint="unit-runtime-v1",
+            dimensions=2,
         )
         with self.assertRaisesRegex(EvidenceStoreError, "duplicate"):
             store_embeddings(
@@ -198,6 +214,107 @@ class EvidencePersistenceTests(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             self.session.commit()
         self.session.rollback()
+
+    def test_coverage_reports_missing_and_rejects_corrupt_stored_vectors(self):
+        chunks = EvidenceChunker(
+            target_chars=5, min_chars=3, max_chars=6, overlap_chars=0
+        ).chunk(
+            project_id="p", document_id="d", document_version=1, content="第一句。第二句。"
+        )
+        profile = EmbeddingProfile.openai_compatible(
+            model_identifier="coverage",
+            model_revision="r1",
+            deployment_fingerprint="unit-runtime-v1",
+            dimensions=2,
+        )
+        store_embeddings(
+            self.session, profile=profile, chunks=[chunks[0]], vectors=[(1.0, 0.0)]
+        )
+        self.session.commit()
+
+        coverage = embedding_coverage(self.session, profile=profile, chunks=chunks)
+        self.assertFalse(coverage.complete)
+        self.assertEqual(coverage.present_count, 1)
+        self.assertEqual(
+            missing_embedding_chunks(self.session, profile=profile, chunks=chunks),
+            (chunks[1],),
+        )
+
+        self.session.execute(
+            update(EvidenceEmbeddingRow)
+            .where(EvidenceEmbeddingRow.chunk_id == chunks[0].chunk_id)
+            .values(dimensions=3)
+        )
+        self.session.commit()
+        with self.assertRaisesRegex(EvidenceStoreError, "dimension"):
+            embedding_coverage(self.session, profile=profile, chunks=chunks)
+
+    def test_sqlite_nearest_fails_closed_instead_of_using_json_vectors(self):
+        chunk = EvidenceChunker().chunk(
+            project_id="p", document_id="d", document_version=1, content="安全事实。"
+        )[0]
+        profile = EmbeddingProfile.openai_compatible(
+            model_identifier="sqlite",
+            model_revision="r1",
+            deployment_fingerprint="unit-runtime-v1",
+            dimensions=2,
+        )
+        store_embeddings(
+            self.session, profile=profile, chunks=[chunk], vectors=[(1.0, 0.0)]
+        )
+        self.session.commit()
+        index = SqlAlchemyEvidenceEmbeddingIndex(lambda: Session(self.engine))
+        with self.assertRaisesRegex(VectorSearchUnavailable, "PostgreSQL"):
+            index.nearest(
+                snapshots=[chunk.snapshot],
+                profile_id=profile.profile_id,
+                chunker_version=chunk.chunker_version,
+                query_vector=(1.0, 0.0),
+                limit=1,
+            )
+
+    def test_deployment_and_query_transform_profiles_do_not_share_vectors(self):
+        chunk = EvidenceChunker().chunk(
+            project_id="p", document_id="d", document_version=1, content="隔离事实。"
+        )[0]
+        base = EmbeddingProfile.openai_compatible(
+            model_identifier="isolation",
+            model_revision="r1",
+            deployment_fingerprint="runtime-a",
+            dimensions=2,
+        )
+        other_deployment = EmbeddingProfile.openai_compatible(
+            model_identifier="isolation",
+            model_revision="r1",
+            deployment_fingerprint="runtime-b",
+            dimensions=2,
+        )
+        other_query = EmbeddingProfile.openai_compatible(
+            model_identifier="isolation",
+            model_revision="r1",
+            deployment_fingerprint="runtime-a",
+            query_transform_identity="query-instruction-v2",
+            dimensions=2,
+        )
+        for profile, vector in (
+            (base, (1.0, 0.0)),
+            (other_deployment, (0.0, 1.0)),
+            (other_query, (-1.0, 0.0)),
+        ):
+            store_embeddings(
+                self.session, profile=profile, chunks=[chunk], vectors=[vector]
+            )
+        self.session.commit()
+        self.assertEqual(
+            self.session.scalar(select(func.count()).select_from(EmbeddingProfileRow)),
+            3,
+        )
+        for profile in (base, other_deployment, other_query):
+            self.assertTrue(
+                embedding_coverage(
+                    self.session, profile=profile, chunks=[chunk]
+                ).complete
+            )
 
 
 if __name__ == "__main__":

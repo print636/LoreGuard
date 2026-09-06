@@ -201,6 +201,9 @@ class EmbeddingProfileRow(Base):
             "provider_namespace",
             "model_identifier",
             "model_revision",
+            "deployment_fingerprint",
+            "document_transform_identity",
+            "query_transform_identity",
             "dimensions",
             "normalized",
             name="uq_embedding_profile_identity",
@@ -215,6 +218,9 @@ class EmbeddingProfileRow(Base):
     provider_namespace: Mapped[str] = mapped_column(String(80))
     model_identifier: Mapped[str] = mapped_column(String(255))
     model_revision: Mapped[str] = mapped_column(String(120))
+    deployment_fingerprint: Mapped[str] = mapped_column(String(160))
+    document_transform_identity: Mapped[str] = mapped_column(String(80))
+    query_transform_identity: Mapped[str] = mapped_column(String(80))
     dimensions: Mapped[int] = mapped_column(Integer)
     normalized: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)

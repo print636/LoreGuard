@@ -33,6 +33,7 @@ class EmbeddingProviderTests(unittest.TestCase):
             "embedding_base_url": "https://embedding.invalid/v1",
             "embedding_model": "embedding-model",
             "embedding_model_revision": "rev-1",
+            "embedding_deployment_fingerprint": "runtime-pooling-dtype-v1",
             "embedding_dimensions": 2,
             "embedding_max_attempts": 2,
             "embedding_total_deadline_seconds": 5,
@@ -62,6 +63,20 @@ class EmbeddingProviderTests(unittest.TestCase):
             self.settings(embedding_model_revision="rev-2")
         ).profile
         self.assertNotEqual(profile.profile_id, changed.profile_id)
+        changed_deployment = OpenAICompatibleEmbeddingProvider(
+            self.settings(embedding_deployment_fingerprint="runtime-pooling-dtype-v2")
+        ).profile
+        self.assertNotEqual(profile.profile_id, changed_deployment.profile_id)
+        changed_query_transform = type(profile).openai_compatible(
+            provider_namespace=profile.provider_namespace,
+            model_identifier=profile.model_identifier,
+            model_revision=profile.model_revision,
+            deployment_fingerprint=profile.deployment_fingerprint,
+            document_transform_identity=profile.document_transform_identity,
+            query_transform_identity="bge-query-instruction-v1",
+            dimensions=profile.dimensions,
+        )
+        self.assertNotEqual(profile.profile_id, changed_query_transform.profile_id)
 
     def test_success_reorders_indexes_normalizes_and_emits_safe_telemetry(self):
         seen: list[httpx.Request] = []
@@ -145,6 +160,14 @@ class EmbeddingProviderTests(unittest.TestCase):
                 EmbeddingNotConfiguredError, "revision"
             ):
                 _ = provider.profile
+
+        missing_deployment = OpenAICompatibleEmbeddingProvider(
+            self.settings(embedding_deployment_fingerprint="unspecified")
+        )
+        with self.assertRaisesRegex(
+            EmbeddingNotConfiguredError, "deployment fingerprint"
+        ):
+            _ = missing_deployment.profile
 
         blocked = OpenAICompatibleEmbeddingProvider(
             self.settings(embedding_base_url="http://tei:8080")

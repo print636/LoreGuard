@@ -184,28 +184,41 @@ def _validate_existing_tables(bind, existing: set[str], dialect: str) -> None:
             raise RuntimeError(f"incompatible pre-existing table: {table_name}")
 
     required_uniques = {
-        "embedding_profiles": (
-            "provider_kind",
-            "provider_namespace",
-            "model_identifier",
-            "model_revision",
-            "dimensions",
-            "normalized",
-        ),
-        "evidence_chunks": (
+        "embedding_profiles": {
+            (
+                "provider_kind",
+                "provider_namespace",
+                "model_identifier",
+                "model_revision",
+                "dimensions",
+                "normalized",
+            ),
+            (
+                "provider_kind",
+                "provider_namespace",
+                "model_identifier",
+                "model_revision",
+                "deployment_fingerprint",
+                "document_transform_identity",
+                "query_transform_identity",
+                "dimensions",
+                "normalized",
+            ),
+        },
+        "evidence_chunks": {(
             "project_id",
             "document_id",
             "document_version",
             "content_sha256",
             "chunker_version",
             "ordinal",
-        ),
+        )},
     }
-    for table_name, required_unique in required_uniques.items():
+    for table_name, accepted_uniques in required_uniques.items():
         if table_name not in existing:
             continue
         available = _unique_column_tuples(bind, table_name)
-        if required_unique not in available:
+        if not available.intersection(accepted_uniques):
             raise RuntimeError(f"incompatible pre-existing table: {table_name}")
 
     if "evidence_chunks" in existing:

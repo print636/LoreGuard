@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     embedding_base_url: str = Field(default="", max_length=2_048)
     embedding_model: str = Field(default="", max_length=255)
     embedding_model_revision: str = Field(default="unspecified", max_length=120)
+    embedding_deployment_fingerprint: str = Field(
+        default="unspecified", max_length=160
+    )
     embedding_profile_namespace: str = Field(default="default", max_length=80)
     embedding_dimensions: int | None = Field(default=None, ge=1, le=16_000)
     embedding_allow_insecure_http: bool = False

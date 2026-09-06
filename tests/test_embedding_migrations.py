@@ -17,6 +17,7 @@ from app import db as app_db
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
+HEAD_REVISION = "0003_embedding_identity"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
@@ -138,7 +139,13 @@ class EmbeddingMigrationTests(unittest.TestCase):
                 """
             )
 
-    def insert_snapshot_fixture(self, engine, *, chunk_project_id: str = "p1") -> None:
+    def insert_snapshot_fixture(
+        self,
+        engine,
+        *,
+        chunk_project_id: str = "p1",
+        include_product_rows: bool = True,
+    ) -> None:
         with engine.begin() as connection:
             connection.exec_driver_sql(
                 "INSERT INTO projects (id, name, description, created_at) "
@@ -150,6 +157,28 @@ class EmbeddingMigrationTests(unittest.TestCase):
                 "(id, project_id, name, content, version, active, created_at) "
                 "VALUES ('doc1', 'p1', 'one.md', 'alpha', 1, 1, '2026-09-07')"
             )
+            if include_product_rows:
+                connection.exec_driver_sql(
+                    "INSERT INTO analysis_runs "
+                    "(id, project_id, status, created_at, started_at, completed_at, "
+                    "input_chars, prompt_tokens, completion_tokens, estimated_cost_usd, "
+                    "error, cancel_requested) VALUES "
+                    "('run1', 'p1', 'completed', '2026-09-07', NULL, NULL, "
+                    "5, 0, 0, 0, NULL, 0)"
+                )
+                connection.exec_driver_sql(
+                    "INSERT INTO issues "
+                    "(id, run_id, category, severity, confidence, title, explanation, "
+                    "evidence, suggestion, extra) VALUES "
+                    "('issue1', 'run1', 'fact_conflict', 'medium', 0.9, 'keep', "
+                    "'keep explanation', '[]', 'keep suggestion', '{}')"
+                )
+                connection.exec_driver_sql(
+                    "INSERT INTO issue_feedback "
+                    "(id, issue_id, label, comment, created_at) "
+                    "VALUES ('feedback1', 'issue1', 'accepted', 'keep feedback', "
+                    "'2026-09-07')"
+                )
             connection.exec_driver_sql(
                 "INSERT INTO embedding_profiles "
                 "(id, provider_kind, provider_namespace, model_identifier, "
@@ -208,7 +237,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
                 revision = connection.exec_driver_sql(
                     "SELECT version_num FROM alembic_version"
                 ).scalar_one()
-            self.assertEqual(revision, "0002_evidence_substrate")
+            self.assertEqual(revision, HEAD_REVISION)
             engine.dispose()
 
     def test_incomplete_legacy_table_stops_before_head_stamp(self):
@@ -226,7 +255,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
                 revision = connection.exec_driver_sql(
                     "SELECT version_num FROM alembic_version"
                 ).scalar_one_or_none()
-            self.assertNotEqual(revision, "0002_evidence_substrate")
+            self.assertNotEqual(revision, HEAD_REVISION)
             engine.dispose()
 
     def test_incomplete_embedding_table_stops_at_baseline_revision(self):
@@ -253,7 +282,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
             self.assertEqual(revision, "0001_legacy_schema_baseline")
             engine.dispose()
 
-    def test_prior_wip_schema_gains_owner_fk_without_data_loss(self):
+    def test_profile_identity_upgrade_invalidates_only_derived_vector_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "prior-wip.db"
             url = f"sqlite:///{path.as_posix()}"
@@ -277,16 +306,88 @@ class EmbeddingMigrationTests(unittest.TestCase):
                 )
             )
             with engine.connect() as connection:
-                preserved = connection.exec_driver_sql(
-                    "SELECT c.text, e.dimensions, e.vector "
-                    "FROM evidence_chunks c JOIN evidence_embeddings e "
-                    "ON e.chunk_id = c.id WHERE c.id = 'chk-wip'"
-                ).one()
+                preserved_chunk = connection.exec_driver_sql(
+                    "SELECT text FROM evidence_chunks WHERE id = 'chk-wip'"
+                ).scalar_one()
+                embedding_count = connection.exec_driver_sql(
+                    "SELECT count(*) FROM evidence_embeddings"
+                ).scalar_one()
+                profile_count = connection.exec_driver_sql(
+                    "SELECT count(*) FROM embedding_profiles"
+                ).scalar_one()
+                document_content = connection.exec_driver_sql(
+                    "SELECT content FROM documents WHERE id = 'doc1'"
+                ).scalar_one()
+                run_status = connection.exec_driver_sql(
+                    "SELECT status FROM analysis_runs WHERE id = 'run1'"
+                ).scalar_one()
+                issue_title = connection.exec_driver_sql(
+                    "SELECT title FROM issues WHERE id = 'issue1'"
+                ).scalar_one()
+                feedback_comment = connection.exec_driver_sql(
+                    "SELECT comment FROM issue_feedback WHERE id = 'feedback1'"
+                ).scalar_one()
                 revision = connection.exec_driver_sql(
                     "SELECT version_num FROM alembic_version"
                 ).scalar_one()
-            self.assertEqual(tuple(preserved), ("alpha", 2, "[1.0, 0.0]"))
-            self.assertEqual(revision, "0002_evidence_substrate")
+            self.assertEqual(preserved_chunk, "alpha")
+            self.assertEqual(embedding_count, 0)
+            self.assertEqual(profile_count, 0)
+            self.assertEqual(document_content, "alpha")
+            self.assertEqual(run_status, "completed")
+            self.assertEqual(issue_title, "keep")
+            self.assertEqual(feedback_comment, "keep feedback")
+            self.assertEqual(revision, HEAD_REVISION)
+            engine.dispose()
+
+    def test_applied_0002_upgrades_to_stronger_profile_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "applied-0002.db"
+            url = f"sqlite:///{path.as_posix()}"
+            self.upgrade_to(url, "0002_evidence_substrate")
+            engine = create_engine(url)
+            self.insert_snapshot_fixture(engine)
+            engine.dispose()
+
+            self.upgrade(url)
+            engine = create_engine(url)
+            columns = {
+                item["name"]
+                for item in inspect(engine).get_columns("embedding_profiles")
+            }
+            self.assertTrue(
+                {
+                    "deployment_fingerprint",
+                    "document_transform_identity",
+                    "query_transform_identity",
+                }
+                <= columns
+            )
+            with engine.connect() as connection:
+                self.assertEqual(
+                    connection.exec_driver_sql(
+                        "SELECT count(*) FROM embedding_profiles"
+                    ).scalar_one(),
+                    0,
+                )
+                self.assertEqual(
+                    connection.exec_driver_sql(
+                        "SELECT count(*) FROM evidence_embeddings"
+                    ).scalar_one(),
+                    0,
+                )
+                self.assertEqual(
+                    connection.exec_driver_sql(
+                        "SELECT content FROM documents WHERE id = 'doc1'"
+                    ).scalar_one(),
+                    "alpha",
+                )
+                self.assertEqual(
+                    connection.exec_driver_sql(
+                        "SELECT title FROM issues WHERE id = 'issue1'"
+                    ).scalar_one(),
+                    "keep",
+                )
             engine.dispose()
 
     def test_stamped_prior_wip_adds_missing_document_owner_unique(self):
@@ -309,7 +410,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
                     "FOREIGN KEY (project_id) REFERENCES projects(id))"
                 )
             self.create_prior_wip_embedding_tables(engine)
-            self.insert_snapshot_fixture(engine)
+            self.insert_snapshot_fixture(engine, include_product_rows=False)
             engine.dispose()
             self.stamp(url, "0001_legacy_schema_baseline")
 
@@ -518,7 +619,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
                     "SELECT version_num FROM alembic_version"
                 ).scalar_one()
             self.assertEqual(name, "startup")
-            self.assertEqual(revision, "0002_evidence_substrate")
+            self.assertEqual(revision, HEAD_REVISION)
             engine.dispose()
 
 
