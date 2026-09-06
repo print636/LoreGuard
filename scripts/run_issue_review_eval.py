@@ -1405,6 +1405,37 @@ def _read_secret_file(path: Path) -> str:
     return value
 
 
+def _read_secret_env(name: str) -> str:
+    """Read one explicitly named process variable without loading dotenv files."""
+    if (
+        not isinstance(name, str)
+        or not 1 <= len(name) <= 64
+        or not (name[0].isupper() or name[0] == "_")
+        or any(
+            not (character.isupper() or character.isdigit() or character == "_")
+            for character in name
+        )
+    ):
+        raise EvalContractError("secret environment variable name is invalid")
+    value = os.environ.get(name)
+    if value is None:
+        raise EvalContractError("required secret environment variable is unavailable")
+    value = value.strip()
+    if not value or "\n" in value or "\r" in value or len(value) > 4_096:
+        raise EvalContractError("secret environment variable content is invalid")
+    return value
+
+
+def _read_secret_source(path: Path | None, environment_name: str | None) -> str | None:
+    if path is not None and environment_name is not None:
+        raise EvalContractError("secret sources are mutually exclusive")
+    if path is not None:
+        return _read_secret_file(path)
+    if environment_name is not None:
+        return _read_secret_env(environment_name)
+    return None
+
+
 class ProductionEvaluationExecutor:
     def __init__(
         self,
@@ -1838,7 +1869,9 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", choices=sorted(MODES), required=True)
     run.add_argument("--repeats", type=int, default=1)
     run.add_argument("--chat-base-url", required=True)
-    run.add_argument("--chat-api-key-file", type=Path, required=True)
+    chat_secret = run.add_mutually_exclusive_group(required=True)
+    chat_secret.add_argument("--chat-api-key-file", type=Path)
+    chat_secret.add_argument("--chat-api-key-env")
     run.add_argument("--chat-model", required=True)
     run.add_argument("--thinking-mode", choices=("disabled", "enabled"))
     run.add_argument("--top-k", type=int, default=6)
@@ -1846,14 +1879,18 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout-seconds", type=float, default=20.0)
     run.add_argument("--total-deadline-seconds", type=float, default=45.0)
     run.add_argument("--embedding-base-url")
-    run.add_argument("--embedding-api-key-file", type=Path)
+    embedding_secret = run.add_mutually_exclusive_group()
+    embedding_secret.add_argument("--embedding-api-key-file", type=Path)
+    embedding_secret.add_argument("--embedding-api-key-env")
     run.add_argument("--embedding-model")
     run.add_argument("--embedding-revision")
     run.add_argument("--embedding-deployment")
     run.add_argument("--embedding-namespace")
     run.add_argument("--embedding-dimensions", type=int)
     run.add_argument("--embedding-allow-insecure-http", action="store_true")
-    run.add_argument("--database-url-file", type=Path)
+    database_secret = run.add_mutually_exclusive_group()
+    database_secret.add_argument("--database-url-file", type=Path)
+    database_secret.add_argument("--database-url-env")
     run.add_argument("--execute", action="store_true")
 
     score = commands.add_parser("score")
@@ -1899,10 +1936,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             total_deadline_seconds=_positive_number(args.total_deadline_seconds, maximum=45),
             embedding_allow_insecure_http=args.embedding_allow_insecure_http,
         )
-        embedding_key = _read_secret_file(args.embedding_api_key_file) if args.embedding_api_key_file else None
-        database_url = _read_secret_file(args.database_url_file) if args.database_url_file else None
+        chat_api_key = _read_secret_source(args.chat_api_key_file, args.chat_api_key_env)
+        embedding_key = _read_secret_source(args.embedding_api_key_file, args.embedding_api_key_env)
+        database_url = _read_secret_source(args.database_url_file, args.database_url_env)
+        if chat_api_key is None:
+            raise EvalContractError("chat credential is unavailable")
         executor = ProductionEvaluationExecutor(
-            chat_api_key=_read_secret_file(args.chat_api_key_file), chat_base_url=args.chat_base_url, chat_model=args.chat_model,
+            chat_api_key=chat_api_key, chat_base_url=args.chat_base_url, chat_model=args.chat_model,
             embedding_api_key=embedding_key, embedding_base_url=args.embedding_base_url, embedding_model=args.embedding_model,
             embedding_revision=args.embedding_revision, embedding_deployment=args.embedding_deployment,
             embedding_namespace=args.embedding_namespace, embedding_dimensions=args.embedding_dimensions,

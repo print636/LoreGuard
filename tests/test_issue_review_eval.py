@@ -527,6 +527,53 @@ def test_secret_loader_rejects_dotenv(tmp_path):
         runner._read_secret_file(path)
 
 
+def test_secret_environment_loader_is_explicit_and_content_safe(monkeypatch):
+    monkeypatch.setenv("LOREGUARD_EVAL_SECRET", "  secret-value  ")
+    assert runner._read_secret_env("LOREGUARD_EVAL_SECRET") == "secret-value"
+
+    monkeypatch.delenv("LOREGUARD_EVAL_SECRET")
+    with pytest.raises(runner.EvalContractError, match="unavailable") as missing:
+        runner._read_secret_env("LOREGUARD_EVAL_SECRET")
+    assert "LOREGUARD_EVAL_SECRET" not in str(missing.value)
+
+    monkeypatch.setenv("LOREGUARD_EVAL_SECRET", "secret\nvalue")
+    with pytest.raises(runner.EvalContractError, match="content is invalid"):
+        runner._read_secret_env("LOREGUARD_EVAL_SECRET")
+
+    with pytest.raises(runner.EvalContractError, match="name is invalid"):
+        runner._read_secret_env("lowercase_secret")
+
+
+def test_secret_sources_are_mutually_exclusive_and_cli_accepts_env(monkeypatch, tmp_path):
+    secret_file = tmp_path / "secret.key"
+    secret_file.write_text("file-secret", encoding="utf-8")
+    monkeypatch.setenv("LOREGUARD_EVAL_SECRET", "env-secret")
+    with pytest.raises(runner.EvalContractError, match="mutually exclusive"):
+        runner._read_secret_source(secret_file, "LOREGUARD_EVAL_SECRET")
+
+    parsed = runner._parser().parse_args(
+        [
+            "run",
+            "--execution",
+            "execution.json",
+            "--execution-sha256",
+            "0" * 64,
+            "--output",
+            "predictions.json",
+            "--mode",
+            "local-context",
+            "--chat-base-url",
+            "https://example.invalid/v1",
+            "--chat-api-key-env",
+            "LOREGUARD_EVAL_SECRET",
+            "--chat-model",
+            "mock",
+        ]
+    )
+    assert parsed.chat_api_key_file is None
+    assert parsed.chat_api_key_env == "LOREGUARD_EVAL_SECRET"
+
+
 def test_embedding_insecure_http_requires_explicit_cli_opt_in_and_is_reported():
     base = [
         "run", "--execution", "execution.json", "--execution-sha256", "0" * 64,
