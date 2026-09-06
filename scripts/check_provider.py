@@ -7,13 +7,23 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.provider import OpenAICompatibleProvider, ProviderError
+from app.provider import (
+    OpenAICompatibleProvider,
+    ProviderError,
+    safe_thinking_configuration,
+)
 
 
 def check_provider(provider=None) -> tuple[dict, int]:
     """Use the production JSON path, never echo upstream bodies or credentials."""
     provider = provider if provider is not None else OpenAICompatibleProvider()
-    report = {"configured": provider.configured, "json_contract_ok": False}
+    report = {
+        "configured": provider.configured,
+        "json_contract_ok": False,
+        "thinking": safe_thinking_configuration(
+            getattr(provider, "settings", None)
+        ),
+    }
     if not provider.configured:
         report["error_type"] = "ProviderNotConfigured"
         return report, 2

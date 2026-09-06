@@ -1,0 +1,205 @@
+{
+  "schema_version": "1.0-draft",
+  "suite_id": "user-acceptance-v1",
+  "title": "LoreGuard 第一阶段 AI-first 用户语义与运行状态验收集",
+  "visibility": "developer-visible-non-blind",
+  "content_license": "原创虚构文本，仅用于本项目验收",
+  "policy": {
+    "ai_first": true,
+    "accuracy_priority": "语义准确率和证据完整性优先于 Token 节省",
+    "deterministic_boundary": "正则和确定性规则只能做格式、证据、状态与安全校验，不能替代模型理解复杂语气",
+    "model_boundary": "模型不得在没有原文证据时补造事实、例外、知识来源或冲突",
+    "token_boundary": "Token 预算只作为防失控安全上限；验收配置必须足以覆盖全部输入，不能以截断换取通过",
+    "scoring_boundary": "本套数据对开发者可见并参与开发，结果只能称固定回归，不能外推为开放文本准确率"
+  },
+  "semantic_classes": {
+    "confirmed_canonical": {
+      "description": "由设定档、清单、明确规则或作者旁白确认的可采信事实",
+      "eligible_for_confirmed_conflict": true
+    },
+    "confirmed_narrative": {
+      "description": "正文明确发生且排除回忆、幻象、猜测等歧义的事件或状态",
+      "eligible_for_confirmed_conflict": true
+    },
+    "tentative": {
+      "description": "假设、可能性、未验证材料或带保留态度的推测",
+      "eligible_for_confirmed_conflict": false
+    },
+    "quoted_claim": {
+      "description": "角色台词、匿名信、转述或已知谎言，只能作为某人声称过的内容",
+      "eligible_for_confirmed_conflict": false
+    },
+    "open_question": {
+      "description": "没有得到回答的疑问，不得抽成事实",
+      "eligible_for_confirmed_conflict": false
+    },
+    "clarification": {
+      "description": "证据不足，需要作者或策划补充的信息缺口",
+      "eligible_for_confirmed_conflict": false
+    }
+  },
+  "cases": [
+    {
+      "id": "game-planner-branch-and-modality",
+      "persona": "二游剧情策划",
+      "input_mode": "setting-plus-mutually-exclusive-branches",
+      "documents": [
+        {"path": "game-planner/world.md", "role": "canon"},
+        {"path": "game-planner/route-a.md", "role": "chapter", "scope": "route_a"},
+        {"path": "game-planner/route-b.md", "role": "chapter", "scope": "route_b"}
+      ],
+      "required_semantics": [
+        {"id": "g-neutral", "class": "confirmed_canonical", "summary": "列车员必须中立且不得主动帮助阵营", "evidence": {"path": "game-planner/world.md", "line": 3}, "enters_conflict_engine": true},
+        {"id": "g-food-scope", "class": "confirmed_canonical", "summary": "餐车只保证带蓝蜡封签的食物饮水安全，推车货物不自动属于餐车供应", "evidence": {"path": "game-planner/world.md", "line": 5}, "enters_conflict_engine": true},
+        {"id": "g-sealed-platform", "class": "confirmed_canonical", "summary": "持有赤钥也不得进入月台三层，书面授权是例外条件", "evidence": {"path": "game-planner/world.md", "line": 7}, "enters_conflict_engine": true},
+        {"id": "g-key-state", "class": "confirmed_canonical", "summary": "唯一赤钥由弥音保管", "evidence": {"path": "game-planner/world.md", "line": 9}, "enters_conflict_engine": true},
+        {"id": "g-travel-limit", "class": "confirmed_canonical", "summary": "十分钟内不能往返两地且本章无传送", "evidence": {"path": "game-planner/world.md", "line": 11}, "enters_conflict_engine": true},
+        {"id": "g-read-log", "class": "confirmed_narrative", "summary": "弥音19:00读过日志并知道编号", "evidence": {"path": "game-planner/route-a.md", "line": 3}, "enters_conflict_engine": true},
+        {"id": "g-no-authorization", "class": "confirmed_narrative", "summary": "弥音未取得书面授权", "evidence": {"path": "game-planner/route-a.md", "line": 5}, "enters_conflict_engine": true},
+        {"id": "g-lie", "class": "quoted_claim", "summary": "弥音声称没有读过日志，且旁白标明她在说谎", "evidence": {"path": "game-planner/route-a.md", "line": 7}, "enters_conflict_engine": false},
+        {"id": "g-cart-question", "class": "open_question", "summary": "推车食物是否等同于安全餐车食物", "evidence": {"path": "game-planner/route-a.md", "line": 9}, "enters_conflict_engine": false},
+        {"id": "g-food-hypothesis", "class": "tentative", "summary": "无封签点心可能恢复体力或导致昏睡", "evidence": {"path": "game-planner/route-a.md", "line": 11}, "enters_conflict_engine": false},
+        {"id": "g-entry", "class": "confirmed_narrative", "summary": "弥音20:00进入月台三层", "evidence": {"path": "game-planner/route-a.md", "line": 13}, "enters_conflict_engine": true},
+        {"id": "g-a-location-1", "class": "confirmed_narrative", "summary": "A路线20:10弥音在观星厅", "evidence": {"path": "game-planner/route-a.md", "line": 15}, "scope": "route_a", "enters_conflict_engine": true},
+        {"id": "g-a-location-2", "class": "confirmed_narrative", "summary": "A路线20:10弥音在下层货舱", "evidence": {"path": "game-planner/route-a.md", "line": 17}, "scope": "route_a", "enters_conflict_engine": true},
+        {"id": "g-branch-exclusion", "class": "confirmed_canonical", "summary": "A、B路线互斥", "evidence": {"path": "game-planner/route-b.md", "line": 3}, "enters_conflict_engine": true},
+        {"id": "g-b-location", "class": "confirmed_narrative", "summary": "B路线20:10弥音在下层货舱", "evidence": {"path": "game-planner/route-b.md", "line": 5}, "scope": "route_b", "enters_conflict_engine": true},
+        {"id": "g-dialogue-question", "class": "open_question", "summary": "角色询问推车食物安全性但无人回答", "evidence": {"path": "game-planner/route-b.md", "line": 7}, "enters_conflict_engine": false}
+      ],
+      "expected_findings": [
+        {"id": "g-issue-entry", "result": "confirmed_conflict", "category": "world_rule_conflict", "evidence_ids": ["g-sealed-platform", "g-no-authorization", "g-entry"]},
+        {"id": "g-issue-location", "result": "confirmed_conflict", "category": "location_collision", "evidence_ids": ["g-travel-limit", "g-a-location-1", "g-a-location-2"]},
+        {"id": "g-clarify-cart", "result": "clarification", "category": "scope_unknown", "evidence_ids": ["g-food-scope", "g-cart-question"]}
+      ],
+      "forbidden_findings": [
+        "不得把是否等同于中的‘是’抽成肯定事实",
+        "不得把两种可能食用结果抽成已发生事件",
+        "不得把已知谎言与旁白事实报成普通事实冲突",
+        "不得把A路线观星厅与B路线货舱报成同刻多地点"
+      ]
+    },
+    {
+      "id": "novelist-body-only-ambiguity",
+      "persona": "网络小说作者",
+      "input_mode": "body-only",
+      "world_document_required": false,
+      "documents": [
+        {"path": "novelist/chapter.md", "role": "chapter"}
+      ],
+      "required_semantics": [
+        {"id": "n-well-rule", "class": "confirmed_canonical", "summary": "正文反复确认古井只在退潮时露出台阶", "evidence": {"path": "novelist/chapter.md", "line": 3}, "authority": "canonical_within_story", "enters_conflict_engine": true},
+        {"id": "n-bell-rule", "class": "confirmed_canonical", "summary": "只有佩戴银铃的人才能穿过井底石门", "evidence": {"path": "novelist/chapter.md", "line": 5}, "authority": "canonical_within_story", "enters_conflict_engine": true},
+        {"id": "n-high-tide", "class": "confirmed_narrative", "summary": "清晨涨潮且石阶没有显露", "evidence": {"path": "novelist/chapter.md", "line": 7}, "enters_conflict_engine": true},
+        {"id": "n-no-bell", "class": "confirmed_narrative", "summary": "陆遥没有银铃也没有临时豁免", "evidence": {"path": "novelist/chapter.md", "line": 9}, "enters_conflict_engine": true},
+        {"id": "n-at-inner-side", "class": "confirmed_narrative", "summary": "同一清晨陆遥已在石门另一侧且带有井道青苔", "evidence": {"path": "novelist/chapter.md", "line": 11}, "enters_conflict_engine": true},
+        {"id": "n-lie", "class": "quoted_claim", "summary": "陆遥声称未去古井，旁白标明他在撒谎", "evidence": {"path": "novelist/chapter.md", "line": 13}, "enters_conflict_engine": false},
+        {"id": "n-door-negative", "class": "confirmed_narrative", "summary": "门没有打开", "evidence": {"path": "novelist/chapter.md", "line": 15}, "polarity": "negative", "enters_conflict_engine": true},
+        {"id": "n-lamp-event", "class": "confirmed_narrative", "summary": "门后灯熄灭", "evidence": {"path": "novelist/chapter.md", "line": 15}, "enters_conflict_engine": true},
+        {"id": "n-rain-condition", "class": "confirmed_canonical", "summary": "若下雨则守塔人熄灯，是单向条件规则", "evidence": {"path": "novelist/chapter.md", "line": 17}, "enters_conflict_engine": true},
+        {"id": "n-other-way-question", "class": "open_question", "summary": "石门后是否存在另一条路", "evidence": {"path": "novelist/chapter.md", "line": 19}, "enters_conflict_engine": false},
+        {"id": "n-channel-hypothesis", "class": "tentative", "summary": "陆遥可能游过暗渠", "evidence": {"path": "novelist/chapter.md", "line": 19}, "enters_conflict_engine": false},
+        {"id": "n-arrival-clarification", "class": "clarification", "summary": "陆遥如何抵达井底需要作者补充", "evidence": {"path": "novelist/chapter.md", "line": 21}, "enters_conflict_engine": false}
+      ],
+      "expected_findings": [
+        {"id": "n-clarify-arrival", "result": "clarification", "category": "missing_causal_bridge", "evidence_ids": ["n-well-rule", "n-bell-rule", "n-high-tide", "n-no-bell", "n-at-inner-side", "n-arrival-clarification"]}
+      ],
+      "forbidden_findings": [
+        "不得因陆遥站在门另一侧就擅自断言他穿过了石门",
+        "不得把暗渠当作已存在的地点或既成路线",
+        "不得从‘若下雨则熄灯’反推‘不下雨就不会熄灯’",
+        "不得把‘门没有打开’抽成开门事件",
+        "不得把角色谎言当作旁白事实"
+      ]
+    },
+    {
+      "id": "editor-cross-chapter-evidence",
+      "persona": "长篇内容编辑/审稿人",
+      "input_mode": "body-only-multi-chapter",
+      "world_document_required": false,
+      "documents": [
+        {"path": "editor/chapter-01.md", "role": "chapter"},
+        {"path": "editor/chapter-02.md", "role": "chapter"}
+      ],
+      "required_semantics": [
+        {"id": "e-key-unique", "class": "confirmed_canonical", "summary": "星钥只有一把", "evidence": {"path": "editor/chapter-01.md", "line": 3}, "authority": "canonical_within_story", "enters_conflict_engine": true},
+        {"id": "e-key-transfer", "class": "confirmed_narrative", "summary": "09:00星钥转交林岑且之后未再转交、遗失或复制", "evidence": {"path": "editor/chapter-01.md", "line": 5}, "enters_conflict_engine": true},
+        {"id": "e-secret-unavailable", "class": "confirmed_narrative", "summary": "深渊坐标14:00才拆封，之前乔予不知道", "evidence": {"path": "editor/chapter-01.md", "line": 7}, "enters_conflict_engine": true},
+        {"id": "e-west-tower", "class": "confirmed_narrative", "summary": "12:00林岑在西塔且无法及时到东港", "evidence": {"path": "editor/chapter-01.md", "line": 9}, "enters_conflict_engine": true},
+        {"id": "e-red-rule", "class": "confirmed_canonical", "summary": "若信标红色则北门关闭", "evidence": {"path": "editor/chapter-01.md", "line": 11}, "authority": "canonical_within_story", "enters_conflict_engine": true},
+        {"id": "e-letter-claim", "class": "quoted_claim", "summary": "匿名人声称烧毁账册，真伪未验证", "evidence": {"path": "editor/chapter-01.md", "line": 13}, "enters_conflict_engine": false},
+        {"id": "e-key-use", "class": "confirmed_narrative", "summary": "10:00乔予使用真实星钥开门", "evidence": {"path": "editor/chapter-02.md", "line": 3}, "enters_conflict_engine": true},
+        {"id": "e-secret-use", "class": "confirmed_narrative", "summary": "11:30乔予准确使用尚未拆封的坐标且不是猜测", "evidence": {"path": "editor/chapter-02.md", "line": 5}, "enters_conflict_engine": true},
+        {"id": "e-east-port", "class": "confirmed_narrative", "summary": "同一主线12:00林岑在东港", "evidence": {"path": "editor/chapter-02.md", "line": 7}, "enters_conflict_engine": true},
+        {"id": "e-blue-gate", "class": "confirmed_narrative", "summary": "16:00信标蓝色且北门敞开", "evidence": {"path": "editor/chapter-02.md", "line": 9}, "enters_conflict_engine": true},
+        {"id": "e-duplicate-key-question", "class": "open_question", "summary": "乔予是否得到另一把星钥", "evidence": {"path": "editor/chapter-02.md", "line": 11}, "enters_conflict_engine": false},
+        {"id": "e-ledger-hypothesis", "class": "tentative", "summary": "若匿名信为真则账册可能不存在", "evidence": {"path": "editor/chapter-02.md", "line": 13}, "enters_conflict_engine": false}
+      ],
+      "expected_findings": [
+        {"id": "e-issue-key", "result": "confirmed_conflict", "category": "item_ownership", "evidence_ids": ["e-key-unique", "e-key-transfer", "e-key-use"]},
+        {"id": "e-issue-knowledge", "result": "confirmed_conflict", "category": "knowledge_without_acquisition", "evidence_ids": ["e-secret-unavailable", "e-secret-use"]},
+        {"id": "e-issue-location", "result": "confirmed_conflict", "category": "location_collision", "evidence_ids": ["e-west-tower", "e-east-port"]},
+        {"id": "e-clarify-key-path", "result": "clarification", "category": "missing_state_transition", "evidence_ids": ["e-key-transfer", "e-key-use", "e-duplicate-key-question"]}
+      ],
+      "forbidden_findings": [
+        "不得把匿名信内容当作蓝色账册已被烧毁",
+        "不得因信标为蓝色且北门开启而违反单向条件规则",
+        "不得用尚未回答的另一把星钥问题自动消除或自动证明冲突"
+      ]
+    }
+  ],
+  "state_machine_scenarios": [
+    {
+      "id": "snapshot-after-submit-update",
+      "given": "v1为当前版本并创建运行R1",
+      "when": "R1排队后上传同名v2，再由worker执行R1",
+      "then": ["R1只读取创建时冻结的v1文档ID和内容哈希", "报告列出v1", "v2不影响R1"]
+    },
+    {
+      "id": "retry-reuses-snapshot",
+      "given": "R1基于v1失败或被取消，项目当前已是v2",
+      "when": "用户点击重试R1并生成R2",
+      "then": ["R2继承R1的v1快照", "R2不得静默改用v2", "页面明确显示继承来源"]
+    },
+    {
+      "id": "new-analysis-reads-new-version",
+      "given": "项目当前活动版本为v2",
+      "when": "用户发起全新的分析R3",
+      "then": ["R3冻结并读取v2", "R3与R1的输入版本可区分"]
+    },
+    {
+      "id": "duplicate-worker-delivery",
+      "given": "同一run_id被两个worker重复收到",
+      "when": "两个worker先后或并发尝试执行",
+      "then": ["只有一个worker获得执行权", "问题、记录、事件和Token不得重复", "最终状态唯一且可重放"]
+    },
+    {
+      "id": "redispatch-completed-run",
+      "given": "运行已经completed",
+      "when": "相同run_id再次被投递给worker",
+      "then": ["直接幂等返回", "不再调用模型", "不覆盖原结果或计费"]
+    },
+    {
+      "id": "cancel-in-flight-run",
+      "given": "运行处于queued或running",
+      "when": "用户请求取消",
+      "then": ["可重复提交取消请求", "在下一个安全检查点停止", "取消后不再开始新的模型调用", "状态为cancelled并保留已发生审计事件", "不得发布半成品为完整报告"]
+    },
+    {
+      "id": "legacy-run-without-snapshot",
+      "given": "旧运行没有文档快照元数据",
+      "when": "用户查看或尝试重试",
+      "then": ["历史结果仍可只读查看并显示输入版本未知", "不得伪造快照", "不得把当前文档当成旧运行原输入", "重试同输入应被拒绝并引导创建基于当前版本的新分析"]
+    }
+  ],
+  "acceptance_gates": {
+    "ai_participation": "三组语义案例必须全部由配置模型完成，无降级、无分块跳过；纯基线只能验证降级安全，不能计为本套AI-first通过",
+    "semantic_routing": "open_question、tentative、quoted_claim、clarification 共11项必须11/11不进入confirmed conflict引擎",
+    "forbidden_transformations": "所有forbidden_findings必须0次出现",
+    "confirmed_findings": "5个confirmed_conflict必须5/5命中类别并引用全部必需证据",
+    "clarifications": "3个clarification必须3/3单独展示，不能混入确认冲突计数",
+    "evidence": "required_semantics证据定位命中率至少95%，且每个确认冲突必须包含跨文档或规则所需完整证据",
+    "stability": "每个案例独立运行3次，语义类别、确认冲突和待澄清项必须完全一致",
+    "token_safety": "不得因追求低Token而截断输入；预算仅在异常循环或达到显式高上限时终止，并将未覆盖状态显示给用户",
+    "state_machine": "7个状态机场景全部通过后，才可宣称运行结果可复现"
+  }
+}

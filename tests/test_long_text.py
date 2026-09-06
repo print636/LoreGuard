@@ -10,6 +10,7 @@ from app.config import Settings
 from app.model_extractor import ModelEnhancedExtractor
 from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
 from app.provider import OpenAICompatibleProvider
+from tests.test_model_extractor import semantic_payload
 
 
 def model_settings(**overrides) -> Settings:
@@ -19,15 +20,17 @@ def model_settings(**overrides) -> Settings:
         "openai_model": "mock-model",
         "enable_model_extraction": True,
         "provider_max_attempts": 1,
+        "provider_thinking_mode": None,
         "model_chunk_max_chars": 35,
         "model_chunk_overlap_lines": 1,
         "model_max_chunks_per_document": 20,
     }
     values.update(overrides)
-    return Settings(**values)
+    return Settings(_env_file=None, **values)
 
 
 def completion(payload: dict) -> httpx.Response:
+    payload = semantic_payload(payload)
     return httpx.Response(200, json={
         "choices": [{"message": {"content": json.dumps(payload, ensure_ascii=False)}}],
         "usage": {"prompt_tokens": 3, "completion_tokens": 2},

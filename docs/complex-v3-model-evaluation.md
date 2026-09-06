@@ -1,5 +1,7 @@
 # complex-v3 真实模型稳定性评测协议
 
+> 本页保留旧中转/模型的协议与历史结果。2026-09-06 当前中转/模型的冻结 Phase 1 `full × 1` 严格 gate 为 0/3，不能用本页历史高分替代；见 [当前脱敏 checkpoint](provider-phase1-checkpoint-20260906.md)。
+
 ## 目的与边界
 
 `scripts/run_complex_model_evaluation.py` 用真实 OpenAI-compatible Provider 运行 LoreGuard 的完整“模型增强＋确定性规则”流程。它评测的是开发者编写、开发者可见的 complex-v3 回归集，不是人工盲测，也不能代表开放剧情生产准确率。

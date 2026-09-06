@@ -3,18 +3,25 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
+
 from app.domain import IssueCategory
+from app.model_extractor import ModelEnhancedExtractor
 from app.natural_evaluation import load_cases
-from app.pipeline import AnalysisPipeline, BaselineExtractor
+from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
 from app.natural_evaluation import score_case
+from app.provider import OpenAICompatibleProvider, RetryPolicy
 from scripts.run_complex_model_evaluation import (
+    CountingProvider,
     _exact_metrics,
+    _provider_stats,
     _strict_errors,
     build_report,
     rescore_report,
     run_evaluation,
     select_cases,
 )
+from tests.test_model_extractor import completion, settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +72,56 @@ class FakePartialFallbackPipeline(FakeModelPipeline):
 
 
 class ComplexModelEvaluationTests(unittest.TestCase):
+    def test_counting_provider_includes_bounded_repair_without_recording_content(self):
+        responses = iter([
+            {"records": [{
+                "kind": "fact",
+                "subject": "林澈",
+                "predicate": "身份",
+                "value": "领航员",
+                "source_line_start": 1,
+                "source_line_end": 1,
+            }]},
+            {"patches": [{
+                "record_index": 1,
+                "modality": "asserted",
+                "source_scope": "narrator",
+                "certainty": "certain",
+            }]},
+        ])
+        requests = []
+
+        def handler(request):
+            requests.append(json.loads(request.content))
+            return completion(json.dumps(next(responses), ensure_ascii=False))
+
+        provider = CountingProvider(OpenAICompatibleProvider(
+            settings(),
+            transport=httpx.MockTransport(handler),
+            retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+            sleep=lambda _: None,
+        ))
+        pipeline = AnalysisPipeline(extractor=ModelEnhancedExtractor(provider))
+        result = pipeline.run([
+            DocumentInput("doc", "chapter.md", "林澈的身份是领航员。")
+        ])
+
+        self.assertTrue(result.diagnostics["model"]["repair_succeeded"])
+        self.assertEqual(2, len(requests))
+        stats = _provider_stats(pipeline)
+        self.assertEqual((2, 2, 0), (
+            stats["requested"], stats["succeeded"], stats["failed"]
+        ))
+        serialized = json.dumps(stats, ensure_ascii=False)
+        for forbidden in (
+            "林澈的身份是领航员",
+            "unit-test-placeholder",
+            "mock.invalid",
+            '"records"',
+            '"patches"',
+        ):
+            self.assertNotIn(forbidden, serialized)
+
     def test_structured_partial_status_overrides_model_used_without_warning(self):
         selected = select_cases(load_cases("test", DATASET_ROOT), "pilot")[:1]
         for status in (

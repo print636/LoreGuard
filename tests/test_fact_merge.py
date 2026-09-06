@@ -7,7 +7,7 @@ from app.domain import EvidenceSpan, ParsedDirective
 from app.model_extractor import ModelEnhancedExtractor, merge_directives
 from app.pipeline import AnalysisPipeline, DocumentInput
 from app.provider import OpenAICompatibleProvider
-from tests.test_model_extractor import completion, settings
+from tests.test_model_extractor import completion, semantic_payload, settings
 
 
 class FactMergeTests(unittest.TestCase):
@@ -57,7 +57,7 @@ class FactMergeTests(unittest.TestCase):
         ]}
         provider = OpenAICompatibleProvider(
             settings(), transport=httpx.MockTransport(
-                lambda _: completion(json.dumps(payload, ensure_ascii=False))
+                lambda _: completion(json.dumps(semantic_payload(payload), ensure_ascii=False))
             ),
         )
         result = AnalysisPipeline(extractor=ModelEnhancedExtractor(provider)).run([

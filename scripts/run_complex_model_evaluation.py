@@ -22,6 +22,7 @@ from app.natural_evaluation import (
 )
 from app.pipeline import AnalysisPipeline, DocumentInput
 from app.provider import OpenAICompatibleProvider
+from scripts.provider_instrumentation import CountingProvider
 
 
 PILOT_CASE_IDS = (
@@ -32,33 +33,6 @@ PILOT_CASE_IDS = (
     "complex-v3-item-authorized-transfer",
     "complex-v3-rule-actor-exception",
 )
-
-
-class CountingProvider:
-    """Count logical completion requests without recording prompts or responses."""
-
-    def __init__(self, delegate: OpenAICompatibleProvider) -> None:
-        self.delegate = delegate
-        self.settings = delegate.settings
-        self.requested = 0
-        self.succeeded = 0
-        self.failed = 0
-        self.last_error_type: str | None = None
-
-    @property
-    def configured(self) -> bool:
-        return self.delegate.configured
-
-    def complete(self, system: str, user: str):
-        self.requested += 1
-        try:
-            result = self.delegate.complete(system, user)
-        except Exception as exc:
-            self.failed += 1
-            self.last_error_type = type(exc).__name__
-            raise
-        self.succeeded += 1
-        return result
 
 
 def model_pipeline() -> AnalysisPipeline:

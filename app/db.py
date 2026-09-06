@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, create_engine
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from .config import get_settings
@@ -38,6 +38,17 @@ class DocumentRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
+class DocumentContextRow(Base):
+    """Typed document context stored additively for legacy DB compatibility."""
+
+    __tablename__ = "document_context"
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id"), primary_key=True
+    )
+    document_role: Mapped[str] = mapped_column(String(40), default="chapter")
+    story_scope: Mapped[str] = mapped_column(String(80), default="global")
+
+
 class AnalysisRunRow(Base):
     __tablename__ = "analysis_runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -52,6 +63,61 @@ class AnalysisRunRow(Base):
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AnalysisRunInputRow(Base):
+    """Immutable document body captured when an analysis run is created.
+
+    This is a separate table rather than new columns on ``documents`` or
+    ``analysis_runs`` so ``create_all`` can safely add it to existing local
+    SQLite databases.  Workers must never reconstruct run input from the
+    project's current active documents.
+    """
+
+    __tablename__ = "analysis_run_inputs"
+    __table_args__ = (
+        UniqueConstraint("run_id", "ordinal", name="uq_analysis_run_input_ordinal"),
+        UniqueConstraint("run_id", "document_id", name="uq_analysis_run_input_document"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("analysis_runs.id"), index=True)
+    document_id: Mapped[str] = mapped_column(String(36))
+    document_name: Mapped[str] = mapped_column(String(255))
+    document_version: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    ordinal: Mapped[int] = mapped_column(Integer)
+
+
+class AnalysisRunInputContextRow(Base):
+    """Optional semantic context kept separate for additive local upgrades."""
+
+    __tablename__ = "analysis_run_input_context"
+    input_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_run_inputs.id"), primary_key=True
+    )
+    document_role: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    story_scope: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
+class AnalysisRunExecutionRow(Base):
+    """Small coordination record for best-effort worker ownership.
+
+    A conditional update on this row prevents concurrent workers from running
+    the same analysis.  The lease is deliberately described as a bounded
+    ownership mechanism, not as an exactly-once guarantee.
+    """
+
+    __tablename__ = "analysis_run_execution"
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_runs.id"), primary_key=True
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, default=0)
+    worker_token: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    retried_from_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class IssueRow(Base):

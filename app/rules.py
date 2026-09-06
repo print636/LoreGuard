@@ -4,6 +4,7 @@ from collections import defaultdict
 import re
 
 from .domain import ConsistencyIssue, IssueCategory, ParsedDirective, Severity
+from .semantic_quality import eligible_for_deterministic_rules
 
 
 def _issue(category, title, explanation, evidence, suggestion, severity=Severity.high, **metadata):
@@ -109,6 +110,66 @@ def _same_evidence(first: ParsedDirective, second: ParsedDirective) -> bool:
     )
 
 
+def _scopes_compatible(first: ParsedDirective, second: ParsedDirective) -> bool:
+    """Global records apply to a branch; sibling branch records do not meet."""
+    first_scope = first.attrs.get("story_scope", "") or "global"
+    second_scope = second.attrs.get("story_scope", "") or "global"
+    return (
+        first_scope == "global"
+        or second_scope == "global"
+        or first_scope == second_scope
+    )
+
+
+def _mobility_limit_applies(
+    state: ParsedDirective,
+    participant: str,
+    origin: str,
+    destination: str,
+) -> bool:
+    attrs = state.attrs
+    subject = attrs.get("subject", "")
+    if subject and subject not in {participant, "*", "任何人", "普通人", "所有人"}:
+        return False
+    route = (attrs.get("origin", ""), attrs.get("destination", ""))
+    forward = _location_within(origin, route[0]) and _location_within(destination, route[1])
+    reverse = _location_within(origin, route[1]) and _location_within(destination, route[0])
+    return bool(forward or (attrs.get("bidirectional") == "true" and reverse))
+
+
+def _authorization_terms(text: str) -> set[str]:
+    terms = set(re.findall(r"书面授权|授权|许可|豁免|批准|通行证|资格", text))
+    return {"authorization"} if terms else set()
+
+
+def _denied_authorization_applies(
+    state: ParsedDirective,
+    assertion: ParsedDirective,
+    rule: ParsedDirective,
+) -> bool:
+    attrs = state.attrs
+    actor = assertion.attrs.get("actor", "")
+    if not actor or attrs.get("subject", "") != actor:
+        return False
+    if not _scopes_compatible(state, assertion) or not _scopes_compatible(state, rule):
+        return False
+    if attrs.get("predicate") == "rule_exception":
+        return attrs.get("value") == "denied" and attrs.get("key") == rule.attrs.get("key")
+    if attrs.get("polarity") != "negative" and attrs.get("modality") != "negated":
+        return False
+    state_terms = _authorization_terms(
+        " ".join(
+            [
+                attrs.get("predicate", ""),
+                attrs.get("value", ""),
+                state.evidence.text,
+            ]
+        )
+    )
+    rule_terms = _authorization_terms(rule.evidence.text)
+    return bool(state_terms & rule_terms)
+
+
 def _rule_exception_applies(
     state: ParsedDirective, actor: str, key: str, action_time: str
 ) -> bool:
@@ -151,16 +212,34 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
     rules: dict[str, list[ParsedDirective]] = defaultdict(list)
     assertions: list[ParsedDirective] = []
     mobility_permissions: list[ParsedDirective] = []
+    mobility_limits: list[ParsedDirective] = []
     rule_exceptions: list[ParsedDirective] = []
+    denied_authorizations: list[ParsedDirective] = []
 
     for d in directives:
+        if not eligible_for_deterministic_rules(d):
+            continue
         a = d.attrs
         if d.kind == "fact":
             facts[(a.get("subject", ""), a.get("predicate", ""))].append(d)
             if a.get("predicate") == "mobility_permission":
                 mobility_permissions.append(d)
+            elif a.get("predicate") == "mobility_limit":
+                mobility_limits.append(d)
             elif a.get("predicate") == "rule_exception":
-                rule_exceptions.append(d)
+                if a.get("value") == "denied":
+                    denied_authorizations.append(d)
+                else:
+                    rule_exceptions.append(d)
+            elif (
+                a.get("polarity") == "negative"
+                and _authorization_terms(
+                    " ".join(
+                        [a.get("predicate", ""), a.get("value", ""), d.evidence.text]
+                    )
+                )
+            ):
+                denied_authorizations.append(d)
         elif d.kind == "event":
             for participant in a.get("participants", "").split(","):
                 if participant.strip():
@@ -179,14 +258,28 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
             assertions.append(d)
 
     for (subject, predicate), rows in facts.items():
-        if predicate in {"mobility_permission", "rule_exception"}:
+        if predicate in {"mobility_permission", "mobility_limit", "rule_exception"}:
             continue
         conflict_pair: tuple[ParsedDirective, ParsedDirective] | None = None
         for index, first in enumerate(rows):
             for second in rows[index + 1:]:
                 if _same_evidence(first, second):
                     continue
-                if not first.attrs.get("value") or first.attrs.get("value") == second.attrs.get("value"):
+                if not _scopes_compatible(first, second):
+                    continue
+                first_value = first.attrs.get("value", "")
+                second_value = second.attrs.get("value", "")
+                if not first_value or not second_value:
+                    continue
+                first_negative = first.attrs.get("polarity") == "negative"
+                second_negative = second.attrs.get("polarity") == "negative"
+                if first_negative == second_negative:
+                    # Two affirmative values conflict when they differ. Two
+                    # negative exclusions never prove which value is true.
+                    if first_negative or first_value == second_value:
+                        continue
+                elif first_value != second_value:
+                    # “不是银色” does not contradict “黑色”.
                     continue
                 first_time, second_time = first.attrs.get("time", ""), second.attrs.get("time", "")
                 if first_time and second_time and _time_key(first_time) != _time_key(second_time):
@@ -229,10 +322,14 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
                 )
                 if first_span == second_span:
                     continue
+                if not _scopes_compatible(first, second):
+                    continue
                 if _evidence_shares_place(first, second):
                     continue
                 if any(
-                    _mobility_permission_applies(
+                    _scopes_compatible(permission, first)
+                    and _scopes_compatible(permission, second)
+                    and _mobility_permission_applies(
                         permission,
                         participant,
                         timestamp,
@@ -248,11 +345,26 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
                 break
         if conflict_pair:
             first, second = conflict_pair
+            supporting_limits = [
+                limit
+                for limit in mobility_limits
+                if _scopes_compatible(limit, first)
+                and _scopes_compatible(limit, second)
+                and _mobility_limit_applies(
+                    limit,
+                    participant,
+                    first.attrs.get("location", ""),
+                    second.attrs.get("location", ""),
+                )
+            ]
+            issue_evidence = [first.evidence, second.evidence]
+            if supporting_limits:
+                issue_evidence.insert(0, supporting_limits[0].evidence)
             issues.append(_issue(
                 IssueCategory.location_collision,
                 f"{participant}在同一时间出现在不同地点",
                 f"{timestamp} 同时记录了“{first.attrs.get('location')}”与“{second.attrs.get('location')}”。",
-                [first.evidence, second.evidence],
+                issue_evidence,
                 "调整事件时间、补充瞬移规则，或修正其中一处地点。",
                 participant=participant,
                 timestamp=timestamp,
@@ -260,7 +372,9 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
 
     for claim in claims:
         key = (claim.attrs.get("character", ""), claim.attrs.get("fact", ""))
-        acquisitions = knows.get(key, [])
+        acquisitions = [
+            row for row in knows.get(key, []) if _scopes_compatible(row, claim)
+        ]
         claim_time = claim.attrs.get("time", "")
         # Absence of an acquisition record is incomplete information, not
         # proof of a continuity error.  A knowledge issue needs an explicit
@@ -308,6 +422,7 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
             d
             for d in owners.get(item, [])
             if _state_applies_at(d.attrs.get("time", ""), use_time)
+            and _scopes_compatible(d, use)
         ]
         if candidates:
             owner = sorted(candidates, key=lambda d: d.attrs.get("time", ""))[-1]
@@ -325,13 +440,16 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
 
     for assertion in assertions:
         key = assertion.attrs.get("key", "")
-        expected = rules.get(key, [])
+        expected = [
+            row for row in rules.get(key, []) if _scopes_compatible(row, assertion)
+        ]
         canonical_rule = expected[-1] if expected else None
         if canonical_rule and _same_evidence(canonical_rule, assertion):
             continue
         if canonical_rule and canonical_rule.attrs.get("value") != assertion.attrs.get("value"):
             if any(
-                _rule_exception_applies(
+                _scopes_compatible(exception, assertion)
+                and _rule_exception_applies(
                     exception,
                     assertion.attrs.get("actor", ""),
                     key,
@@ -340,11 +458,19 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
                 for exception in rule_exceptions
             ):
                 continue
+            denied = [
+                state
+                for state in denied_authorizations
+                if _denied_authorization_applies(state, assertion, canonical_rule)
+            ]
+            issue_evidence = [canonical_rule.evidence]
+            issue_evidence.extend(state.evidence for state in denied[:1])
+            issue_evidence.append(assertion.evidence)
             issues.append(_issue(
                 IssueCategory.world_rule_conflict,
                 _world_rule_title(key),
                 f"权威规则为“{canonical_rule.attrs.get('value')}”，当前剧情写为“{assertion.attrs.get('value')}”。",
-                [canonical_rule.evidence, assertion.evidence],
+                issue_evidence,
                 "遵循既有规则，或在世界观文档中正式引入规则例外及其代价。",
                 key=key,
             ))

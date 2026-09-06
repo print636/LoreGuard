@@ -11,3 +11,11 @@ docker compose up --build
 ```
 
 The repository includes a FastAPI backend, a React/Vite local project workbench, versioned document and run history, evidence-linked Cytoscape graph and conservative timeline projections, model chunking with global evidence lines, explicit alias normalization, deterministic local hybrid-retrieval diagnostics, Redis/Celery integration, resumable SSE progress, audited feedback, Docker Compose and CI. Graph/timeline views read persisted completed-run records and never trigger a provider call. The retrieval vector-like score uses stable SHA-256 character n-grams, not embeddings or pgvector. Evaluation includes an 80-case directive regression, a 100-case synthetic natural-Chinese dev/test dataset, a 50-case developer-visible challenge-v2, a 14-case original multi-document complex acceptance suite, and a generated 24k-character long-text smoke. None is presented as a human blind test or production accuracy. See [the resume-readiness gate](docs/resume-readiness.md) for the deliberately conservative publication boundary.
+
+Both JSON-text and multipart document APIs accept an explicit `document_role`
+(`canon`, `character_profile`, `chapter`, or `reference`) and a constrained
+`story_scope`. Omitted fields inherit from the previous same-name version; a new
+document safely defaults to `chapter/global`. LoreGuard never guesses these values
+from filenames. Completed runs expose questions and evidence gaps separately at
+`GET /api/v1/analysis-runs/{id}/clarifications`; they are not counted as confirmed
+consistency issues.

@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 import unittest
 
 import httpx
@@ -7,7 +8,7 @@ from app.model_extractor import ModelEnhancedExtractor
 from app.pipeline import AnalysisPipeline, DocumentInput
 from app.provider import OpenAICompatibleProvider, RetryPolicy
 from app.service import analysis_mode
-from tests.test_model_extractor import completion, settings
+from tests.test_model_extractor import completion, semantic_payload, settings
 
 
 class ModelExecutionTests(unittest.TestCase):
@@ -20,7 +21,9 @@ class ModelExecutionTests(unittest.TestCase):
             value = next(responses)
             if isinstance(value, Exception):
                 raise value
-            return completion(json.dumps(value, ensure_ascii=False))
+            if isinstance(value, httpx.Response):
+                return value
+            return completion(json.dumps(semantic_payload(value), ensure_ascii=False))
 
         provider = OpenAICompatibleProvider(
             settings(**overrides), transport=httpx.MockTransport(handler),
@@ -38,12 +41,33 @@ class ModelExecutionTests(unittest.TestCase):
     def test_explicit_empty_records_is_success_but_missing_records_is_invalid(self):
         result, status, _ = self.run_pipeline([{"records": []}])
         self.assertEqual(1, status["empty_response_chunks"])
-        self.assertEqual(("完整模型增强", False), analysis_mode(result))
+        self.assertFalse(result.model_used)
+        self.assertEqual(("模型返回空结果，无法证明完整覆盖", True), analysis_mode(result))
+        self.assertTrue(any("模型返回空结果，无法证明完整覆盖" in row for row in result.warnings))
         result, status, _ = self.run_pipeline([{}])
         self.assertEqual(0, status["empty_response_chunks"])
         self.assertEqual(1, status["failed_chunks"])
         self.assertIn("schema_validation", status["reason_codes"])
         self.assertEqual(("确定性基线（模型未参与或已降级）", True), analysis_mode(result))
+
+    def test_empty_results_accumulate_for_each_nonempty_chunk(self):
+        document = DocumentInput(
+            "doc",
+            "chapter.md",
+            "林澈的身份是领航员。" * 7,
+        )
+        result, status, _ = self.run_pipeline(
+            [{"records": []}] * 10,
+            [document],
+            model_chunk_max_chars=32,
+            model_chunk_overlap_lines=0,
+            per_run_token_budget=100_000,
+        )
+        self.assertGreater(status["succeeded_chunks"], 1)
+        self.assertEqual(status["succeeded_chunks"], status["empty_response_chunks"])
+        self.assertEqual(
+            ("模型返回空结果，无法证明完整覆盖", True), analysis_mode(result)
+        )
 
     def test_partial_valid_records_are_never_complete_and_warning_text_is_irrelevant(self):
         payload = {"records": [
@@ -57,7 +81,10 @@ class ModelExecutionTests(unittest.TestCase):
         self.assertEqual(0, status["failed_chunks"])
         result.warnings.clear()
         self.assertEqual(("模型增强（部分分块已降级）", True), analysis_mode(result))
-        complete, _, _ = self.run_pipeline([{"records": []}])
+        complete, _, _ = self.run_pipeline([{"records": [{
+            "kind": "fact", "subject": "林澈", "predicate": "身份", "value": "领航员",
+            "source_line_start": 1, "source_line_end": 1,
+        }]}])
         complete.warnings = ["模型分块 运行级熔断 后续模型分块已停止 降级到 BaselineExtractor"]
         self.assertEqual(("完整模型增强", False), analysis_mode(complete))
 
@@ -83,7 +110,10 @@ class ModelExecutionTests(unittest.TestCase):
                 self.assertGreater(status["succeeded_chunks"], 0)
                 self.assertGreater(status["skipped_chunks"], 0)
                 self.assertIn(reason, status["reason_codes"])
-                self.assertEqual(("模型增强（部分分块已降级）", True), analysis_mode(result))
+                self.assertEqual(
+                    ("模型返回空结果，无法证明完整覆盖", True),
+                    analysis_mode(result),
+                )
 
     def test_provider_failure_aborts_document_then_circuit_skips_later_document(self):
         documents = [
@@ -97,6 +127,9 @@ class ModelExecutionTests(unittest.TestCase):
         self.assertEqual(1, status["failed_chunks"])
         self.assertIn("document_aborted", status["reason_codes"])
         self.assertIn("provider_error", status["reason_codes"])
+        self.assertEqual("read_timeout", status["provider_calls"][0]["category"])
+        self.assertEqual("failure", status["provider_calls"][0]["status"])
+        self.assertEqual(1, status["provider_calls"][0]["attempt"])
         self.assertEqual(0, status["documents"][1]["attempted_chunks"])
         self.assertEqual(["circuit_open"], status["documents"][1]["reason_codes"])
         self.assertNotIn("private upstream", json.dumps(status))
@@ -104,9 +137,144 @@ class ModelExecutionTests(unittest.TestCase):
         pipeline.extractor.begin_run()
         self.assertFalse(pipeline.extractor._circuit_open)
 
+    def test_success_429_retry_and_truncation_emit_logical_call_telemetry(self):
+        result, status, _ = self.run_pipeline([{"records": []}])
+        success = status["provider_calls"][0]
+        self.assertEqual(("success", "success", 1), (
+            success["status"], success["category"], success["attempt"],
+        ))
+        self.assertEqual(20, success["total_tokens"])
+        self.assertGreater(success["input_chars"], 0)
+        self.assertGreater(success["response_chars"], 0)
+        self.assertIsNotNone(success["elapsed_ms"])
+
+        responses = iter([
+            httpx.Response(429, json={"error": "private upstream body"}),
+            completion('{"records":[]}'),
+        ])
+        provider = OpenAICompatibleProvider(
+            settings(),
+            transport=httpx.MockTransport(lambda _: next(responses)),
+            retry_policy=RetryPolicy(max_attempts=2, base_delay_seconds=0),
+            sleep=lambda _: None,
+        )
+        retried = AnalysisPipeline(extractor=ModelEnhancedExtractor(provider)).run([
+            DocumentInput("doc", "chapter.md", "林澈的身份是领航员。")
+        ])
+        call = retried.diagnostics["model"]["provider_calls"][0]
+        self.assertEqual(("success", 2), (call["status"], call["attempt"]))
+        self.assertNotIn("private upstream body", json.dumps(call))
+
+        rate_limited, status, _ = self.run_pipeline([
+            httpx.Response(429, json={"error": "private rate-limit body"})
+        ])
+        call = status["provider_calls"][0]
+        self.assertEqual(("failure", "rate_limit", 429), (
+            call["status"], call["category"], call["http_status"],
+        ))
+        self.assertEqual((0, 0), (
+            rate_limited.prompt_tokens, rate_limited.completion_tokens,
+        ))
+        self.assertNotIn("private rate-limit body", json.dumps(call))
+
+        truncated = httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {"content": '{"records":['},
+                    "finish_reason": "length",
+                }],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 8},
+            },
+        )
+        result, status, _ = self.run_pipeline([truncated])
+        call = status["provider_calls"][0]
+        self.assertEqual(("failure", "truncated", 20), (
+            call["status"], call["category"], call["total_tokens"],
+        ))
+        # Provider-call usage is diagnostics, not a second addition to run usage.
+        self.assertEqual((0, 0), (result.prompt_tokens, result.completion_tokens))
+
+    def test_legacy_missing_telemetry_is_unavailable_and_allowlist_drops_secrets(self):
+        class LegacyProvider:
+            settings = settings()
+            configured = True
+
+            def complete(self, system, user):
+                return SimpleNamespace(
+                    text='{"records":[]}', prompt_tokens=0, completion_tokens=0
+                )
+
+        legacy = AnalysisPipeline(
+            extractor=ModelEnhancedExtractor(LegacyProvider())
+        ).run([DocumentInput("doc", "chapter.md", "林澈的身份是领航员。")])
+        self.assertIsNone(legacy.diagnostics["model"]["provider_calls"])
+
+        class SecretTelemetryProvider(LegacyProvider):
+            def complete(self, system, user):
+                return SimpleNamespace(
+                    text='{"records":[]}',
+                    prompt_tokens=3,
+                    completion_tokens=2,
+                    telemetry=SimpleNamespace(
+                        category="success",
+                        attempt_no=1,
+                        elapsed_ms=4,
+                        input_chars=len(system) + len(user),
+                        response_chars=14,
+                        prompt_tokens=3,
+                        completion_tokens=2,
+                        http_status=200,
+                        request_id="request-safe_789",
+                        url="https://secret.invalid",
+                        headers={"Authorization": "Bearer private-key"},
+                        prompt="private prompt",
+                        response="private response",
+                    ),
+                )
+
+        safe = AnalysisPipeline(
+            extractor=ModelEnhancedExtractor(SecretTelemetryProvider())
+        ).run([DocumentInput("doc", "chapter.md", "林澈的身份是领航员。")])
+        serialized = json.dumps(safe.diagnostics["model"])
+        self.assertIn("request-safe_789", serialized)
+        for secret in (
+            "secret.invalid", "Authorization", "private-key",
+            "private prompt", "private response",
+        ):
+            self.assertNotIn(secret, serialized)
+
+        class MaliciousTelemetryProvider(LegacyProvider):
+            def complete(self, system, user):
+                return SimpleNamespace(
+                    text='{"records":[]}',
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    telemetry=SimpleNamespace(
+                        category="success",
+                        attempt_no=1,
+                        elapsed_ms=1,
+                        input_chars=1,
+                        response_chars=1,
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        http_status=200,
+                        request_id="bad request id\nprivate-header: secret",
+                    ),
+                )
+
+        malicious = AnalysisPipeline(
+            extractor=ModelEnhancedExtractor(MaliciousTelemetryProvider())
+        ).run([DocumentInput("doc", "chapter.md", "林澈的身份是领航员。")])
+        serialized = json.dumps(malicious.diagnostics["model"])
+        self.assertIn('"request_id": null', serialized)
+        self.assertNotIn("private-header", serialized)
+
     def test_all_invalid_records_are_not_empty_success_and_usage_is_preserved(self):
         result, status, _ = self.run_pipeline([{"records": [{"kind": "bad"}, {"kind": "bad"}]}])
         self.assertEqual(2, status["invalid_records"])
+        self.assertEqual(2, status["unresolved_invalid_records"])
+        self.assertEqual(0, status["recovered_invalid_records"])
         self.assertEqual(1, status["failed_chunks"])
         self.assertEqual(0, status["succeeded_chunks"])
         self.assertEqual(0, status["empty_response_chunks"])

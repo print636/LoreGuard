@@ -1,9 +1,13 @@
 import json
+import os
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.chunking import chunk_document, numbered_chunk
 from app.config import Settings
@@ -13,6 +17,9 @@ from app.provider import OpenAICompatibleProvider
 from app.rate_limit import SlidingWindowLimiter, WriteRateLimitMiddleware
 from app.usage import configured_cost_usd, estimate_request_tokens
 from scripts.run_model_stability import load_case, run_stability
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def completion(prompt_tokens=3, completion_tokens=2):
@@ -29,16 +36,33 @@ def provider_settings(**overrides):
         "openai_model": "mock-model",
         "enable_model_extraction": True,
         "provider_max_attempts": 1,
+        "provider_thinking_mode": None,
         "model_chunk_max_chars": 64,
         "model_chunk_overlap_lines": 0,
         "model_max_chunks_per_document": 20,
         "per_run_token_budget": 20_000,
     }
     values.update(overrides)
-    return Settings(**values)
+    return Settings(_env_file=None, **values)
 
 
 class TokenBudgetTests(unittest.TestCase):
+    def test_empty_thinking_environment_and_compose_defaults_mean_unconfigured(self):
+        with patch.dict(os.environ, {"PROVIDER_THINKING_MODE": ""}, clear=True):
+            self.assertIsNone(Settings(_env_file=None).provider_thinking_mode)
+        self.assertIsNone(
+            Settings(_env_file=None, provider_thinking_mode="   ").provider_thinking_mode
+        )
+        with self.assertRaises(ValidationError):
+            Settings(_env_file=None, provider_thinking_mode="automatic")
+
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        api_block = compose.split("  api:", 1)[1].split("  web:", 1)[0]
+        worker_block = compose.split("  worker:", 1)[1].split("  postgres:", 1)[0]
+        interpolation = "PROVIDER_THINKING_MODE: ${PROVIDER_THINKING_MODE:-}"
+        self.assertIn(interpolation, api_block)
+        self.assertIn(interpolation, worker_block)
+
     def test_exact_conservative_budget_allows_request_and_one_less_rejects(self):
         document = DocumentInput(id="doc", name="doc.md", content="普通叙述没有结构化状态。")
         chunk = chunk_document(document, 64, 0)[0]
@@ -89,10 +113,15 @@ class TokenBudgetTests(unittest.TestCase):
         self.assertTrue(any("后续分块由全文基线覆盖" in warning for warning in result.warnings))
 
     def test_unconfigured_and_configured_cost(self):
-        self.assertIsNone(configured_cost_usd(1_000, 500, Settings()))
+        self.assertIsNone(configured_cost_usd(1_000, 500, Settings(_env_file=None)))
         value = configured_cost_usd(
             1_000, 500,
-            Settings(model_input_price_per_million=2.0, model_output_price_per_million=6.0),
+            Settings(
+                _env_file=None,
+                model_input_price_per_million=2.0,
+                model_output_price_per_million=6.0,
+                provider_thinking_mode=None,
+            ),
         )
         self.assertEqual(0.005, value)
 

@@ -18,6 +18,11 @@ SUPPORTED_DIRECTIVES = {
     "uses",
     "world_rule",
     "world_assert",
+    "open_question",
+    "tentative_fact",
+    "character_claim",
+    "negative_statement",
+    "clarification",
 }
 
 
@@ -103,6 +108,31 @@ def parse_document(document_id: str, document_name: str, content: str) -> Parsed
             parsed.warnings.append(f"Line {line_no}: unsupported directive @{kind}")
             continue
         attrs = _parse_attrs(parts[1] if len(parts) > 1 else "")
+        attrs.setdefault("input_form", "directive")
+        # ``@directive`` is an explicit author contract rather than a model
+        # inference from the short evidence label after ``|``. Give each kind
+        # an explicit semantic classification here; provenance alone never
+        # grants eligibility.
+        semantic_defaults = {
+            "entity": ("uncertain", "unknown", "unknown"),
+            "fact": ("asserted", "narrator", "certain"),
+            "event": ("asserted", "narrator", "certain"),
+            "knows": ("asserted", "narrator", "certain"),
+            "claims_knows": ("reported", "character_dialogue", "certain"),
+            "item": ("asserted", "narrator", "certain"),
+            "uses": ("asserted", "narrator", "certain"),
+            "world_rule": ("asserted", "world_rule", "certain"),
+            "world_assert": ("asserted", "narrator", "certain"),
+            "open_question": ("interrogative", "unknown", "unknown"),
+            "tentative_fact": ("uncertain", "unknown", "possible"),
+            "character_claim": ("reported", "character_dialogue", "unknown"),
+            "negative_statement": ("negated", "narrator", "certain"),
+            "clarification": ("uncertain", "unknown", "unknown"),
+        }
+        modality, source_scope, certainty = semantic_defaults[kind]
+        attrs.setdefault("modality", modality)
+        attrs.setdefault("source_scope", source_scope)
+        attrs.setdefault("certainty", certainty)
         evidence = EvidenceSpan(
             document_id=document_id,
             document_name=document_name,
@@ -111,6 +141,12 @@ def parse_document(document_id: str, document_name: str, content: str) -> Parsed
             text=(evidence_text.strip() or source_line.strip()),
         )
         parsed.directives.append(ParsedDirective(kind=kind, attrs=attrs, evidence=evidence))
+    from .semantic_quality import apply_semantic_quality_gate
+
+    quality = apply_semantic_quality_gate(parsed.directives)
+    parsed.directives = quality.directives
+    if warning := quality.warning():
+        parsed.warnings.append(warning)
     if unmatched_natural_lines:
         preview = "、".join(str(line) for line in unmatched_natural_lines[:5])
         remaining = len(unmatched_natural_lines) - 5

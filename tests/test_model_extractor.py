@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 import unittest
 
 import httpx
@@ -22,9 +23,10 @@ def settings(**overrides) -> Settings:
         "enable_model_extraction": True,
         "provider_timeout_seconds": 1,
         "provider_max_attempts": 3,
+        "provider_thinking_mode": None,
     }
     values.update(overrides)
-    return Settings(**values)
+    return Settings(_env_file=None, **values)
 
 
 def completion(content: str, status: int = 200) -> httpx.Response:
@@ -35,6 +37,35 @@ def completion(content: str, status: int = 200) -> httpx.Response:
             "usage": {"prompt_tokens": 12, "completion_tokens": 8},
         },
     )
+
+
+def semantic_payload(payload: dict) -> dict:
+    """Add explicit semantic labels to ordinary successful model fixtures.
+
+    Production validation deliberately has no high-confidence defaults.  This
+    helper keeps older tests focused on their original concern while ensuring
+    their mocked model responses satisfy the current contract.
+    """
+    labelled = deepcopy(payload)
+    for record in labelled.get("records", []):
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("kind")
+        if kind == "open_question":
+            defaults = ("interrogative", "narrator", "unknown")
+        elif kind == "clarification":
+            defaults = ("uncertain", "narrator", "unknown")
+        elif kind == "claims_knows":
+            defaults = ("reported", "character_dialogue", "certain")
+        elif kind == "world_rule":
+            defaults = ("asserted", "world_rule", "certain")
+        else:
+            defaults = ("asserted", "narrator", "certain")
+        for field, value in zip(
+            ("modality", "source_scope", "certainty"), defaults, strict=True
+        ):
+            record.setdefault(field, value)
+    return labelled
 
 
 class ProviderTests(unittest.TestCase):
@@ -113,7 +144,7 @@ class ProviderTests(unittest.TestCase):
 
 class ModelExtractorTests(unittest.TestCase):
     def provider_for(self, payload: dict) -> OpenAICompatibleProvider:
-        content = json.dumps(payload, ensure_ascii=False)
+        content = json.dumps(semantic_payload(payload), ensure_ascii=False)
         return OpenAICompatibleProvider(
             settings(), transport=httpx.MockTransport(lambda _: completion(content))
         )
@@ -200,6 +231,31 @@ class ModelExtractorTests(unittest.TestCase):
             DocumentInput(id="doc", name="chapter.md", content="林澈的发色是银色。")
         )
         self.assertEqual(1, len(result.directives))
+
+    def test_general_color_morphology_rule_accepts_exact_color_and_rejects_nearby_one(self):
+        accepted = ModelEnhancedExtractor(self.provider_for({"records": [{
+            "kind": "fact",
+            "subject": "旅人甲",
+            "predicate": "发色",
+            "value": "青色",
+            "source_line_start": 1,
+            "source_line_end": 1,
+        }]})).extract(DocumentInput("ok", "ok.md", "旅人甲留着青发。"))
+        rejected = ModelEnhancedExtractor(self.provider_for({"records": [{
+            "kind": "fact",
+            "subject": "旅人甲",
+            "predicate": "发色",
+            "value": "青灰色",
+            "source_line_start": 1,
+            "source_line_end": 1,
+        }]})).extract(DocumentInput("bad", "bad.md", "旅人甲留着青发。"))
+        self.assertTrue(any(
+            row.attrs.get("value") == "青色" for row in accepted.directives
+        ))
+        self.assertFalse(any(
+            row.attrs.get("value") == "青灰色" for row in rejected.directives
+        ))
+        self.assertTrue(any("lexical_support" in warning for warning in rejected.warnings))
 
     def test_boolean_permission_fields_are_valid_and_normalized(self):
         payload = {
@@ -418,7 +474,7 @@ class ModelExtractorTests(unittest.TestCase):
         self.assertEqual(0, calls)
         self.assertEqual(1, len(result.directives))
 
-    def test_model_extractor_is_consumed_by_analysis_pipeline(self):
+    def test_quoted_setting_material_never_creates_a_deterministic_conflict(self):
         payload = {
             "records": [
                 {"kind": "fact", "subject": "林澈", "predicate": "发色", "value": "银色", "source_line_start": 1, "source_line_end": 1},
@@ -440,7 +496,11 @@ class ModelExtractorTests(unittest.TestCase):
         self.assertTrue(result.model_used)
         self.assertEqual(12, result.prompt_tokens)
         self.assertEqual(2, len(result.directives))
-        self.assertEqual("fact_conflict", result.issues[0].category.value)
+        self.assertEqual([], result.issues)
+        self.assertTrue(all(
+            row.attrs.get("source_scope") == "quoted_material"
+            for row in result.directives
+        ))
 
 
 if __name__ == "__main__":

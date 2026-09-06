@@ -56,12 +56,14 @@ uvicorn app.main:app --reload
 set OPENAI_API_KEY=...
 set OPENAI_BASE_URL=https://api.openai.com/v1
 set OPENAI_MODEL=gpt-4o-mini
+# 仅当上游明确支持 thinking 扩展时设置 disabled 或 enabled；默认省略
+set PROVIDER_THINKING_MODE=disabled
 set ENABLE_MODEL_EXTRACTION=true
 set PER_RUN_TOKEN_BUDGET=20000
 set DAILY_TOKEN_BUDGET=100000
 ```
 
-模型 Key 只从服务端环境变量或本地未提交的 `.env` 读取，并且只有显式设置 `ENABLE_MODEL_EXTRACTION=true` 才会调用模型，避免开发和测试意外产生费用。请勿把 Key 写入源码、前端、README 或提交记录。模型抽取支持 `fact`、`event`、`knows`、`claims_knows`、`item`、`uses`、`world_rule` 与 `world_assert`。超时、429、5xx、空响应、非法 JSON、字段校验失败或证据行号越界时，系统会记录非敏感警告并降级到 `BaselineExtractor`；基线与模型结果会去重合并。默认单次请求最多尝试 2 次、每次 30 秒；某分块终态失败后停止当前文档剩余模型分块，一个文档出现终态失败后开启本次运行熔断，后续文档直接走全文基线，避免兼容服务异常时串行等待数分钟。运行事件和诊断会明确区分“完整模型增强”“模型增强（部分分块已降级）”“确定性基线（模型未参与或已降级）”与主动关闭模型的“确定性基线”，结果正确时也不会掩盖模型失败。
+模型 Key 只从服务端环境变量或本地未提交的 `.env` 读取，并且只有显式设置 `ENABLE_MODEL_EXTRACTION=true` 才会调用模型，避免开发和测试意外产生费用。请勿把 Key 写入源码、前端、README 或提交记录。`PROVIDER_THINKING_MODE` 默认不配置，因此通用 OpenAI-compatible 请求不会携带 `thinking`；只有显式设置为 `disabled` 或 `enabled` 时才发送顶层 `thinking={"type": ...}`。Compose 会把该配置同时传入 API 与 worker，空白值统一归一为 `None`。模型抽取支持 `fact`、`event`、`knows`、`claims_knows`、`item`、`uses`、`world_rule` 与 `world_assert`。超时、429、5xx、空响应、非法 JSON、字段校验失败或证据行号越界时，系统会记录非敏感警告并降级到 `BaselineExtractor`；基线与模型结果会去重合并。默认单次请求最多尝试 2 次、每次 30 秒；某分块终态失败后停止当前文档剩余模型分块，一个文档出现终态失败后开启本次运行熔断，后续文档直接走全文基线，避免兼容服务异常时串行等待数分钟。运行事件和诊断会明确区分“完整模型增强”“模型增强（部分分块已降级）”“确定性基线（模型未参与或已降级）”与主动关闭模型的“确定性基线”，结果正确时也不会掩盖模型失败。
 
 模型逐分块调用前会用保守 Token 估算与本次已用额度执行门控；兼容 Provider 不返回 usage 时也按保守估算扣减内部预算。超出单次额度后停止后续模型分块，但全文基线仍会继续。每日额度在创建或重试分析时检查，当前是本地单数据库的非原子配额；多实例生产环境仍需 Redis 或事务式配额服务。写接口另有单进程滑动窗口限流，429 响应包含 `Retry-After`。
 
@@ -82,6 +84,14 @@ set DAILY_TOKEN_BUDGET=100000
 SSE 客户端可用 `Last-Event-ID` 请求头或 `last_event_id` 查询参数从指定事件之后恢复。终态事件固定返回 `status` 和 `error`；失败任务不会被当成成功结果加载。
 
 ## 输入格式
+
+文本 JSON 接口和 multipart 上传接口都接受显式 `document_role` 与
+`story_scope`。`document_role` 只能是 `canon`、`character_profile`、
+`chapter` 或 `reference`；`story_scope` 是 1–80 位的中文、英文、数字、
+下划线或连字符标识。创建同名新版本时，省略某一字段会继承被替换版本
+（未指定替换目标时继承该文件最新版本）的对应值；全新文档默认
+`chapter/global`。系统不从文件名猜测角色或分支。只上传一份纯正文、
+不提供独立世界观，也可以直接启动分析。
 
 网页默认接受保守的自然中文基线，例如：
 
@@ -150,7 +160,7 @@ python scripts/run_model_stability.py --case long-smoke-2k --repeats 5 --max-tot
 
 challenge-v2 位于 `data/evaluation-challenge-v2/`，schema、固定 seed、生成器和 SHA-256 均落盘可审计。详细口径见 [`docs/state-modeling-v2-evaluation.md`](docs/state-modeling-v2-evaluation.md)。
 
-复杂验收集位于 `data/evaluation-complex-v3/`，其原创声明、固定证据行、数据哈希与限制见 [`docs/complex-v3-evaluation.md`](docs/complex-v3-evaluation.md)。真实模型重复运行的严格统计协议与当前结果见 [`docs/complex-v3-model-evaluation.md`](docs/complex-v3-model-evaluation.md)。简历采用哪些事实则受 [`docs/resume-readiness.md`](docs/resume-readiness.md) 的保守门槛约束。
+复杂验收集位于 `data/evaluation-complex-v3/`，其原创声明、固定证据行、数据哈希与限制见 [`docs/complex-v3-evaluation.md`](docs/complex-v3-evaluation.md)。旧中转/模型的真实重复运行记录见 [`docs/complex-v3-model-evaluation.md`](docs/complex-v3-model-evaluation.md)；2026-09-06 当前新中转/模型的冻结 Phase 1 结果见 [`docs/provider-phase1-checkpoint-20260906.md`](docs/provider-phase1-checkpoint-20260906.md)。简历采用哪些事实则受 [`docs/resume-readiness.md`](docs/resume-readiness.md) 的保守门槛约束。
 
 `run_model_stability.py` 会真实调用已配置的 Provider，记录逐次类别/证据、首进度、P50/P95、Token 与预算停止状态；预期答案只用于运行后评分，不进入 Prompt。报告不保存 Key 或原始响应正文。总预算是运行间停止阈值，单次 Provider 实际 usage 可能让最后一次发生少量越界，报告会单独记录 `budget_overshoot_tokens`。
 
@@ -158,7 +168,9 @@ challenge-v2 位于 `data/evaluation-challenge-v2/`，schema、固定 seed、生
 
 上述历史模型轮次使用 2026-09-02 的旧覆盖判定。2026-09-04 起完整模型统计必须有结构化执行计数，并排除部分无效记录；旧报告缺少计数时仅保留带“历史未验证”标记的原统计，不能据此声称通过了新协议，也不能移用为新 Provider/模型的成绩。
 
-固定 2000 字单文档真实模型延迟测试 5 次的首进度 P95 为 5.9 ms，端到端 P50 / P95 为 6.30 / 7.94 秒，总计 11,799 Token。该样本没有准确率标注，只用于验证当前 Provider 下的短文本延迟门槛。
+2026-09-06 新中转/模型在 `thinking=disabled` 下通过最小 JSON preflight，但冻结 Phase 1 `full × 1` 严格 gate 为 0/3。三次正式调用均 HTTP 200 且无空响应，仍因内容校验、未解决无效记录和 batch 协议失败而不具备完整覆盖；HTTP 成功不能解释为产品可用。首次运行曾因旧计数包装器缺少 repair 依赖转发而中断，额外调用不可计量；随后 Phase 1/complex runner 已共用修复后的安全计数包装，派生 repair 调用也纳入统计并通过 Mock 回归。默认报告保存在 Git 忽略的 `artifacts/`，不含 key、endpoint、Prompt 或原始响应。旧模型/中转的历史成绩不得沿用到本轮。
+
+历史固定 2000 字单文档真实模型延迟测试 5 次的首进度 P95 为 5.9 ms，端到端 P50 / P95 为 6.30 / 7.94 秒，总计 11,799 Token。该样本没有准确率标注，使用的是旧中转/模型，只保留为当时的短文本延迟记录。
 
 ## 测试
 
@@ -194,6 +206,7 @@ python scripts/run_long_text_smoke.py
 | GET | `/api/v1/analysis-runs/{id}` | 查询状态与成本 |
 | GET | `/api/v1/analysis-runs/{id}/events` | SSE 进度流 |
 | GET | `/api/v1/analysis-runs/{id}/issues` | 获取问题与证据 |
+| GET | `/api/v1/analysis-runs/{id}/clarifications` | 获取与确认问题隔离的待澄清/开放问题（仅完成态） |
 | GET | `/api/v1/analysis-runs/{id}/records` | 查看实际抽取记录与提示 |
 | GET | `/api/v1/analysis-runs/{id}/diagnostics` | 获取分块、别名和检索候选诊断 |
 | GET | `/api/v1/analysis-runs/{id}/graph` | 从已保存记录投影证据化关系图（仅完成态） |
@@ -209,7 +222,8 @@ python scripts/run_long_text_smoke.py
 - MVP 侧重“发现并解释矛盾”，不自动覆写作者原文。
 - 大模型输出不是事实来源；所有问题必须绑定输入文档中的证据。
 - 在线 Demo 应启用访客限额、文件大小限制和每日 Token 预算。
-- 当前只证明了模型抽取协议、降级机制和 Mock 异常测试；尚未完成真实长篇人工标注评测，不能宣称开放文本准确率。
+- 当前已验证模型抽取协议、降级机制、工程安全边界和一次冻结真实 Phase 1 运行；但当前新中转/模型的严格 gate 为 0/3，且尚未完成真实长篇人工标注评测，不能宣称开放文本准确率或当前模型能力达标。
+- `document_context` 与运行输入上下文采用附加关联表兼容旧 SQLite；旧文档读取为安全默认 `chapter/global` 并标记上下文并非显式保存。`create_all` 只是当前本地兼容引导，不替代正式数据库迁移框架。
 - 版本差异只在当前项目和同名文档边界内运行，不调用模型。默认每个版本最多处理前 20,000 行/2,000,000 字符并最多返回 4,000 行差异，超限会在响应和页面显式提示。
 - LangGraph、向量列与 OpenTelemetry 链路属于下一阶段，不列为本版完成事实。
 - 详细完成度见 [`docs/completion-status.md`](docs/completion-status.md)，学习顺序见 [`docs/learning-guide.md`](docs/learning-guide.md)。
