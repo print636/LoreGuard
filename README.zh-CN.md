@@ -6,7 +6,7 @@
 
 ## 已实现的 MVP
 
-- 一键简单/复杂原创样例、自然文本粘贴及 Markdown、TXT、JSON 多文件上传
+- 一键简单/复杂原创样例、自然文本粘贴及 Markdown、TXT、JSON、标准 DOCX 多文件上传
 - 本地项目列表、文档版本历史和运行历史；刷新页面后可恢复最近任务与结果
 - 无 API Key 抽取明确中文句式，并展示抽取记录与未抽取提示
 - 配置 OpenAI-compatible 模型后，从普通中文故事中结构化抽取 8 类叙事记录；模型失败自动保留基线结果
@@ -40,6 +40,19 @@ docker compose up --build
 - Prometheus：<http://localhost:9090>
 
 GitHub Actions 会实际构建并启动整套 Compose，在关闭模型的隔离环境中经 Celery worker 完成复杂样例分析，并断言五类问题、关系图、时间线和 SSE 终态；这不是只做 YAML 语法检查。
+
+#### 可选：本地真实 embedding 服务
+
+默认 `docker compose up` 始终保持 embedding 关闭，不会拉取模型或启动 embedding 容器。需要验证本地真实向量时，使用独立 overlay：
+
+```bash
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.rag.yml up --build
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.rag.yml --profile rag-smoke run --rm tei-smoke
+```
+
+overlay 使用固定 digest 的 TEI 1.9.3 CPU 镜像和固定 revision 的 `BAAI/bge-small-zh-v1.5`，明确采用 float32、CLS pooling、512 维向量及 `auto-truncate=false`。TEI 不映射宿主机端口，只允许 Compose 私网内的 API、worker 和显式 smoke 服务访问；本地 TEI 无需 Key，`EMBEDDING_API_KEY` 保持为空且绝不继承 `OPENAI_API_KEY`。模型文件首次启动时从 Hugging Face 下载到具名卷 `tei_model_cache`，后续复用缓存；首次运行需要网络，实际磁盘、内存和 CPU 延迟取决于机器，不能据此宣称生产吞吐。
+
+`tei-smoke` 会真实检查 `/health`、`/info` 返回的模型 SHA、512 维有限且 L2 归一化的向量、batch/single 近似一致、固定中文相关性排序，以及超出模型输入上限时确实拒绝而非静默截断。[TEI 项目](https://github.com/huggingface/text-embeddings-inference)采用 Apache-2.0，固定 [BGE 模型卡](https://huggingface.co/BAAI/bge-small-zh-v1.5)标注 MIT；实际部署仍需自行复核两者许可。该 overlay 只证明本地 embedding 基础设施可运行：当前主分析仍未消费这些向量，不能据此声称 Evidence RAG 已完成。
 
 ### 本地开发
 
@@ -83,7 +96,7 @@ Evidence RAG 数据底座已实现独立显式配置的 OpenAI-compatible embedd
 ## 本地项目工作流
 
 1. 在“本地项目工作台”新建或选择项目。
-2. 一次选择多个 `.md`、`.txt`、`.json` 文件上传。同一项目内再次上传同名文件会自动生成下一版本，并把旧的同名活动版本标记为历史版本；明确选择“替换”时，上传文件名必须与目标一致，否则返回 `409`。
+2. 一次选择多个 `.md`、`.txt`、`.json`、`.docx` 文件上传。同一项目内再次上传同名文件会自动生成下一版本，并把旧的同名活动版本标记为历史版本；明确选择“替换”时，上传文件名必须与目标一致，否则返回 `409`。
 3. 点击“分析当前项目”。所有启动分析的按钮都会提示：仅当服务端显式启用模型时才可能消耗 Token。
 4. 运行中可以请求取消；只有 `failed` 或 `cancelled` 任务允许重试，终态任务不能取消。刷新页面后重新选择项目，可从运行历史恢复状态、错误或已完成报告。
 5. 问题可标记为接受、误报或已解决并附备注；相同标签与备注不会重复写入，历史反馈仍可由 API 审计。
@@ -99,6 +112,8 @@ SSE 客户端可用 `Last-Event-ID` 请求头或 `last_event_id` 查询参数从
 （未指定替换目标时继承该文件最新版本）的对应值；全新文档默认
 `chapter/global`。系统不从文件名猜测角色或分支。只上传一份纯正文、
 不提供独立世界观，也可以直接启动分析。
+
+`.docx` 只通过 multipart 文件上传接口导入；文本 JSON 接口不接收二进制 Word 内容。导入器只读取标准 Office Open XML 包的主文档正文，将段落、显式换行和表格行转换为稳定的纯文本行，后续证据行号均指向这份导入后的文本。系统限制 ZIP 成员数、单成员/总展开量、XML 大小、压缩比和最终文本大小，拒绝加密、启用宏、损坏、路径异常或结构含糊的包；不会跟随外部关系，也不会导入或执行宏、嵌入对象、图片、批注、页眉和页脚。旧版二进制 `.doc` 不受支持，需先在 Word 或兼容软件中另存为 `.docx`。
 
 网页默认接受保守的自然中文基线，例如：
 

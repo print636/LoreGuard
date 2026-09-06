@@ -3,7 +3,7 @@
 可在简历中表述：
 
 - 已实现 FastAPI 端到端 API和 SQLite 本地模式；PostgreSQL、Redis、FastAPI、Celery worker、Web/Nginx、Prometheus 主分析 Compose 链路已由 GitHub Actions 实机 smoke 验证。
-- 已实现 Markdown、TXT、JSON 导入与文档版本字段。
+- 已实现 Markdown、TXT、JSON 与标准 DOCX 导入及文档版本字段；DOCX 将主文档段落、显式换行和表格转换为稳定纯文本行，限制压缩成员、展开量、XML、压缩比与输出大小，不执行宏或外部关系。
 - 已实现事实冲突、同刻多地点、知识越权、物品持有、世界规则五类确定性检查。
 - 已实现证据片段、严重度、置信度、建议、反馈、取消、重试和可恢复 SSE 事件流。
 - 已建立 80 条显式指令规则回归；其 100% 结果只代表规则接线正确。

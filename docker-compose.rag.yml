@@ -1,0 +1,103 @@
+services:
+  embeddings:
+    image: "ghcr.io/huggingface/text-embeddings-inference@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07"
+    command:
+      - --model-id
+      - BAAI/bge-small-zh-v1.5
+      - --revision
+      - 7999e1d3359715c523056ef9478215996d62a620
+      - --dtype
+      - float32
+      - --pooling
+      - cls
+      - --served-model-name
+      - BAAI/bge-small-zh-v1.5
+      - --auto-truncate
+      - "false"
+      - --hostname
+      - 0.0.0.0
+      - --port
+      - "80"
+      - --max-concurrent-requests
+      - "32"
+      - --max-client-batch-size
+      - "32"
+      - --payload-limit
+      - "2000000"
+      - --json-output
+    expose:
+      - "80"
+    volumes:
+      - tei_model_cache:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 90
+      start_period: 20s
+    restart: unless-stopped
+
+  api:
+    environment:
+      ENABLE_EMBEDDINGS: "true"
+      EMBEDDING_API_KEY: ""
+      EMBEDDING_BASE_URL: http://embeddings:80/v1
+      EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+      EMBEDDING_MODEL_REVISION: 7999e1d3359715c523056ef9478215996d62a620
+      EMBEDDING_PROFILE_NAMESPACE: local-tei-bge-small-zh-v1.5
+      EMBEDDING_DIMENSIONS: "512"
+      EMBEDDING_ALLOW_INSECURE_HTTP: "true"
+      EMBEDDING_TIMEOUT_SECONDS: "30"
+      EMBEDDING_MAX_ATTEMPTS: "2"
+      EMBEDDING_TOTAL_DEADLINE_SECONDS: "60"
+      EMBEDDING_MAX_RESPONSE_BYTES: "4194304"
+      EMBEDDING_BATCH_MAX_ITEMS: "32"
+      EMBEDDING_BATCH_MAX_CHARS: "120000"
+    depends_on:
+      embeddings:
+        condition: service_healthy
+
+  worker:
+    environment:
+      ENABLE_EMBEDDINGS: "true"
+      EMBEDDING_API_KEY: ""
+      EMBEDDING_BASE_URL: http://embeddings:80/v1
+      EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+      EMBEDDING_MODEL_REVISION: 7999e1d3359715c523056ef9478215996d62a620
+      EMBEDDING_PROFILE_NAMESPACE: local-tei-bge-small-zh-v1.5
+      EMBEDDING_DIMENSIONS: "512"
+      EMBEDDING_ALLOW_INSECURE_HTTP: "true"
+      EMBEDDING_TIMEOUT_SECONDS: "30"
+      EMBEDDING_MAX_ATTEMPTS: "2"
+      EMBEDDING_TOTAL_DEADLINE_SECONDS: "60"
+      EMBEDDING_MAX_RESPONSE_BYTES: "4194304"
+      EMBEDDING_BATCH_MAX_ITEMS: "32"
+      EMBEDDING_BATCH_MAX_CHARS: "120000"
+    depends_on:
+      embeddings:
+        condition: service_healthy
+
+  tei-smoke:
+    profiles: ["rag-smoke"]
+    build: .
+    command:
+      - python
+      - /opt/loreguard/run_tei_smoke.py
+      - --base-url
+      - http://embeddings:80
+      - --expected-model
+      - BAAI/bge-small-zh-v1.5
+      - --expected-revision
+      - 7999e1d3359715c523056ef9478215996d62a620
+      - --expected-dimensions
+      - "512"
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./scripts/run_tei_smoke.py:/opt/loreguard/run_tei_smoke.py:ro
+    depends_on:
+      embeddings:
+        condition: service_healthy
+
+volumes:
+  tei_model_cache: {}
