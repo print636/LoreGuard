@@ -162,6 +162,26 @@ class ApiFlowTests(unittest.TestCase):
         for topic in ("额度", "租户", "IP", "模型"):
             self.assertIn(topic, serialized)
 
+    def test_health_recognizes_evidence_review_as_a_model_capability(self):
+        previous = (
+            settings.enable_model_extraction,
+            settings.enable_issue_evidence_review,
+            settings.openai_api_key,
+        )
+        try:
+            settings.enable_model_extraction = False
+            settings.enable_issue_evidence_review = True
+            settings.openai_api_key = "unit-test-placeholder"
+            with TestClient(app) as client:
+                response = client.get("/health")
+            self.assertTrue(response.json()["model"]["configured"])
+        finally:
+            (
+                settings.enable_model_extraction,
+                settings.enable_issue_evidence_review,
+                settings.openai_api_key,
+            ) = previous
+
     def test_provider_check_reports_unconfigured_without_calling_complete(self):
         provider = SimpleNamespace(configured=False)
         with patch("app.main.OpenAICompatibleProvider", return_value=provider):

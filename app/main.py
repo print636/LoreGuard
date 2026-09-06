@@ -311,7 +311,10 @@ def health() -> dict:
         "status": "ok",
         "time": utc_now_naive().isoformat(),
         "model": {
-            "configured": settings.enable_model_extraction
+            "configured": (
+                settings.enable_model_extraction
+                or settings.enable_issue_evidence_review
+            )
             and bool(settings.openai_api_key.strip()),
             "thinking": safe_thinking_configuration(settings),
         },
@@ -320,7 +323,7 @@ def health() -> dict:
 
 def _provider_check_suggestions(category: str) -> list[str]:
     if category == "not_configured":
-        return ["启用模型抽取并配置有效的 API 凭据后重试。"]
+        return ["启用模型抽取或 AI 证据复核，并配置有效的 API 凭据后重试。"]
     if category == "unauthorized":
         return [
             "检查 API 凭据是否有效、未过期，并确认凭据属于当前租户或项目。",

@@ -80,6 +80,13 @@ class TeiComposeStructureTests(unittest.TestCase):
         self.assertEqual(
             2,
             BASE_COMPOSE.count(
+                'ENABLE_ISSUE_EVIDENCE_REVIEW: '
+                '${ENABLE_ISSUE_EVIDENCE_REVIEW:-false}'
+            ),
+        )
+        self.assertEqual(
+            2,
+            BASE_COMPOSE.count(
                 "EMBEDDING_DEPLOYMENT_FINGERPRINT: "
                 "${EMBEDDING_DEPLOYMENT_FINGERPRINT:-unspecified}"
             ),

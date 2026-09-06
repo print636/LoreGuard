@@ -68,6 +68,17 @@ def semantic_payload(payload: dict) -> dict:
     return labelled
 
 
+def test_provider_can_be_configured_for_evidence_review_without_model_extraction():
+    review_only = OpenAICompatibleProvider(
+        settings(enable_model_extraction=False, enable_issue_evidence_review=True)
+    )
+    disabled = OpenAICompatibleProvider(
+        settings(enable_model_extraction=False, enable_issue_evidence_review=False)
+    )
+    assert review_only.configured is True
+    assert disabled.configured is False
+
+
 class ProviderTests(unittest.TestCase):
     def test_success_and_usage(self):
         transport = httpx.MockTransport(lambda _: completion('{"records":[]}'))

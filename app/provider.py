@@ -154,9 +154,11 @@ class OpenAICompatibleProvider:
 
     @property
     def configured(self) -> bool:
-        return self.settings.enable_model_extraction and bool(
-            self.settings.openai_api_key.strip()
+        capability_enabled = (
+            self.settings.enable_model_extraction
+            or self.settings.enable_issue_evidence_review
         )
+        return capability_enabled and bool(self.settings.openai_api_key.strip())
 
     def complete(self, system: str, user: str) -> ModelResult:
         call_started = self.monotonic()

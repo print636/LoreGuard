@@ -7,6 +7,10 @@ requires-python = ">=3.12"
 [tool.ruff]
 line-length = 100
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["artifacts", ".artifacts", ".venv", "frontend"]
+
 [tool.coverage.run]
 source = ["app"]
 omit = ["app/main.py", "app/tasks.py"]
