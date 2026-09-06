@@ -379,6 +379,63 @@
   box-shadow: inset 3px 0 #f4dc78;
 }
 
+.issueEvidenceReview {
+  margin-top: 16px;
+  padding: 15px 16px;
+  border: 1px solid #426b5c;
+  border-left: 4px solid #74df9f;
+  background: #0b1915;
+}
+
+.issueEvidenceReview.exception,
+.issueEvidenceReview.insufficient {
+  border-left-color: #d8c988;
+}
+
+.issueEvidenceReviewHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.issueEvidenceReviewHead strong { color: #8de0af; }
+.issueEvidenceReview.exception .issueEvidenceReviewHead strong,
+.issueEvidenceReview.insufficient .issueEvidenceReviewHead strong { color: #d8c988; }
+.issueEvidenceReviewHead span,
+.issueEvidenceReview > small { color: #8fa39b; font-size: 12px; }
+.issueEvidenceReview > p { margin: 11px 0; color: #dce9e4; line-height: 1.6; }
+
+.reviewCitations {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 11px;
+}
+
+.reviewCitations span {
+  color: #a8bbb3;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.reviewCitations b { color: #8de0af; }
+
+.diagnosticGrid > .issueReviewDiagnostic {
+  border-left: 3px solid #74df9f;
+}
+
+.diagnosticGrid > .issueReviewDiagnostic.partial,
+.diagnosticGrid > .issueReviewDiagnostic.skipped,
+.diagnosticGrid > .issueReviewDiagnostic.degraded,
+.diagnosticGrid > .issueReviewDiagnostic.failed,
+.diagnosticGrid > .issueReviewDiagnostic.unknown {
+  border-left-color: #d8c988;
+}
+
+@media(max-width:800px) {
+  .issueEvidenceReviewHead { align-items: flex-start; flex-direction: column; }
+}
+
 .tables {
   display: grid;
   grid-template-columns: 1fr 1fr;
