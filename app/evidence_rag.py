@@ -44,7 +44,13 @@ MAX_RETRIEVAL_CANDIDATES = 5_000
 MAX_RETRIEVAL_LIMIT = 50
 
 IndexOutcome = Literal["complete", "provider_unavailable", "write_conflict"]
-RetrievalMode = Literal["hybrid", "lexical_only"]
+RetrievalMode = Literal["hybrid", "lexical_only", "dense_only", "unavailable"]
+RetrievalStrategy = Literal[
+    "keyword-only",
+    "dense-only",
+    "keyword+dense-rrf",
+    "keyword+vector+entity-rrf",
+]
 
 
 @dataclass(frozen=True)
@@ -166,6 +172,7 @@ class RankedEvidence:
 
 @dataclass(frozen=True)
 class RetrievalDiagnostics:
+    strategy: RetrievalStrategy
     mode: RetrievalMode
     reason: str | None
     profile_id: str
@@ -180,7 +187,13 @@ class RetrievalDiagnostics:
     elapsed_ms: int
 
     def safe_dict(self) -> dict[str, object]:
-        modes = {"hybrid", "lexical_only"}
+        strategies = {
+            "keyword-only",
+            "dense-only",
+            "keyword+dense-rrf",
+            "keyword+vector+entity-rrf",
+        }
+        modes = {"hybrid", "lexical_only", "dense_only", "unavailable"}
         reasons = {
             None,
             "index_incomplete",
@@ -193,6 +206,11 @@ class RetrievalDiagnostics:
             "vector_scope_invalid",
         }
         return {
+            "strategy": (
+                self.strategy
+                if isinstance(self.strategy, str) and self.strategy in strategies
+                else "keyword-only"
+            ),
             "mode": (
                 self.mode
                 if isinstance(self.mode, str) and self.mode in modes
@@ -452,6 +470,7 @@ class EvidenceRrfRetriever:
         indexed: EvidenceIndexResult,
         allowed_snapshots: Sequence[SnapshotDocumentKey],
         query: EvidenceQuery,
+        strategy: RetrievalStrategy = "keyword+vector+entity-rrf",
         limit: int = 12,
         branch_limit: int = 30,
     ) -> EvidenceRetrievalResult:
@@ -466,6 +485,14 @@ class EvidenceRrfRetriever:
             1 <= branch_limit <= MAX_RETRIEVAL_LIMIT
         ):
             raise ValueError("retrieval branch limit is invalid")
+        strategies = {
+            "keyword-only",
+            "dense-only",
+            "keyword+dense-rrf",
+            "keyword+vector+entity-rrf",
+        }
+        if not isinstance(strategy, str) or strategy not in strategies:
+            raise ValueError("retrieval strategy is invalid")
         profile = indexed.profile
         if not isinstance(profile, EmbeddingProfile):
             raise ValueError("retrieval embedding profile is invalid")
@@ -503,13 +530,32 @@ class EvidenceRrfRetriever:
         authorized_set = set(authorized_snapshots)
         if any(chunk.snapshot not in authorized_set for chunk in chunks):
             raise ValueError("retrieval candidate is outside the authorized snapshots")
-        keyword_ids = _keyword_ranking(query.text, chunks, branch_limit)
-        entity_ids = _entity_ranking(query.entity_terms, chunks, branch_limit)
+        uses_keyword = strategy in {
+            "keyword-only",
+            "keyword+dense-rrf",
+            "keyword+vector+entity-rrf",
+        }
+        uses_vector = strategy in {
+            "dense-only",
+            "keyword+dense-rrf",
+            "keyword+vector+entity-rrf",
+        }
+        uses_entity = strategy == "keyword+vector+entity-rrf"
+        keyword_ids = (
+            _keyword_ranking(query.text, chunks, branch_limit) if uses_keyword else ()
+        )
+        entity_ids = (
+            _entity_ranking(query.entity_terms, chunks, branch_limit)
+            if uses_entity
+            else ()
+        )
         vector_ids: tuple[str, ...] = ()
         vector_reason: str | None = None
         provider_calls = 0
         provider_input_chars = 0
-        if not indexed.complete:
+        if not uses_vector:
+            pass
+        elif not indexed.complete:
             vector_reason = "index_incomplete"
         elif chunks:
             self._checkpoint()
@@ -587,7 +633,16 @@ class EvidenceRrfRetriever:
         return EvidenceRetrievalResult(
             matches=matches,
             diagnostics=RetrievalDiagnostics(
-                mode="hybrid" if vector_ids else "lexical_only",
+                strategy=strategy,
+                mode=(
+                    "hybrid"
+                    if vector_ids and (keyword_ids or entity_ids)
+                    else "dense_only"
+                    if vector_ids
+                    else "lexical_only"
+                    if keyword_ids or entity_ids or strategy == "keyword-only"
+                    else "unavailable"
+                ),
                 reason=vector_reason,
                 profile_id=profile.profile_id,
                 chunker_version=indexed.diagnostics.chunker_version,

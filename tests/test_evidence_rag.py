@@ -357,6 +357,45 @@ class EvidenceRagTests(unittest.TestCase):
         self.assertTrue(any(match.vector_rank is not None for match in result.matches))
         self.assertNotIn("林澈在哪里", repr(result))
 
+    def test_public_keyword_dense_and_rrf_strategies_use_only_requested_channels(self):
+        provider = MockEmbeddingProvider(self.profile)
+        indexed = self._coordinator(provider).ensure_index([self.document])
+        query = EvidenceQuery(text="林澈的星钥", entity_terms=())
+
+        keyword = EvidenceRrfRetriever(
+            index=FakeIndex([]), provider=ForbiddenProvider()
+        ).retrieve(
+            indexed=indexed,
+            allowed_snapshots=[self.snapshot],
+            query=query,
+            strategy="keyword-only",
+        )
+        self.assertEqual(keyword.diagnostics.strategy, "keyword-only")
+        self.assertEqual(keyword.diagnostics.provider_calls, 0)
+        self.assertEqual(keyword.diagnostics.vector_hits, 0)
+
+        vector_index = FakeIndex(reversed(indexed.chunks))
+        dense = EvidenceRrfRetriever(index=vector_index, provider=provider).retrieve(
+            indexed=indexed,
+            allowed_snapshots=[self.snapshot],
+            query=query,
+            strategy="dense-only",
+        )
+        self.assertEqual(dense.diagnostics.mode, "dense_only")
+        self.assertEqual(dense.diagnostics.keyword_hits, 0)
+        self.assertEqual(dense.diagnostics.entity_hits, 0)
+
+        fused = EvidenceRrfRetriever(index=vector_index, provider=provider).retrieve(
+            indexed=indexed,
+            allowed_snapshots=[self.snapshot],
+            query=query,
+            strategy="keyword+dense-rrf",
+        )
+        self.assertEqual(fused.diagnostics.strategy, "keyword+dense-rrf")
+        self.assertEqual(fused.diagnostics.entity_hits, 0)
+        self.assertGreater(fused.diagnostics.keyword_hits, 0)
+        self.assertGreater(fused.diagnostics.vector_hits, 0)
+
     def test_sqlite_vector_channel_fails_closed_but_lexical_retrieval_survives(self):
         provider = MockEmbeddingProvider(self.profile)
         indexed = self._coordinator(provider).ensure_index([self.document])
@@ -452,6 +491,7 @@ class EvidenceRagTests(unittest.TestCase):
         self.assertNotIn(self.content, repr(safe))
 
         retrieval_diagnostic = RetrievalDiagnostics(
+            strategy="keyword+dense-rrf",
             mode="hybrid",
             reason=None,
             profile_id=self.profile.profile_id,
