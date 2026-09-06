@@ -4,7 +4,12 @@ import unittest
 import httpx
 from pydantic import ValidationError
 
-from app.domain import AnalysisCancelled, EvidenceSpan, ParsedDirective
+from app.domain import (
+    AnalysisCancelled,
+    EvidenceSpan,
+    ParsedDirective,
+    directive_fingerprint,
+)
 from app.model_extractor import ModelEnhancedExtractor, RECORD_ADAPTER
 from app.parser import ParsedDocument, parse_document
 from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
@@ -13,6 +18,7 @@ from app.rules import detect_issues
 from app.semantic_quality import (
     apply_semantic_quality_gate,
     assess_directive,
+    document_context_has_noncanonical_frame,
     eligible_for_deterministic_rules,
 )
 from tests.test_model_extractor import completion, settings
@@ -267,6 +273,165 @@ class BaselineSemanticQualityTests(unittest.TestCase):
         self.assertEqual("character_claim", quality.directives[2].kind)
         self.assertEqual("quoted_material", quality.directives[3].attrs["source_scope"])
         self.assertFalse(eligible_for_deterministic_rules(quality.directives[3]))
+
+    def test_full_evidence_attribution_blocks_semantic_laundering(self):
+        cases = (
+            (
+                "旧卷只记载：佩戴青铜铃者可以听见潮声。",
+                {"subject": "佩戴青铜铃者", "predicate": "能力", "value": "听见潮声"},
+                "quoted_material",
+            ),
+            (
+                "“洛岚盗走了星核。”值班员说道。",
+                {"subject": "洛岚", "predicate": "盗走", "value": "星核"},
+                "character_dialogue",
+            ),
+        )
+        for text, core, expected_scope in cases:
+            with self.subTest(text=text):
+                assessed, _ = assess_directive(
+                    ParsedDirective(
+                        kind="fact",
+                        attrs={
+                            **core,
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        },
+                        evidence=evidence(text),
+                    )
+                )
+                self.assertIsNotNone(assessed)
+                self.assertEqual(expected_scope, assessed.attrs["source_scope"])
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_reported_is_ineligible_except_for_observed_knowledge_claim(self):
+        reported_fact = ParsedDirective(
+            kind="fact",
+            attrs={
+                "subject": "洛岚",
+                "predicate": "身份",
+                "value": "领航员",
+                "modality": "reported",
+                "source_scope": "narrator",
+                "certainty": "certain",
+            },
+            evidence=evidence("洛岚的身份是领航员。"),
+        )
+        observed_claim = ParsedDirective(
+            kind="claims_knows",
+            attrs={
+                "character": "洛岚",
+                "fact": "星门口令",
+                "time": "1026-01-01 09:00",
+                "modality": "reported",
+                "source_scope": "character_dialogue",
+                "certainty": "certain",
+            },
+            evidence=evidence("洛岚说出了星门口令。", line=2),
+        )
+        self.assertFalse(eligible_for_deterministic_rules(reported_fact))
+        self.assertTrue(eligible_for_deterministic_rules(observed_claim))
+
+    def test_noncanonical_frame_is_internal_and_does_not_change_fingerprint(self):
+        row = ParsedDirective(
+            kind="event",
+            attrs={
+                "time": "1026-01-01 10:00",
+                "location": "雪原",
+                "participants": "沈砚",
+                "modality": "asserted",
+                "source_scope": "narrator",
+                "certainty": "certain",
+            },
+            evidence=evidence("1026-01-01 10:00，沈砚在雪原。"),
+        )
+        framed = row.model_copy(update={"noncanonical_frame": True})
+        self.assertNotIn("noncanonical_frame", framed.model_dump())
+        self.assertEqual(row.model_dump(), framed.model_dump())
+        self.assertEqual(
+            directive_fingerprint(
+                row, path="chapter.md", semantic_class="confirmed_narrative", eligible=True
+            ),
+            directive_fingerprint(
+                framed,
+                path="chapter.md",
+                semantic_class="confirmed_narrative",
+                eligible=True,
+            ),
+        )
+
+    def test_dream_context_is_traceable_but_cannot_create_location_conflict(self):
+        from app.candidate_normalizer import NormalizationResult
+
+        class EventExtractor:
+            def extract(self, document):
+                line = 2 if document.id == "dream" else 1
+                source = document.content.splitlines()[line - 1]
+                location = "雪原" if document.id == "dream" else "潮痕镇"
+                return ParsedDocument(
+                    document_id=document.id,
+                    document_name=document.name,
+                    directives=[
+                        ParsedDirective(
+                            kind="event",
+                            attrs={
+                                "time": "1026-01-01 10:00",
+                                "location": location,
+                                "participants": "沈砚",
+                                "modality": "asserted",
+                                "source_scope": "narrator",
+                                "certainty": "certain",
+                            },
+                            evidence=EvidenceSpan(
+                                document_id=document.id,
+                                document_name=document.name,
+                                line_start=line,
+                                line_end=line,
+                                text=source,
+                            ),
+                        )
+                    ],
+                )
+
+        class PassthroughNormalizer:
+            def enrich(self, _documents, directives):
+                return NormalizationResult(directives=list(directives))
+
+        documents = [
+            DocumentInput(
+                "dream",
+                "dream.md",
+                "作者旁注：以下段落均为梦境。\n1026-01-01 10:00，沈砚站在雪原。",
+            ),
+            DocumentInput(
+                "reality", "reality.md", "1026-01-01 10:00，沈砚站在潮痕镇。"
+            ),
+        ]
+        result = AnalysisPipeline(
+            extractor=EventExtractor(), normalizer=PassthroughNormalizer()
+        ).run(documents)
+        dream_rows = [
+            row for row in result.directives if row.evidence.document_id == "dream"
+        ]
+        self.assertEqual(1, len(dream_rows))
+        self.assertEqual("tentative_fact", dream_rows[0].kind)
+        self.assertTrue(dream_rows[0].noncanonical_frame)
+        self.assertFalse(eligible_for_deterministic_rules(dream_rows[0]))
+        self.assertEqual([], result.issues)
+
+    def test_reality_resumption_and_explicit_negation_are_not_overblocked(self):
+        content = (
+            "作者旁注：以下段落均为梦境。\n"
+            "从梦中醒来后在现实，1026-01-01 10:00，沈砚站在潮痕镇；"
+            "旁白明确说明，这不是回忆、幻象或通讯投影。"
+        )
+        self.assertFalse(document_context_has_noncanonical_frame(content, 2, 2))
+        self.assertTrue(
+            document_context_has_noncanonical_frame(
+                "这不是回忆，而是梦境中的片段。", 1, 1
+            )
+        )
 
     def test_unverified_report_and_possible_certainty_never_become_canonical(self):
         anonymous = ParsedDirective(

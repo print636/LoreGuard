@@ -780,12 +780,26 @@ def _bind_directive_context(
 ) -> ParsedDirective:
     if document is None:
         return directive
+    from .semantic_quality import document_context_has_noncanonical_frame
+
     attrs = dict(directive.attrs)
     if document.role:
         attrs["document_role"] = document.role
     if document.scope:
         attrs["story_scope"] = document.scope
-    return directive.model_copy(update={"attrs": attrs})
+    return directive.model_copy(
+        update={
+            "attrs": attrs,
+            "noncanonical_frame": (
+                directive.noncanonical_frame
+                or document_context_has_noncanonical_frame(
+                    document.content,
+                    directive.evidence.line_start,
+                    directive.evidence.line_end,
+                )
+            ),
+        }
+    )
 
 
 def _label_closed_normalizer_directive(

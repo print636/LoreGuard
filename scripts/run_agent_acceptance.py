@@ -21,7 +21,9 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SUITE_ROOT = ROOT / "data" / "agent-acceptance-v1"
+DEFAULT_SUITE_ROOT = ROOT / "data" / "agent-acceptance-v2"
+LEGACY_SUITE_ROOT = ROOT / "data" / "agent-acceptance-v1"
+SUITE_ROOTS = {"v1": LEGACY_SUITE_ROOT, "v2": DEFAULT_SUITE_ROOT}
 ALLOWED_TOOLS = {"READ_SPAN", "PATCH_RECORDS", "ABSTAIN"}
 IMMUTABLE_PATCH_FIELDS = {
     "doc_ref",
@@ -703,7 +705,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Score bounded-Agent traces against the developer-visible frozen suite."
     )
-    parser.add_argument("--suite-root", type=Path, default=DEFAULT_SUITE_ROOT)
+    parser.add_argument(
+        "--benchmark-version",
+        choices=tuple(SUITE_ROOTS),
+        default="v2",
+        help="Select the frozen benchmark; v1 remains available only for historical replay.",
+    )
+    parser.add_argument("--suite-root", type=Path)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument(
         "--trace-file",
@@ -722,12 +730,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    manifest = load_manifest(args.suite_root)
+    suite_root = args.suite_root or SUITE_ROOTS[args.benchmark_version]
+    manifest = load_manifest(suite_root)
     if args.mock_oracle:
-        bundle = build_mock_trace_bundle(manifest, args.suite_root)
+        bundle = build_mock_trace_bundle(manifest, suite_root)
     else:
         bundle = json.loads(args.trace_file.read_text(encoding="utf-8"))
-    report = score_trace_bundle(manifest, bundle, args.suite_root)
+    report = score_trace_bundle(manifest, bundle, suite_root)
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

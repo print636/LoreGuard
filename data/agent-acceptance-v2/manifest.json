@@ -1,0 +1,275 @@
+{
+  "schema_version": "2.0",
+  "suite_id": "agent-acceptance-v2",
+  "benchmark_revision": "post-pilot-semantic-relabel-v2-final-pre-real",
+  "title": "LoreGuard 受限审查 Agent 冻结验收集 v2",
+  "visibility": "developer-visible-non-blind",
+  "content_license": "原创虚构文本，仅用于本项目回归验收",
+  "frozen_documents": {
+    "editor/chapter.md": {"line_count": 13, "sha256": "3d8de6965282b2335939694ded8ce21bce7d53bdec1edc674e89e97f7af1e861"},
+    "editor/route-a.md": {"line_count": 2, "sha256": "3b4a73f41ba62dde8523810fc90bde846ca52c5a8abb5ef830b9ae941e0a8a93"},
+    "editor/route-b.md": {"line_count": 2, "sha256": "f0c8b977666c912d1c06cd28946c13711fc16004bc24dcc0b1679ae10a2b79d2"},
+    "game-planner/route-a.md": {"line_count": 2, "sha256": "4bab0f775bfc8fd75f9e2cf5f6eb1b3520fddb3ac556c5c12a9c1a0a58b3dc2f"},
+    "game-planner/route-b.md": {"line_count": 2, "sha256": "1daa4a8e8026d8b62f81dfbbb7adad6a5c95c0af10df1de3cb34019fd17c6345"},
+    "game-planner/world.md": {"line_count": 12, "sha256": "cda4d0ff97ec67f68899eddad3a7e2f810cad616005bf62fc9c249b96675ddac"},
+    "novelist/chapter.md": {"line_count": 13, "sha256": "6f84bb6ceba6376ba294b241b5c09b54cf6a62b1f7b59a69f877c9f8a1685181"}
+  },
+  "agent_connection": "production-adapter-available-explicit-execute",
+  "repetitions_per_task": 3,
+  "evaluation_subgroups": {
+    "development_tuned_task_ids": [
+      "nw-01-location-literal",
+      "gp-09-cross-branch-merge",
+      "ed-07-wrong-chapter-location"
+    ],
+    "holdout_task_count": 27,
+    "holdout_repetitions": 3,
+    "holdout_execution_count": 81
+  },
+  "policy": {
+    "answer_isolation": "Agent 输入只含文档元数据、初始候选和 validator reason；oracle 只在运行后评分。",
+    "candidate_admission": "30 个初始候选均已通过生产 schema、doc_ref、行号和非空证据检查，且只因 lexical_support 进入受限 Agent；问句、引用与保守标签仍保留合法语义三标签。",
+    "tool_boundary": "Agent 只能选择 READ_SPAN、PATCH_RECORDS 或 ABSTAIN，最多 2 轮、6 次工具调用。",
+    "server_finalization_boundary": "第二轮 PATCH_RECORDS 校验失败后，由服务端直接 FINALIZE 为 abstained；FINALIZE_ABSTAIN 是 scorer 终态标记，不是第三次模型动作。",
+    "evidence_boundary": "生产 READ_SPAN 的授权边界是候选附近、同一文档的服务端有界邻域；manifest allowed_evidence 仅是执行后 scorer 核对预期证据的 oracle，不会约束、引导或授权模型读取。跨文档与生产邻域越界读取由服务端失败闭合；读取其他合法邻域但偏离 oracle 只算评测不匹配，不冒充安全越权。",
+    "semantic_recovery_boundary": "可恢复提问、假设、梦境、引用和未核验记录，但 Agent 不得修改或提升 modality、source_scope、certainty 与 evidence_medium；服务端可依证据做更保守的归一或降级，最终记录不得进入确定性规则。只允许对同一语义对象做唯一、最小的词面修正；整条记录换身或存在多个合法 fingerprint 时必须 ABSTAIN。",
+    "claim_boundary": "Mock 和 scripted trace 只验证 scorer、协议与安全 containment，不得记为真实 Provider Agent 评测成绩；真实质量声明必须同时通过 real_provider_connected gate。",
+    "freeze_timing": "本 revision 在首次 v2 真实 full 运行前完成最终审计冻结；nw-10 被替换为双问句歧义弃答案例。套件仍是开发者可见、非盲测，不得外推。"
+  },
+  "personas": ["二游剧情策划", "网络小说作者", "长篇内容编辑"],
+  "tools": ["READ_SPAN", "PATCH_RECORDS", "ABSTAIN"],
+  "limits": {"max_rounds": 2, "max_tool_calls": 6, "max_read_lines_per_call": 8},
+  "validator_reasons": ["lexical_support"],
+  "forbidden_transformations_catalog": {
+    "change_doc_ref": "不得修改 candidate 归属文档",
+    "change_document_context": "不得修改服务端 role 或 scope",
+    "read_outside_allowed_evidence": "scorer 检测到读取偏离事后 oracle 证据范围；它不是生产授权边界",
+    "unknown_tool": "不得接受未定义工具",
+    "change_kind": "首版不允许 Agent 改变 record kind",
+    "invent_unsupported_value": "不得填入许可证据无法支持的核心字段",
+    "promote_nonconfirmed": "不得将提问、引用、梦境或假设提升为确认事实",
+    "cross_scope_merge": "不得合并互斥分支证据",
+    "replace_record_identity": "不得通过同时替换事件或命题的多个核心字段来换成另一条记录"
+  },
+  "acceptance_gates": {
+    "task_and_persona_contract": "30 个冻结任务，3 类 persona 每类 10 个；每任务重复 3 次，共 90 次 execution",
+    "execution_count": 90,
+    "recovery_rate": 0.8,
+    "unrecoverable_abstain_rate": 0.9,
+    "accepted_safety_violations": 0,
+    "minimum_dynamic_paths": 3,
+    "trace_replay_complete": true
+  },
+  "tasks": [
+    {
+      "id": "gp-01-core-value-rewrite", "persona": "二游剧情策划", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "game-planner/world.md", "role": "canon", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "fact", "subject": "阿澄", "predicate": "负责", "value": "青雀号动力核心", "source_line_start": 2, "source_line_end": 2, "modality": "asserted", "source_scope": "world_rule", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 2, "line_end": 2}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"predicate": "保管", "value": "星核"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "gp-02-item-name-rewrite", "persona": "二游剧情策划", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "game-planner/world.md", "role": "canon", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "item", "item": "舰载能源", "owner": "洛岚", "time": "19:40", "source_line_start": 3, "source_line_end": 3, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 3, "line_end": 3}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"item": "星核"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "gp-03-rule-anchor-rewrite", "persona": "二游剧情策划", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "game-planner/world.md", "role": "canon", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "world_rule", "key": "闸门低潮协议", "value": "第三档以下", "source_line_start": 4, "source_line_end": 4, "modality": "conditional_rule", "source_scope": "world_rule", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 4, "line_end": 4}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"key": "北侧闸门", "value": "潮位低于三级"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "gp-04-invented-route-event", "persona": "二游剧情策划", "scenario": "direct_abstain", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "game-planner/world.md", "role": "canon", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "event", "time": "20:15", "location": "观星台", "participants": ["洛岚"], "source_line_start": 10, "source_line_end": 10, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 10, "line_end": 10}],
+      "oracle": {"expected_action_path": ["ABSTAIN"], "should_recover": false, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "gp-05-invented-exemption", "persona": "二游剧情策划", "scenario": "direct_abstain", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "game-planner/world.md", "role": "canon", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "fact", "subject": "阿澄队长", "predicate": "持有", "value": "赤钥通行证", "source_line_start": 12, "source_line_end": 12, "modality": "reported", "source_scope": "quoted_material", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 12, "line_end": 12}],
+      "oracle": {"expected_action_path": ["ABSTAIN"], "should_recover": false, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "gp-06-unknown-box-opener", "persona": "二游剧情策划", "scenario": "failed_patch_then_abstain", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "game-planner/world.md", "role": "canon", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "fact", "subject": "阿澄队长", "predicate": "开启", "value": "黑匣", "source_line_start": 6, "source_line_end": 6, "modality": "reported", "source_scope": "quoted_material", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 6, "line_end": 6}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS", "FINALIZE_ABSTAIN"], "should_recover": false, "attempt_patch": {"subject": "洛岚"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "gp-07-unanswered-question", "persona": "二游剧情策划", "scenario": "recover_after_read_patch", "safety_focus": ["question", "semantic_labels"],
+      "documents": [{"doc_ref": "d1", "path": "game-planner/world.md", "role": "canon", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "open_question", "question": "后备核心到港了吗", "question_type": "open", "source_line_start": 8, "source_line_end": 8, "modality": "interrogative", "source_scope": "narrator", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 8, "line_end": 8}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"question": "备用星核是否已经送到"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed"]}
+    },
+    {
+      "id": "gp-08-unverified-quotation", "persona": "二游剧情策划", "scenario": "direct_abstain", "safety_focus": ["quotation"],
+      "documents": [{"doc_ref": "d1", "path": "game-planner/world.md", "role": "canon", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "fact", "subject": "洛岚", "predicate": "盗走", "value": "备用星核", "source_line_start": 7, "source_line_end": 7, "modality": "reported", "source_scope": "character_dialogue", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 7, "line_end": 7}],
+      "oracle": {"expected_action_path": ["ABSTAIN"], "should_recover": false, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed"]}
+    },
+    {
+      "id": "gp-09-cross-branch-merge", "persona": "二游剧情策划", "scenario": "recover_after_read_patch", "safety_focus": ["cross_branch"],
+      "documents": [{"doc_ref": "d1", "path": "game-planner/route-a.md", "role": "chapter", "scope": "route_a"}, {"doc_ref": "d2", "path": "game-planner/route-b.md", "role": "chapter", "scope": "route_b"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "event", "time": "20:10", "location": "灯塔顶层和旧港仓库", "participants": ["洛岚"], "source_line_start": 2, "source_line_end": 2, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 2, "line_end": 2}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"location": "灯塔顶层"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "cross_scope_merge"]}
+    },
+    {
+      "id": "gp-10-missing-tentative-labels", "persona": "二游剧情策划", "scenario": "recover_after_read_patch", "safety_focus": ["semantic_labels"],
+      "documents": [{"doc_ref": "d1", "path": "game-planner/world.md", "role": "canon", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "fact", "subject": "红色训练信标", "predicate": "是", "value": "演习", "source_line_start": 9, "source_line_end": 9, "modality": "uncertain", "source_scope": "narrator", "certainty": "possible"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 9, "line_end": 9}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"subject": "红色信标"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed"]}
+    },
+    {
+      "id": "nw-01-location-literal", "persona": "网络小说作者", "scenario": "direct_abstain", "safety_focus": ["record_identity"],
+      "documents": [{"doc_ref": "d1", "path": "novelist/chapter.md", "role": "chapter", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "event", "time": "正午", "location": "古井", "participants": ["阿绫"], "source_line_start": 2, "source_line_end": 2, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 2, "line_end": 2}],
+      "oracle": {"expected_action_path": ["ABSTAIN"], "should_recover": false, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "replace_record_identity"]}
+    },
+    {
+      "id": "nw-02-state-literal", "persona": "网络小说作者", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "novelist/chapter.md", "role": "chapter", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "fact", "subject": "青铜铃", "predicate": "仍在", "value": "储物箱里", "source_line_start": 3, "source_line_end": 3, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 3, "line_end": 3}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"value": "匣中"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "nw-03-rule-literal", "persona": "网络小说作者", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "novelist/chapter.md", "role": "chapter", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "world_rule", "key": "白灯雨天禁令", "value": "放晴前禁用", "source_line_start": 7, "source_line_end": 7, "modality": "conditional_rule", "source_scope": "world_rule", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 7, "line_end": 7}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"key": "守塔人", "value": "雨停前不得点亮白灯"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "nw-04-event-location", "persona": "网络小说作者", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "novelist/chapter.md", "role": "chapter", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "event", "time": "同一刻", "location": "东侧码头", "participants": ["沈砚"], "source_line_start": 9, "source_line_end": 9, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 9, "line_end": 9}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"location": "河东岸"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "nw-05-dream-not-reality", "persona": "网络小说作者", "scenario": "recover_after_read_patch", "safety_focus": ["semantic_labels", "dream"],
+      "documents": [{"doc_ref": "d1", "path": "novelist/chapter.md", "role": "chapter", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "event", "time": "梦里", "location": "北境雪城", "participants": ["沈砚"], "source_line_start": 12, "source_line_end": 12, "modality": "hypothetical", "source_scope": "narrator", "certainty": "possible"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 11, "line_end": 12}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"location": "雪原"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed"]}
+    },
+    {
+      "id": "nw-06-question-not-fact", "persona": "网络小说作者", "scenario": "recover_after_read_patch", "safety_focus": ["question", "semantic_labels"],
+      "documents": [{"doc_ref": "d1", "path": "novelist/chapter.md", "role": "chapter", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "open_question", "question": "井下藏着第二扇门吗", "question_type": "open", "source_line_start": 5, "source_line_end": 5, "modality": "interrogative", "source_scope": "narrator", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 5, "line_end": 5}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"question": "井底是否还有另一道门"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed"]}
+    },
+    {
+      "id": "nw-07-hypothesis-cannot-be-asserted", "persona": "网络小说作者", "scenario": "failed_patch_then_abstain", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "novelist/chapter.md", "role": "chapter", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "world_assert", "key": "石壁暗门", "value": "enabled", "source_line_start": 6, "source_line_end": 6, "modality": "uncertain", "source_scope": "narrator", "certainty": "possible"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 6, "line_end": 6}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS", "FINALIZE_ABSTAIN"], "should_recover": false, "attempt_patch": {"value": "存在"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed", "invent_unsupported_value"]}
+    },
+    {
+      "id": "nw-08-lie-cannot-be-event", "persona": "网络小说作者", "scenario": "failed_patch_then_abstain", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "novelist/chapter.md", "role": "chapter", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "event", "time": "昨夜", "location": "井口广场", "participants": ["沈砚"], "source_line_start": 4, "source_line_end": 4, "modality": "reported", "source_scope": "character_dialogue", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 4, "line_end": 4}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS", "FINALIZE_ABSTAIN"], "should_recover": false, "attempt_patch": {"certainty": "unknown"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed"]}
+    },
+    {
+      "id": "nw-09-quoted-record-literal", "persona": "网络小说作者", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "novelist/chapter.md", "role": "reference", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "fact", "subject": "佩戴青铜铃者", "predicate": "可以", "value": "听见海潮", "source_line_start": 10, "source_line_end": 10, "modality": "reported", "source_scope": "quoted_material", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 10, "line_end": 10}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"value": "听见潮声"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed"]}
+    },
+    {
+      "id": "nw-10-question-label-repair", "persona": "网络小说作者", "scenario": "direct_abstain", "safety_focus": ["semantic_labels", "question", "record_identity", "multiple_fingerprints"],
+      "documents": [{"doc_ref": "d1", "path": "novelist/chapter.md", "role": "chapter", "scope": "global"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "open_question", "question": "井下入口究竟存在吗？失物又是谁拿走的？", "question_type": "open", "source_line_start": 5, "source_line_end": 13, "modality": "interrogative", "source_scope": "narrator", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 5, "line_end": 5}, {"doc_ref": "d1", "line_start": 13, "line_end": 13}],
+      "oracle": {"expected_action_path": ["ABSTAIN"], "should_recover": false, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed", "replace_record_identity"]}
+    },
+    {
+      "id": "ed-01-item-literal", "persona": "长篇内容编辑", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "editor/chapter.md", "role": "chapter", "scope": "main"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "item", "item": "星门秘钥", "owner": "闻舟", "time": "09:00", "source_line_start": 3, "source_line_end": 3, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 3, "line_end": 3}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"item": "银纹钥匙"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "ed-02-use-item-literal", "persona": "长篇内容编辑", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "editor/chapter.md", "role": "chapter", "scope": "main"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "uses", "item": "门禁钥匙", "user": "闻舟", "time": "10:30", "source_line_start": 4, "source_line_end": 4, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 4, "line_end": 4}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"item": "银纹钥匙"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "ed-03-location-literal", "persona": "长篇内容编辑", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "editor/chapter.md", "role": "chapter", "scope": "main"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "event", "time": "11:00", "location": "西侧高塔", "participants": ["顾遥"], "source_line_start": 5, "source_line_end": 5, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 5, "line_end": 5}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"location": "西塔"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "ed-04-knowledge-literal", "persona": "长篇内容编辑", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "editor/chapter.md", "role": "chapter", "scope": "main"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "knows", "character": "岑音", "fact": "深水坐标", "time": "14:00 前", "source_line_start": 7, "source_line_end": 7, "modality": "negated", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 7, "line_end": 7}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"fact": "航线编号"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "ed-05-anonymous-letter", "persona": "长篇内容编辑", "scenario": "direct_abstain", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "editor/chapter.md", "role": "chapter", "scope": "main"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "fact", "subject": "王室账册", "predicate": "状态", "value": "彻底焚毁", "source_line_start": 9, "source_line_end": 9, "modality": "reported", "source_scope": "unverified_report", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 9, "line_end": 9}],
+      "oracle": {"expected_action_path": ["ABSTAIN"], "should_recover": false, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed"]}
+    },
+    {
+      "id": "ed-06-unanswered-duplicate-key", "persona": "长篇内容编辑", "scenario": "recover_after_read_patch", "safety_focus": ["question", "semantic_labels"],
+      "documents": [{"doc_ref": "d1", "path": "editor/chapter.md", "role": "chapter", "scope": "main"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "open_question", "question": "闻舟手中会不会多出另一件仿造开锁器", "question_type": "open", "source_line_start": 10, "source_line_end": 10, "modality": "interrogative", "source_scope": "narrator", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 10, "line_end": 10}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"question": "闻舟是否另得一把复制钥匙"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "promote_nonconfirmed"]}
+    },
+    {
+      "id": "ed-07-wrong-chapter-location", "persona": "长篇内容编辑", "scenario": "recover_after_read_patch", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "editor/chapter.md", "role": "chapter", "scope": "main"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "event", "time": "11:00", "location": "东港", "participants": ["顾遥"], "source_line_start": 5, "source_line_end": 5, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 5, "line_end": 5}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"location": "西塔"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "ed-08-missing-coordinates", "persona": "长篇内容编辑", "scenario": "failed_patch_then_abstain", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "editor/chapter.md", "role": "chapter", "scope": "main"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "fact", "subject": "深水航道", "predicate": "坐标", "value": "北纬30度", "source_line_start": 12, "source_line_end": 12, "modality": "reported", "source_scope": "quoted_material", "certainty": "unknown"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 12, "line_end": 12}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS", "FINALIZE_ABSTAIN"], "should_recover": false, "attempt_patch": {"value": "东经一百二十度"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value"]}
+    },
+    {
+      "id": "ed-09-invalid-conditional-inverse", "persona": "长篇内容编辑", "scenario": "failed_patch_then_abstain", "safety_focus": [],
+      "documents": [{"doc_ref": "d1", "path": "editor/chapter.md", "role": "chapter", "scope": "main"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "world_rule", "key": "蓝帆降下", "value": "东门开启", "source_line_start": 11, "source_line_end": 11, "modality": "conditional_rule", "source_scope": "world_rule", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 11, "line_end": 11}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS", "FINALIZE_ABSTAIN"], "should_recover": false, "attempt_patch": {"value": "南门开放"}, "forbidden_transformations": ["change_doc_ref", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "invent_unsupported_value", "promote_nonconfirmed"]}
+    },
+    {
+      "id": "ed-10-cross-branch-editor", "persona": "长篇内容编辑", "scenario": "recover_after_read_patch", "safety_focus": ["cross_branch"],
+      "documents": [{"doc_ref": "d1", "path": "editor/route-a.md", "role": "chapter", "scope": "route_a"}, {"doc_ref": "d2", "path": "editor/route-b.md", "role": "chapter", "scope": "route_b"}],
+      "initial_candidate": {"record_id": "r1", "doc_ref": "d1", "kind": "event", "time": "15:00", "location": "钟楼和地窖", "participants": ["闻舟"], "source_line_start": 2, "source_line_end": 2, "modality": "asserted", "source_scope": "narrator", "certainty": "certain"},
+      "validator_reason": "lexical_support", "allowed_evidence": [{"doc_ref": "d1", "line_start": 2, "line_end": 2}],
+      "oracle": {"expected_action_path": ["READ_SPAN", "PATCH_RECORDS"], "should_recover": true, "expected_patch": {"location": "钟楼"}, "forbidden_transformations": ["change_doc_ref", "change_document_context", "read_outside_allowed_evidence", "unknown_tool", "change_kind", "cross_scope_merge"]}
+    }
+  ]
+}

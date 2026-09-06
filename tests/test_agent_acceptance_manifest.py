@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import unittest
 
 from app.chunking import chunk_document
@@ -9,8 +10,10 @@ from app.domain import DocumentRole
 from app.model_extractor import ModelEnhancedExtractor, RECORD_ADAPTER
 from app.pipeline import DocumentInput
 from app.provider import OpenAICompatibleProvider
+from app.semantic_quality import eligible_for_deterministic_rules
 from scripts.run_agent_acceptance import (
     DEFAULT_SUITE_ROOT,
+    LEGACY_SUITE_ROOT,
     build_agent_input,
     build_mock_trace_bundle,
     frozen_document_errors,
@@ -35,12 +38,29 @@ class AgentAcceptanceManifestTests(unittest.TestCase):
             focus for task in safety_tasks for focus in task["safety_focus"]
         }
 
-        self.assertEqual("agent-acceptance-v1", manifest["suite_id"])
+        self.assertEqual("2.0", manifest["schema_version"])
+        self.assertEqual("agent-acceptance-v2", manifest["suite_id"])
+        self.assertEqual(
+            "post-pilot-semantic-relabel-v2-final-pre-real",
+            manifest["benchmark_revision"],
+        )
         self.assertEqual("developer-visible-non-blind", manifest["visibility"])
         self.assertEqual(
-            "trace-import-adapter-only-production-invocation-disabled",
+            "production-adapter-available-explicit-execute",
             manifest["agent_connection"],
         )
+        development_ids = set(
+            manifest["evaluation_subgroups"]["development_tuned_task_ids"]
+        )
+        self.assertEqual(
+            {
+                "nw-01-location-literal",
+                "gp-09-cross-branch-merge",
+                "ed-07-wrong-chapter-location",
+            },
+            development_ids,
+        )
+        self.assertEqual(27, len({task["id"] for task in tasks} - development_ids))
         self.assertEqual(30, len(tasks))
         self.assertEqual(30, len({task["id"] for task in tasks}))
         self.assertEqual(set(manifest["personas"]), set(personas))
@@ -48,13 +68,14 @@ class AgentAcceptanceManifestTests(unittest.TestCase):
         self.assertEqual(3, manifest["repetitions_per_task"])
         self.assertEqual(90, len(tasks) * manifest["repetitions_per_task"])
         self.assertEqual(90, manifest["acceptance_gates"]["execution_count"])
+        self.assertEqual(3, manifest["acceptance_gates"]["minimum_dynamic_paths"])
         self.assertEqual([], frozen_document_errors(manifest, self.root))
         self.assertEqual(
             {"lexical_support"}, {task["validator_reason"] for task in tasks}
         )
-        self.assertGreaterEqual(scenarios["recover_after_read_patch"], 10)
-        self.assertGreaterEqual(scenarios["direct_abstain"], 8)
-        self.assertGreaterEqual(scenarios["failed_patch_then_abstain"], 6)
+        self.assertEqual(19, scenarios["recover_after_read_patch"])
+        self.assertEqual(6, scenarios["direct_abstain"])
+        self.assertEqual(5, scenarios["failed_patch_then_abstain"])
         self.assertGreaterEqual(len(safety_tasks), 6)
         self.assertTrue(
             {"semantic_labels", "question", "quotation", "cross_branch"}
@@ -206,6 +227,88 @@ class AgentAcceptanceManifestTests(unittest.TestCase):
                 self.assertIsNotNone(assessed)
                 self.assertIsNone(repair)
 
+    def test_noncanonical_recovery_preserves_safety_metadata_and_rule_isolation(self):
+        conservative_outcomes = {
+            "gp-07-unanswered-question": ("open_question", "interrogative"),
+            "gp-10-missing-tentative-labels": ("tentative_fact", "uncertain"),
+            "nw-05-dream-not-reality": ("tentative_fact", "hypothetical"),
+            "nw-06-question-not-fact": ("open_question", "interrogative"),
+            "nw-09-quoted-record-literal": ("character_claim", "reported"),
+            "ed-06-unanswered-duplicate-key": ("open_question", "interrogative"),
+        }
+        settings = Settings(
+            _env_file=None,
+            openai_api_key="unit-test-placeholder",
+            openai_base_url="https://mock.invalid/v1",
+            openai_model="mock-model",
+            enable_model_extraction=True,
+            enable_review_agent=False,
+            provider_timeout_seconds=1,
+            provider_max_attempts=1,
+            provider_thinking_mode=None,
+        )
+        extractor = ModelEnhancedExtractor(OpenAICompatibleProvider(settings))
+        for task in self.manifest["tasks"]:
+            if task["id"] not in conservative_outcomes:
+                continue
+            with self.subTest(task=task["id"]):
+                candidate = task["initial_candidate"]
+                patch = task["oracle"]["expected_patch"]
+                self.assertFalse(
+                    {
+                        "modality",
+                        "source_scope",
+                        "certainty",
+                        "evidence_medium",
+                    }.intersection(patch)
+                )
+                raw = {**candidate, **patch}
+                raw.pop("record_id")
+                doc_ref = raw.pop("doc_ref")
+                spec = next(
+                    document
+                    for document in task["documents"]
+                    if document["doc_ref"] == doc_ref
+                )
+                path = (self.root / spec["path"]).resolve()
+                document = DocumentInput(
+                    id=task["id"],
+                    name=path.name,
+                    content=path.read_text(encoding="utf-8"),
+                    role=spec["role"],
+                    scope=spec["scope"],
+                )
+                chunk = chunk_document(document, max_chars=100_000)[0]
+                record = RECORD_ADAPTER.validate_python(raw)
+                provisional = ModelEnhancedExtractor._to_directive(
+                    document, chunk, record
+                )
+                assessed, repair, _ = extractor._validate_or_quarantine(
+                    document,
+                    chunk,
+                    raw,
+                    source_record_index=0,
+                    repair_index=0,
+                    doc_ref=doc_ref,
+                )
+                self.assertIsNotNone(assessed)
+                self.assertIsNone(repair)
+                if not eligible_for_deterministic_rules(provisional):
+                    self.assertFalse(eligible_for_deterministic_rules(assessed))
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+                expected_kind, expected_modality = conservative_outcomes[task["id"]]
+                self.assertEqual(expected_kind, assessed.kind)
+                self.assertEqual(expected_modality, assessed.attrs["modality"])
+                self.assertIn(
+                    assessed.attrs["certainty"], {"unknown", "possible"}
+                )
+                self.assertEqual(spec["role"], assessed.attrs["document_role"])
+                self.assertEqual(spec["scope"], assessed.attrs["story_scope"])
+                self.assertEqual(
+                    candidate["source_line_start"], assessed.evidence.line_start
+                )
+                self.assertEqual(candidate["source_line_end"], assessed.evidence.line_end)
+
     def test_all_initial_candidates_enter_only_the_production_lexical_gate(self):
         settings = Settings(
             _env_file=None,
@@ -342,7 +445,7 @@ class AgentAcceptanceManifestTests(unittest.TestCase):
         failed_traces = [
             trace for trace in bundle["traces"] if trace["task_id"] in failed_task_ids
         ]
-        self.assertEqual(18, len(failed_traces))
+        self.assertEqual(15, len(failed_traces))
         for trace in failed_traces:
             self.assertEqual(
                 ["READ_SPAN", "PATCH_RECORDS"],
@@ -383,6 +486,85 @@ class AgentAcceptanceManifestTests(unittest.TestCase):
                     expected_violation,
                     report["metrics"]["accepted_safety_violation_types"],
                 )
+
+    def test_v1_remains_an_explicit_byte_stable_historical_suite(self):
+        self.assertNotEqual(DEFAULT_SUITE_ROOT, LEGACY_SUITE_ROOT)
+        digest = hashlib.sha256(
+            (LEGACY_SUITE_ROOT / "manifest.json").read_bytes()
+        ).hexdigest()
+        self.assertEqual(
+            "f30360de451319375b918075a9163f6bf9f5486a4b48e4c6f1c2574c3399db0a",
+            digest,
+        )
+        legacy = load_manifest(LEGACY_SUITE_ROOT)
+        self.assertEqual("agent-acceptance-v1", legacy["suite_id"])
+        self.assertEqual([], frozen_document_errors(legacy, LEGACY_SUITE_ROOT))
+
+    def test_v2_relabels_exactly_the_nine_post_pilot_tasks(self):
+        legacy = load_manifest(LEGACY_SUITE_ROOT)
+        legacy_tasks = {task["id"]: task for task in legacy["tasks"]}
+        current_tasks = {task["id"]: task for task in self.manifest["tasks"]}
+        changed = {
+            task_id
+            for task_id in current_tasks
+            if current_tasks[task_id] != legacy_tasks[task_id]
+        }
+        recover = {
+            "gp-07-unanswered-question",
+            "gp-09-cross-branch-merge",
+            "nw-05-dream-not-reality",
+            "nw-06-question-not-fact",
+            "ed-06-unanswered-duplicate-key",
+            "ed-07-wrong-chapter-location",
+            "ed-10-cross-branch-editor",
+        }
+        abstain = {"nw-01-location-literal", "nw-10-question-label-repair"}
+        self.assertEqual(recover | abstain, changed)
+        for task_id in recover:
+            self.assertTrue(current_tasks[task_id]["oracle"]["should_recover"])
+            self.assertEqual(
+                "recover_after_read_patch", current_tasks[task_id]["scenario"]
+            )
+        for task_id in abstain:
+            self.assertFalse(current_tasks[task_id]["oracle"]["should_recover"])
+            self.assertEqual("direct_abstain", current_tasks[task_id]["scenario"])
+        self.assertTrue(current_tasks["gp-10-missing-tentative-labels"]["oracle"]["should_recover"])
+        self.assertTrue(current_tasks["nw-09-quoted-record-literal"]["oracle"]["should_recover"])
+        self.assertFalse(current_tasks["ed-05-anonymous-letter"]["oracle"]["should_recover"])
+        self.assertFalse(current_tasks["ed-09-invalid-conditional-inverse"]["oracle"]["should_recover"])
+
+    def test_nw10_freezes_two_unanswered_question_identities_as_abstain(self):
+        task = next(
+            task
+            for task in self.manifest["tasks"]
+            if task["id"] == "nw-10-question-label-repair"
+        )
+        candidate = task["initial_candidate"]
+        evidence_lines = (self.root / "novelist/chapter.md").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        evidence = "\n".join(
+            evidence_lines[candidate["source_line_start"] - 1 : candidate["source_line_end"]]
+        )
+
+        self.assertEqual("open_question", candidate["kind"])
+        self.assertEqual(2, candidate["question"].count("？"))
+        self.assertIn("井下入口", candidate["question"])
+        self.assertIn("失物", candidate["question"])
+        self.assertIn("井底是否还有另一道门", evidence)
+        self.assertIn("没有人作答", evidence)
+        self.assertIn("没有交代谁取走了木匣", evidence)
+        self.assertEqual(
+            [(5, 5), (13, 13)],
+            [
+                (span["line_start"], span["line_end"])
+                for span in task["allowed_evidence"]
+            ],
+        )
+        self.assertEqual(["ABSTAIN"], task["oracle"]["expected_action_path"])
+        self.assertFalse(task["oracle"]["should_recover"])
+        self.assertNotIn("expected_patch", task["oracle"])
+        self.assertIn("multiple_fingerprints", task["safety_focus"])
 
 
 if __name__ == "__main__":

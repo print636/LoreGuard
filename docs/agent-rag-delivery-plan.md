@@ -1,6 +1,6 @@
 # Evidence RAG 与受限审查 Agent 交付计划
 
-更新：2026-09-06。状态：P0 核心正确性边界已实现；P2 的受限 Agent 第一阶段代码已接入且默认关闭，但只通过 Mock 安全/动态路径回归，尚未通过真实模型验收；P1 的真实 Evidence RAG 与 P4 仍未完成。未完成或未实测项不能作为已完成项目经历。
+更新：2026-09-06。状态：P0 核心正确性边界已实现；P2 的受限 Agent 第一阶段代码已接入且默认关闭。v1 的 3 任务真实 Provider 开发 pilot 两组均失败并暴露 benchmark 错标，v2 的 81 次 holdout 尚未运行；P1 的真实 Evidence RAG 与 P4 仍未完成。未完成或未实测项不能作为已完成项目经历。
 
 增量状态：P0 已覆盖冻结输入、幂等认领、lease/heartbeat、跨进程取消检查点、typed diagnostics 和保守旧运行展示。受限 Agent 现有实现比原 P2 设想更窄，只处理通过核心 schema/证据边界但需要词面支持修复的候选；它不是 Evidence RAG，也不因此宣布项目交付就绪。
 
@@ -17,7 +17,7 @@
 - 主抽取仍是固定 system/user 的结构化抽取；另有 LangGraph 1.2.11 `StateGraph` 编排的受限修复循环。它使用应用层 JSON 动作，不使用、也未验证 Provider 原生 `tool_calls/tool_call_id`。
 - 运行输入快照、原子认领、终态幂等和 worker lease/heartbeat 已补齐并有自动回归；共享配额仍不是多实例原子预留，工程测试通过也不等于高并发高可用。
 - 固定 semantic label repair pass 只修补 modality/source_scope/certainty，是非 Agent 路径；不得把其调用或恢复结果计入 Agent 经验。
-- 冻结 Agent 套件的 30 个任务 × 3 次重复目前全部使用 Mock oracle/scorer。安全失败闭合与动态路径测试通过只证明实现边界可回归，不能替代真实模型效果验收。
+- 冻结 Agent 套件的 90 次完整 Mock oracle/scorer 只证明实现边界可回归。v1 的 3 项真实 Provider pilot 也只是已用于调优的开发证据，不能替代 v2 holdout 效果验收。
 
 RAG 不以向量数据库为定义条件，但必须证明检索内容进入下游模型推理/生成。将已有精确规则保留为独立通路是合理的；把未实际影响输出的短名单标成已消费则需要纠正。
 
@@ -56,9 +56,9 @@ RAG 不以向量数据库为定义条件，但必须证明检索内容进入下�
 
 当前验证边界：
 
-- [冻结 manifest](../data/agent-acceptance-v1/manifest.json) 含 30 个开发者可见任务，3 类 persona 各 10 个，每任务重复 3 次，共 90 次 execution；30 个初始候选均由生产校验路径证明只失败于 `lexical_support`，而不是把其他 validator reason 改名伪装。套件覆盖 `READ_SPAN -> PATCH_RECORDS`、直接 `ABSTAIN`、失败补丁后服务端终止等动态路径，以及问句/引用/保守标签、跨文档/scope、越界、未知动作和不允许字段等安全负例。
-- [离线 runner](../scripts/run_agent_acceptance.py) 当前只接受 trace 文件或 `--mock-oracle`；它不会调用生产 Agent。现有 90 次全部是 Mock scorer fixture，只验证 scorer、协议、回放完整性和安全 gate，不能解释成真实模型调用、恢复率、准确率或 Agent 收益。
-- 完整实现边界见 [第一阶段说明](review-agent-phase1.md)。在真实模型冻结验收前，准确表述仅为“实现并在 Mock 中验证了默认关闭的受限工具循环”，不得作为简历成绩。
+- [v2 冻结 manifest](../data/agent-acceptance-v2/manifest.json) 含 30 个开发者可见任务，3 类 persona 各 10 个，每任务重复 3 次，共 90 次 execution；30 个初始候选均由生产校验路径证明只失败于 `lexical_support`，而不是把其他 validator reason 改名伪装。v1 开发 pilot 使用的 3 项已标为 development/tuned，其余 27 项是 full 报告必须单列 gate 的 holdout，且 holdout 自身必须覆盖三种运行成功语义路径。可恢复项要求 `READ_SPAN -> accepted PATCH_RECORDS` 与 scorer 事后 oracle 指纹匹配；不可恢复项必须由模型实际 `ABSTAIN`。Provider/协议失败和坏补丁 containment 均不计质量成功。Mock/scripted harness 还必须失败 `real_provider_connected` gate。详见 [pilot 记录](review-agent-pilot-20260906.md)。
+- [离线 runner](../scripts/run_agent_acceptance.py) 只接受 trace 文件或 `--mock-oracle`；它不会调用生产 Agent。真实 runner 虽走同一生产 Agent 路径，但 scripted harness 会被 `real_provider_connected` gate 显式拦截。
+- 完整实现边界见 [第一阶段说明](review-agent-phase1.md) 与 [pilot 记录](review-agent-pilot-20260906.md)。在 v2 真实 holdout 验收前，不得声称 Agent 质量成绩。
 
 仍待 P2 验收：用真实模型产生并导入同一冻结套件的 trace，比较基线、一次检索和受限 Agent 的恢复、误报、漏报、证据正确性、安全弃答、覆盖/降级、动态路径、延迟与 Token 成本。不能所有案例都执行同一条预写顺序；冻结后发现错误需披露是否用于修复。只有真实完整运行达到既定 P ≥ 0.75、R ≥ 0.60、证据命中率 ≥ 0.85 等门槛，且安全违规为 0，才能讨论收益。真正的 Evidence RAG 仍属于 P1：当前 `READ_SPAN` 是候选附近有界读取，不是 embedding/pgvector 语义召回，也没有搜索工具闭环。
 

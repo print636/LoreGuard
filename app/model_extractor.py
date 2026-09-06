@@ -25,7 +25,7 @@ from .chunking import DocumentChunk, chunk_document, numbered_chunk
 from .parser import ParsedDocument
 from .pipeline import BaselineExtractor, DocumentInput
 from .provider import OpenAICompatibleProvider, ProviderError, RetryPolicy
-from .review_agent import AgentCandidate, BoundedReviewAgent
+from .review_agent import AgentCandidate, AgentPatchRejected, BoundedReviewAgent
 from .usage import (
     estimate_batch_request_tokens,
     estimate_repair_request_tokens,
@@ -33,6 +33,7 @@ from .usage import (
 )
 from .semantic_quality import (
     assess_directive,
+    document_context_has_noncanonical_frame,
     eligible_for_deterministic_rules,
     open_question_directives,
 )
@@ -386,7 +387,19 @@ def _bind_server_context(
         attrs["document_role"] = document.role
     if document.scope:
         attrs["story_scope"] = document.scope
-    return directive.model_copy(update={"attrs": attrs})
+    return directive.model_copy(
+        update={
+            "attrs": attrs,
+            "noncanonical_frame": (
+                directive.noncanonical_frame
+                or document_context_has_noncanonical_frame(
+                    document.content,
+                    directive.evidence.line_start,
+                    directive.evidence.line_end,
+                )
+            ),
+        }
+    )
 
 
 def merge_directives(
@@ -811,9 +824,6 @@ class ModelEnhancedExtractor:
         assessed, semantic_reason = assess_directive(candidate)
         if assessed is None:
             raise ValueError("模型记录未通过语义质量门")
-        # Eligibility is deliberately recomputed here even for noncanonical
-        # rows. It is not inferred from the model's labels.
-        eligible_for_deterministic_rules(assessed)
         return assessed, None, semantic_reason
 
     @staticmethod
@@ -1060,7 +1070,6 @@ class ModelEnhancedExtractor:
                 assessed, _ = assess_directive(directive)
                 if assessed is None:
                     raise ValueError("repair_semantic_revalidation")
-                eligible_for_deterministic_rules(assessed)
                 repaired[candidate.repair_index] = assessed
             for execution in executions:
                 execution.repair_succeeded = True
@@ -1116,6 +1125,11 @@ class ModelEnhancedExtractor:
             agent_candidate: AgentCandidate, fields: dict[str, Any]
         ) -> ParsedDirective:
             source = candidate_by_index[agent_candidate.index]
+            before_assessed, _ = assess_directive(source.provisional_directive)
+            before_eligible = bool(
+                before_assessed is not None
+                and eligible_for_deterministic_rules(before_assessed)
+            )
             if _stable_raw_hash(source.raw_record) != source.raw_hash:
                 raise ValueError("agent_candidate_mutated")
             patched = deepcopy(source.raw_record)
@@ -1142,7 +1156,9 @@ class ModelEnhancedExtractor:
             assessed, _ = assess_directive(directive)
             if assessed is None:
                 raise ValueError("agent_semantic_quality")
-            eligible_for_deterministic_rules(assessed)
+            after_eligible = eligible_for_deterministic_rules(assessed)
+            if not before_eligible and after_eligible:
+                raise AgentPatchRejected("semantic_promotion")
             return assessed
 
         remaining_tokens = min(
@@ -2000,5 +2016,8 @@ class ModelEnhancedExtractor:
             kind=record.kind,
             attrs=attrs,
             evidence=evidence,
+            noncanonical_frame=document_context_has_noncanonical_frame(
+                document.content, start, end
+            ),
             provenance_sources=frozenset({"model"}),
         )

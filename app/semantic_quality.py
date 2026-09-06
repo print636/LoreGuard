@@ -76,8 +76,50 @@ _UNVERIFIED_SOURCE_MARKERS = re.compile(
     r"(?:伪造|造假|篡改)的(?:记录|日志|报告|档案|时间戳)"
 )
 _QUOTED_SOURCE_MARKERS = re.compile(
-    r"(?:设定(?:稿)?|档案|日志|记录|报告|手册|碑文)(?:中|称|写道|写明)|"
-    r"(?:设定(?:稿)?|档案|手册|碑文)记载"
+    r"(?:设定(?:稿)?|档案|日志|记录|报告|手册|碑文|旧卷|卷宗|卷册|"
+    r"书信|信件|札记|手稿|文书|传记|报道|资料)(?:中|称|写道|写明|记载)|"
+    r"(?:设定(?:稿)?|档案|手册|碑文|旧卷|卷宗|卷册|书信|信件|札记|"
+    r"手稿|文书|传记|报道|资料)(?:只|仅)?记载"
+)
+_REPORTED_SOURCE_MARKERS = re.compile(
+    r"据[^，。；\n]{0,20}(?:所述|说法|声称|转述|口述)|"
+    r"(?:转述|口述|传话)(?:中|称|提到|表示)"
+)
+
+# These expressions describe narrative frames, not isolated keywords.  In
+# particular, a sentence that says an event is *not* a memory or illusion must
+# remain eligible, while a section heading that establishes a dream can govern
+# a following evidence line which contains no frame word of its own.
+_NON_REALITY_DIRECT_MARKERS = re.compile(
+    r"梦(?:里|中)|梦境(?:里|中)|(?:在|于)?(?:一段)?回忆(?:里|中)|"
+    r"(?:在|于)?(?:幻象|幻觉|想象|假想)(?:里|中)|"
+    r"(?:通讯)?投影(?:里|中|画面中)|"
+    r"(?:梦境|回忆|幻象|幻觉|想象|假想|投影)(?:片段|段落|场景|画面)"
+)
+_NON_REALITY_DECLARATION_MARKERS = re.compile(
+    r"(?:段落|片段|场景|画面|章节|下文|以下|本段|本节|镜中段落)"
+    r"[^。；\n]{0,20}(?:均|都)?(?:为|属于|是|被标注为)"
+    r"[^。；\n]{0,6}(?:梦境|回忆|幻象|幻觉|想象|假想|投影)|"
+    r"(?:只是|均为|属于|被标注为)[^。；\n]{0,6}"
+    r"(?:梦境|回忆|幻象|幻觉|想象|假想|投影)"
+)
+_NON_REALITY_CONTEXT_MARKERS = re.compile(
+    r"(?:作者|编辑|旁白|叙事)?(?:旁注|注释|说明|标注|提示)[：:]"
+    r"[^。；\n]{0,40}(?:下文|以下|本段|本节|镜中段落|该段|这些段落)"
+    r"[^。；\n]{0,20}(?:梦境|回忆|幻象|幻觉|想象|假想|投影)|"
+    r"^[\s#【\[]*(?:梦境|回忆|幻象|幻觉|想象|假想|投影)"
+    r"(?:片段|段落|场景|章节)?[】\]:：\s]*$",
+    re.MULTILINE,
+)
+_REALITY_CONFIRMATION_MARKERS = re.compile(
+    r"(?:不是|并非|绝非|不属于|排除|明确(?:并)?非)"
+    r"[^。；\n]{0,36}(?:回忆|梦境|幻象|幻觉|想象|假想|(?:通讯)?投影)"
+)
+_REALITY_RESUMPTION_MARKERS = re.compile(
+    r"(?:从|自)(?:梦|回忆|幻象|幻觉|想象|假想)(?:里|中)"
+    r"(?:醒来|走出|脱离|回到现实)(?:后|之后)?|"
+    r"梦醒(?:后|之后)|(?:回忆|幻象|幻觉|想象|投影)(?:结束|消散|终止)"
+    r"(?:后|之后)|回到现实(?:后|中)?"
 )
 
 _NON_AUTHORITATIVE_SCOPES = {
@@ -86,6 +128,50 @@ _NON_AUTHORITATIVE_SCOPES = {
     SourceScope.unverified_report,
     SourceScope.unknown,
 }
+
+
+def evidence_has_noncanonical_frame(text: str) -> bool:
+    """Return whether text positively places its proposition outside reality.
+
+    Reality confirmations and explicit transitions are removed before the
+    positive frame scan.  Other mixed-frame evidence remains conservative: a
+    caller should cite the smaller reality-only span if it wants promotion.
+    """
+
+    adversative_tails = re.findall(r"(?:而是|却是|其实是)([^。；\n]*)", text)
+    if any(
+        _NON_REALITY_DIRECT_MARKERS.search(tail)
+        or _NON_REALITY_DECLARATION_MARKERS.search(tail)
+        for tail in adversative_tails
+    ):
+        return True
+    cleaned = _REALITY_CONFIRMATION_MARKERS.sub("", text)
+    cleaned = _REALITY_RESUMPTION_MARKERS.sub("回到现实", cleaned)
+    return bool(
+        _NON_REALITY_DIRECT_MARKERS.search(cleaned)
+        or _NON_REALITY_DECLARATION_MARKERS.search(cleaned)
+    )
+
+
+def document_context_has_noncanonical_frame(
+    content: str, line_start: int, line_end: int
+) -> bool:
+    """Check cited evidence plus a narrowly scoped preceding frame marker."""
+
+    lines = content.splitlines()
+    if not (1 <= line_start <= line_end <= len(lines)):
+        return False
+    evidence = "\n".join(lines[line_start - 1 : line_end])
+    if evidence_has_noncanonical_frame(evidence):
+        return True
+    # A line that explicitly resumes reality overrides a preceding dream or
+    # recollection heading.  Only explicit annotation/heading syntax from the
+    # previous two lines can otherwise establish cross-line scope.
+    if _REALITY_RESUMPTION_MARKERS.search(evidence):
+        return False
+    preceding = "\n".join(lines[max(0, line_start - 3) : line_start - 1])
+    preceding = _REALITY_CONFIRMATION_MARKERS.sub("", preceding)
+    return bool(_NON_REALITY_CONTEXT_MARKERS.search(preceding))
 
 _REQUIRED_ATTRS: dict[str, tuple[str, ...]] = {
     "fact": ("subject", "predicate", "value"),
@@ -365,11 +451,16 @@ def _source_scope(text: str, directive: ParsedDirective) -> SourceScope:
         r"信中声称", full_evidence
     ):
         return SourceScope.unverified_report
-    if _DIALOGUE_MARKERS.search(text):
+    # Attribution often follows a quoted sentence. `_support_text` may select
+    # only the proposition before the full stop, so source authority must be
+    # classified from the complete cited evidence rather than that slice.
+    if _DIALOGUE_MARKERS.search(full_evidence) or _REPORTED_SOURCE_MARKERS.search(
+        full_evidence
+    ):
         return SourceScope.character_dialogue
     if _ACTUAL_QUOTE_MARKERS.search(full_evidence):
         return SourceScope.quoted_material
-    if _QUOTED_SOURCE_MARKERS.search(text):
+    if _QUOTED_SOURCE_MARKERS.search(full_evidence):
         return SourceScope.quoted_material
     if directive.kind == "world_rule" or re.search(
         r"根据(?:世界观)?规则[^：:]{0,12}[：:]", text
@@ -661,6 +752,18 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
     if _QUESTION_MARKERS.search(support):
         return _to_open_question(directive), "interrogative"
 
+    if directive.noncanonical_frame and directive.kind in CANONICAL_KINDS:
+        return (
+            _to_noncanonical(
+                directive,
+                kind="tentative_fact",
+                modality=SemanticModality.hypothetical,
+                source_scope=SourceScope.unknown,
+                certainty=CertaintyLevel.possible,
+            ),
+            "noncanonical_frame",
+        )
+
     scope = _source_scope(support, directive)
     # Explicit structured directives are authoritative only when their evidence
     # has no source-risk marker. An author contract cannot launder an anonymous
@@ -890,6 +993,8 @@ def apply_semantic_quality_gate(directives: list[ParsedDirective]) -> SemanticQu
 def eligible_for_deterministic_rules(directive: ParsedDirective) -> bool:
     if directive.kind not in CANONICAL_KINDS:
         return False
+    if directive.noncanonical_frame:
+        return False
     attrs = directive.attrs
     if attrs.get("repair_status") == "failed":
         return False
@@ -912,5 +1017,4 @@ def eligible_for_deterministic_rules(directive: ParsedDirective) -> bool:
         SemanticModality.asserted.value,
         SemanticModality.negated.value,
         SemanticModality.conditional_rule.value,
-        SemanticModality.reported.value,
     }

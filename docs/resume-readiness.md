@@ -6,7 +6,7 @@ LoreGuard 当前目标是形成一个可以公开体验、指标诚实、本人�
 
 2026-09-06 当前 checkpoint：semantic trust、冻结输入快照、幂等认领、worker lease/heartbeat、typed diagnostics、受限语义标签 repair、batch 失败域、Provider response cap 与 thinking 配置等工程边界已经实现并进入自动回归；Phase 1/complex runner 共用的安全计数包装也已覆盖派生 repair 调用，Compose 的 API/worker thinking 空白配置会归一为 `None`。这些内容只说明代码状态，不自动成为简历成果。新中转/模型虽在 `thinking=disabled` 下通过 preflight，但冻结 Phase 1 `full × 1` 严格 gate 为 **0/3**；详情见 [脱敏 checkpoint](provider-phase1-checkpoint-20260906.md)。在真实 AI gate 重新通过前，不更新简历能力表述。
 
-受限 Agent 第一阶段代码也已接入：LangGraph 1.2.11 `StateGraph` 编排默认关闭，通过应用层 JSON 协议提供 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`，并非已验证的原生 `tool_calls`。30 个冻结任务 × 3 次重复得到的 90 次 execution 全部来自 Mock scorer，只覆盖安全边界、离线回放和动态动作路径；尚无真实模型 Agent 验收，不能声称 Agent 有收益或把它写成简历成绩。固定语义标签 repair 是独立的非 Agent 补救路径；真实 Evidence RAG 也尚未完成。参见 [第一阶段说明](review-agent-phase1.md)、[冻结 manifest](../data/agent-acceptance-v1/manifest.json) 与 [离线 runner](../scripts/run_agent_acceptance.py)。
+受限 Agent 第一阶段代码也已接入：LangGraph 1.2.11 `StateGraph` 编排默认关闭，通过应用层 JSON 协议提供 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`，并非已验证的原生 `tool_calls`。v1 的 3 任务真实 Provider 开发 pilot 已运行，`thinking=disabled/enabled` 两组均失败并暴露了 benchmark 错标；该 3 项已永久归入 development/tuned。修正后的 v2 仍未完成 27 任务 × 3 轮的 81 次 holdout，不能声称 Agent 有收益或把它写成简历成绩。Mock/scripted 报告也必须在 `real_provider_connected` gate 失败。固定语义标签 repair 是独立的非 Agent 补救路径；真实 Evidence RAG 也尚未完成。参见 [第一阶段说明](review-agent-phase1.md)、[pilot 记录](review-agent-pilot-20260906.md)、[v2 冻结 manifest](../data/agent-acceptance-v2/manifest.json) 与 [离线 runner](../scripts/run_agent_acceptance.py)。
 
 ## 已满足
 

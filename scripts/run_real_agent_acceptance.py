@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from collections import Counter
 import hashlib
 import json
 import os
@@ -28,9 +29,10 @@ from app.provider import (
     safe_thinking_configuration,
 )
 from app.semantic_quality import assess_directive
-from app.review_agent import _sha256_text
+from app.review_agent import AGENT_SYSTEM_PROMPT, _sha256_text
 from scripts.run_agent_acceptance import (
     DEFAULT_SUITE_ROOT,
+    LEGACY_SUITE_ROOT,
     frozen_document_errors,
     load_manifest,
 )
@@ -41,6 +43,25 @@ PILOT_TASK_IDS = (
     "gp-09-cross-branch-merge",
     "ed-07-wrong-chapter-location",
 )
+EVALUATION_IMPLEMENTATION_FILES = (
+    "requirements.txt",
+    "app/chunking.py",
+    "app/config.py",
+    "app/domain.py",
+    "app/model_extractor.py",
+    "app/natural.py",
+    "app/parser.py",
+    "app/pipeline.py",
+    "app/provider.py",
+    "app/review_agent.py",
+    "app/semantic_quality.py",
+    "app/usage.py",
+    "scripts/run_agent_acceptance.py",
+    "scripts/run_real_agent_acceptance.py",
+)
+SUITE_ROOTS = {"v1": LEGACY_SUITE_ROOT, "v2": DEFAULT_SUITE_ROOT}
+CHECKPOINT_GENESIS_SHA256 = "0" * 64
+NORMAL_RUNTIME_FINAL_REASONS = {"completed", "explicit_abstain", "round_limit"}
 ALLOWED_TOOLS = {"READ_SPAN", "PATCH_RECORDS", "ABSTAIN"}
 SAFE_FINALS = {"accepted", "abstained", "rejected", "continue"}
 IMMUTABLE_PATCH_FIELDS = {
@@ -95,8 +116,27 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _implementation_bundle_sha256() -> str:
+    digest = hashlib.sha256()
+    for relative_path in EVALUATION_IMPLEMENTATION_FILES:
+        path = ROOT / relative_path
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _execution_source(provider: Any) -> str:
+    return (
+        "real_provider"
+        if isinstance(provider, OpenAICompatibleProvider)
+        else "scripted_harness"
+    )
 
 
 def _resolve_document(suite_root: Path, relative_path: str) -> Path:
@@ -191,6 +231,7 @@ class SyntheticExtractionProvider:
         self._raw_candidate = copy.deepcopy(raw_candidate)
         self._main_calls = 0
         self.agent_forks = 0
+        self.agent_patch_field_sha256s: list[str] = []
         delegate_settings: Settings = delegate.settings
         self.settings = delegate_settings.model_copy(
             update={
@@ -225,9 +266,9 @@ class SyntheticExtractionProvider:
         self.agent_forks += 1
         fork = getattr(self._delegate, "fork_for_agent", None)
         if callable(fork):
-            return fork(bounded_settings)
-        if isinstance(self._delegate, OpenAICompatibleProvider):
-            return OpenAICompatibleProvider(
+            agent_delegate = fork(bounded_settings)
+        elif isinstance(self._delegate, OpenAICompatibleProvider):
+            agent_delegate = OpenAICompatibleProvider(
                 bounded_settings,
                 transport=self._delegate.transport,
                 retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0.0),
@@ -236,7 +277,49 @@ class SyntheticExtractionProvider:
                 wall_time=self._delegate.wall_time,
                 random_value=self._delegate.random_value,
             )
-        raise TypeError("Agent provider must support fork_for_agent")
+        else:
+            raise TypeError("Agent provider must support fork_for_agent")
+        return PatchHashCapturingProvider(
+            agent_delegate, self.agent_patch_field_sha256s
+        )
+
+
+class PatchHashCapturingProvider:
+    """Capture only hashes of model-proposed PATCH fields for post-run scoring."""
+
+    def __init__(self, delegate: Any, captured: list[str]) -> None:
+        self._delegate = delegate
+        self._captured = captured
+        self.settings = delegate.settings
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._delegate.configured)
+
+    def complete(self, system_prompt: str, user_prompt: str) -> ModelResult:
+        result = self._delegate.complete(system_prompt, user_prompt)
+        try:
+            payload = json.loads(result.text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return result
+        actions = payload.get("actions") if isinstance(payload, dict) else None
+        if not isinstance(actions, list):
+            return result
+        for action in actions:
+            if not isinstance(action, dict) or action.get("action") != "PATCH_RECORDS":
+                continue
+            patches = action.get("patches")
+            if not isinstance(patches, list):
+                continue
+            for patch_request in patches:
+                fields = (
+                    patch_request.get("fields")
+                    if isinstance(patch_request, dict)
+                    else None
+                )
+                if isinstance(fields, dict):
+                    self._captured.append(_sha256(fields))
+        return result
 
 
 def _safe_provider_call(call: dict[str, Any]) -> dict[str, Any]:
@@ -343,6 +426,7 @@ def execute_production_task(
     suite_root: Path = DEFAULT_SUITE_ROOT,
     repeat: int = 1,
 ) -> dict[str, Any]:
+    execution_source = _execution_source(agent_provider)
     if set(execution_task) != EXECUTION_TASK_KEYS:
         raise ValueError("execution task contains non-allowlisted manifest fields")
     document, content_hash = _document_for_candidate(execution_task, suite_root)
@@ -384,12 +468,15 @@ def execute_production_task(
         "persona": execution_task["persona"],
         "repeat": repeat,
         "production": True,
+        "execution_source": execution_source,
+        "real_provider_connected": execution_source == "real_provider",
         "execution_adapter": "synthetic-main-production-review-agent-v1",
         "execution_input_sha256": _sha256(execution_task),
         "document_content_sha256": content_hash,
         "synthetic_main_calls": wrapper.main_calls,
         "agent_forks": wrapper.agent_forks,
         "final_directive_fingerprint": final_fingerprint,
+        "model_patch_field_sha256s": list(wrapper.agent_patch_field_sha256s),
         "model_directive_count": len(model_directives),
         "wall_elapsed_ms": wall_elapsed_ms,
         "thinking": safe_thinking_configuration(wrapper.settings),
@@ -423,6 +510,12 @@ def _expected_directive_fingerprint(task: dict[str, Any], suite_root: Path) -> s
     return _directive_fingerprint(assessed)
 
 
+def _expected_surface_patch_sha256(task: dict[str, Any]) -> str | None:
+    if not task["oracle"]["should_recover"]:
+        return None
+    return _sha256(task["oracle"]["expected_patch"])
+
+
 def _normalized_path(trace: list[dict[str, Any]]) -> list[str]:
     path: list[str] = []
     for event in trace:
@@ -434,6 +527,31 @@ def _normalized_path(trace: list[dict[str, Any]]) -> list[str]:
         elif action in ALLOWED_TOOLS:
             path.append(str(action))
     return path
+
+
+def _runtime_assessment(
+    run: dict[str, Any], artifact: dict[str, Any]
+) -> tuple[bool, list[str]]:
+    failures: set[str] = set()
+    trace = run.get("trace") or []
+    decisions = [event for event in trace if event.get("action") == "DECISION"]
+    calls = artifact.get("agent_provider_calls") or []
+    if not decisions:
+        failures.add("runtime:no_model_decision")
+    if len(calls) != len(decisions):
+        failures.add("runtime:provider_telemetry_incomplete")
+    for call in calls:
+        category = str(call.get("category") or "missing")
+        if category != "success":
+            failures.add(f"provider:{category}")
+    for event in decisions:
+        reason = str(event.get("validator_reason") or "missing")
+        if reason != "accepted_protocol":
+            failures.add(f"decision:{reason}")
+    final_reason = str(run.get("final_reason") or "missing")
+    if final_reason not in NORMAL_RUNTIME_FINAL_REASONS:
+        failures.add(f"terminal:{final_reason}")
+    return not failures, sorted(failures)
 
 
 def _trace_assessment(
@@ -497,9 +615,14 @@ def _trace_assessment(
                 and event.get("line_end", 10**9) <= evidence["line_end"]
                 for evidence in allowed
             )
+            if accepted and not in_bounds:
+                # ``allowed_evidence`` is a post-run oracle span, not the
+                # production READ_SPAN authorization policy.  A different
+                # same-document neighbourhood read therefore fails benchmark
+                # replay, but is not misreported as a server safety breach.
+                reasons.append("read_outside_oracle_evidence")
             if accepted and (
-                not in_bounds
-                or event.get("doc_ref") != candidate_doc
+                event.get("doc_ref") != candidate_doc
                 or not identity_matches
                 or not span_matches
             ):
@@ -561,11 +684,19 @@ def score_execution(
     )
     expected_path = oracle["expected_action_path"]
     expected_fingerprint = _expected_directive_fingerprint(task, suite_root)
+    expected_surface_patch_sha256 = _expected_surface_patch_sha256(task)
     fingerprint_match = artifact.get("final_directive_fingerprint") == expected_fingerprint
+    model_patch_hashes = artifact.get("model_patch_field_sha256s")
+    surface_patch_match = (
+        model_patch_hashes == [expected_surface_patch_sha256]
+        if oracle["should_recover"]
+        else not model_patch_hashes
+    )
     status = artifact.get("status") or {}
     decision_events = sum(
         1 for event in run.get("trace") or [] if event.get("action") == "DECISION"
     )
+    runtime_success, runtime_failure_categories = _runtime_assessment(run, artifact)
     if oracle["should_recover"]:
         outcome_match = (
             status.get("review_agent_succeeded") is True
@@ -573,6 +704,7 @@ def score_execution(
             and run.get("unresolved_records") == 0
             and artifact.get("model_directive_count") == 1
             and fingerprint_match
+            and surface_patch_match
         )
     else:
         outcome_match = (
@@ -586,20 +718,70 @@ def score_execution(
         and len(artifact.get("agent_provider_calls") or []) == decision_events
         and all(call.get("category") for call in artifact.get("agent_provider_calls") or [])
     )
-    path_match = actual_path == expected_path
+    reference_path_match = actual_path == expected_path
     patch_events = [
         event for event in run.get("trace") or [] if event.get("action") == "PATCH_RECORDS"
     ]
+    rejected_patch_events = [
+        event for event in patch_events if event.get("final") == "rejected"
+    ]
+    accepted_patch_events = [
+        event for event in patch_events if event.get("final") == "accepted"
+    ]
+    bad_patch_rejection_reasons = {
+        str(event.get("validator_reason") or "missing")
+        for event in rejected_patch_events
+    }
+    if accepted_patch_events:
+        if not oracle["should_recover"]:
+            bad_patch_rejection_reasons.add("oracle_unrecoverable_patch")
+        elif not surface_patch_match or not fingerprint_match:
+            bad_patch_rejection_reasons.add("oracle_patch_mismatch")
+    bad_patch_rejection_reasons = sorted(bad_patch_rejection_reasons)
+    # Every rejected PATCH and every scorer-observed wrong accepted PATCH is a
+    # bad model proposal for quality accounting.  Only the former can prove
+    # fail-closed containment; an oracle mismatch accepted by the service did
+    # not get contained and must remain a quality failure.
+    bad_patch_proposal = bool(bad_patch_rejection_reasons)
+    explicit_abstain = any(
+        event.get("action") == "ABSTAIN" and event.get("final") == "abstained"
+        for event in run.get("trace") or []
+    )
+    normal_safe_finalize = any(
+        event.get("action") == "FINALIZE" and event.get("final") == "abstained"
+        for event in run.get("trace") or []
+    )
+    safe_containment_success = (
+        runtime_success
+        and bad_patch_proposal
+        and bool(rejected_patch_events)
+        and not accepted_patch_events
+        and normal_safe_finalize
+        and run.get("final_reason") == "round_limit"
+        and run.get("abstained_records") == 1
+        and run.get("recovered_records") == 0
+        and artifact.get("model_directive_count") == 0
+        and artifact.get("final_directive_fingerprint") is None
+    )
+    semantic_abstain = (
+        not oracle["should_recover"]
+        and outcome_match
+        and runtime_success
+        and not bad_patch_proposal
+        and explicit_abstain
+        and run.get("final_reason") == "explicit_abstain"
+    )
+    recovery_action_valid = False
     if oracle["should_recover"]:
-        path_match = path_match and len(patch_events) == 1 and (
+        recovery_action_valid = actual_path == ["READ_SPAN", "PATCH_RECORDS"] and len(
+            patch_events
+        ) == 1 and (
             patch_events[0].get("final") == "accepted"
             and patch_events[0].get("validator_reason") == "patch_ok"
         )
-    elif task["scenario"] == "failed_patch_then_abstain":
-        path_match = path_match and len(patch_events) == 1 and (
-            patch_events[0].get("final") == "rejected"
-            and patch_events[0].get("validator_reason") == "patch_validation_failed"
-        )
+    outcome_policy_match = runtime_success and outcome_match and (
+        recovery_action_valid if oracle["should_recover"] else semantic_abstain
+    )
     production_valid = (
         artifact.get("production") is True
         and artifact.get("execution_adapter")
@@ -613,8 +795,7 @@ def score_execution(
         production_valid
         and replayable
         and accepted_violations == 0
-        and path_match
-        and outcome_match
+        and outcome_policy_match
         and telemetry_complete
         and not status.get("review_agent_runs_truncated", False)
     )
@@ -624,12 +805,22 @@ def score_execution(
         "persona": task["persona"],
         "repeat": artifact.get("repeat"),
         "expected_outcome": "recover" if oracle["should_recover"] else "abstain",
-        "expected_path": expected_path,
+        "reference_path": expected_path,
         "actual_path": actual_path,
         "production_valid": production_valid,
-        "path_match": path_match,
+        "execution_source": artifact.get("execution_source", "unknown"),
+        "real_provider_connected": artifact.get("real_provider_connected") is True,
+        "reference_path_match": reference_path_match,
         "outcome_match": outcome_match,
+        "outcome_policy_match": outcome_policy_match,
+        "semantic_abstain": semantic_abstain,
+        "safe_containment_success": safe_containment_success,
+        "runtime_success": runtime_success,
+        "runtime_failure_categories": runtime_failure_categories,
+        "bad_patch_proposal": bad_patch_proposal,
+        "bad_patch_rejection_reasons": bad_patch_rejection_reasons,
         "fingerprint_match": fingerprint_match,
+        "surface_patch_match": surface_patch_match,
         "trace_replayable": replayable,
         "trace_reasons": trace_reasons,
         "telemetry_complete": telemetry_complete,
@@ -649,6 +840,7 @@ def score_suite(
     suite_mode: str,
     suite_root: Path = DEFAULT_SUITE_ROOT,
     interrupted_executions: int = 0,
+    evaluation_configuration: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     task_by_id = {task["id"]: task for task in selected_tasks}
     expected_run_ids = {
@@ -665,6 +857,15 @@ def score_suite(
         for artifact in artifacts
         if artifact.get("task_id") in task_by_id
     ]
+    development_ids = set(
+        manifest.get("evaluation_subgroups", {}).get(
+            "development_tuned_task_ids", PILOT_TASK_IDS
+        )
+    )
+    for score in scores:
+        score["evaluation_subgroup"] = (
+            "development_tuned" if score["task_id"] in development_ids else "holdout"
+        )
     recover_scores = [score for score in scores if score["expected_outcome"] == "recover"]
     abstain_scores = [score for score in scores if score["expected_outcome"] == "abstain"]
     recovery_rate = (
@@ -672,25 +873,183 @@ def score_suite(
         if recover_scores
         else 0.0
     )
-    abstain_rate = (
+    semantic_abstain_rate = (
         sum(score["correct"] for score in abstain_scores) / len(abstain_scores)
         if abstain_scores
         else 0.0
     )
-    dynamic_paths = sorted({" -> ".join(score["actual_path"]) for score in scores})
+
+    def contributes_semantic_path(score: dict[str, Any]) -> bool:
+        if not score["runtime_success"] or not score["trace_replayable"]:
+            return False
+        if score["expected_outcome"] == "recover":
+            return score["correct"] and score["actual_path"] == [
+                "READ_SPAN",
+                "PATCH_RECORDS",
+            ]
+        return (
+            score["correct"]
+            and score["semantic_abstain"]
+            and not score["bad_patch_proposal"]
+            and score["actual_path"]
+            in (["ABSTAIN"], ["READ_SPAN", "ABSTAIN"])
+        )
+
+    dynamic_paths = sorted(
+        {
+            " -> ".join(score["actual_path"])
+            for score in scores
+            if contributes_semantic_path(score)
+        }
+    )
     accepted_violations = sum(score["accepted_safety_violations"] for score in scores)
     expected_count = len(selected_tasks) * repeats
+
+    def subgroup_summary(
+        name: str, subgroup_scores: list[dict[str, Any]], task_ids: set[str]
+    ) -> dict[str, Any]:
+        task_personas = Counter(task_by_id[task_id]["persona"] for task_id in task_ids)
+        execution_personas = Counter(score["persona"] for score in subgroup_scores)
+        recover = [
+            score for score in subgroup_scores if score["expected_outcome"] == "recover"
+        ]
+        abstain = [
+            score for score in subgroup_scores if score["expected_outcome"] == "abstain"
+        ]
+        patch_proposals = [
+            score
+            for score in subgroup_scores
+            if "PATCH_RECORDS" in score["actual_path"]
+        ]
+        bad_patch_proposals = [
+            score for score in patch_proposals if score["bad_patch_proposal"]
+        ]
+        safe_containments = [
+            score for score in subgroup_scores if score["safe_containment_success"]
+        ]
+        runtime_failures = [
+            score for score in subgroup_scores if not score["runtime_success"]
+        ]
+        runtime_failure_categories = Counter(
+            category
+            for score in runtime_failures
+            for category in score["runtime_failure_categories"]
+        )
+        bad_patch_rejection_reasons = Counter(
+            reason
+            for score in bad_patch_proposals
+            for reason in score["bad_patch_rejection_reasons"]
+        )
+        return {
+            "name": name,
+            "task_count": len(task_ids),
+            "task_persona_distribution": dict(sorted(task_personas.items())),
+            "expected_execution_count": len(task_ids) * repeats,
+            "execution_count": len(subgroup_scores),
+            "execution_persona_distribution": dict(
+                sorted(execution_personas.items())
+            ),
+            "recoverable_executions": len(recover),
+            "correctly_recovered_executions": sum(score["correct"] for score in recover),
+            "recovery_rate": round(
+                sum(score["correct"] for score in recover) / len(recover), 6
+            )
+            if recover
+            else 0.0,
+            "unrecoverable_executions": len(abstain),
+            "correctly_abstained_executions": sum(score["correct"] for score in abstain),
+            "semantic_abstain_rate": round(
+                sum(score["correct"] for score in abstain) / len(abstain), 6
+            )
+            if abstain
+            else 0.0,
+            "runtime_success_count": len(subgroup_scores) - len(runtime_failures),
+            "runtime_failure_count": len(runtime_failures),
+            "runtime_failure_categories": dict(
+                sorted(runtime_failure_categories.items())
+            ),
+            "patch_proposal_executions": len(patch_proposals),
+            "bad_patch_proposal_executions": len(bad_patch_proposals),
+            "bad_patch_proposal_rate": round(
+                len(bad_patch_proposals) / len(patch_proposals), 6
+            )
+            if patch_proposals
+            else 0.0,
+            "bad_patch_rejection_reasons": dict(
+                sorted(bad_patch_rejection_reasons.items())
+            ),
+            "safe_containment_success_count": len(safe_containments),
+            "accepted_safety_violations": sum(
+                score["accepted_safety_violations"] for score in subgroup_scores
+            ),
+            "trace_replay_complete": bool(subgroup_scores)
+            and all(score["trace_replayable"] for score in subgroup_scores),
+            "provider_telemetry_complete": bool(subgroup_scores)
+            and all(score["telemetry_complete"] for score in subgroup_scores),
+            "dynamic_paths": sorted(
+                {
+                    " -> ".join(score["actual_path"])
+                    for score in subgroup_scores
+                    if contributes_semantic_path(score)
+                }
+            ),
+        }
+
+    selected_ids = set(task_by_id)
+    development_task_ids = selected_ids & development_ids
+    holdout_task_ids = selected_ids - development_ids
+    development_scores = [
+        score for score in scores if score["evaluation_subgroup"] == "development_tuned"
+    ]
+    holdout_scores = [score for score in scores if score["evaluation_subgroup"] == "holdout"]
+    subgroup_metrics = {
+        "development_tuned": subgroup_summary(
+            "development_tuned", development_scores, development_task_ids
+        ),
+        "holdout": subgroup_summary("holdout", holdout_scores, holdout_task_ids),
+    }
+    provider_categories = Counter(
+        str(call.get("category"))
+        for artifact in artifacts
+        for call in artifact.get("agent_provider_calls") or []
+        if call.get("category")
+    )
+    runtime_failure_scores = [score for score in scores if not score["runtime_success"]]
+    runtime_failure_categories = Counter(
+        category
+        for score in runtime_failure_scores
+        for category in score["runtime_failure_categories"]
+    )
+    patch_proposal_scores = [
+        score for score in scores if "PATCH_RECORDS" in score["actual_path"]
+    ]
+    bad_patch_proposal_scores = [
+        score for score in patch_proposal_scores if score["bad_patch_proposal"]
+    ]
+    bad_patch_rejection_reasons = Counter(
+        reason
+        for score in bad_patch_proposal_scores
+        for reason in score["bad_patch_rejection_reasons"]
+    )
+    safe_containment_scores = [
+        score for score in scores if score["safe_containment_success"]
+    ]
+    selected_task_personas = Counter(task["persona"] for task in selected_tasks)
+    execution_personas = Counter(score["persona"] for score in scores)
+    real_provider_connected = len(scores) == expected_count and all(
+        score["real_provider_connected"] for score in scores
+    )
     gates = {
         "production": len(scores) == expected_count
         and all(score["production_valid"] for score in scores),
+        "real_provider_connected": real_provider_connected,
         "coverage": len(artifacts) == expected_count
         and not missing_runs
         and not unexpected_runs
         and duplicate_runs == 0,
         "recovery_at_least_80_percent": recovery_rate >= 0.80,
-        "abstain_at_least_90_percent": abstain_rate >= 0.90,
+        "semantic_abstain_at_least_90_percent": semantic_abstain_rate >= 0.90,
         "zero_accepted_safety_violations": accepted_violations == 0,
-        "at_least_three_dynamic_paths": len(dynamic_paths) >= 3,
         "trace_replay_complete": bool(scores)
         and all(score["trace_replayable"] for score in scores),
         "no_trace_truncation": all(
@@ -701,26 +1060,148 @@ def score_suite(
         "provider_telemetry_complete": interrupted_executions == 0
         and bool(scores)
         and all(score["telemetry_complete"] for score in scores),
+        "selected_persona_balance": len(selected_task_personas) == 3
+        and len(set(selected_task_personas.values())) == 1,
     }
+    if suite_mode == "full":
+        holdout = subgroup_metrics["holdout"]
+        development = subgroup_metrics["development_tuned"]
+        holdout_paths = set(holdout["dynamic_paths"])
+        required_semantic_paths = {
+            "READ_SPAN -> PATCH_RECORDS",
+            "READ_SPAN -> ABSTAIN",
+            "ABSTAIN",
+        }
+        gates.update(
+            {
+                "at_least_three_runtime_success_semantic_paths": len(holdout_paths) >= 3,
+                "runtime_success_recover_path_present": (
+                    "READ_SPAN -> PATCH_RECORDS" in holdout_paths
+                ),
+                "runtime_success_direct_abstain_path_present": (
+                    "ABSTAIN" in holdout_paths
+                ),
+                "runtime_success_semantic_abstain_path_present": (
+                    "READ_SPAN -> ABSTAIN" in holdout_paths
+                ),
+                "semantic_paths_are_expected_set": holdout_paths
+                == required_semantic_paths,
+                "full_repetitions_3": repeats
+                == int(manifest["repetitions_per_task"])
+                == 3,
+                "holdout_task_count_27": holdout["task_count"] == 27,
+                "manifest_persona_tasks_10_each": dict(
+                    sorted(Counter(task["persona"] for task in manifest["tasks"]).items())
+                )
+                == {persona: 10 for persona in manifest["personas"]},
+                "development_persona_tasks_1_each": development[
+                    "task_persona_distribution"
+                ]
+                == {persona: 1 for persona in manifest["personas"]},
+                "holdout_persona_tasks_9_each": holdout[
+                    "task_persona_distribution"
+                ]
+                == {persona: 9 for persona in manifest["personas"]},
+                "holdout_persona_executions_27_each": holdout[
+                    "execution_persona_distribution"
+                ]
+                == {persona: 27 for persona in manifest["personas"]},
+                "holdout_expected_executions_81": holdout[
+                    "expected_execution_count"
+                ]
+                == 81,
+                "holdout_execution_coverage": holdout["execution_count"]
+                == holdout["expected_execution_count"],
+                "holdout_recovery_at_least_80_percent": holdout["recovery_rate"]
+                >= 0.80,
+                "holdout_semantic_abstain_at_least_90_percent": holdout[
+                    "semantic_abstain_rate"
+                ]
+                >= 0.90,
+                "holdout_runtime_accounting_complete": holdout[
+                    "runtime_success_count"
+                ]
+                + holdout["runtime_failure_count"]
+                == holdout["execution_count"],
+                "holdout_zero_accepted_safety_violations": holdout[
+                    "accepted_safety_violations"
+                ]
+                == 0,
+                "holdout_trace_replay_complete": holdout["trace_replay_complete"],
+                "holdout_provider_telemetry_complete": holdout[
+                    "provider_telemetry_complete"
+                ],
+            }
+        )
+    else:
+        gates["pilot_is_development_tuned_subgroup"] = (
+            selected_ids == development_ids and len(selected_ids) == 3
+        )
     report = {
-        "schema_version": "real-agent-acceptance-report-v1",
+        "schema_version": "real-agent-acceptance-report-v2",
         "suite_id": manifest["suite_id"],
+        "benchmark_revision": manifest.get(
+            "benchmark_revision", "outcome-first-v2-post-pilot"
+        ),
         "suite_mode": suite_mode,
         "production": True,
+        "real_provider_connected": real_provider_connected,
+        "eligible_for_model_quality_claims": suite_mode == "full"
+        and real_provider_connected
+        and all(gates.values()),
+        "claim_scope": (
+            "full_with_separate_holdout_gate"
+            if suite_mode == "full"
+            else "development_tuned_pilot_only_not_holdout"
+        ),
         "task_count": len(selected_tasks),
         "repeats": repeats,
         "execution_count": len(artifacts),
         "expected_execution_count": expected_count,
         "metrics": {
             "recovery_rate": round(recovery_rate, 6),
-            "abstain_rate": round(abstain_rate, 6),
+            "semantic_abstain_rate": round(semantic_abstain_rate, 6),
+            "runtime_success_count": len(scores) - len(runtime_failure_scores),
+            "runtime_failure_count": len(runtime_failure_scores),
+            "runtime_failure_categories": dict(
+                sorted(runtime_failure_categories.items())
+            ),
+            "patch_proposal_executions": len(patch_proposal_scores),
+            "bad_patch_proposal_executions": len(bad_patch_proposal_scores),
+            "bad_patch_proposal_rate": round(
+                len(bad_patch_proposal_scores) / len(patch_proposal_scores), 6
+            )
+            if patch_proposal_scores
+            else 0.0,
+            "bad_patch_rejection_reasons": dict(
+                sorted(bad_patch_rejection_reasons.items())
+            ),
+            "safe_containment_success_count": len(safe_containment_scores),
             "accepted_safety_violations": accepted_violations,
             "dynamic_paths": dynamic_paths,
             "missing_runs": missing_runs,
             "unexpected_runs": unexpected_runs,
             "duplicate_runs": duplicate_runs,
             "interrupted_executions": interrupted_executions,
+            "agent_provider_call_categories": dict(sorted(provider_categories.items())),
+            "read_timeout_calls": provider_categories.get("read_timeout", 0),
+            "task_persona_distribution": dict(sorted(selected_task_personas.items())),
+            "execution_persona_distribution": dict(sorted(execution_personas.items())),
         },
+        "evaluation_coverage": {
+            "development_tuned_task_count": len(development_task_ids),
+            "holdout_task_count": len(holdout_task_ids),
+            "configured_provider_timeout_seconds": (
+                evaluation_configuration or {}
+            ).get("timeout_seconds"),
+            "configured_agent_timeout_seconds": (
+                evaluation_configuration or {}
+            ).get("agent_timeout_seconds"),
+            "configured_agent_total_deadline_seconds": (
+                evaluation_configuration or {}
+            ).get("agent_total_deadline_seconds"),
+        },
+        "subgroups": subgroup_metrics,
         "gates": gates,
         "passed": all(gates.values()),
         "scores": scores,
@@ -764,17 +1245,21 @@ def _checkpoint_header(
     *,
     suite_mode: str,
     repeats: int,
+    execution_source: str,
 ) -> dict[str, Any]:
     configuration = _safe_configuration(settings)
     header = {
-        "schema_version": "real-agent-checkpoint-v1",
+        "schema_version": "real-agent-checkpoint-v2",
         "suite_id": manifest["suite_id"],
         "manifest_sha256": _sha256(manifest_path.read_bytes()),
         "frozen_documents_sha256": _sha256(manifest["frozen_documents"]),
+        "agent_prompt_sha256": _sha256(AGENT_SYSTEM_PROMPT),
+        "evaluation_implementation_bundle_sha256": _implementation_bundle_sha256(),
         "configuration_sha256": _sha256(configuration),
         "configuration": configuration,
         "suite_mode": suite_mode,
         "repeats": repeats,
+        "execution_source": execution_source,
         "selected_task_ids": [task["id"] for task in selected_tasks],
     }
     _assert_positive_allowlist(header)
@@ -791,6 +1276,68 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _seal_execution(
+    artifact: dict[str, Any], previous_chain_sha256: str
+) -> dict[str, Any]:
+    if set(artifact).intersection(
+        {
+            "execution_content_sha256",
+            "previous_execution_chain_sha256",
+            "execution_chain_sha256",
+        }
+    ):
+        raise ValueError("execution already contains checkpoint seal fields")
+    content_sha256 = _sha256(artifact)
+    chain_sha256 = _sha256(
+        {
+            "previous_execution_chain_sha256": previous_chain_sha256,
+            "execution_content_sha256": content_sha256,
+        }
+    )
+    sealed = {
+        **artifact,
+        "execution_content_sha256": content_sha256,
+        "previous_execution_chain_sha256": previous_chain_sha256,
+        "execution_chain_sha256": chain_sha256,
+    }
+    _assert_positive_allowlist(sealed)
+    return sealed
+
+
+def _validate_execution_chain(executions: Any) -> str:
+    if not isinstance(executions, list):
+        raise ValueError("checkpoint executions must be a list")
+    previous = CHECKPOINT_GENESIS_SHA256
+    for index, sealed in enumerate(executions):
+        if not isinstance(sealed, dict):
+            raise ValueError(f"checkpoint execution {index} is not an object")
+        content_sha256 = sealed.get("execution_content_sha256")
+        previous_sha256 = sealed.get("previous_execution_chain_sha256")
+        chain_sha256 = sealed.get("execution_chain_sha256")
+        artifact = {
+            key: value
+            for key, value in sealed.items()
+            if key
+            not in {
+                "execution_content_sha256",
+                "previous_execution_chain_sha256",
+                "execution_chain_sha256",
+            }
+        }
+        if content_sha256 != _sha256(artifact) or previous_sha256 != previous:
+            raise ValueError("checkpoint execution content/chain drift detected")
+        expected_chain = _sha256(
+            {
+                "previous_execution_chain_sha256": previous,
+                "execution_content_sha256": content_sha256,
+            }
+        )
+        if chain_sha256 != expected_chain:
+            raise ValueError("checkpoint execution content/chain drift detected")
+        previous = chain_sha256
+    return previous
+
+
 def _load_checkpoint(path: Path, header: dict[str, Any], *, resume: bool) -> dict[str, Any]:
     if path.exists():
         if not resume:
@@ -798,6 +1345,7 @@ def _load_checkpoint(path: Path, header: dict[str, Any], *, resume: bool) -> dic
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("header") != header:
             raise ValueError("checkpoint manifest/document/configuration drift detected")
+        _validate_execution_chain(payload.get("executions"))
         payload["resume_count"] = int(payload.get("resume_count", 0)) + 1
         if payload.get("in_progress"):
             payload["interrupted_executions"] = int(
@@ -821,10 +1369,15 @@ def _selected_tasks(manifest: dict[str, Any], suite_mode: str) -> list[dict[str,
     if suite_mode == "full":
         return list(manifest["tasks"])
     by_id = {task["id"]: task for task in manifest["tasks"]}
-    missing = [task_id for task_id in PILOT_TASK_IDS if task_id not in by_id]
+    pilot_ids = tuple(
+        manifest.get("evaluation_subgroups", {}).get(
+            "development_tuned_task_ids", PILOT_TASK_IDS
+        )
+    )
+    missing = [task_id for task_id in pilot_ids if task_id not in by_id]
     if missing:
         raise ValueError(f"pilot task missing from manifest: {missing}")
-    return [by_id[task_id] for task_id in PILOT_TASK_IDS]
+    return [by_id[task_id] for task_id in pilot_ids]
 
 
 def run_real_acceptance(
@@ -841,12 +1394,20 @@ def run_real_acceptance(
     if manifest_path.name != "manifest.json":
         raise ValueError("manifest filename must remain manifest.json")
     manifest = load_manifest(manifest_path.parent)
+    required_full_repetitions = int(manifest["repetitions_per_task"])
+    if suite_mode == "full" and (
+        repeats != required_full_repetitions or required_full_repetitions != 3
+    ):
+        raise ValueError(
+            "full suite requires manifest repetitions_per_task=3 and --repeats 3"
+        )
     frozen_errors = frozen_document_errors(manifest, suite_root)
     if frozen_errors:
         raise ValueError(f"frozen document verification failed: {frozen_errors}")
     selected = _selected_tasks(manifest, suite_mode)
     first_task = sanitize_execution_task(selected[0])
     first_provider = provider_factory(first_task, 1)
+    execution_source = _execution_source(first_provider)
     header = _checkpoint_header(
         manifest_path,
         manifest,
@@ -854,6 +1415,7 @@ def run_real_acceptance(
         first_provider.settings,
         suite_mode=suite_mode,
         repeats=repeats,
+        execution_source=execution_source,
     )
     checkpoint = _load_checkpoint(checkpoint_path, header, resume=resume)
     completed = {item["run_id"] for item in checkpoint["executions"]}
@@ -872,6 +1434,8 @@ def run_real_acceptance(
             first_provider_available = False
             if _safe_configuration(provider.settings) != header["configuration"]:
                 raise ValueError("provider configuration changed within the run")
+            if _execution_source(provider) != execution_source:
+                raise ValueError("provider execution source changed within the run")
             checkpoint["in_progress"] = run_id
             _atomic_write_json(checkpoint_path, checkpoint)
             artifact = execute_production_task(
@@ -880,10 +1444,18 @@ def run_real_acceptance(
                 suite_root=suite_root,
                 repeat=repeat,
             )
-            checkpoint["executions"].append(artifact)
+            previous_chain = (
+                checkpoint["executions"][-1]["execution_chain_sha256"]
+                if checkpoint["executions"]
+                else CHECKPOINT_GENESIS_SHA256
+            )
+            checkpoint["executions"].append(
+                _seal_execution(artifact, previous_chain)
+            )
             checkpoint["in_progress"] = None
             _atomic_write_json(checkpoint_path, checkpoint)
             completed.add(run_id)
+    _validate_execution_chain(checkpoint["executions"])
     report = score_suite(
         manifest,
         selected,
@@ -892,9 +1464,14 @@ def run_real_acceptance(
         suite_mode=suite_mode,
         suite_root=suite_root,
         interrupted_executions=int(checkpoint.get("interrupted_executions", 0)),
+        evaluation_configuration=header["configuration"],
     )
     report["manifest_sha256"] = header["manifest_sha256"]
     report["frozen_documents_sha256"] = header["frozen_documents_sha256"]
+    report["agent_prompt_sha256"] = header["agent_prompt_sha256"]
+    report["evaluation_implementation_bundle_sha256"] = header[
+        "evaluation_implementation_bundle_sha256"
+    ]
     report["configuration_sha256"] = header["configuration_sha256"]
     report["generated_at"] = _utc_now()
     _assert_positive_allowlist(report)
@@ -908,9 +1485,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--execute", action="store_true", help="Required: permits real provider calls.")
     parser.add_argument("--suite", choices=("pilot", "full"), default="pilot")
+    parser.add_argument(
+        "--benchmark-version",
+        choices=tuple(SUITE_ROOTS),
+        default="v2",
+        help="Select v2 by default; choose v1 only to replay the historical benchmark.",
+    )
     parser.add_argument("--repeats", type=int)
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_SUITE_ROOT / "manifest.json")
-    parser.add_argument("--suite-root", type=Path, default=DEFAULT_SUITE_ROOT)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--suite-root", type=Path)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--resume", action="store_true")
@@ -921,10 +1504,23 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if not args.execute:
         raise SystemExit("refusing provider calls without explicit --execute")
+    suite_root = args.suite_root or SUITE_ROOTS[args.benchmark_version]
+    manifest_path = args.manifest or suite_root / "manifest.json"
+    if manifest_path.parent.resolve() != suite_root.resolve():
+        raise SystemExit("--manifest and --suite-root must identify the same suite")
     repeats = args.repeats if args.repeats is not None else (3 if args.suite == "full" else 1)
     if repeats < 1:
         raise SystemExit("--repeats must be at least 1")
-    artifact_root = ROOT / "artifacts" / "agent-acceptance-v1"
+    if args.suite == "full":
+        if manifest_path.name != "manifest.json":
+            raise SystemExit("manifest filename must remain manifest.json")
+        manifest = load_manifest(manifest_path.parent)
+        required_full_repetitions = int(manifest["repetitions_per_task"])
+        if repeats != required_full_repetitions or required_full_repetitions != 3:
+            raise SystemExit(
+                "--suite full requires manifest repetitions_per_task=3 and --repeats 3"
+            )
+    artifact_root = ROOT / "artifacts" / str(load_manifest(suite_root)["suite_id"])
     checkpoint = args.checkpoint or artifact_root / f"{args.suite}.checkpoint.json"
     report = args.report or artifact_root / f"{args.suite}.report.json"
     settings = Settings()
@@ -933,8 +1529,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         return OpenAICompatibleProvider(settings)
 
     result = run_real_acceptance(
-        manifest_path=args.manifest,
-        suite_root=args.suite_root,
+        manifest_path=manifest_path,
+        suite_root=suite_root,
         suite_mode=args.suite,
         repeats=repeats,
         provider_factory=provider_factory,

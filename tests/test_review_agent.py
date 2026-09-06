@@ -702,6 +702,25 @@ class ReviewAgentUnitTests(unittest.TestCase):
         self.assertEqual({}, run.recovered)
         self.assertEqual((1, 2), run.abstained_indexes)
 
+    def test_semantic_fields_are_explicitly_forbidden_by_the_server(self):
+        run, provider = self.run_agent(
+            [
+                {"actions": [read_action()]},
+                patch_from_read(
+                    fields={"value": "领航员", "modality": "asserted"}
+                ),
+            ]
+        )
+        self.assertEqual("semantic_field_forbidden", run.final_reason)
+        self.assertEqual({}, run.recovered)
+        first_prompt = json.loads(provider.calls[0][1])
+        allowlist = first_prompt["candidates"][0]["patch_field_allowlist"]
+        self.assertTrue(
+            {"modality", "source_scope", "certainty", "evidence_medium"}.isdisjoint(
+                allowlist
+            )
+        )
+
     def test_persistable_trace_contains_hashes_not_sensitive_text(self):
         marker = "DO_NOT_PERSIST_STORY_OR_SECRET_KEY"
         run, _ = self.run_agent(
@@ -1222,6 +1241,58 @@ class ReviewAgentIntegrationTests(unittest.TestCase):
         self.assertFalse(status["repair_attempted"])
         self.assertEqual("application_json_tools_v1", status["review_agent_runs"][0]["protocol"])
         self.assertEqual(3, len(provider.calls))
+
+    def test_agent_cannot_promote_an_ineligible_candidate_during_lexical_repair(self):
+        provider = ScriptedProvider(
+            [
+                {
+                    "records": [
+                        {
+                            "kind": "fact",
+                            "subject": "苏晚",
+                            "predicate": "职务",
+                            "value": "舰长官",
+                            "source_line_start": 1,
+                            "source_line_end": 1,
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        }
+                    ]
+                },
+                {"actions": [read_action()]},
+                patch_from_read(
+                    fields={
+                        "subject": "林澈",
+                        "predicate": "身份",
+                        "value": "领航员",
+                    }
+                ),
+            ],
+            settings(enable_review_agent=True),
+        )
+        extractor = ModelEnhancedExtractor(provider=provider)
+        extractor.begin_run()
+        parsed = extractor.extract(
+            DocumentInput(
+                id="doc-semantic-promotion",
+                name="chapter.md",
+                content="也许苏晚是舰长。林澈的身份是领航员。",
+                role="chapter",
+                scope="route-a",
+            )
+        )
+
+        status = parsed.model_execution.safe_dict()
+        self.assertEqual(0, status["recovered_invalid_records"])
+        self.assertEqual(1, status["unresolved_invalid_records"])
+        self.assertTrue(status["review_agent_abstained"])
+        patch_events = [
+            row
+            for row in status["review_agent_runs"][0]["trace"]
+            if row["action"] == "PATCH_RECORDS"
+        ]
+        self.assertEqual("semantic_promotion", patch_events[-1]["validator_reason"])
 
     def test_label_only_candidate_stays_on_fixed_repair_pass(self):
         provider = ScriptedProvider(

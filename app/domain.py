@@ -69,6 +69,8 @@ _SAFE_AGENT_REASONS = {
     "response_too_large",
     "repeated_loop",
     "patch_field_forbidden",
+    "semantic_field_forbidden",
+    "semantic_promotion",
     "patch_duplicate_candidate",
     "patch_validation_failed",
     "read_required",
@@ -550,6 +552,11 @@ class ParsedDirective(BaseModel):
     kind: str
     attrs: dict[str, str]
     evidence: EvidenceSpan
+    # Server-derived narrative-frame safety bit.  A preceding section marker
+    # such as "the following passage is a dream" may govern an otherwise
+    # ordinary-looking evidence line.  Keep that context through model_copy
+    # and normalization without exposing it in records, APIs or fingerprints.
+    noncanonical_frame: bool = Field(default=False, exclude=True, repr=False)
     # Internal-only lineage carried through normalization/model_copy.  It is
     # deliberately excluded from record/API serialization; the public,
     # allowlisted representation lives in diagnostics.provenance.
