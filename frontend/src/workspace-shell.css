@@ -1,0 +1,671 @@
+body {
+  overflow: hidden;
+}
+
+.topBar {
+  display: grid;
+  grid-template-columns: auto minmax(280px, 1fr) auto;
+  gap: 18px;
+  width: 100%;
+  padding: 0 clamp(18px, 2vw, 34px);
+}
+
+.topBar .brand {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  justify-self: start;
+  color: var(--text);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+
+.topBar .brand:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  transform: none;
+}
+
+.topContext {
+  min-width: 0;
+  justify-self: center;
+}
+
+.topContext > button {
+  display: grid;
+  min-width: 0;
+  min-height: 42px;
+  padding: 5px 12px;
+  text-align: left;
+  border-color: var(--line);
+  background: rgba(31, 24, 58, .58);
+}
+
+.topContext > button:first-child {
+  grid-template-columns: auto auto;
+  gap: 0 9px;
+  max-width: 310px;
+}
+
+.topContext > button:first-child small,
+.topContext > button:first-child span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.topContext > button:first-child small {
+  grid-row: 1 / 3;
+  align-self: center;
+  padding-right: 10px;
+  border-right: 1px solid var(--line);
+}
+
+.topContext > button:first-child b {
+  overflow: hidden;
+  color: var(--text);
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 12px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topContext > button:first-child span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.providerPill {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  max-width: 230px;
+}
+
+.providerPill i,
+.navProvider i,
+.railLiveTop i,
+.mobileRunStrip > span i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 0 4px rgba(148, 138, 174, .09);
+}
+
+.providerPill.ready i,
+.navProvider.ready i { background: var(--success); }
+.providerPill.warning i,
+.navProvider.warning i { background: var(--warning); }
+.providerPill.error i,
+.navProvider.error i { background: var(--danger); }
+
+.providerPill span {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topActions {
+  justify-self: end;
+  gap: 8px;
+}
+
+.topActions > button {
+  min-height: 38px;
+  padding: 7px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.topActions .topRunButton {
+  width: auto;
+  min-width: 112px;
+  margin: 0;
+}
+
+.reportShortcut span,
+.railReportButton span {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  margin-left: 5px;
+  padding: 0 5px;
+  color: var(--danger);
+  border-radius: 999px;
+  background: rgba(255, 127, 173, .12);
+  font-size: 10px;
+}
+
+.appShell {
+  display: grid;
+  grid-template-columns: 220px minmax(600px, 1fr) minmax(360px, 400px);
+  gap: 16px;
+  width: 100%;
+  max-width: 1800px;
+  height: calc(100dvh - 72px);
+  margin: 0 auto;
+  padding: 16px clamp(16px, 1.6vw, 28px) 20px;
+  overflow: hidden;
+}
+
+.sideNav,
+.mainCanvas,
+.resultRail {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: linear-gradient(155deg, rgba(31, 24, 59, .88), rgba(17, 13, 37, .9));
+  box-shadow: inset 0 1px rgba(255, 255, 255, .045), 0 18px 44px rgba(3, 2, 12, .18);
+}
+
+.sideNav {
+  display: flex;
+  flex-direction: column;
+  padding: 18px 12px 14px;
+  overflow: hidden;
+}
+
+.sideNavTitle {
+  display: grid;
+  gap: 3px;
+  padding: 4px 10px 16px;
+}
+
+.sideNavTitle span {
+  color: var(--cyan);
+  font: 9px "Cascadia Code", monospace;
+  letter-spacing: .16em;
+}
+
+.sideNavTitle b {
+  font-family: "STKaiti", "KaiTi", "Microsoft YaHei UI", serif;
+  font-size: 23px;
+}
+
+.sideNav nav {
+  display: grid;
+  gap: 5px;
+}
+
+.sideNav nav > button {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 48px;
+  padding: 6px 9px;
+  color: var(--text-2);
+  border-color: transparent;
+  border-radius: 12px;
+  background: transparent;
+  text-align: left;
+}
+
+.sideNav nav > button:hover:not(:disabled) {
+  border-color: var(--line);
+  background: rgba(183, 162, 255, .07);
+}
+
+.sideNav nav > button.active {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: linear-gradient(90deg, rgba(183, 162, 255, .17), rgba(139, 233, 240, .05));
+  box-shadow: inset 3px 0 var(--lavender);
+}
+
+.navGlyph {
+  display: inline-grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  color: var(--cyan);
+  border: 1px solid rgba(139, 233, 240, .25);
+  border-radius: 9px;
+  background: rgba(139, 233, 240, .055);
+  font: 700 9px "Cascadia Code", monospace;
+}
+
+.sideNav nav > button small {
+  min-width: 20px;
+  color: var(--pink);
+  font-size: 9px;
+  text-align: right;
+}
+
+.sideNavBottom {
+  display: grid;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.navProvider {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 10px;
+  border-radius: 12px;
+  text-align: left;
+}
+
+.navProvider span,
+.navProvider small,
+.navProvider b {
+  display: block;
+  min-width: 0;
+}
+
+.navProvider small { color: var(--muted); font-size: 9px; }
+.navProvider b { overflow: hidden; margin-top: 2px; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+
+.sampleShelf {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(9, 7, 22, .34);
+}
+
+.sampleShelf summary { color: var(--lavender); cursor: pointer; font-size: 12px; font-weight: 700; }
+.sampleShelf p { margin: 9px 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.sampleShelf button { width: 100%; margin-top: 6px; padding: 6px 8px; font-size: 10px; }
+
+.mainCanvas,
+.resultRail {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.mainCanvas {
+  padding: 20px;
+}
+
+.workspaceView {
+  animation: viewEnter .2s ease-out both;
+}
+
+.workbenchIntro {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 86px;
+  margin-bottom: 10px;
+  padding: 11px 18px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 17px;
+  background: linear-gradient(120deg, rgba(78, 57, 126, .23), rgba(16, 13, 36, .46));
+}
+
+.workbenchIntro::after {
+  position: absolute;
+  right: -42px;
+  top: -76px;
+  width: 180px;
+  height: 180px;
+  content: "";
+  border: 1px solid rgba(183, 162, 255, .14);
+  border-radius: 50%;
+  box-shadow: 0 0 0 24px rgba(139, 233, 240, .018), 0 0 0 48px rgba(242, 167, 213, .012);
+}
+
+.workbenchIntro h1 {
+  margin: 1px 0;
+  font-family: "STKaiti", "KaiTi", "Microsoft YaHei UI", serif;
+  font-size: clamp(29px, 2.4vw, 34px);
+}
+
+.workbenchIntro .eyebrow { margin: 0; }
+.workbenchIntro p:last-child { display: none; }
+
+.workbenchMascot {
+  position: relative;
+  z-index: 1;
+  width: 58px;
+  height: 48px;
+  flex: 0 0 auto;
+  margin-right: 28px;
+  color: rgba(139, 233, 240, .68);
+}
+
+.workbenchMascot i { position: absolute; top: 12px; width: 29px; height: 27px; border: 1px solid currentColor; background: rgba(183,162,255,.06); }
+.workbenchMascot i:first-child { left: 1px; border-radius: 12px 3px 6px 12px; transform: skewY(7deg); }
+.workbenchMascot i:nth-child(2) { right: 1px; border-radius: 3px 12px 12px 6px; transform: skewY(-7deg); }
+.workbenchMascot b { position: absolute; left: 23px; top: 21px; color: var(--text); font: 700 11px system-ui; letter-spacing: 4px; }
+.workbenchMascot em { position: absolute; right: -7px; top: 0; color: var(--pink); font-style: normal; }
+
+.mainCanvas .providerConnection,
+.mainCanvas .projectPanel,
+.mainCanvas .workspace,
+.mainCanvas .visualization {
+  width: 100%;
+  margin: 0;
+  padding: 20px;
+  border-radius: 17px;
+}
+
+.mainCanvas .workspace {
+  min-height: 0;
+}
+
+.mainCanvas .workspace .sectionHead {
+  align-items: center;
+}
+
+.mainCanvas .workspace .editors textarea {
+  min-height: clamp(260px, 32dvh, 420px);
+}
+
+.visualDeck {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.visualDeck article {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: rgba(16, 13, 36, .55);
+}
+
+.visualDeck b,
+.visualDeck small { display: block; }
+.visualDeck b { font-size: 12px; }
+.visualDeck small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.visualDeck button { min-height: 32px; padding: 5px 10px; font-size: 10px; }
+
+.mainCanvas .projectPanel .projectControls {
+  grid-template-columns: minmax(180px, 1fr) minmax(160px, .8fr) auto;
+}
+
+.mainCanvas .projectControls .primary {
+  grid-column: 1 / -1;
+}
+
+.mainCanvas .projectPanel .uploadRow {
+  grid-template-columns: minmax(220px, 1fr) minmax(210px, 1fr);
+}
+
+.mainCanvas .tables { grid-template-columns: 1fr; }
+.mainCanvas .tables > div { min-width: 0; }
+.mainCanvas .diffPanel { margin-top: 0; }
+.mainCanvas .diffHunks { max-height: calc(100dvh - 320px); overflow: auto; }
+.mainCanvas .visualization .graphCanvas { height: calc(100dvh - 230px); min-height: 480px; }
+.mainCanvas .clarifications,
+.mainCanvas .issues { margin: 0 0 18px; }
+.mainCanvas .issues article,
+.mainCanvas .clarifications article { grid-template-columns: 54px minmax(0, 1fr); }
+.mainCanvas .status { margin-top: 0; }
+
+.mobileRunStrip { display: none; }
+
+.resultRail {
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+  overflow: hidden;
+}
+
+.resultRailHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.resultRailHead h2 {
+  margin: 3px 0 0;
+  font-family: "STKaiti", "KaiTi", "Microsoft YaHei UI", serif;
+  font-size: 24px;
+}
+
+.resultRailHead > strong {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  color: var(--danger);
+  border: 1px solid rgba(255, 127, 173, .26);
+  border-radius: 14px;
+  background: rgba(255, 127, 173, .08);
+  font-size: 22px;
+}
+
+.railCoverage {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 8px 10px;
+  color: var(--warning);
+  border-left: 2px solid currentColor;
+  background: rgba(255, 189, 130, .05);
+  font-size: 10px;
+}
+
+.railCoverage.full { color: var(--success); background: rgba(141,229,184,.05); }
+.railCoverage small { color: var(--muted); }
+
+.railLive,
+.issuePreview,
+.questionPreview {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: rgba(16, 13, 36, .58);
+}
+
+.railLive.running {
+  border-color: rgba(139, 233, 240, .34);
+  box-shadow: inset 3px 0 var(--cyan);
+}
+
+.railLiveTop,
+.railLiveTop span,
+.railSectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.railLiveTop span { justify-content: flex-start; color: var(--text-2); font-size: 11px; }
+.railLiveTop b { color: var(--cyan); }
+.railLive .meter { margin: 11px 0; }
+.railLive > p { margin: 8px 0 11px; color: var(--text-2); font-size: 11px; line-height: 1.55; }
+.railIds { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.railIds span { min-width: 0; color: var(--muted); font: 8px "Cascadia Code", monospace; }
+.railIds code { display: block; overflow: hidden; margin-top: 2px; color: var(--text-2); text-overflow: ellipsis; }
+.railLive .runActions { margin-top: 10px; }
+.railLive .runActions button { min-height: 30px; padding: 5px 9px; font-size: 9px; }
+
+.railSummary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.railSummary > div {
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(41, 31, 75, .44);
+}
+
+.railSummary small,
+.railSummary b,
+.railSummary span { display: block; }
+.railSummary small { color: var(--muted); font-size: 9px; }
+.railSummary b { margin-top: 3px; color: var(--lavender); font-size: 20px; }
+.railSummary span { margin-top: 3px; overflow-wrap: anywhere; color: var(--muted); font-size: 8px; }
+.railSummary .railToken { grid-column: 1 / -1; }
+.railSummary .railToken b { color: var(--cyan); }
+
+.railSectionHead { margin-bottom: 9px; }
+.railSectionHead h3 { margin: 0; font-size: 14px; }
+.railSectionHead > button { min-height: 28px; padding: 4px 8px; font-size: 9px; }
+.railSectionHead > span { color: var(--warning); font-size: 11px; }
+
+.railPreviewScroll {
+  min-height: 0;
+  padding-right: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.issuePreviewCard,
+.questionPreview > button {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  margin-top: 7px;
+  padding: 11px;
+  color: var(--text-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--danger);
+  border-radius: 11px;
+  background: rgba(38, 27, 64, .54);
+  text-align: left;
+}
+
+.issuePreviewCard:hover:not(:disabled),
+.issuePreviewCard.focused { border-color: rgba(139, 233, 240, .38); border-left-color: var(--danger); background: rgba(62, 43, 92, .58); }
+.issuePreviewCard > span,
+.questionPreview > button span { color: var(--danger); font: 9px "Cascadia Code", monospace; }
+.issuePreviewCard b,
+.questionPreview > button b { color: var(--text); font-size: 12px; }
+.issuePreviewCard p { display: -webkit-box; margin: 0; overflow: hidden; color: var(--text-2); font-size: 10px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.issuePreviewCard small { color: var(--cyan); font-size: 9px; }
+.questionPreview { margin-top: 12px; }
+.questionPreview > button { border-left-color: var(--warning); }
+.questionPreview > button span { color: var(--warning); }
+.railEmpty { padding: 22px 12px; color: var(--muted); border: 1px dashed var(--line-strong); border-radius: 11px; font-size: 10px; line-height: 1.6; text-align: center; }
+
+.railReportButton {
+  flex: 0 0 auto;
+  width: 100%;
+  margin-top: 12px;
+  background: rgba(31, 24, 58, .96);
+  box-shadow: 0 -6px 18px rgba(9, 7, 22, .32);
+}
+
+footer {
+  min-height: 40px;
+  padding: 12px;
+  font-size: 10px;
+}
+
+@keyframes viewEnter {
+  from { opacity: .55; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 1279px) {
+  .topBar { grid-template-columns: auto minmax(180px, 1fr) auto; gap: 10px; }
+  .topContext > button:first-child span { display: none; }
+  .topActions > button { padding-inline: 9px; }
+  .appShell { grid-template-columns: 72px minmax(0, 1fr) minmax(330px, 350px); gap: 12px; padding-inline: 12px; }
+  .sideNav { padding-inline: 8px; }
+  .sideNavTitle { justify-items: center; padding-inline: 0; }
+  .sideNavTitle span, .sideNavTitle b { display: none; }
+  .sideNavTitle::after { content: "✦"; color: var(--pink); }
+  .sideNav nav > button { grid-template-columns: 1fr; justify-items: center; padding-inline: 5px; }
+  .sideNav nav > button small { position: absolute; margin: -28px 0 0 32px; }
+  .navLabel, .navProvider span { display: none; }
+  .navProvider { grid-template-columns: 1fr; justify-items: center; }
+  .sampleShelf { padding: 8px 5px; text-align: center; }
+  .sampleShelf summary { font-size: 0; }
+  .sampleShelf summary::after { content: "样例"; font-size: 9px; }
+  .sampleShelf p, .sampleShelf button { display: none; }
+  .sampleShelf[open] { position: absolute; z-index: 20; left: 78px; bottom: 16px; width: 180px; padding: 10px; background: #17112f; text-align: left; }
+  .sampleShelf[open] p, .sampleShelf[open] button { display: block; }
+}
+
+@media (max-width: 1023px) {
+  body { overflow: auto; }
+  .topBar .topContext > button:first-child,
+  .topActions > button:nth-child(1),
+  .topActions > button:nth-child(2) { display: none; }
+  .appShell { grid-template-columns: 72px minmax(0, 1fr); }
+  .resultRail { display: none; }
+  .mobileRunStrip { display: grid; grid-template-columns: auto minmax(80px, 1fr) auto; align-items: center; gap: 10px; margin-bottom: 10px; padding: 8px 10px; border: 1px solid rgba(139,233,240,.28); border-radius: 12px; background: rgba(22, 36, 56, .84); }
+  .mobileRunStrip > span { display: flex; align-items: center; gap: 7px; color: var(--cyan); font-size: 10px; }
+  .mobileRunStrip button { min-height: 28px; padding: 4px 9px; font-size: 9px; }
+}
+
+@media (max-width: 767px) {
+  .topBar { position: sticky; grid-template-columns: minmax(0, 1fr) auto auto; min-height: 64px; padding: 8px 12px; }
+  .topBar .brand small { display: none; }
+  .topContext { justify-self: end; }
+  .topContext .providerPill { min-width: 38px; width: 38px; padding: 0; justify-items: center; border-radius: 50%; }
+  .providerPill span { display: none; }
+  .topActions > button { display: none !important; }
+  .topActions .topRunButton { display: inline-flex !important; min-width: 96px; justify-content: center; }
+  .appShell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 9px; height: calc(100dvh - 64px); padding: 8px; }
+  .sideNav { display: block; padding: 6px; border-radius: 15px; overflow-x: auto; overflow-y: hidden; }
+  .sideNavTitle, .sideNavBottom { display: none; }
+  .sideNav nav { display: flex; width: max-content; gap: 3px; }
+  .sideNav nav > button { display: flex; grid-template-columns: none; gap: 6px; min-height: 38px; width: auto; padding: 5px 9px; }
+  .sideNav nav > button .navLabel { display: inline; white-space: nowrap; }
+  .sideNav nav > button small { position: static; margin: 0; }
+  .navGlyph { width: 24px; height: 24px; }
+  .mainCanvas { padding: 10px; border-radius: 15px; }
+  .workbenchIntro { min-height: 86px; padding: 13px 15px; }
+  .workbenchIntro h1 { font-size: 28px; }
+  .workbenchIntro p:last-child { font-size: 11px; }
+  .workbenchMascot { display: none; }
+  .mainCanvas .providerConnection,
+  .mainCanvas .projectPanel,
+  .mainCanvas .workspace,
+  .mainCanvas .visualization { padding: 14px; }
+  .mainCanvas .workspace { min-height: auto; }
+  .mainCanvas .workspace .editors textarea { min-height: 330px; }
+  .mainCanvas .workspace .sectionHead { align-items: stretch; }
+  .visualDeck { grid-template-columns: 1fr; }
+  .mainCanvas .projectPanel .projectControls,
+  .mainCanvas .projectPanel .uploadRow,
+  .quickMode { grid-template-columns: 1fr; }
+  .mainCanvas .projectControls .primary { grid-column: auto; }
+  .mainCanvas .visualization .graphCanvas { height: 420px; min-height: 420px; }
+  .mainCanvas .clarifications,
+  .mainCanvas .issues { padding: 14px; }
+  .mainCanvas .issues article,
+  .mainCanvas .clarifications article { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 430px) {
+  .brandSeal { width: 32px; height: 32px; }
+  .topBar .brand strong { font-size: 14px; }
+  .topActions .topRunButton { min-width: 88px; padding-inline: 8px; font-size: 11px; }
+  .workbenchIntro .eyebrow { font-size: 9px; }
+  .workbenchIntro h1 { font-size: 25px; }
+  .visualDeck article { grid-template-columns: auto minmax(0, 1fr); }
+  .visualDeck article button { grid-column: 1 / -1; width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspaceView { animation: none; }
+}
