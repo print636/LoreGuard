@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable
+from typing import Any, Callable, Literal, TypeVar
 
 import httpx
 from pydantic import BaseModel, Field
@@ -17,6 +18,16 @@ from .config import Settings, get_settings
 
 _REQUEST_ID_HEADERS = ("x-request-id", "request-id", "trace-id", "cf-ray")
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_TOOL_CALL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_MAX_TOOL_DEFINITIONS = 64
+_MAX_TOOL_DESCRIPTION_CHARS = 4_096
+_MAX_TOOL_SCHEMA_BYTES = 64 * 1_024
+_MAX_TOOL_REQUEST_BYTES = 256 * 1_024
+_ABSOLUTE_MAX_TOOL_CALLS = 32
+_ABSOLUTE_MAX_TOOL_ARGUMENT_BYTES = 256 * 1_024
+
+_ParsedResponse = TypeVar("_ParsedResponse")
 
 
 def sanitize_request_id(value: Any) -> str | None:
@@ -78,6 +89,53 @@ class ModelResult(BaseModel):
     telemetry: ProviderCallTelemetry | None = Field(default=None, exclude=True)
 
 
+@dataclass(frozen=True, slots=True)
+class ToolDefinition:
+    """One caller-owned function contract sent to an OpenAI-compatible API."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class NamedToolChoice:
+    """Force the provider to select one named tool from the supplied allowlist."""
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallLimits:
+    """Defense-in-depth limits below the provider response-byte ceiling."""
+
+    max_calls: int = 8
+    max_argument_bytes: int = 64 * 1_024
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderToolCall:
+    """Structurally checked call with no raw response or prompt attached.
+
+    ``arguments`` remains untrusted until a tool-specific Pydantic model and
+    runtime authorization policy validate it immediately before execution.
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallResult:
+    """Sanitized transport result; it is not an authorization to run a tool."""
+
+    tool_calls: tuple[ProviderToolCall, ...]
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    telemetry: ProviderCallTelemetry | None = None
+
+
 class ProviderError(RuntimeError):
     """Safe provider failure that never includes credentials or response bodies."""
 
@@ -106,6 +164,12 @@ class ProviderNotConfigured(ProviderError):
 
 
 class ProviderRetryExhausted(ProviderError):
+    pass
+
+
+class ProviderToolCallError(ProviderError):
+    """A safe local request or upstream native-tool contract failure."""
+
     pass
 
 
@@ -194,6 +258,112 @@ class OpenAICompatibleProvider:
         if self.settings.provider_thinking_mode is not None:
             payload["thinking"] = {"type": self.settings.provider_thinking_mode}
 
+        text, prompt_tokens, completion_tokens, telemetry = self._execute_payload(
+            payload=payload,
+            input_chars=input_chars,
+            call_started=call_started,
+            response_parser=self._parse_completion_response,
+        )
+        return ModelResult(
+            text=text,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            telemetry=telemetry,
+        )
+
+    def complete_with_tools(
+        self,
+        system: str,
+        user: str,
+        *,
+        tools: tuple[ToolDefinition, ...] | list[ToolDefinition],
+        tool_choice: Literal["required"] | NamedToolChoice = "required",
+        limits: ToolCallLimits | None = None,
+    ) -> ToolCallResult:
+        """Request and structurally validate native ``assistant.tool_calls``.
+
+        This is intentionally separate from :meth:`complete`: callers cannot
+        accidentally interpret ordinary JSON content as native tool calls, and
+        no raw provider response, prompt, endpoint, or credential is retained in
+        the returned value.  The contract always requires at least one call;
+        final assistant text belongs to a separate, future Agent turn contract.
+        Arguments are checked as bounded JSON objects but deliberately are not
+        treated as schema-valid or authorized for execution at this layer.
+        """
+        call_started = self.monotonic()
+        self.last_telemetry = None
+        checked_limits = self._validate_tool_limits(limits or ToolCallLimits())
+        tool_payloads, allowed_names, tool_payload_chars = self._tool_payloads(tools)
+        choice_payload, forced_name = self._tool_choice_payload(
+            tool_choice, allowed_names
+        )
+        input_chars = len(system) + len(user) + tool_payload_chars
+        attempts: list[ProviderAttemptTelemetry] = []
+
+        if not self.configured:
+            telemetry = self._call_telemetry(
+                call_started, input_chars, "not_configured", attempts
+            )
+            self.last_telemetry = telemetry
+            raise ProviderNotConfigured(
+                "模型未配置",
+                category="not_configured",
+                elapsed_ms=telemetry.elapsed_ms,
+                telemetry=telemetry,
+            )
+
+        payload: dict[str, Any] = {
+            "model": self.settings.openai_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0,
+            "tools": tool_payloads,
+            "tool_choice": choice_payload,
+        }
+        if self.settings.provider_max_completion_tokens is not None:
+            payload["max_tokens"] = self.settings.provider_max_completion_tokens
+        if self.settings.provider_thinking_mode is not None:
+            payload["thinking"] = {"type": self.settings.provider_thinking_mode}
+
+        def parse_tool_response(
+            raw_body: bytes, attempt_no: int
+        ) -> tuple[tuple[ProviderToolCall, ...], int, int, _Failure | None]:
+            return self._parse_tool_response(
+                raw_body,
+                attempt_no,
+                allowed_names=allowed_names,
+                forced_name=forced_name,
+                limits=checked_limits,
+            )
+
+        calls, prompt_tokens, completion_tokens, telemetry = self._execute_payload(
+            payload=payload,
+            input_chars=input_chars,
+            call_started=call_started,
+            response_parser=parse_tool_response,
+            tool_contract=True,
+        )
+        return ToolCallResult(
+            tool_calls=calls,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            telemetry=telemetry,
+        )
+
+    def _execute_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        input_chars: int,
+        call_started: float,
+        response_parser: Callable[
+            [bytes, int], tuple[_ParsedResponse, int, int, _Failure | None]
+        ],
+        tool_contract: bool = False,
+    ) -> tuple[_ParsedResponse, int, int, ProviderCallTelemetry]:
+        attempts: list[ProviderAttemptTelemetry] = []
         headers = {
             "Authorization": f"Bearer {self.settings.openai_api_key}",
             "Content-Type": "application/json",
@@ -220,6 +390,7 @@ class OpenAICompatibleProvider:
                 received_bytes = 0
                 prompt_tokens = 0
                 completion_tokens = 0
+                parsed_response: _ParsedResponse | None = None
                 request_id = None
                 failure: _Failure | None = None
                 try:
@@ -253,7 +424,11 @@ class OpenAICompatibleProvider:
                             )
                         elif status >= 300:
                             failure = _Failure(
-                                self._http_failure_category(status),
+                                (
+                                    self._tool_http_failure_category(status)
+                                    if tool_contract
+                                    else self._http_failure_category(status)
+                                ),
                                 attempt_no,
                                 http_status=status,
                                 request_id=request_id,
@@ -265,16 +440,12 @@ class OpenAICompatibleProvider:
                             if failure is None:
                                 assert raw_body is not None
                                 response_chars = self._response_chars(raw_body)
-                                body, failure = self._response_body(
-                                    raw_body, attempt_no
-                                )
-                                if failure is None:
-                                    (
-                                        text,
-                                        prompt_tokens,
-                                        completion_tokens,
-                                        failure,
-                                    ) = self._response_content(body, attempt_no)
+                                (
+                                    parsed_response,
+                                    prompt_tokens,
+                                    completion_tokens,
+                                    failure,
+                                ) = response_parser(raw_body, attempt_no)
 
                         # Error responses are intentionally never consumed. A
                         # successful oversized stream is closed by the bounded
@@ -304,11 +475,12 @@ class OpenAICompatibleProvider:
                             call_started, input_chars, "success", attempts
                         )
                         self.last_telemetry = telemetry
-                        return ModelResult(
-                            text=text,
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            telemetry=telemetry,
+                        assert parsed_response is not None
+                        return (
+                            parsed_response,
+                            prompt_tokens,
+                            completion_tokens,
+                            telemetry,
                         )
                 except httpx.ConnectTimeout:
                     failure = _Failure("connect_timeout", attempt_no, retryable=True)
@@ -356,11 +528,14 @@ class OpenAICompatibleProvider:
         )
         self.last_telemetry = telemetry
         message = self._safe_error_message(failure)
-        error_type = (
-            ProviderError
-            if failure.category in {"unauthorized", "forbidden", "nonretry_http"}
-            else ProviderRetryExhausted
-        )
+        if failure.retryable:
+            error_type: type[ProviderError] = ProviderRetryExhausted
+        elif failure.category in {"unauthorized", "forbidden", "nonretry_http"}:
+            error_type = ProviderError
+        elif tool_contract:
+            error_type = ProviderToolCallError
+        else:
+            error_type = ProviderRetryExhausted
         raise error_type(
             message,
             category=failure.category,
@@ -370,6 +545,332 @@ class OpenAICompatibleProvider:
             telemetry=telemetry,
             request_id=failure.request_id,
         )
+
+    def _parse_completion_response(
+        self, raw_body: bytes, attempt_no: int
+    ) -> tuple[str, int, int, _Failure | None]:
+        body, failure = self._response_body(raw_body, attempt_no)
+        if failure is not None:
+            return "", 0, 0, failure
+        return self._response_content(body, attempt_no)
+
+    @staticmethod
+    def _tool_input_error(category: str) -> ProviderToolCallError:
+        return ProviderToolCallError(
+            f"工具调用请求无效（category={category}）",
+            category=category,
+        )
+
+    def _validate_tool_limits(self, limits: ToolCallLimits) -> ToolCallLimits:
+        if not isinstance(limits, ToolCallLimits):
+            raise self._tool_input_error("tool_limits_invalid")
+        if (
+            isinstance(limits.max_calls, bool)
+            or not isinstance(limits.max_calls, int)
+            or not 1 <= limits.max_calls <= _ABSOLUTE_MAX_TOOL_CALLS
+        ):
+            raise self._tool_input_error("tool_limits_invalid")
+        if (
+            isinstance(limits.max_argument_bytes, bool)
+            or not isinstance(limits.max_argument_bytes, int)
+            or not 1
+            <= limits.max_argument_bytes
+            <= _ABSOLUTE_MAX_TOOL_ARGUMENT_BYTES
+        ):
+            raise self._tool_input_error("tool_limits_invalid")
+        return limits
+
+    def _tool_payloads(
+        self, tools: tuple[ToolDefinition, ...] | list[ToolDefinition]
+    ) -> tuple[list[dict[str, Any]], frozenset[str], int]:
+        if not isinstance(tools, (tuple, list)) or not 1 <= len(tools) <= _MAX_TOOL_DEFINITIONS:
+            raise self._tool_input_error("tool_definitions_invalid")
+
+        payloads: list[dict[str, Any]] = []
+        names: set[str] = set()
+        total_bytes = 0
+        total_chars = 0
+        for tool in tools:
+            if not isinstance(tool, ToolDefinition):
+                raise self._tool_input_error("tool_definition_invalid")
+            if (
+                not isinstance(tool.name, str)
+                or _TOOL_NAME_PATTERN.fullmatch(tool.name) is None
+                or tool.name in names
+            ):
+                raise self._tool_input_error("tool_definition_invalid")
+            if (
+                not isinstance(tool.description, str)
+                or len(tool.description) > _MAX_TOOL_DESCRIPTION_CHARS
+            ):
+                raise self._tool_input_error("tool_definition_invalid")
+            if (
+                not isinstance(tool.parameters, dict)
+                or tool.parameters.get("type") != "object"
+                or not self._is_json_value(tool.parameters)
+            ):
+                raise self._tool_input_error("tool_definition_invalid")
+
+            try:
+                schema_json = json.dumps(
+                    tool.parameters,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+                schema_bytes = len(schema_json.encode("utf-8"))
+                parameters = self._strict_json_loads(schema_json)
+            except (TypeError, ValueError, UnicodeError, RecursionError):
+                raise self._tool_input_error("tool_definition_invalid") from None
+            if schema_bytes > _MAX_TOOL_SCHEMA_BYTES:
+                raise self._tool_input_error("tool_definition_too_large")
+
+            payload = {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": parameters,
+                },
+            }
+            try:
+                payload_json = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+                payload_bytes = len(payload_json.encode("utf-8"))
+            except (TypeError, ValueError, UnicodeError, RecursionError):
+                raise self._tool_input_error("tool_definition_invalid") from None
+            total_bytes += payload_bytes
+            total_chars += len(payload_json)
+            if total_bytes > _MAX_TOOL_REQUEST_BYTES:
+                raise self._tool_input_error("tool_definitions_too_large")
+            names.add(tool.name)
+            payloads.append(payload)
+        return payloads, frozenset(names), total_chars
+
+    def _tool_choice_payload(
+        self,
+        tool_choice: Literal["required"] | NamedToolChoice,
+        allowed_names: frozenset[str],
+    ) -> tuple[str | dict[str, Any], str | None]:
+        if isinstance(tool_choice, str):
+            if tool_choice != "required":
+                raise self._tool_input_error("tool_choice_invalid")
+            return tool_choice, None
+        if not isinstance(tool_choice, NamedToolChoice):
+            raise self._tool_input_error("tool_choice_invalid")
+        if (
+            not isinstance(tool_choice.name, str)
+            or _TOOL_NAME_PATTERN.fullmatch(tool_choice.name) is None
+        ):
+            raise self._tool_input_error("tool_choice_invalid")
+        if tool_choice.name not in allowed_names:
+            raise self._tool_input_error("tool_choice_unknown")
+        return (
+            {"type": "function", "function": {"name": tool_choice.name}},
+            tool_choice.name,
+        )
+
+    def _parse_tool_response(
+        self,
+        raw_body: bytes,
+        attempt_no: int,
+        *,
+        allowed_names: frozenset[str],
+        forced_name: str | None,
+        limits: ToolCallLimits,
+    ) -> tuple[tuple[ProviderToolCall, ...], int, int, _Failure | None]:
+        try:
+            body = self._strict_json_loads(raw_body)
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            return (), 0, 0, _Failure("tool_response_json", attempt_no)
+        if not isinstance(body, dict):
+            return (), 0, 0, _Failure("tool_response_shape", attempt_no)
+
+        choices = body.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1:
+            return (), 0, 0, _Failure("tool_response_shape", attempt_no)
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return (), 0, 0, _Failure("tool_response_shape", attempt_no)
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            return (), 0, 0, _Failure("tool_response_shape", attempt_no)
+
+        prompt_tokens, completion_tokens, usage_failure = self._response_usage(
+            body, attempt_no
+        )
+        if usage_failure is not None:
+            return (), 0, 0, usage_failure
+
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "length":
+            return (), prompt_tokens, completion_tokens, _Failure(
+                "truncated", attempt_no
+            )
+        if finish_reason is not None and finish_reason not in {"tool_calls", "stop"}:
+            return (), prompt_tokens, completion_tokens, _Failure(
+                "tool_response_finish_reason", attempt_no
+            )
+
+        raw_calls = message.get("tool_calls")
+        if raw_calls is None or raw_calls == []:
+            return (), prompt_tokens, completion_tokens, _Failure(
+                "tool_calls_missing", attempt_no
+            )
+        if not isinstance(raw_calls, list):
+            return (), prompt_tokens, completion_tokens, _Failure(
+                "tool_calls_shape", attempt_no
+            )
+        if len(raw_calls) > limits.max_calls:
+            return (), prompt_tokens, completion_tokens, _Failure(
+                "tool_calls_too_many", attempt_no
+            )
+
+        calls: list[ProviderToolCall] = []
+        seen_ids: set[str] = set()
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, dict) or raw_call.get("type") != "function":
+                return (), prompt_tokens, completion_tokens, _Failure(
+                    "tool_call_shape", attempt_no
+                )
+            call_id = raw_call.get("id")
+            if (
+                not isinstance(call_id, str)
+                or _TOOL_CALL_ID_PATTERN.fullmatch(call_id) is None
+            ):
+                return (), prompt_tokens, completion_tokens, _Failure(
+                    "tool_call_id_invalid", attempt_no
+                )
+            if call_id in seen_ids:
+                return (), prompt_tokens, completion_tokens, _Failure(
+                    "tool_call_id_duplicate", attempt_no
+                )
+
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                return (), prompt_tokens, completion_tokens, _Failure(
+                    "tool_call_shape", attempt_no
+                )
+            name = function.get("name")
+            if not isinstance(name, str) or _TOOL_NAME_PATTERN.fullmatch(name) is None:
+                return (), prompt_tokens, completion_tokens, _Failure(
+                    "tool_call_name_invalid", attempt_no
+                )
+            if name not in allowed_names:
+                return (), prompt_tokens, completion_tokens, _Failure(
+                    "tool_call_unknown", attempt_no
+                )
+            if forced_name is not None and name != forced_name:
+                return (), prompt_tokens, completion_tokens, _Failure(
+                    "tool_choice_mismatch", attempt_no
+                )
+
+            arguments, argument_failure = self._tool_arguments(
+                function.get("arguments"), attempt_no, limits.max_argument_bytes
+            )
+            if argument_failure is not None:
+                return (), prompt_tokens, completion_tokens, argument_failure
+            assert arguments is not None
+            seen_ids.add(call_id)
+            calls.append(ProviderToolCall(id=call_id, name=name, arguments=arguments))
+
+        return tuple(calls), prompt_tokens, completion_tokens, None
+
+    def _tool_arguments(
+        self, raw_arguments: Any, attempt_no: int, max_bytes: int
+    ) -> tuple[dict[str, Any] | None, _Failure | None]:
+        if isinstance(raw_arguments, str):
+            try:
+                argument_bytes = len(raw_arguments.encode("utf-8"))
+            except UnicodeError:
+                return None, _Failure("tool_call_arguments_json", attempt_no)
+            if argument_bytes > max_bytes:
+                return None, _Failure("tool_call_arguments_too_large", attempt_no)
+            try:
+                arguments = self._strict_json_loads(raw_arguments)
+            except (TypeError, ValueError, UnicodeError, RecursionError):
+                return None, _Failure("tool_call_arguments_json", attempt_no)
+        elif isinstance(raw_arguments, dict):
+            if not self._is_json_value(raw_arguments):
+                return None, _Failure("tool_call_arguments_json", attempt_no)
+            try:
+                canonical = json.dumps(
+                    raw_arguments,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+                argument_bytes = len(canonical.encode("utf-8"))
+                arguments = self._strict_json_loads(canonical)
+            except (TypeError, ValueError, UnicodeError, RecursionError):
+                return None, _Failure("tool_call_arguments_json", attempt_no)
+            if argument_bytes > max_bytes:
+                return None, _Failure("tool_call_arguments_too_large", attempt_no)
+        else:
+            return None, _Failure("tool_call_arguments_shape", attempt_no)
+
+        if not isinstance(arguments, dict) or not self._is_json_value(arguments):
+            return None, _Failure("tool_call_arguments_shape", attempt_no)
+        return arguments, None
+
+    @staticmethod
+    def _response_usage(
+        body: dict[str, Any], attempt_no: int
+    ) -> tuple[int, int, _Failure | None]:
+        usage = body.get("usage", {})
+        if not isinstance(usage, dict):
+            return 0, 0, _Failure("usage_shape", attempt_no)
+        try:
+            prompt_tokens = OpenAICompatibleProvider._token_count(
+                usage.get("prompt_tokens", 0)
+            )
+            completion_tokens = OpenAICompatibleProvider._token_count(
+                usage.get("completion_tokens", 0)
+            )
+        except (TypeError, ValueError, OverflowError):
+            return 0, 0, _Failure("usage_shape", attempt_no)
+        return prompt_tokens, completion_tokens, None
+
+    @staticmethod
+    def _strict_json_loads(value: str | bytes) -> Any:
+        def object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON key")
+                result[key] = item
+            return result
+
+        def reject_constant(_: str) -> None:
+            raise ValueError("non-finite JSON number")
+
+        return json.loads(
+            value,
+            object_pairs_hook=object_without_duplicates,
+            parse_constant=reject_constant,
+        )
+
+    @classmethod
+    def _is_json_value(cls, value: Any, *, depth: int = 0) -> bool:
+        if depth > 32:
+            return False
+        if value is None or isinstance(value, (str, bool, int)):
+            return True
+        if isinstance(value, float):
+            return math.isfinite(value)
+        if isinstance(value, list):
+            return all(cls._is_json_value(item, depth=depth + 1) for item in value)
+        if isinstance(value, dict):
+            return all(
+                isinstance(key, str)
+                and cls._is_json_value(item, depth=depth + 1)
+                for key, item in value.items()
+            )
+        return False
 
     def _read_success_body(
         self, response: httpx.Response, attempt_no: int
@@ -554,6 +1055,17 @@ class OpenAICompatibleProvider:
         if status == 403:
             return "forbidden"
         return "nonretry_http"
+
+    @staticmethod
+    def _tool_http_failure_category(status: int) -> str:
+        if status == 401:
+            return "unauthorized"
+        if status == 403:
+            return "forbidden"
+        # Error bodies remain unread.  A safe gateway therefore reports only
+        # that the native-tool request was rejected, not an invented claim that
+        # a particular OpenAI-compatible extension is unsupported.
+        return "tool_request_rejected"
 
     @staticmethod
     def _request_id(response: httpx.Response) -> str | None:
