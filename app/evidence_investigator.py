@@ -70,11 +70,17 @@ _CANDIDATE_FIELD_CONTRACTS: dict[str, CandidateFieldContract] = {
     ),
     "knows": CandidateFieldContract(
         ("character", "fact", "time"),
-        semantic_guidance="仅表示角色已经实际获得该知识。",
+        semantic_guidance=(
+            "仅表示角色已经实际获得该知识；引用范围须同时支持角色、知识内容、"
+            "精确 time 和实际获知关系，不得只依赖代词、间接接触描述或范围外上下文。"
+        ),
     ),
     "claims_knows": CandidateFieldContract(
         ("character", "fact", "time"),
-        semantic_guidance="仅表示角色声称知道，不等同于实际获得知识。",
+        semantic_guidance=(
+            "仅表示角色声称知道，不等同于实际获得知识；引用范围须同时支持角色、"
+            "知识内容、精确 time 和声称关系，不得只依赖代词、间接接触描述或范围外上下文。"
+        ),
     ),
     "item": CandidateFieldContract(
         ("item", "owner"),
@@ -125,6 +131,8 @@ _FAMILY_SEMANTIC_GUIDANCE: dict[IssueCategory, str] = {
     ),
     IssueCategory.knowledge_without_acquisition: (
         "区分实际获得知识与仅声称知道；没有获得证据时不得把声称当作已知。"
+        "候选的最小引用范围必须同时支持角色、知识内容、精确 time 和对应的"
+        "获知或声称关系，不得仅凭代词、间接接触描述或跨范围补全来提交。"
     ),
     IssueCategory.item_ownership: (
         "区分物品的所有或保管关系与已经发生的实际使用。"

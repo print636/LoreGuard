@@ -132,6 +132,20 @@ def test_shared_candidate_and_family_guidance_covers_every_supported_shape():
         get_family_semantic_guidance("fact_conflict")  # type: ignore[arg-type]
 
 
+def test_knowledge_guidance_requires_complete_same_range_semantic_support():
+    shared_terms = ("引用范围", "角色", "知识内容", "精确 time", "关系", "代词")
+    for kind in ("knows", "claims_knows"):
+        guidance = get_candidate_field_contract(kind).semantic_guidance
+        assert all(term in guidance for term in shared_terms)
+        assert "范围外上下文" in guidance
+
+    family_guidance = get_family_semantic_guidance(
+        IssueCategory.knowledge_without_acquisition
+    )
+    assert all(term in family_guidance for term in shared_terms)
+    assert "跨范围补全" in family_guidance
+
+
 def scope_for(content="证据1\n证据2\n证据3\n证据4\n证据5", *, run_id="run-a"):
     snapshot = SnapshotDocumentKey(
         project_id="project-a",
