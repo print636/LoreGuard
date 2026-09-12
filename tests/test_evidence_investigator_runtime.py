@@ -436,8 +436,8 @@ def test_native_tool_turns_share_one_absolute_runtime_deadline():
     )
 
     assert (outcome.outcome, outcome.reason_code) == ("degraded", "deadline")
-    assert provider.remaining_deadlines == pytest.approx([45.0, 25.0, 5.0])
-    assert clock.value == pytest.approx(45.0)
+    assert provider.remaining_deadlines == pytest.approx([60.0, 40.0, 20.0])
+    assert clock.value == pytest.approx(60.0)
     assert scripted.calls == 2
     assert outcome.promotion is None
 

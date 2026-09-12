@@ -77,10 +77,10 @@ def test_evidence_investigator_defaults_are_bounded_and_disabled():
         "max_results": 12,
         "max_read_lines": 12,
         "max_span_chars": 12_000,
-        "token_budget": 8_000,
+        "token_budget": 16_000,
         "max_prompt_bytes": 128 * 1_024,
-        "timeout_seconds": 15.0,
-        "total_deadline_seconds": 45.0,
+        "timeout_seconds": 25.0,
+        "total_deadline_seconds": 60.0,
         "max_completion_tokens": 768,
         "max_response_bytes": 64_000,
         "top_k": 6,
@@ -88,6 +88,10 @@ def test_evidence_investigator_defaults_are_bounded_and_disabled():
         "embedding_max_input_chars": 250_000,
         "require_hybrid": True,
     }
+    assert (
+        configured.evidence_investigator_token_budget
+        < configured.per_run_token_budget
+    )
 
 
 @pytest.mark.parametrize(
@@ -280,8 +284,8 @@ def test_investigator_provider_fork_applies_dedicated_limits_and_one_attempt():
     assert fork.settings.enable_model_extraction is False
     assert fork.settings.enable_issue_evidence_review is False
     assert fork.settings.enable_review_agent is False
-    assert fork.settings.provider_timeout_seconds == 15
-    assert fork.settings.provider_total_deadline_seconds == 45
+    assert fork.settings.provider_timeout_seconds == 25
+    assert fork.settings.provider_total_deadline_seconds == 60
     assert fork.settings.provider_max_completion_tokens == 768
     assert fork.settings.provider_max_response_bytes == 64_000
     assert fork.settings.provider_max_attempts == 1
@@ -445,10 +449,10 @@ def test_compose_passes_investigator_limits_without_rag_implicitly_enabling_it()
         "EVIDENCE_INVESTIGATOR_MAX_RESULTS": "12",
         "EVIDENCE_INVESTIGATOR_MAX_READ_LINES": "12",
         "EVIDENCE_INVESTIGATOR_MAX_SPAN_CHARS": "12000",
-        "EVIDENCE_INVESTIGATOR_TOKEN_BUDGET": "8000",
+        "EVIDENCE_INVESTIGATOR_TOKEN_BUDGET": "16000",
         "EVIDENCE_INVESTIGATOR_MAX_PROMPT_BYTES": "131072",
-        "EVIDENCE_INVESTIGATOR_TIMEOUT_SECONDS": "15",
-        "EVIDENCE_INVESTIGATOR_TOTAL_DEADLINE_SECONDS": "45",
+        "EVIDENCE_INVESTIGATOR_TIMEOUT_SECONDS": "25",
+        "EVIDENCE_INVESTIGATOR_TOTAL_DEADLINE_SECONDS": "60",
         "EVIDENCE_INVESTIGATOR_MAX_COMPLETION_TOKENS": "768",
         "EVIDENCE_INVESTIGATOR_MAX_RESPONSE_BYTES": "64000",
         "EVIDENCE_INVESTIGATOR_TOP_K": "6",

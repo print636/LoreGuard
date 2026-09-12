@@ -26,7 +26,9 @@ from .evidence_investigator import (
     SEED_REF_PATTERN,
     CandidateRecordSubmission,
     InvestigationSeed,
+    candidate_kinds,
     clone_investigation_seed,
+    get_candidate_field_contract,
 )
 from .evidence_investigator_state import UntrustedCandidateEnvelope
 from .evidence_investigator_loop import (
@@ -232,6 +234,12 @@ class CandidateEvidenceResolver:
                 usage_unavailable_calls=investigator_result.usage_unavailable_calls,
                 completed_seeds=investigator_result.completed_seeds,
                 abstained_seeds=investigator_result.abstained_seeds,
+                executed_tool_calls=investigator_result.executed_tool_calls,
+                executed_searches=investigator_result.executed_searches,
+                executed_reads=investigator_result.executed_reads,
+                recoverable_rejections=(
+                    investigator_result.recoverable_rejections
+                ),
             )
         except (AttributeError, TypeError, ValueError):
             raise ValueError("completed investigator result is invalid") from None
@@ -429,47 +437,34 @@ class _KindSchema:
         return self.required | self.optional
 
 
+_KIND_FIELD_BYTE_LIMITS: dict[str, dict[str, int]] = {
+    "fact": {"subject": 128, "predicate": 128, "value": 512, "time": 64},
+    "event": {"time": 64, "location": 256, "participants": 512},
+    "knows": {"character": 128, "fact": 512, "time": 64},
+    "claims_knows": {"character": 128, "fact": 512, "time": 64},
+    "item": {"item": 256, "owner": 128, "time": 64},
+    "uses": {"item": 256, "user": 128, "time": 64},
+    "world_rule": {"key": 384, "value": 256},
+    "world_assert": {"key": 384, "value": 256, "actor": 128, "time": 64},
+}
+if set(_KIND_FIELD_BYTE_LIMITS) != set(candidate_kinds()):
+    raise RuntimeError("candidate field limits do not cover candidate kinds")
+
+
+def _kind_schema(kind: str) -> _KindSchema:
+    contract = get_candidate_field_contract(kind)
+    field_byte_limits = _KIND_FIELD_BYTE_LIMITS[kind]
+    if set(field_byte_limits) != set(contract.required + contract.optional):
+        raise RuntimeError("candidate field limits do not match shared contract")
+    return _KindSchema(
+        frozenset(contract.required),
+        frozenset(contract.optional),
+        field_byte_limits,
+    )
+
+
 _KIND_SCHEMAS: dict[str, _KindSchema] = {
-    "fact": _KindSchema(
-        frozenset({"subject", "predicate", "value"}),
-        frozenset({"time"}),
-        {"subject": 128, "predicate": 128, "value": 512, "time": 64},
-    ),
-    "event": _KindSchema(
-        frozenset({"time", "location", "participants"}),
-        frozenset(),
-        {"time": 64, "location": 256, "participants": 512},
-    ),
-    "knows": _KindSchema(
-        frozenset({"character", "fact", "time"}),
-        frozenset(),
-        {"character": 128, "fact": 512, "time": 64},
-    ),
-    "claims_knows": _KindSchema(
-        frozenset({"character", "fact", "time"}),
-        frozenset(),
-        {"character": 128, "fact": 512, "time": 64},
-    ),
-    "item": _KindSchema(
-        frozenset({"item", "owner"}),
-        frozenset({"time"}),
-        {"item": 256, "owner": 128, "time": 64},
-    ),
-    "uses": _KindSchema(
-        frozenset({"item", "user"}),
-        frozenset({"time"}),
-        {"item": 256, "user": 128, "time": 64},
-    ),
-    "world_rule": _KindSchema(
-        frozenset({"key", "value"}),
-        frozenset(),
-        {"key": 384, "value": 256},
-    ),
-    "world_assert": _KindSchema(
-        frozenset({"key", "value"}),
-        frozenset({"actor", "time"}),
-        {"key": 384, "value": 256, "actor": 128, "time": 64},
-    ),
+    kind: _kind_schema(kind) for kind in _KIND_FIELD_BYTE_LIMITS
 }
 
 _REJECTION_REASONS = frozenset(

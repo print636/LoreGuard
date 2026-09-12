@@ -138,6 +138,7 @@ def _completed_result(
         authorized_candidates=bindings,
         provider_calls=max(1, len(envelopes)),
         completed_seeds=len({row.seed_ref for row in envelopes}),
+        executed_tool_calls=max(1, len(envelopes)),
     )
 
 

@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -30,6 +30,53 @@ CandidateKind: TypeAlias = Literal[
     "world_rule",
     "world_assert",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateFieldContract:
+    """Shared immutable shape used for model guidance and promotion checks."""
+
+    required: tuple[str, ...]
+    optional: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        fields = self.required + self.optional
+        if (
+            not self.required
+            or len(fields) != len(set(fields))
+            or any(_FIELD_PATTERN.fullmatch(value) is None for value in fields)
+        ):
+            raise ValueError("candidate field contract is invalid")
+
+
+_CANDIDATE_FIELD_CONTRACTS: dict[str, CandidateFieldContract] = {
+    "fact": CandidateFieldContract(("subject", "predicate", "value"), ("time",)),
+    "event": CandidateFieldContract(("time", "location", "participants")),
+    "knows": CandidateFieldContract(("character", "fact", "time")),
+    "claims_knows": CandidateFieldContract(("character", "fact", "time")),
+    "item": CandidateFieldContract(("item", "owner"), ("time",)),
+    "uses": CandidateFieldContract(("item", "user"), ("time",)),
+    "world_rule": CandidateFieldContract(("key", "value")),
+    "world_assert": CandidateFieldContract(("key", "value"), ("actor", "time")),
+}
+if set(_CANDIDATE_FIELD_CONTRACTS) != set(get_args(CandidateKind)):
+    raise RuntimeError("candidate field contracts do not cover candidate kinds")
+
+
+def get_candidate_field_contract(kind: str) -> CandidateFieldContract:
+    """Return the immutable contract for one allowed candidate kind."""
+
+    if type(kind) is not str or kind not in _CANDIDATE_FIELD_CONTRACTS:
+        raise ValueError("candidate kind is invalid")
+    return _CANDIDATE_FIELD_CONTRACTS[kind]
+
+
+def candidate_kinds() -> tuple[str, ...]:
+    """Return every supported kind without exposing the mutable registry."""
+
+    return tuple(_CANDIDATE_FIELD_CONTRACTS)
+
+
 ToolName: TypeAlias = Literal[
     "SEARCH_EVIDENCE", "READ_SPAN", "SUBMIT_VERDICT", "ABSTAIN"
 ]

@@ -268,8 +268,33 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
     offered = [[tool.name for tool in row["tools"]] for row in provider.requests]
     assert offered == [
         ["SEARCH_EVIDENCE", "ABSTAIN"],
-        ["SEARCH_EVIDENCE", "READ_SPAN", "ABSTAIN"],
-        ["SEARCH_EVIDENCE", "READ_SPAN", "SUBMIT_VERDICT", "ABSTAIN"],
+        ["READ_SPAN", "ABSTAIN"],
+        ["SUBMIT_VERDICT", "ABSTAIN"],
+    ]
+    prompts = [json.loads(row["user"]) for row in provider.requests]
+    assert [row["current_phase"] for row in prompts] == [
+        "search",
+        "read",
+        "verdict",
+    ]
+    assert [row["allowed_next_actions"] for row in prompts] == offered
+    assert prompts[0]["current_seed"]["allowed_candidate_kinds"] == ["fact"]
+    assert prompts[0]["current_seed"]["candidate_field_contracts"] == {
+        "fact": {
+            "required_fields": ["subject", "predicate", "value"],
+            "optional_fields": ["time"],
+        }
+    }
+    assert [row["remaining_limits"]["round_no"] for row in prompts] == [1, 2, 3]
+    assert prompts[1]["observations"] == [
+        {
+            "kind": "search_result",
+            "rank": 1,
+            "result_ref": "result_tok0000000000001",
+            "line_start": 1,
+            "line_end": 2,
+            "overlaps_anchor": True,
+        }
     ]
     assert all(row["tool_choice"] == "required" for row in provider.requests)
     assert all(row["limits"].max_calls == 1 for row in provider.requests)
@@ -360,6 +385,59 @@ def test_usage_is_reported_immediately_and_checkpoints_wrap_external_work():
             completion_reserve=768,
         )
         assert expected > without_schemas
+
+
+def test_search_observation_marks_non_anchor_chunk_without_leaking_document_id():
+    base_scope, seeds, _ = context()
+    other_content = "岚的发色变成黑色。"
+    other_snapshot = SnapshotDocumentKey(
+        project_id="project-a",
+        document_id="doc-2",
+        document_version=1,
+        content_sha256=hashlib.sha256(other_content.encode("utf-8")).hexdigest(),
+    )
+    scope = InvestigationScope.create(
+        run_id="run-a",
+        project_id="project-a",
+        documents=(
+            base_scope.documents[0],
+            ScopedEvidenceDocument(snapshot=other_snapshot, content=other_content),
+        ),
+    )
+    other_chunk = EvidenceChunker(
+        target_chars=100,
+        min_chars=1,
+        max_chars=120,
+        overlap_chars=0,
+    ).chunk(
+        project_id="project-a",
+        document_id="doc-2",
+        document_version=1,
+        content=other_content,
+        content_sha256=other_snapshot.content_sha256,
+    )[0]
+    seed_ref = seeds[0].seed_ref
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", search_args(seed_ref)),
+        result(
+            "ABSTAIN",
+            {"seed_ref": seed_ref, "reason": "insufficient_evidence"},
+        ),
+    )
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever((other_chunk,)),
+        scope=scope,
+        seeds=seeds,
+        token_factory=Tokens(),
+    ).run()
+
+    assert outcome.outcome == "completed"
+    visible = json.loads(provider.requests[1]["user"])["observations"][0]
+    assert visible["rank"] == 1
+    assert visible["overlaps_anchor"] is False
+    assert "doc-2" not in json.dumps(visible)
 
 
 def test_partial_line_read_preserves_unambiguous_server_character_offsets():
@@ -604,6 +682,66 @@ def test_missing_or_zero_usage_stops_instead_of_creating_a_free_loop():
         outcome.charged_tokens,
         "usage_unavailable",
     )
+
+
+def test_invalid_argument_shape_without_usage_cannot_enter_correction_turn():
+    scope, seeds, _ = context()
+    malformed = ToolCallResult(
+        tool_calls=(
+            ProviderToolCall(
+                id="call_1",
+                name="SEARCH_EVIDENCE",
+                arguments=[],  # type: ignore[arg-type]
+            ),
+        ),
+        prompt_tokens=0,
+        completion_tokens=0,
+    )
+    provider = ScriptedProvider(
+        malformed,
+        result(
+            "ABSTAIN",
+            {
+                "seed_ref": seeds[0].seed_ref,
+                "reason": "insufficient_evidence",
+            },
+        ),
+    )
+    usage_rows = []
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever(),
+        scope=scope,
+        seeds=seeds,
+        usage_callback=lambda *row: usage_rows.append(row),
+    ).run()
+
+    assert (outcome.outcome, outcome.reason_code) == (
+        "degraded",
+        "usage_unavailable",
+    )
+    assert outcome.provider_calls == 1
+    assert outcome.executed_tool_calls == 0
+    assert outcome.recoverable_rejections == 0
+    assert outcome.reported_prompt_tokens == 0
+    assert outcome.reported_completion_tokens == 0
+    assert outcome.usage_unavailable_calls == 1
+    assert outcome.charged_tokens == estimated_request_charge(provider.requests[0])
+    assert len(provider.steps) == 1
+    assert usage_rows == [
+        (
+            None,
+            False,
+            0,
+            0,
+            outcome.charged_tokens,
+            "tool_call_arguments_shape",
+        )
+    ]
+    safe = outcome.safe_dict()
+    assert safe["charged_tokens"] == outcome.charged_tokens
+    assert safe["usage_unavailable_calls"] == 1
 
 
 def test_foreign_provider_result_is_rejected_without_reading_active_properties():
@@ -875,7 +1013,10 @@ def test_custom_provider_arguments_are_independently_size_bounded():
         retriever=retriever,
         scope=scope,
         seeds=seeds,
-        policy=InvestigatorLoopPolicy(max_tool_argument_bytes=1),
+        policy=InvestigatorLoopPolicy(
+            max_tool_argument_bytes=1,
+            max_recoverable_rejections_per_seed=0,
+        ),
     ).run()
 
     assert outcome.outcome == "degraded"
@@ -900,10 +1041,222 @@ def test_custom_provider_cyclic_arguments_fail_closed_without_recursion():
         retriever=FakeRetriever(),
         scope=scope,
         seeds=seeds,
+        policy=InvestigatorLoopPolicy(max_recoverable_rejections_per_seed=0),
     ).run()
 
     assert outcome.outcome == "degraded"
     assert outcome.reason_code == "invalid_tool_arguments"
+
+
+def test_one_invalid_argument_turn_can_be_corrected_without_executing_it():
+    scope, seeds, _ = context()
+    seed_ref = seeds[0].seed_ref
+    provider = ScriptedProvider(
+        result(
+            "SEARCH_EVIDENCE",
+            {"seed_ref": seed_ref, "query": "", "entity_terms": []},
+            prompt_tokens=9,
+            completion_tokens=2,
+        ),
+        result(
+            "ABSTAIN",
+            {"seed_ref": seed_ref, "reason": "insufficient_evidence"},
+            prompt_tokens=11,
+            completion_tokens=2,
+        ),
+    )
+    retriever = FakeRetriever()
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=retriever,
+        scope=scope,
+        seeds=seeds,
+        limits=InvestigatorLimits(max_charged_tokens=16_000),
+    ).run()
+
+    assert outcome.outcome == "completed"
+    assert outcome.provider_calls == 2
+    assert outcome.executed_tool_calls == 1
+    assert outcome.executed_searches == 0
+    assert outcome.recoverable_rejections == 1
+    assert outcome.charged_tokens == sum(
+        estimated_request_charge(request) for request in provider.requests
+    )
+    assert retriever.requests == []
+    correction_prompt = json.loads(provider.requests[1]["user"])
+    assert correction_prompt["observations"] == [
+        {
+            "kind": "retryable_tool_rejection",
+            "reason_code": "invalid_tool_arguments",
+            "remaining_corrections": 0,
+        }
+    ]
+    assert correction_prompt["remaining_limits"]["corrections"] == 0
+
+
+def test_second_invalid_argument_turn_degrades_and_discards_any_candidates():
+    scope, seeds, _ = context()
+    invalid = {"seed_ref": seeds[0].seed_ref, "query": "", "entity_terms": []}
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", invalid),
+        result("SEARCH_EVIDENCE", invalid),
+    )
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever(),
+        scope=scope,
+        seeds=seeds,
+        limits=InvestigatorLimits(max_charged_tokens=16_000),
+    ).run()
+
+    assert (outcome.outcome, outcome.reason_code) == (
+        "degraded",
+        "invalid_tool_arguments",
+    )
+    assert outcome.provider_calls == 2
+    assert outcome.executed_tool_calls == 0
+    assert outcome.recoverable_rejections == 1
+    assert outcome.envelopes == ()
+
+
+def test_repeated_search_is_rejected_before_rag_then_one_correction_can_finish():
+    scope, seeds, _ = context()
+    seed_ref = seeds[0].seed_ref
+    repeated = search_args(seed_ref)
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", repeated),
+        result("SEARCH_EVIDENCE", repeated),
+        result(
+            "ABSTAIN",
+            {"seed_ref": seed_ref, "reason": "no_relevant_evidence"},
+        ),
+    )
+    retriever = FakeRetriever()
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=retriever,
+        scope=scope,
+        seeds=seeds,
+        limits=InvestigatorLimits(max_charged_tokens=16_000),
+    ).run()
+
+    assert outcome.outcome == "completed"
+    assert outcome.provider_calls == 3
+    assert outcome.executed_tool_calls == 2
+    assert outcome.executed_searches == 1
+    assert outcome.recoverable_rejections == 1
+    assert len(retriever.requests) == 1
+    final_prompt = json.loads(provider.requests[2]["user"])
+    assert final_prompt["observations"][-1]["reason_code"] == "repeated_action"
+
+
+def test_repeated_action_correction_is_strictly_single_use():
+    scope, seeds, _ = context()
+    repeated = search_args(seeds[0].seed_ref)
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", repeated),
+        result("SEARCH_EVIDENCE", repeated),
+        result("SEARCH_EVIDENCE", repeated),
+    )
+    retriever = FakeRetriever()
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=retriever,
+        scope=scope,
+        seeds=seeds,
+        limits=InvestigatorLimits(max_charged_tokens=16_000),
+    ).run()
+
+    assert (outcome.outcome, outcome.reason_code) == (
+        "degraded",
+        "repeated_action",
+    )
+    assert outcome.provider_calls == 3
+    assert outcome.executed_tool_calls == 1
+    assert outcome.executed_searches == 1
+    assert outcome.recoverable_rejections == 1
+    assert len(retriever.requests) == 1
+
+
+def test_phase_gate_blocks_second_search_after_results_before_rag_dispatch():
+    scope, seeds, chunk = context()
+    seed_ref = seeds[0].seed_ref
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", search_args(seed_ref)),
+        result(
+            "SEARCH_EVIDENCE",
+            {
+                "seed_ref": seed_ref,
+                "query": "岚 黑色 发色 第二次检索",
+                "entity_terms": ["岚", "黑色", "发色"],
+            },
+        ),
+    )
+    retriever = FakeRetriever((chunk,))
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=retriever,
+        scope=scope,
+        seeds=seeds,
+        limits=InvestigatorLimits(max_charged_tokens=16_000),
+    ).run()
+
+    assert (outcome.outcome, outcome.reason_code) == ("degraded", "unknown_tool")
+    assert outcome.provider_calls == 2
+    assert outcome.executed_tool_calls == 1
+    assert outcome.executed_searches == 1
+    assert len(retriever.requests) == 1
+    assert [tool.name for tool in provider.requests[1]["tools"]] == [
+        "READ_SPAN",
+        "ABSTAIN",
+    ]
+
+
+def test_degraded_loop_reports_only_tools_that_finished_before_timeout():
+    scope, seeds, chunk = context()
+    seed_ref = seeds[0].seed_ref
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", search_args(seed_ref)),
+        ProviderRetryExhausted(
+            "safe timeout",
+            category="read_timeout",
+            attempt_no=1,
+        ),
+    )
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever((chunk,)),
+        scope=scope,
+        seeds=seeds,
+        limits=InvestigatorLimits(max_charged_tokens=16_000),
+    ).run()
+
+    assert (outcome.outcome, outcome.reason_code) == (
+        "degraded",
+        "provider_timeout",
+    )
+    assert outcome.provider_calls == 2
+    assert outcome.executed_tool_calls == 1
+    assert outcome.executed_searches == 1
+    assert outcome.executed_reads == 0
+    safe = outcome.safe_dict()
+    assert safe["executed_tool_calls"] == 1
+    assert safe["executed_searches"] == 1
+    assert safe["executed_reads"] == 0
+
+
+@pytest.mark.parametrize("invalid", [-1, 2, True, "1"])
+def test_recoverable_rejection_limit_is_a_hard_one_turn_cap(invalid):
+    with pytest.raises(ValueError, match="recoverable rejection limit"):
+        InvestigatorLoopPolicy(
+            max_recoverable_rejections_per_seed=invalid  # type: ignore[arg-type]
+        )
 
 
 def test_scope_arguments_and_cross_seed_attempts_are_rejected_before_retrieval():
@@ -926,6 +1279,11 @@ def test_scope_arguments_and_cross_seed_attempts_are_rejected_before_retrieval()
             retriever=retriever,
             scope=scope,
             seeds=seeds,
+            policy=InvestigatorLoopPolicy(
+                max_recoverable_rejections_per_seed=(
+                    0 if reason == "invalid_tool_arguments" else 1
+                )
+            ),
         ).run()
         assert outcome.outcome == "degraded"
         assert outcome.reason_code == reason
@@ -1319,6 +1677,7 @@ def test_a_later_seed_failure_discards_earlier_authorized_candidates():
         scope=scope,
         seeds=seeds,
         token_factory=Tokens(),
+        limits=InvestigatorLimits(max_charged_tokens=20_000),
     ).run()
 
     assert outcome.outcome == "degraded"
