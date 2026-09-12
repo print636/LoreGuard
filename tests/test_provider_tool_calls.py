@@ -203,6 +203,33 @@ class ProviderNativeToolCallingTests(unittest.TestCase):
         self.assertEqual(("call_1", "call_2"), tuple(row.id for row in result.tool_calls))
         self.assertEqual(3, result.tool_calls[1].arguments["top_k"])
 
+    def test_parallel_tool_calls_is_disabled_only_for_single_call_limit(self):
+        payloads = []
+
+        def single_handler(request):
+            payloads.append(json.loads(request.content))
+            return completion([call()])
+
+        self.provider(single_handler).complete_with_tools(
+            "s",
+            "u",
+            tools=[tool()],
+            limits=ToolCallLimits(max_calls=1),
+        )
+        self.assertIs(payloads[0]["parallel_tool_calls"], False)
+
+        def multiple_handler(request):
+            payloads.append(json.loads(request.content))
+            return completion([call("call_1"), call("call_2")])
+
+        self.provider(multiple_handler).complete_with_tools(
+            "s",
+            "u",
+            tools=[tool()],
+            limits=ToolCallLimits(max_calls=2),
+        )
+        self.assertNotIn("parallel_tool_calls", payloads[1])
+
     def test_prompt_derived_arguments_are_untrusted_and_hidden_from_repr(self):
         echoed = "private user prompt copied by the model"
         provider = self.provider(
