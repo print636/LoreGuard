@@ -1144,6 +1144,37 @@ def _fact_has_bound_relation(
     )
 
 
+def find_bound_knowledge_relation_matches(
+    support: str, *, kind: str, character: str, fact: str
+) -> list[re.Match[str]]:
+    """Return spans that explicitly bind a character to one knowledge item.
+
+    Merely finding a knowledge verb somewhere in the evidence is insufficient:
+    the same closed relation must name the submitted character before the verb
+    and the submitted knowledge immediately after it.  Escaping both submitted
+    fields keeps model-provided punctuation and regex metacharacters literal.
+    """
+
+    compact_character = _clean(character)
+    compact_fact = _clean(fact)
+    if not compact_character or not compact_fact:
+        return []
+    if kind == "knows":
+        verbs = KNOWLEDGE_ACQUISITION_VERB_PATTERN
+    elif kind == "claims_knows":
+        verbs = KNOWLEDGE_CLAIM_VERB_PATTERN
+    else:
+        return []
+    compact = re.sub(r"\s+", "", support)
+    pattern = re.compile(
+        rf"{re.escape(compact_character)}"
+        rf"(?:才|已|已经|终于|随后|此时|后来)?"
+        rf"(?:{verbs})(?:了)?(?:关于)?"
+        rf"{re.escape(compact_fact)}"
+    )
+    return list(pattern.finditer(compact))
+
+
 def _fact_contrast_affirms_submitted_value(
     support: str, directive: ParsedDirective
 ) -> bool:
@@ -1227,12 +1258,14 @@ def _closed_baseline_semantics(
             )
         )
     elif kind in {"knows", "claims_knows"}:
-        relation_pattern = (
-            KNOWLEDGE_ACQUISITION_VERB_PATTERN
-            if kind == "knows"
-            else KNOWLEDGE_CLAIM_VERB_PATTERN
+        closed = bool(
+            find_bound_knowledge_relation_matches(
+                support,
+                kind=kind,
+                character=attrs.get("character", ""),
+                fact=attrs.get("fact", ""),
+            )
         )
-        closed = bool(re.search(relation_pattern, support))
     elif kind == "item":
         closed = bool(re.search(r"获得|持有|保管|掌管|交给|移交|归还|接收", support))
     elif kind == "uses":

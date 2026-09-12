@@ -843,6 +843,53 @@ class BaselineSemanticQualityTests(unittest.TestCase):
         self.assertFalse(eligible_for_deterministic_rules(reported_fact))
         self.assertTrue(eligible_for_deterministic_rules(observed_claim))
 
+    def test_unbound_perception_does_not_close_knowledge_semantics(self):
+        sources = (
+            "2026-01-01 12:00，岚看到苏弦放下未拆密函，潮门口令藏在里面。",
+            "2026-01-01 12:00，岚听到苏弦封存录音，潮门口令写在封套上。",
+            "2026-01-01 12:00，岚读到苏弦的值班姓名，潮门口令另附在页尾。",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="knows",
+                        attrs={
+                            "character": "岚",
+                            "fact": "潮门口令",
+                            "time": "2026-01-01 12:00",
+                        },
+                        evidence=evidence(source),
+                    )
+                )
+
+                self.assertEqual("missing_semantic_labels", reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("tentative_fact", assessed.kind)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_bound_perception_closes_knowledge_semantics(self):
+        for perception in ("看到", "听到", "读到"):
+            with self.subTest(perception=perception):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="knows",
+                        attrs={
+                            "character": "岚",
+                            "fact": "潮门口令",
+                            "time": "2026-01-01 12:00",
+                        },
+                        evidence=evidence(
+                            f"2026-01-01 12:00，岚{perception}潮门口令。"
+                        ),
+                    )
+                )
+
+                self.assertIsNone(reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("knows", assessed.kind)
+                self.assertTrue(eligible_for_deterministic_rules(assessed))
+
     def test_semantic_gate_downgrades_command_plan_and_missing_execution(self):
         candidates = (
             (

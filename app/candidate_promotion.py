@@ -38,12 +38,11 @@ from .evidence_investigator_loop import (
 from .evidence_chunks import SnapshotDocumentKey
 from .rules import detect_issues
 from .semantic_quality import (
-    KNOWLEDGE_ACQUISITION_VERB_PATTERN,
-    KNOWLEDGE_CLAIM_VERB_PATTERN,
     apply_semantic_quality_gate,
     document_context_has_noncanonical_frame,
     eligible_for_deterministic_rules,
     find_bound_fact_relation_matches,
+    find_bound_knowledge_relation_matches,
     find_bound_use_action_matches,
     has_unrealized_heading_frame,
 )
@@ -1541,26 +1540,17 @@ def _event_relation_grounded(attrs: Mapping[str, str], text: str) -> bool:
 def _knowledge_relation_grounded(
     kind: str, attrs: Mapping[str, str], text: str
 ) -> bool:
-    character = re.escape(_compact(attrs["character"]))
-    fact = re.escape(_compact(attrs["fact"]))
-    if kind == "knows":
-        verbs = KNOWLEDGE_ACQUISITION_VERB_PATTERN
-    else:
-        verbs = KNOWLEDGE_CLAIM_VERB_PATTERN
-    pattern = re.compile(
-        rf"{character}(?:才|已|已经|终于|随后|此时|后来)?"
-        rf"(?:{verbs})(?:了)?(?:关于)?{fact}"
-    )
     for clause in _grounding_clauses(text):
-        match = pattern.search(clause)
-        if (
-            match is not None
-            and not _non_actual_action(
-                clause, allow_reported=(kind == "claims_knows")
-            )
-            and not _externally_modalized(clause, match.start())
+        for match in find_bound_knowledge_relation_matches(
+            clause,
+            kind=kind,
+            character=_compact(attrs["character"]),
+            fact=_compact(attrs["fact"]),
         ):
-            return True
+            if not _non_actual_action(
+                clause, allow_reported=(kind == "claims_knows")
+            ) and not _externally_modalized(clause, match.start()):
+                return True
     return False
 
 
