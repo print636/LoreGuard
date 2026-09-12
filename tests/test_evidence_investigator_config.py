@@ -79,7 +79,7 @@ def test_evidence_investigator_defaults_are_bounded_and_disabled():
         "max_span_chars": 12_000,
         "token_budget": 16_000,
         "max_prompt_bytes": 128 * 1_024,
-        "timeout_seconds": 25.0,
+        "timeout_seconds": 30.0,
         "total_deadline_seconds": 60.0,
         "max_completion_tokens": 768,
         "max_response_bytes": 64_000,
@@ -284,7 +284,7 @@ def test_investigator_provider_fork_applies_dedicated_limits_and_one_attempt():
     assert fork.settings.enable_model_extraction is False
     assert fork.settings.enable_issue_evidence_review is False
     assert fork.settings.enable_review_agent is False
-    assert fork.settings.provider_timeout_seconds == 25
+    assert fork.settings.provider_timeout_seconds == 30
     assert fork.settings.provider_total_deadline_seconds == 60
     assert fork.settings.provider_max_completion_tokens == 768
     assert fork.settings.provider_max_response_bytes == 64_000
@@ -319,6 +319,32 @@ def test_investigator_provider_fork_never_expands_base_or_remaining_limits():
     assert fork.settings.provider_total_deadline_seconds == 5
     assert fork.settings.provider_max_completion_tokens == 320
     assert fork.settings.provider_max_response_bytes == 32_000
+
+
+def test_investigator_provider_fork_caps_each_turn_by_remaining_total_deadline():
+    provider = OpenAICompatibleProvider(
+        settings(
+            enable_evidence_investigator=True,
+            enable_embeddings=True,
+            provider_timeout_seconds=30,
+            provider_total_deadline_seconds=None,
+            provider_max_attempts=4,
+        )
+    )
+
+    first_turn = provider.fork_for_evidence_investigator(
+        remaining_deadline_seconds=60
+    )
+    final_turn = provider.fork_for_evidence_investigator(
+        remaining_deadline_seconds=12.5
+    )
+
+    assert first_turn.settings.provider_timeout_seconds == 30
+    assert first_turn.settings.provider_total_deadline_seconds == 60
+    assert final_turn.settings.provider_timeout_seconds == 12.5
+    assert final_turn.settings.provider_total_deadline_seconds == 12.5
+    assert first_turn.settings.provider_max_attempts == 1
+    assert final_turn.settings.provider_max_attempts == 1
 
 
 def test_investigator_provider_fork_sends_its_completion_cap():
@@ -451,7 +477,7 @@ def test_compose_passes_investigator_limits_without_rag_implicitly_enabling_it()
         "EVIDENCE_INVESTIGATOR_MAX_SPAN_CHARS": "12000",
         "EVIDENCE_INVESTIGATOR_TOKEN_BUDGET": "16000",
         "EVIDENCE_INVESTIGATOR_MAX_PROMPT_BYTES": "131072",
-        "EVIDENCE_INVESTIGATOR_TIMEOUT_SECONDS": "25",
+        "EVIDENCE_INVESTIGATOR_TIMEOUT_SECONDS": "30",
         "EVIDENCE_INVESTIGATOR_TOTAL_DEADLINE_SECONDS": "60",
         "EVIDENCE_INVESTIGATOR_MAX_COMPLETION_TOKENS": "768",
         "EVIDENCE_INVESTIGATOR_MAX_RESPONSE_BYTES": "64000",

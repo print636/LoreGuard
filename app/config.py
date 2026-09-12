@@ -132,7 +132,7 @@ class Settings(BaseSettings):
         default=128 * 1_024, ge=4 * 1_024, le=256 * 1_024
     )
     evidence_investigator_timeout_seconds: float = Field(
-        default=25.0, gt=0, le=30.0
+        default=30.0, gt=0, le=30.0
     )
     evidence_investigator_total_deadline_seconds: float = Field(
         default=60.0, gt=0, le=60.0

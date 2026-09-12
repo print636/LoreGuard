@@ -10,6 +10,8 @@
 - 先固定模型、Prompt、RAG、预算和阈值；holdout 运行结果不得用于调参。
 - runner 会产生真实模型调用与费用，因此没有 `--confirm-live-provider` 时必定拒绝执行。
 
+当前部署默认给 Investigator 预留 16,000 个保守计费 Token，单轮 Provider 调用最多等待 30 秒，整个 Investigator 阶段共用 60 秒绝对 deadline。每一轮实际超时取“30 秒、通用 Provider 更严格限制、全局剩余时间”中的最小值，且每轮仍只执行一次 Provider attempt；这组默认值是部署配置说明，不是评测产物对上游模型身份或服务质量的证明。
+
 先运行 dev 接线验证：
 
 ```powershell
