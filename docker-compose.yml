@@ -10,6 +10,7 @@ services:
   api:
     build: .
     environment:
+      LOREGUARD_BUILD_REVISION: ${LOREGUARD_BUILD_REVISION:-}
       DATABASE_URL: postgresql+psycopg://loreguard:loreguard@postgres:5432/loreguard
       REDIS_URL: redis://redis:6379/0
       USE_CELERY: "true"
@@ -99,6 +100,7 @@ services:
     build: .
     command: celery -A app.tasks.celery_app worker --loglevel=INFO
     environment:
+      LOREGUARD_BUILD_REVISION: ${LOREGUARD_BUILD_REVISION:-}
       DATABASE_URL: postgresql+psycopg://loreguard:loreguard@postgres:5432/loreguard
       REDIS_URL: redis://redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

@@ -36,6 +36,7 @@ from .issue_evidence_review import (
     failed_issue_evidence_review,
 )
 from .pipeline import AnalysisPipeline, DocumentInput, build_result_provenance
+from .runtime_provenance import safe_runtime_provenance
 from .time_utils import utc_now_naive
 from .usage import configured_cost_usd
 
@@ -1546,6 +1547,12 @@ def execute_analysis(
                 "immutable": True,
                 "documents": input_metadata,
             }
+            # API and worker each report the same content-free identity. The
+            # live E2E runner compares them so a stale worker image or a
+            # divergent model/RAG configuration fails provenance closed.
+            result.diagnostics["runtime_provenance"] = safe_runtime_provenance(
+                settings
+            )
             db.add(AnalysisDiagnosticRow(run_id=run_id, payload=result.diagnostics))
             cost = configured_cost_usd(
                 result.prompt_tokens, result.completion_tokens, get_settings()

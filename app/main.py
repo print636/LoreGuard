@@ -30,6 +30,7 @@ from .provider import (
     sanitize_request_id,
 )
 from .rate_limit import SlidingWindowLimiter, WriteRateLimitMiddleware
+from .runtime_provenance import safe_runtime_provenance
 from .service import DEFAULT_DOCUMENT_ROLE, DEFAULT_STORY_SCOPE, MISSING_SNAPSHOT_ERROR, capture_run_inputs, copy_run_inputs, execute_analysis, run_input_metadata, safe_persisted_analysis_error
 from .time_utils import utc_now_naive
 
@@ -319,6 +320,7 @@ def health() -> dict:
             and bool(settings.openai_api_key.strip()),
             "thinking": safe_thinking_configuration(settings),
         },
+        "runtime_provenance": safe_runtime_provenance(settings),
     }
 
 

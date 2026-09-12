@@ -7,6 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+import scripts.run_evidence_investigator_live as live_runner
 
 from scripts.run_evidence_investigator_live import (
     CasePlan,
@@ -21,15 +22,78 @@ from scripts.run_evidence_investigator_live import (
     _classify,
     _safe_capability_isolation,
     _safe_diagnostics,
+    _safe_runtime_provenance,
     _service_reported_effective_limits,
     _target_evidence_match,
     build_parser,
+    compare_dev_artifact_payloads,
     load_case_plans,
     main,
     run_live_evaluation,
     verify_frozen_dataset,
     write_artifact_exclusive,
 )
+
+
+FIXTURE_GIT_REVISION = "b" * 40
+FIXTURE_SERVICE_ARTIFACT = "c" * 64
+FIXTURE_PROFILE = "a" * 64
+FIXTURE_CHUNKER = "d" * 64
+
+
+def runtime_provenance():
+    return {
+        "schema_version": "loreguard-runtime-provenance-v1",
+        "build": {
+            "git_revision": FIXTURE_GIT_REVISION,
+            "service_artifact_sha256": FIXTURE_SERVICE_ARTIFACT,
+        },
+        "chat_provider": {
+            "model_alias": "fixture-model",
+            "relay_hostname": "relay.example",
+            "relay_configuration_sha256": "e" * 64,
+            "temperature": 0,
+            "thinking_configured": True,
+            "thinking_mode": "disabled",
+        },
+        "capabilities": {
+            "model_extraction": False,
+            "issue_evidence_review": False,
+            "record_repair_agent": False,
+            "evidence_investigator": True,
+            "embeddings": True,
+        },
+        "investigator_limits": {
+            "max_seeds": 1,
+            "max_decision_rounds": 6,
+            "max_tool_calls": 6,
+            "max_searches": 2,
+            "max_reads": 2,
+            "max_results": 12,
+            "max_read_lines": 12,
+            "max_span_chars": 12000,
+            "token_budget": 16000,
+            "max_agent_input_bytes": 131072,
+            "provider_call_timeout_seconds": 30.0,
+            "total_deadline_seconds": 60.0,
+            "max_completion_tokens": 768,
+            "max_response_bytes": 64000,
+            "provider_attempts_per_decision": 1,
+            "top_k": 6,
+            "branch_limit": 30,
+            "embedding_max_input_chars": 250000,
+            "require_hybrid": True,
+            "daily_token_budget": 100000,
+        },
+        "rag": {
+            "strategy": "keyword+vector+entity-rrf",
+            "profile_fingerprint": FIXTURE_PROFILE,
+            "chunker_fingerprint": FIXTURE_CHUNKER,
+            "require_hybrid": True,
+            "top_k": 6,
+            "branch_limit": 30,
+        },
+    }
 
 
 class FixtureHttpApi:
@@ -53,6 +117,7 @@ class FixtureHttpApi:
                     "configured": True,
                     "thinking": {"configured": True, "mode": "disabled"},
                 },
+                "runtime_provenance": runtime_provenance(),
             }
         if method == "POST" and path == "/api/v1/projects":
             assert set(payload) == {"name", "description"}
@@ -133,6 +198,7 @@ class FixtureHttpApi:
                 positive = plan.ground_truth.decision == "added_issue"
                 provider_calls = 3 if positive else 1
                 return {
+                    "runtime_provenance": runtime_provenance(),
                     "model": {
                         "enabled": False,
                         "configured": False,
@@ -186,8 +252,8 @@ class FixtureHttpApi:
                             "index": {
                                 "outcome": "complete",
                                 "reason": None,
-                                "profile_fingerprint": "a" * 64,
-                                "chunker_fingerprint": "fixture-chunker-v1",
+                                "profile_fingerprint": FIXTURE_PROFILE,
+                                "chunker_fingerprint": FIXTURE_CHUNKER,
                             },
                             "retrievals": [
                                 {
@@ -223,7 +289,17 @@ def options(tmp_path: Path, *, split="dev", confirm=True) -> RunnerOptions:
     )
 
 
-def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(tmp_path):
+def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        live_runner,
+        "_git_state",
+        lambda: {
+            "commit": FIXTURE_GIT_REVISION,
+            "tracked_worktree_dirty": False,
+        },
+    )
     plans, _, _ = load_case_plans("dev")
     api = FixtureHttpApi(plans)
 
@@ -236,6 +312,12 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(tmp_path):
         "active_abstain": 3,
         "positive_added_issue": 5,
     }
+    assert artifact["schema_version"] == "evidence-investigator-live-http-v3"
+    assert artifact["provenance_gate"]["passed"] is True
+    assert artifact["development_gate"]["passed"] is True
+    assert artifact["reproducibility_fingerprint"] == artifact[
+        "safe_configuration_fingerprint"
+    ]
     assert artifact["summary"]["capability_isolation_verified"] == 8
     expected_outcome_metrics = {
         "final_output_observed_cases": 8,
@@ -301,6 +383,7 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(tmp_path):
     assert "http://service.test:8000" not in persisted
     assert "CANARY source body" not in persisted
     assert "sk-" not in persisted
+    assert "https://relay.example" not in persisted
     assert all(document.content not in persisted for plan in plans for document in plan.documents)
 
 
@@ -715,6 +798,175 @@ def test_safe_diagnostics_keeps_only_safe_budget_and_execution_counters():
     assert "secret" not in sanitized["budget_preflight"]
 
 
+def test_runtime_provenance_parser_is_exact_and_fail_closed():
+    value = runtime_provenance()
+
+    assert _safe_runtime_provenance(value) == value
+
+    missing_limit = json.loads(json.dumps(value))
+    missing_limit["investigator_limits"].pop("max_reads")
+    assert _safe_runtime_provenance(missing_limit) is None
+
+    unexpected_url = json.loads(json.dumps(value))
+    unexpected_url["chat_provider"]["base_url"] = "https://relay.example/v1"
+    assert _safe_runtime_provenance(unexpected_url) is None
+
+
+def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
+    provenance = runtime_provenance()
+    provenance["chat_provider"]["model_alias"] = model
+    git = {
+        "commit": FIXTURE_GIT_REVISION,
+        "tracked_worktree_dirty": False,
+        "stable_during_run": True,
+    }
+    safe_configuration = {
+        "artifact_schema": "evidence-investigator-live-http-v3",
+        "dataset_id": "evidence-investigator-live-v1",
+        "split": "dev",
+        "manifest_sha256": live_runner.PINNED_MANIFEST_SHA256,
+        "freeze_sha256": live_runner.PINNED_FREEZE_SHA256,
+        "case_timeout_seconds": 180.0,
+        "request_timeout_seconds": 30.0,
+        "poll_interval_seconds": 1.0,
+        "runner_git": git,
+        "service_observation": {
+            "service_ok": True,
+            "model_configured": True,
+            "thinking_configured": True,
+            "thinking_mode": "disabled",
+            "runtime_provenance": provenance,
+        },
+        "service_reported_effective_limits": {
+            "observed_cases": 8,
+            "consistent_across_cases": True,
+            "values": {},
+            "distinct_snapshot_count": 1,
+        },
+        "worker_runtime_provenance_matches_api_cases": 8,
+        "rag_configuration_verified_cases": 8,
+    }
+    fingerprint = live_runner._sha256_bytes(
+        live_runner._canonical_json_bytes(safe_configuration)
+    )
+    provenance_gate = {
+        "passed": True,
+        "reason_codes": [],
+        "api_runtime_provenance": provenance,
+        "worker_runtime_provenance_observed_cases": 8,
+        "worker_runtime_provenance_matches_api_cases": 8,
+        "rag_configuration_verified_cases": 8,
+        "case_count": 8,
+    }
+    summary = {
+        "case_count": 8,
+        "passed": 5,
+        "positive_cases": 5,
+        "positive_passed": 3,
+        "negative_cases": 3,
+        "negative_safe_cases": 3,
+        "negative_active_abstain_cases": 2,
+        "normally_terminated_cases": 7,
+        "erroneous_added_issue_count": 0,
+        "final_output_observed_cases": 8,
+        "capability_isolation_verified": 8,
+        "promotion_accounting_observed_cases": 8,
+    }
+    return {
+        "schema_version": "evidence-investigator-live-http-v3",
+        "dataset_id": "evidence-investigator-live-v1",
+        "split": "dev",
+        "execution_source": "live_http_service",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "fixture": {
+            "manifest_sha256": live_runner.PINNED_MANIFEST_SHA256,
+            "freeze_sha256": live_runner.PINNED_FREEZE_SHA256,
+        },
+        "git": git,
+        "safe_configuration": safe_configuration,
+        "safe_configuration_fingerprint": fingerprint,
+        "reproducibility_fingerprint": fingerprint,
+        "provenance_gate": provenance_gate,
+        "development_gate": live_runner._build_development_gate(
+            "dev", summary, provenance_gate
+        ),
+        "summary": summary,
+        "cases": [{} for _ in range(8)],
+        "privacy_boundary": {
+            "source_bodies_persisted": False,
+            "provider_payloads_persisted": False,
+            "credentials_persisted": False,
+            "service_address_persisted": False,
+        },
+        "diagnostic_boundary": "fixture",
+    }
+
+
+def test_dev_pair_requires_v3_qualified_identical_nonoverlapping_runs():
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    second = _qualified_dev_artifact(
+        started_at="2026-09-12T10:06:00+00:00",
+        completed_at="2026-09-12T10:11:00+00:00",
+    )
+
+    passed = compare_dev_artifact_payloads(first, second)
+    assert passed["passed"] is True
+    assert passed["shared_reproducibility_fingerprint"] is not None
+
+    changed = _qualified_dev_artifact(
+        started_at="2026-09-12T10:06:00+00:00",
+        completed_at="2026-09-12T10:11:00+00:00",
+        model="different-model",
+    )
+    rejected = compare_dev_artifact_payloads(first, changed)
+    assert rejected["passed"] is False
+    assert "runtime_configuration_changed_between_dev_runs" in rejected[
+        "reason_codes"
+    ]
+
+
+def test_dev_pair_treats_v2_and_missing_fields_as_historical_only():
+    historical = {
+        "schema_version": "evidence-investigator-live-http-v2",
+        "dataset_id": "evidence-investigator-live-v1",
+        "split": "dev",
+    }
+    current = _qualified_dev_artifact(
+        started_at="2026-09-12T10:06:00+00:00",
+        completed_at="2026-09-12T10:11:00+00:00",
+    )
+
+    result = compare_dev_artifact_payloads(historical, current)
+    assert result["passed"] is False
+    assert "first_artifact_historical_only" in result["reason_codes"]
+
+    missing = dict(current)
+    missing.pop("provenance_gate")
+    result = compare_dev_artifact_payloads(current, missing)
+    assert result["passed"] is False
+    assert "second_provenance_gate_failed" in result["reason_codes"]
+
+    incomplete = json.loads(json.dumps(current))
+    incomplete["provenance_gate"].pop(
+        "worker_runtime_provenance_matches_api_cases"
+    )
+    result = compare_dev_artifact_payloads(current, incomplete)
+    assert result["passed"] is False
+    assert "second_provenance_gate_failed" in result["reason_codes"]
+
+    incomplete = json.loads(json.dumps(current))
+    incomplete["development_gate"]["checks"].pop(
+        "runtime_provenance_and_rag_verified"
+    )
+    result = compare_dev_artifact_payloads(current, incomplete)
+    assert result["passed"] is False
+    assert "second_development_gate_failed" in result["reason_codes"]
+
+
 def test_top_level_usage_survives_missing_loop_and_preserves_failure_reason():
     raw_diagnostics = {
         "model": {
@@ -847,11 +1099,35 @@ def test_confirmation_gate_precedes_fixture_and_http(tmp_path):
     assert not (tmp_path / "dev-result.json").exists()
 
 
+def test_dev_plan_loading_never_reads_holdout_source_bytes(monkeypatch):
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+
+    def guarded_read_bytes(path):
+        if "holdout" in path.parts:
+            raise AssertionError("dev verification opened holdout bytes")
+        return original_read_bytes(path)
+
+    def guarded_read_text(path, *args, **kwargs):
+        if "holdout" in path.parts:
+            raise AssertionError("dev plan loading opened holdout text")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+    plans, manifest_hash, freeze_hash = load_case_plans("dev")
+
+    assert len(plans) == 8
+    assert len(manifest_hash) == 64
+    assert len(freeze_hash) == 64
+
+
 def test_holdout_tamper_fails_before_http(tmp_path):
     copied = tmp_path / "fixture"
     shutil.copytree(DATASET_ROOT, copied)
     target = copied / "holdout" / "EIL-H-01" / "chapter.md"
-    target.write_text(target.read_text(encoding="utf-8") + "\n篡改。\n", encoding="utf-8")
+    target.write_bytes(b"tampered fixture copy\n")
     api = NoCallApi()
 
     with pytest.raises(LiveEvaluationError, match="fixture_integrity_failed"):
@@ -897,8 +1173,8 @@ def test_cli_refuses_without_explicit_live_confirmation(tmp_path, capsys):
     assert not target.exists()
 
 
-def test_frozen_fixture_is_valid_without_running_a_model():
-    manifest, manifest_hash, freeze_hash = verify_frozen_dataset()
+def test_frozen_dev_fixture_is_valid_without_running_a_model():
+    manifest, manifest_hash, freeze_hash = verify_frozen_dataset(split="dev")
     assert manifest["dataset_id"] == "evidence-investigator-live-v1"
     assert len(manifest_hash) == 64
     assert len(freeze_hash) == 64

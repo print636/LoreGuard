@@ -7,6 +7,7 @@
 - PostgreSQL、Redis、API 与 Celery worker 已启动，并指向同一套服务配置。
 - `ENABLE_EVIDENCE_INVESTIGATOR=true`，真实模型凭据已通过服务端环境变量配置。为隔离被测能力，应关闭通用模型抽取与 issue evidence review；否则 runner 会拒绝把其它模型阶段先发现的问题归功于调查器。
 - 若要求真实混合检索，还需配置 embedding Provider，并保持调查器的 hybrid 要求开启。
+- API 与 worker 必须设置相同的 `LOREGUARD_BUILD_REVISION`，值为本次评测所用干净工作树的完整 Git commit SHA；修改代码后必须重新构建并更新该值。
 - 先固定模型、Prompt、RAG、预算和阈值；holdout 运行结果不得用于调参。
 - runner 会产生真实模型调用与费用，因此没有 `--confirm-live-provider` 时必定拒绝执行。
 
@@ -21,7 +22,15 @@ python scripts/run_evidence_investigator_live.py `
   --confirm-live-provider
 ```
 
-只有在配置冻结后才运行 holdout，并显式指定一个尚不存在的结果文件：
+先取得两次连续、互不重叠且配置指纹相同的合格 dev 产物：
+
+```powershell
+python scripts/check_evidence_investigator_dev_pair.py `
+  artifacts/evidence-investigator-live/dev-run-01.json `
+  artifacts/evidence-investigator-live/dev-run-02.json
+```
+
+只有 pair checker 通过后才运行一次 holdout，并显式指定一个尚不存在的结果文件：
 
 ```powershell
 python scripts/run_evidence_investigator_live.py `
@@ -32,6 +41,8 @@ python scripts/run_evidence_investigator_live.py `
 ```
 
 所有结果文件都采用“只创建、不覆盖”语义。默认文件名包含 UTC 时间和随机后缀；显式路径若已存在，runner 会退出而不会改写原始结果。每个案例有独立项目，超时后会尽力取消仍在运行的任务。
+
+冻结校验始终认证共享 manifest 与 freeze 索引，但 dev 运行只打开并哈希 dev 正文，holdout 运行才打开并哈希 holdout 正文；`verify_frozen_dataset(split=None)` 仅用于显式的离线全夹具审计。任何 holdout 篡改都会在建立 HTTP 客户端、创建项目或调用 Provider 前终止 holdout 运行。
 
 ## 结果边界
 
@@ -49,7 +60,13 @@ python scripts/run_evidence_investigator_live.py `
 - `wrong_candidate`：输出了错误问题、漏掉正例，或证据没有命中冻结授权行；
 - `runner_failure`：HTTP/协议/本地执行失败，不得计作模型主动 abstain。
 
-产物格式 `evidence-investigator-live-http-v2` 会逐案例保存脱敏的 capability isolation 证明：主模型抽取必须明确为 disabled、unconfigured、unused 且零逻辑/Provider 调用；`ai_evidence_review` 必须按服务分支契约缺席或明确关闭且零调用；运行级 prompt、completion 与 charged token 还必须和 Investigator 账本完全相等。任一条件不满足都会得到 `isolation_failure`，即使最终问题恰好命中也不能通过。
+产物格式 `evidence-investigator-live-http-v3` 会逐案例保存脱敏的 capability isolation 证明：主模型抽取必须明确为 disabled、unconfigured、unused 且零逻辑/Provider 调用；`ai_evidence_review` 必须按服务分支契约缺席或明确关闭且零调用；运行级 prompt、completion 与 charged token 还必须和 Investigator 账本完全相等。任一条件不满足都会得到 `isolation_failure`，即使最终问题恰好命中也不能通过。v2 及更早产物仅保留作历史记录，不能用于取得 dev pair 资格。
+
+### Dev 晋级门槛
+
+单次 dev 产物必须同时满足：固定的 8 案例结构（5 正例、3 负例）、strict 至少 5/8、正例至少 3/5、负例最终安全 3/3、Agent 主动 abstain 至少 2/3、正常终止至少 7/8、零错误新增、8/8 最终输出可观察、能力隔离与 promotion 计数均为 8/8。一次超时或 Provider 拒绝不会被伪装为安全通过：它既不算最终输出可观察，也不算主动 abstain；由于最终输出必须 8/8 可观察，实际晋级不允许此类失败。
+
+runtime provenance 还必须证明 API 与全部 worker 案例使用同一服务代码包哈希、Git revision、模型别名、relay hostname 与脱敏 endpoint 配置哈希、核心 Investigator 有效上限和 RAG profile/chunker 配置。产物不保存 API key 或完整 base URL。缺少任一 v3 provenance/gate 字段都会 fail closed；两次合格 dev 还必须具有同一 `reproducibility_fingerprint` 且时间不重叠。
 
 ### Summary 指标口径
 
@@ -68,6 +85,6 @@ python scripts/run_evidence_investigator_live.py `
 
 公共诊断接口会同时保存安全的 `budget_preflight` 和由其直接证明的有效 token 上限，并将跨案例一致值纳入 `safe_configuration_fingerprint`。这里不会从本地源码或 runner 参数猜测服务端的搜索次数、超时等未公开上限。每案的 `case_wall_latency_ms` 从建项前开始，到文档上传、异步分析、诊断和问题读取全部结束后停止；它是整次评测编排墙钟时间，不是分析接口或模型调用的 P95。
 
-调查器诊断还包括 reported prompt/completion、保守 charged token、RAG 策略/模式和 promotion 结果，以及与 Provider decision 分开统计的已执行工具、检索、读取和可恢复拒绝次数。Token 对账以顶层 `evidence_investigator.usage` 累计账本为准，因此即使 deadline 等边界令 `loop` 诊断缺席也不会丢失已发生调用；loop 内 Token 仅作为旧版诊断兼容回退，且不会和不完整的新账本混用。即使循环后续降级，服务仍能报告成功执行的工具数；旧版 completed-loop 诊断才使用“一次 Provider decision 对应一次已执行工具”的协议不变量。服务刻意不公开有效 Provider 身份与密钥配置，因此安全配置指纹不能被解释为上游部署身份的证明。
+调查器诊断还包括 reported prompt/completion、保守 charged token、RAG 策略/模式和 promotion 结果，以及与 Provider decision 分开统计的已执行工具、检索、读取和可恢复拒绝次数。Token 对账以顶层 `evidence_investigator.usage` 累计账本为准，因此即使 deadline 等边界令 `loop` 诊断缺席也不会丢失已发生调用；loop 内 Token 仅作为旧版诊断兼容回退，且不会和不完整的新账本混用。即使循环后续降级，服务仍能报告成功执行的工具数；旧版 completed-loop 诊断才使用“一次 Provider decision 对应一次已执行工具”的协议不变量。服务只公开评测所需的脱敏 Provider 配置身份，不能据此证明 relay 背后的实际模型权重或供应商部署。
 
 这是一套小型、开发者编写的 E2E 夹具，不是公开盲测基准。任何指标都必须来自保留的真实运行产物，不能从 mock 测试或结构校验推断。

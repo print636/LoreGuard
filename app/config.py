@@ -9,6 +9,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # Optional immutable revision embedded in API/worker runtime provenance.
+    # Real evaluation gates require the full commit SHA and fail closed when it
+    # is absent; ordinary development remains usable without it.
+    loreguard_build_revision: str = Field(
+        default="", max_length=64, pattern=r"^(?:|[a-f0-9]{40,64})$"
+    )
     database_url: str = "sqlite:///./loreguard.db"
     redis_url: str = "redis://localhost:6379/0"
     use_celery: bool = False
