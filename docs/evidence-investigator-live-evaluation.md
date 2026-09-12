@@ -41,7 +41,7 @@ python scripts/run_evidence_investigator_live.py `
 
 - `positive_added_issue`：规则类别、数量和冻结证据行均命中；
 - `active_abstain`：模型通过受控工具协议主动放弃；
-- `promotion_rejection`：模型提交了候选，但确定性 promotion 拒绝；
+- `promotion_rejection`：模型提交了候选，但确定性 promotion 拒绝；在负例上它可以使最终输出安全并按现有 strict 规则通过，但这只证明系统兜底生效，不等于 Agent 主动判断正确；
 - `agent_protocol_failure`：模型违反工具状态机或参数协议，例如重复动作、无效参数或多工具调用；
 - `isolation_failure`：主模型抽取或 AI 证据复核未关闭、发生调用，或运行级聊天用量无法与调查器账本对齐；该案例不得归因给 Investigator；
 - `provider_failure`：Provider 不可用、拒绝、响应契约失效，或出现未能细分的调查器降级；
@@ -50,6 +50,21 @@ python scripts/run_evidence_investigator_live.py `
 - `runner_failure`：HTTP/协议/本地执行失败，不得计作模型主动 abstain。
 
 产物格式 `evidence-investigator-live-http-v2` 会逐案例保存脱敏的 capability isolation 证明：主模型抽取必须明确为 disabled、unconfigured、unused 且零逻辑/Provider 调用；`ai_evidence_review` 必须按服务分支契约缺席或明确关闭且零调用；运行级 prompt、completion 与 charged token 还必须和 Investigator 账本完全相等。任一条件不满足都会得到 `isolation_failure`，即使最终问题恰好命中也不能通过。
+
+### Summary 指标口径
+
+`passed` / `failed` 和逐案例 `passed` 仍是原有 strict 判分，不会被下面的拆分指标替代。新增指标用于分清“发现了正确问题”“最终没有误报”“Agent 自己选择放弃”“确定性 promotion 拦住候选”和“链路正常结束”这几件不同的事：
+
+- `system_safety_rate = system_safe_cases / case_count`：只有成功读取到 completed 最终问题列表、且其中没有错误新增问题的案例才进入分子；无法观察最终输出的超时、Provider、runner 等失败仍保留在总分母中，不会被当成安全的零输出。正例漏报但没有错误新增可计为系统安全，同时会降低正例召回。
+- `erroneous_added_issue_count`：在可观察的最终输出中累计错误新增问题数；负例中的所有问题均为错误新增，正例只允许抵扣一个类别与冻结证据均匹配的目标问题。`final_output_observed_cases` 明示该计数覆盖了多少案例，未完成案例属于未知而不是零错误。
+- `capability_isolation_verified` / `capability_isolation_rate`：通过能力隔离证明的案例数及其占全部案例的比例；它只说明结果可归因于 Investigator，不说明结果正确。
+- `positive_recall = positive_passed / positive_cases`：strict 通过的正例数除以正例总数。
+- `negative_safety_rate = negative_safe_cases / negative_cases`：最终可观察且没有错误新增问题的负例数除以负例总数；未完成或无法观察最终输出的负例不进入分子。
+- `agent_active_abstain_rate = negative_active_abstain_cases / negative_cases`：分类为 `active_abstain` 的负例数除以负例总数。`promotion_rejection` 不计入该分子，因为它表示 Agent 已提交候选、随后被确定性层拒绝。
+- `promotion_acceptance_rate = promotion_accepted_candidates / promotion_submitted_candidates`：对具有合法 submitted/accepted 诊断的案例汇总后计算；`promotion_accounting_observed_cases` 给出诊断覆盖案例数。没有任何提交时 rate 为 `null`，而不是 0。
+- `normal_termination_rate = normally_terminated_cases / case_count`：分类不属于 `timeout_or_budget`、`provider_failure`、`runner_failure`、`isolation_failure` 或 `agent_protocol_failure` 的案例比例。它衡量正常收束，不衡量答案正确性。
+
+因此，负例的 `promotion_rejection` 可能同时表现为 strict 通过、系统安全，但 Agent 主动弃权率不会因此上升。评估 Agent 判断能力时应同时查看正例召回、主动弃权率和 promotion 接受率，不能只引用系统安全率。
 
 公共诊断接口会同时保存安全的 `budget_preflight` 和由其直接证明的有效 token 上限，并将跨案例一致值纳入 `safe_configuration_fingerprint`。这里不会从本地源码或 runner 参数猜测服务端的搜索次数、超时等未公开上限。每案的 `case_wall_latency_ms` 从建项前开始，到文档上传、异步分析、诊断和问题读取全部结束后停止；它是整次评测编排墙钟时间，不是分析接口或模型调用的 P95。
 

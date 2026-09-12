@@ -9,16 +9,20 @@ from pathlib import Path
 import pytest
 
 from scripts.run_evidence_investigator_live import (
+    CasePlan,
     DATASET_ROOT,
     GroundTruth,
     HttpApiError,
     LiveEvaluationError,
     RunnerOptions,
+    SourceDocument,
     UrllibJsonApi,
+    _build_outcome_summary,
     _classify,
     _safe_capability_isolation,
     _safe_diagnostics,
     _service_reported_effective_limits,
+    _target_evidence_match,
     build_parser,
     load_case_plans,
     main,
@@ -233,6 +237,31 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(tmp_path):
         "positive_added_issue": 5,
     }
     assert artifact["summary"]["capability_isolation_verified"] == 8
+    expected_outcome_metrics = {
+        "final_output_observed_cases": 8,
+        "system_safe_cases": 8,
+        "system_safety_rate": 1.0,
+        "erroneous_added_issue_count": 0,
+        "capability_isolation_verified": 8,
+        "capability_isolation_rate": 1.0,
+        "positive_cases": 5,
+        "positive_passed": 5,
+        "positive_recall": 1.0,
+        "negative_cases": 3,
+        "negative_safe_cases": 3,
+        "negative_safety_rate": 1.0,
+        "negative_active_abstain_cases": 3,
+        "agent_active_abstain_rate": 1.0,
+        "promotion_accounting_observed_cases": 8,
+        "promotion_submitted_candidates": 5,
+        "promotion_accepted_candidates": 5,
+        "promotion_acceptance_rate": 1.0,
+        "normally_terminated_cases": 8,
+        "normal_termination_rate": 1.0,
+    }
+    assert {
+        key: artifact["summary"][key] for key in expected_outcome_metrics
+    } == expected_outcome_metrics
     assert artifact["safe_configuration"][
         "service_reported_effective_limits"
     ] == {
@@ -275,6 +304,218 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(tmp_path):
     assert all(document.content not in persisted for plan in plans for document in plan.documents)
 
 
+def test_outcome_summary_separates_safety_agent_judgment_and_liveness():
+    def result(
+        *,
+        expected_decision,
+        classification,
+        passed,
+        counts,
+        evidence_match=False,
+        authorized=True,
+        submitted=0,
+        accepted=0,
+        isolated=True,
+        run_status="completed",
+    ):
+        return {
+            "expected_decision": expected_decision,
+            "expected_issue_category": "fact_conflict",
+            "classification": classification,
+            "passed": passed,
+            "run_status": run_status,
+            "issue_category_counts": counts,
+            "citation_scope_authorized": authorized,
+            "target_evidence_match": evidence_match,
+            "investigator": {
+                "promotion": {
+                    "submitted_candidates": submitted,
+                    "accepted_candidates": accepted,
+                }
+            },
+            "capability_isolation": (
+                {"verified": isolated} if isolated is not None else None
+            ),
+        }
+
+    results = [
+        result(
+            expected_decision="added_issue",
+            classification="positive_added_issue",
+            passed=True,
+            counts={"fact_conflict": 1},
+            evidence_match=True,
+            submitted=1,
+            accepted=1,
+        ),
+        result(
+            expected_decision="added_issue",
+            classification="wrong_candidate",
+            passed=False,
+            counts={"world_rule_conflict": 2},
+            evidence_match=False,
+            submitted=2,
+            accepted=1,
+        ),
+        result(
+            expected_decision="abstain",
+            classification="active_abstain",
+            passed=True,
+            counts={},
+        ),
+        result(
+            expected_decision="abstain",
+            classification="promotion_rejection",
+            passed=True,
+            counts={},
+            submitted=1,
+            accepted=0,
+        ),
+        result(
+            expected_decision="abstain",
+            classification="timeout_or_budget",
+            passed=False,
+            counts={},
+            authorized=None,
+            isolated=None,
+            run_status=None,
+        ),
+    ]
+
+    assert _build_outcome_summary(results) == {
+        "final_output_observed_cases": 4,
+        "system_safe_cases": 3,
+        "system_safety_rate": 0.6,
+        "erroneous_added_issue_count": 2,
+        "capability_isolation_verified": 4,
+        "capability_isolation_rate": 0.8,
+        "positive_cases": 2,
+        "positive_passed": 1,
+        "positive_recall": 0.5,
+        "negative_cases": 3,
+        "negative_safe_cases": 2,
+        "negative_safety_rate": 0.666667,
+        "negative_active_abstain_cases": 1,
+        "agent_active_abstain_rate": 0.333333,
+        "promotion_accounting_observed_cases": 5,
+        "promotion_submitted_candidates": 4,
+        "promotion_accepted_candidates": 2,
+        "promotion_acceptance_rate": 0.5,
+        "normally_terminated_cases": 4,
+        "normal_termination_rate": 0.8,
+    }
+
+
+def test_target_evidence_requires_one_issue_to_cover_every_required_span():
+    ground_truth = GroundTruth(
+        decision="added_issue",
+        issue_category="fact_conflict",
+        added_issue_count=1,
+        allowed_evidence=(("canon", 1, 1), ("chapter", 2, 2)),
+    )
+    split_across_issues = [
+        {"category": "fact_conflict", "spans": (("canon", 1, 1),)},
+        {"category": "fact_conflict", "spans": (("chapter", 2, 2),)},
+    ]
+    one_complete_issue = [
+        {
+            "category": "fact_conflict",
+            "spans": (("canon", 1, 1), ("chapter", 2, 2)),
+        }
+    ]
+    no_evidence_ground_truth = GroundTruth(
+        decision="added_issue",
+        issue_category="fact_conflict",
+        added_issue_count=1,
+        allowed_evidence=(),
+    )
+
+    assert _target_evidence_match(split_across_issues, ground_truth) is False
+    assert _target_evidence_match(one_complete_issue, ground_truth) is True
+    assert _target_evidence_match(one_complete_issue, no_evidence_ground_truth) is False
+
+    summary = _build_outcome_summary(
+        [
+            {
+                "expected_decision": "added_issue",
+                "expected_issue_category": "fact_conflict",
+                "classification": "wrong_candidate",
+                "passed": False,
+                "run_status": "completed",
+                "issue_category_counts": {"fact_conflict": 2},
+                "citation_scope_authorized": True,
+                "target_evidence_match": False,
+                "investigator": {"promotion": {}},
+                "capability_isolation": {"verified": True},
+            }
+        ]
+    )
+    assert summary["erroneous_added_issue_count"] == 2
+    assert summary["system_safe_cases"] == 0
+
+
+def test_mock_http_e2e_persists_split_outcome_metrics_without_frozen_fixture_read(
+    tmp_path, monkeypatch
+):
+    def document(logical_id, role, content):
+        return SourceDocument(
+            logical_id=logical_id,
+            filename=f"{logical_id}.md",
+            content=content,
+            role=role,
+            story_scope="synthetic",
+            line_count=1,
+        )
+
+    positive = CasePlan(
+        case_id="SYN-P-01",
+        split="dev",
+        documents=(
+            document("canon", "canon", "Synthetic canon."),
+            document("chapter", "chapter", "Synthetic contradiction."),
+        ),
+        ground_truth=GroundTruth(
+            decision="added_issue",
+            issue_category="fact_conflict",
+            added_issue_count=1,
+            allowed_evidence=(("canon", 1, 1), ("chapter", 1, 1)),
+        ),
+    )
+    negative = CasePlan(
+        case_id="SYN-N-01",
+        split="dev",
+        documents=(
+            document("canon", "canon", "Synthetic canon."),
+            document("chapter", "chapter", "Synthetic compatible event."),
+        ),
+        ground_truth=GroundTruth(
+            decision="abstain",
+            issue_category="fact_conflict",
+            added_issue_count=0,
+            allowed_evidence=(),
+        ),
+    )
+    plans = (positive, negative)
+    monkeypatch.setattr(
+        "scripts.run_evidence_investigator_live.load_case_plans",
+        lambda split, dataset_root: (plans, "a" * 64, "b" * 64),
+    )
+
+    artifact, _ = run_live_evaluation(options(tmp_path), api=FixtureHttpApi(plans))
+
+    assert artifact["summary"]["passed"] == 2
+    assert artifact["summary"]["system_safety_rate"] == 1.0
+    assert artifact["summary"]["capability_isolation_verified"] == 2
+    assert artifact["summary"]["positive_recall"] == 1.0
+    assert artifact["summary"]["negative_safety_rate"] == 1.0
+    assert artifact["summary"]["agent_active_abstain_rate"] == 1.0
+    assert artifact["summary"]["promotion_acceptance_rate"] == 1.0
+    assert artifact["summary"]["normal_termination_rate"] == 1.0
+    assert artifact["summary"]["erroneous_added_issue_count"] == 0
+    persisted = json.loads((tmp_path / "dev-result.json").read_text(encoding="utf-8"))
+    assert persisted["summary"] == artifact["summary"]
+
+
 def _investigator_diagnostics(*, reason="completed", outcome="completed"):
     return {
         "available": True,
@@ -314,7 +555,12 @@ def _isolation(*, verified=True):
 
 @pytest.mark.parametrize(
     "protocol_reason",
-    ["repeated_action", "invalid_tool_arguments", "multiple_tool_calls"],
+    [
+        "repeated_action",
+        "invalid_tool_arguments",
+        "multiple_tool_calls",
+        "anchor_evidence_reused",
+    ],
 )
 def test_classification_separates_agent_protocol_and_isolation_failures(
     protocol_reason,

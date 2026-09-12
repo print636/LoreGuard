@@ -149,6 +149,7 @@ AGENT_PROTOCOL_FAILURE_REASONS = frozenset(
         "unknown_result_ref",
         "unknown_span_ref",
         "candidate_kind_forbidden",
+        "anchor_evidence_reused",
         "repeated_action",
         "repeated_query",
         "no_progress",
@@ -1035,13 +1036,14 @@ def _observed_issues(
 def _target_evidence_match(
     issues: Sequence[dict[str, Any]], ground_truth: GroundTruth
 ) -> bool:
-    target_spans = {
-        span
+    required_spans = frozenset(ground_truth.allowed_evidence)
+    if not required_spans:
+        return False
+    return any(
+        issue["category"] == ground_truth.issue_category
+        and required_spans.issubset(frozenset(issue["spans"]))
         for issue in issues
-        if issue["category"] == ground_truth.issue_category
-        for span in issue["spans"]
-    }
-    return all(required in target_spans for required in ground_truth.allowed_evidence)
+    )
 
 
 def _reason_from_diagnostics(diagnostics: dict[str, Any]) -> str | None:
@@ -1350,6 +1352,149 @@ def _percentile(values: Sequence[int], percentile: float) -> int | None:
     return ordered[index]
 
 
+def _rate(numerator: int, denominator: int) -> float | None:
+    if denominator == 0:
+        return None
+    return round(numerator / denominator, 6)
+
+
+def _erroneous_added_issue_count(result: dict[str, Any]) -> int | None:
+    """Count final issues that cannot be credited to the frozen expectation.
+
+    A missing/failed final response is unknown rather than zero.  For a positive
+    case, at most the one fixture-authorized, correctly cited target issue can be
+    credited; every other returned issue is an erroneous addition.  Every issue
+    returned for an abstain case is erroneous.
+    """
+
+    counts = result.get("issue_category_counts")
+    if (
+        result.get("run_status") != "completed"
+        or type(counts) is not dict
+        or result.get("citation_scope_authorized") is None
+    ):
+        return None
+    safe_counts: dict[str, int] = {}
+    for category, count in counts.items():
+        if category not in ISSUE_CATEGORIES or _safe_int(count) is None:
+            return None
+        safe_counts[category] = count
+    total = sum(safe_counts.values())
+    if result.get("expected_decision") == "abstain":
+        return total
+    if result.get("expected_decision") != "added_issue":
+        return None
+    expected_category = result.get("expected_issue_category")
+    if expected_category not in ISSUE_CATEGORIES:
+        return None
+    credited = 0
+    if (
+        result.get("citation_scope_authorized") is True
+        and result.get("target_evidence_match") is True
+    ):
+        # Frozen v1 cases allow exactly one expected addition.
+        credited = min(safe_counts.get(expected_category, 0), 1)
+    return total - credited
+
+
+def _build_outcome_summary(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Build orthogonal safety, capability and liveness metrics.
+
+    These intentionally do not replace the strict per-case ``passed`` score.
+    In particular, a deterministic promotion rejection may keep a negative case
+    safe without proving that the Agent itself chose the correct abstain action.
+    """
+
+    case_count = len(results)
+    positive_cases = sum(
+        result.get("expected_decision") == "added_issue" for result in results
+    )
+    negative_cases = sum(
+        result.get("expected_decision") == "abstain" for result in results
+    )
+    positive_passed = sum(
+        result.get("expected_decision") == "added_issue"
+        and result.get("passed") is True
+        for result in results
+    )
+
+    erroneous_counts = [_erroneous_added_issue_count(result) for result in results]
+    final_output_observed = sum(count is not None for count in erroneous_counts)
+    system_safe_cases = sum(count == 0 for count in erroneous_counts)
+    erroneous_added_issues = sum(
+        count for count in erroneous_counts if count is not None
+    )
+    negative_safe_cases = sum(
+        result.get("expected_decision") == "abstain" and count == 0
+        for result, count in zip(results, erroneous_counts, strict=True)
+    )
+    negative_active_abstain_cases = sum(
+        result.get("expected_decision") == "abstain"
+        and result.get("classification") == "active_abstain"
+        for result in results
+    )
+
+    isolation_verified = sum(
+        type(result.get("capability_isolation")) is dict
+        and result["capability_isolation"].get("verified") is True
+        for result in results
+    )
+    promotion_submitted = 0
+    promotion_accepted = 0
+    promotion_accounting_observed = 0
+    for result in results:
+        investigator = result.get("investigator")
+        promotion = (
+            investigator.get("promotion")
+            if type(investigator) is dict
+            and type(investigator.get("promotion")) is dict
+            else {}
+        )
+        submitted = _safe_int(promotion.get("submitted_candidates"))
+        accepted = _safe_int(promotion.get("accepted_candidates"))
+        if submitted is None or accepted is None or accepted > submitted:
+            continue
+        promotion_accounting_observed += 1
+        promotion_submitted += submitted
+        promotion_accepted += accepted
+
+    normal_termination_classes = {
+        "positive_added_issue",
+        "active_abstain",
+        "promotion_rejection",
+        "wrong_candidate",
+    }
+    normally_terminated = sum(
+        result.get("classification") in normal_termination_classes for result in results
+    )
+    return {
+        "final_output_observed_cases": final_output_observed,
+        "system_safe_cases": system_safe_cases,
+        "system_safety_rate": _rate(system_safe_cases, case_count),
+        "erroneous_added_issue_count": erroneous_added_issues,
+        "capability_isolation_verified": isolation_verified,
+        "capability_isolation_rate": _rate(isolation_verified, case_count),
+        "positive_cases": positive_cases,
+        "positive_passed": positive_passed,
+        "positive_recall": _rate(positive_passed, positive_cases),
+        "negative_cases": negative_cases,
+        "negative_safe_cases": negative_safe_cases,
+        "negative_safety_rate": _rate(negative_safe_cases, negative_cases),
+        "negative_active_abstain_cases": negative_active_abstain_cases,
+        "agent_active_abstain_rate": _rate(
+            negative_active_abstain_cases, negative_cases
+        ),
+        "promotion_accounting_observed_cases": promotion_accounting_observed,
+        "promotion_submitted_candidates": promotion_submitted,
+        "promotion_accepted_candidates": promotion_accepted,
+        "promotion_acceptance_rate": _rate(
+            promotion_accepted, promotion_submitted
+        ),
+        "normally_terminated_cases": normally_terminated,
+        "normal_termination_rate": _rate(normally_terminated, case_count),
+    }
+
+
 def _safe_health(value: Any) -> dict[str, Any]:
     root = _require_object(value)
     model = root.get("model") if type(root.get("model")) is dict else {}
@@ -1492,11 +1637,7 @@ def run_live_evaluation(
     classifications = Counter(result["classification"] for result in results)
     case_wall_latencies = [result["case_wall_latency_ms"] for result in results]
     passed = sum(result["passed"] is True for result in results)
-    isolation_verified = sum(
-        type(result.get("capability_isolation")) is dict
-        and result["capability_isolation"].get("verified") is True
-        for result in results
-    )
+    outcome_summary = _build_outcome_summary(results)
     artifact = {
         "schema_version": ARTIFACT_SCHEMA,
         "dataset_id": DATASET_ID,
@@ -1515,7 +1656,7 @@ def run_live_evaluation(
             "case_count": len(results),
             "passed": passed,
             "failed": len(results) - passed,
-            "capability_isolation_verified": isolation_verified,
+            **outcome_summary,
             "classification_counts": dict(sorted(classifications.items())),
             "case_wall_latency_ms_p50": _percentile(
                 case_wall_latencies, 0.50
