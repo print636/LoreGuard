@@ -9,10 +9,10 @@ from typing import Annotated, Literal
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import func, select, update
 
 from .config import get_settings
@@ -21,6 +21,7 @@ from .document_diff import build_document_diff
 from .docx_import import DocxImportError, extract_docx_text
 from .domain import CertaintyLevel, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
 from .evaluation import run_evaluation
+from .observability import AnalysisMetricsUnavailable, render_analysis_metrics
 from .projections import project_graph, project_timeline, record_sort_key
 from .provider import (
     OpenAICompatibleProvider,
@@ -31,10 +32,6 @@ from .provider import (
 from .rate_limit import SlidingWindowLimiter, WriteRateLimitMiddleware
 from .service import DEFAULT_DOCUMENT_ROLE, DEFAULT_STORY_SCOPE, MISSING_SNAPSHOT_ERROR, capture_run_inputs, copy_run_inputs, execute_analysis, run_input_metadata, safe_persisted_analysis_error
 from .time_utils import utc_now_naive
-
-RUNS = Counter("loreguard_analysis_runs_total", "Analysis runs", ["status"])
-LATENCY = Histogram("loreguard_analysis_seconds", "Analysis duration")
-
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -737,7 +734,6 @@ def start_analysis(project_id: str) -> dict:
         db.commit()
         run_id = run.id
     dispatch_analysis(run_id)
-    RUNS.labels(status="queued").inc()
     return {"id": run_id, "status": "queued"}
 
 
@@ -1055,7 +1051,24 @@ def evaluation(evaluation_id: str) -> dict:
 
 @app.get("/metrics")
 def metrics():
-    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    try:
+        database_metrics = render_analysis_metrics(SessionLocal)
+    except AnalysisMetricsUnavailable:
+        body = (
+            "# HELP loreguard_analysis_metrics_database_available "
+            "Whether this analysis metrics scrape was derived from the database.\n"
+            "# TYPE loreguard_analysis_metrics_database_available gauge\n"
+            "loreguard_analysis_metrics_database_available 0\n"
+        )
+        return Response(
+            content=body,
+            status_code=503,
+            media_type=CONTENT_TYPE_LATEST,
+        )
+    return Response(
+        content=generate_latest() + database_metrics,
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 # Production build can be experienced with one Python process. API routes are
