@@ -1143,7 +1143,7 @@ def _clone_envelope(
         type(seed_ref) is not str
         or re.fullmatch(SEED_REF_PATTERN, seed_ref) is None
         or type(payloads) is not tuple
-        or not 1 <= len(payloads) <= 2
+        or len(payloads) != 1
         or type(hashes) is not tuple
         or len(hashes) != len(payloads)
     ):
@@ -1237,7 +1237,7 @@ def _validate_kind_shape(kind: str, attrs: dict[str, str]) -> None:
             allowed_values = (
                 {"disabled", "allowed"}
                 if kind == "world_rule"
-                else {"performed", "disabled", "allowed", "denied"}
+                else {"performed", "disabled", "allowed"}
             )
             if attrs["value"] not in allowed_values:
                 raise _CandidateRejected("candidate_shape_invalid")

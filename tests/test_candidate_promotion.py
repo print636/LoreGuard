@@ -708,6 +708,33 @@ def test_scope_action_assertion_rejects_free_form_value_cooccurrence():
     assert dict(result.rejection_counts) == {"candidate_shape_invalid": 1}
 
 
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "北塔明确拒绝岚的跃迁授权。",
+        "岚没有获得在北塔跃迁的许可。",
+        "北塔禁止向岚授予跃迁许可。",
+    ],
+)
+def test_denied_scope_action_cannot_be_promoted_as_a_conflicting_world_assert(
+    candidate_text,
+):
+    result, *_ = _promote(
+        IssueCategory.world_rule_conflict,
+        candidate_text=candidate_text,
+        candidate_fields={
+            "key": "scope_action:北塔:跃迁",
+            "value": "denied",
+            "actor": "岚",
+        },
+    )
+
+    assert result.accepted_candidates == 0
+    assert not result.added_issues
+    assert not result.issues
+    assert dict(result.rejection_counts) == {"candidate_shape_invalid": 1}
+
+
 def test_authorized_span_hash_and_full_source_line_are_rechecked():
     baseline, seed, envelope, resolver = _prepared_case(IssueCategory.fact_conflict)
     forged = replace(envelope, authorized_span_hashes=("0" * 64,))
@@ -1144,71 +1171,26 @@ def test_tampered_envelope_is_rejected_before_json_semantics():
         )
 
 
-def test_explicit_candidate_limit_counts_excess_without_partial_overflow():
-    baseline, seed, envelope, resolver = _prepared_case(IssueCategory.fact_conflict)
+def test_multi_candidate_envelope_is_invalid_before_promotion_budgeting():
+    _, seed, envelope, _ = _prepared_case(IssueCategory.fact_conflict)
     first_candidate = envelope.candidates[0]
     second_candidate = first_candidate.model_copy(
         update={"span_ref": f"span_{'B' * 16}"},
         deep=True,
     )
-    expanded_envelope = UntrustedCandidateEnvelope.create(
-        seed_ref=seed.seed_ref,
-        candidates=(first_candidate, second_candidate),
-        authorized_span_hashes=(
-            envelope.authorized_span_hashes[0],
-            envelope.authorized_span_hashes[0],
-        ),
-    )
-    internal = next(iter(resolver._bindings.values()))
-    snapshot = next(iter(resolver._documents))
-
-    def binding(candidate, payload):
-        return AuthorizedCandidateBinding(
+    with pytest.raises(ValueError, match="untrusted candidate envelope"):
+        UntrustedCandidateEnvelope.create(
             seed_ref=seed.seed_ref,
-            candidate_payload=payload,
-            span_ref=candidate.span_ref,
-            snapshot=snapshot,
-            line_start=internal.line_start,
-            line_end=internal.line_end,
-            char_start=internal.char_start,
-            char_end=internal.char_end,
-            text=internal.text,
-            text_sha256=internal.text_sha256,
-            authorized_span_char_start=internal.authorized_span_char_start,
-            authorized_span_char_end=internal.authorized_span_char_end,
-            authorized_span_sha256=internal.authorized_span_sha256,
+            candidates=(first_candidate, second_candidate),
+            authorized_span_hashes=(
+                envelope.authorized_span_hashes[0],
+                envelope.authorized_span_hashes[0],
+            ),
         )
 
-    expanded_resolver = CandidateEvidenceResolver(
-        scope=resolver._scope,
-        documents=tuple(resolver._contexts.values()),
-        investigator_result=_completed_result(
-            (expanded_envelope,),
-            tuple(
-                binding(candidate, payload)
-                for candidate, payload in zip(
-                    expanded_envelope.candidates,
-                    expanded_envelope.candidate_payloads,
-                    strict=True,
-                )
-            ),
-        ),
-    )
-    result = promote_investigator_candidates(
-        baseline_directives=(baseline,),
-        baseline_issues=(),
-        envelopes=(expanded_envelope,),
-        seeds=(seed,),
-        evidence_resolver=expanded_resolver,
-        limits=CandidatePromotionLimits(max_candidates=1),
-    )
-    assert result.submitted_candidates == 2
-    assert result.accepted_candidates == 1
-    assert dict(result.rejection_counts) == {"candidate_budget": 1}
 
-
-def test_candidate_choice_is_stable_across_fresh_opaque_refs_and_tool_order():
-    lines = ("岚的发色是银色。", "岚的发色是黑色。", "岚的发色是紫色。")
+def test_candidate_identity_is_stable_across_fresh_opaque_refs():
+    lines = ("岚的发色是银色。", "岚的发色是黑色。")
     content = "\n".join(lines)
     baseline = _directive(
         "fact", {"subject": "岚", "predicate": "发色", "value": "银色"}, 1, lines[0]
@@ -1234,66 +1216,51 @@ def test_candidate_choice_is_stable_across_fresh_opaque_refs_and_tool_order():
         ),
     )
 
-    def run(order, refs):
-        candidates = []
-        bindings_by_line = {}
-        for line_number, span_ref in zip(order, refs, strict=True):
-            value = "黑色" if line_number == 2 else "紫色"
-            candidate = CandidateRecordSubmission.model_validate(
-                {
-                    "kind": "fact",
-                    "span_ref": span_ref,
-                    "source_line_start": line_number,
-                    "source_line_end": line_number,
-                    "fields": {
-                        "subject": "岚",
-                        "predicate": "发色",
-                        "value": value,
-                    },
-                }
-            )
-            candidates.append(candidate)
-            char_start = sum(len(row) + 1 for row in lines[: line_number - 1])
-            text = lines[line_number - 1]
-            bindings_by_line[line_number] = (char_start, text)
+    def run(span_ref):
+        line_number = 2
+        candidate = CandidateRecordSubmission.model_validate(
+            {
+                "kind": "fact",
+                "span_ref": span_ref,
+                "source_line_start": line_number,
+                "source_line_end": line_number,
+                "fields": {
+                    "subject": "岚",
+                    "predicate": "发色",
+                    "value": "黑色",
+                },
+            }
+        )
+        text = lines[line_number - 1]
+        span_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        char_start = len(lines[0]) + 1
         envelope = UntrustedCandidateEnvelope.create(
             seed_ref=seed.seed_ref,
-            candidates=tuple(candidates),
-            authorized_span_hashes=tuple(
-                hashlib.sha256(lines[line - 1].encode("utf-8")).hexdigest()
-                for line in order
-            ),
+            candidates=(candidate,),
+            authorized_span_hashes=(span_hash,),
         )
-        bindings = []
-        for line_number, candidate, payload, span_hash in zip(
-            order,
-            candidates,
-            envelope.candidate_payloads,
-            envelope.authorized_span_hashes,
-            strict=True,
-        ):
-            char_start, text = bindings_by_line[line_number]
-            bindings.append(
-                AuthorizedCandidateBinding(
-                    seed_ref=seed.seed_ref,
-                    candidate_payload=payload,
-                    span_ref=candidate.span_ref,
-                    snapshot=snapshot,
-                    line_start=line_number,
-                    line_end=line_number,
-                    char_start=char_start,
-                    char_end=char_start + len(text),
-                    text=text,
-                    text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                    authorized_span_char_start=char_start,
-                    authorized_span_char_end=char_start + len(text),
-                    authorized_span_sha256=span_hash,
-                )
-            )
+        binding = AuthorizedCandidateBinding(
+            seed_ref=seed.seed_ref,
+            candidate_payload=envelope.candidate_payloads[0],
+            span_ref=candidate.span_ref,
+            snapshot=snapshot,
+            line_start=line_number,
+            line_end=line_number,
+            char_start=char_start,
+            char_end=char_start + len(text),
+            text=text,
+            text_sha256=span_hash,
+            authorized_span_char_start=char_start,
+            authorized_span_char_end=char_start + len(text),
+            authorized_span_sha256=span_hash,
+        )
         resolver = CandidateEvidenceResolver(
             scope=scope,
             documents=contexts,
-            investigator_result=_completed_result((envelope,), tuple(bindings)),
+            investigator_result=_completed_result(
+                (envelope,),
+                (binding,),
+            )
         )
         return promote_investigator_candidates(
             baseline_directives=(baseline,),
@@ -1302,8 +1269,8 @@ def test_candidate_choice_is_stable_across_fresh_opaque_refs_and_tool_order():
             evidence_resolver=resolver,
         )
 
-    first = run((3, 2), (f"span_{'C' * 16}", f"span_{'D' * 16}"))
-    second = run((2, 3), (f"span_{'E' * 16}", f"span_{'F' * 16}"))
+    first = run(f"span_{'C' * 16}")
+    second = run(f"span_{'D' * 16}")
 
     assert first.accepted_candidates == second.accepted_candidates == 1
     assert first.promoted_directives[0].evidence.line_start == 2

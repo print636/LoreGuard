@@ -300,6 +300,9 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
             ),
         }
     }
+    assert "一肯定一明确否定" in prompts[0]["current_seed"][
+        "candidate_field_contracts"
+    ]["fact"]["semantic_guidance"]
     assert prompts[0]["current_seed"]["family_semantic_guidance"] == (
         "只调查同一主体同一属性的同时冲突：肯定取值互异，或同一取值一肯定一明确否定。"
         "只有两条记录都有合法、精确且可排序的 time，并且 time 不同，才把明确的状态"
@@ -307,7 +310,8 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
         "time 相同，仍按真实冲突规则判断，不得仅因状态转变措辞而放弃。"
     )
     assert prompts[0]["current_seed"]["source_line_guidance"] == (
-        "选择支持候选全部字段的最小充分行范围；不得覆盖 anchor 证据行。"
+        "一次 READ 后进入 verdict；选择最直接支持完整非 anchor 新记录的最小充分"
+        "范围，不要只读背景，且不得覆盖 anchor 证据行。"
     )
     assert "time" not in prompts[0]["current_seed"]["anchor"]["fields"]
     assert [row["remaining_limits"]["round_no"] for row in prompts] == [1, 2, 3]
@@ -342,7 +346,15 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
         "rule_preconditions",
         "uncertainty_policy",
     }
-    assert "最终冲突判断" in checklist["submission_boundary"]
+    assert "anchor.fields 已由服务端接受" in checklist["submission_boundary"]
+    assert "无需重证" in checklist["submission_boundary"]
+    assert "必须只提交这一条" in checklist["submission_boundary"]
+    assert "没有否认候选关系已发生的阻断" in checklist[
+        "submission_boundary"
+    ]
+    assert "明确否定型 fact 不属于此类阻断" in checklist[
+        "submission_boundary"
+    ]
     assert "安全兜底" in checklist["submission_boundary"]
     assert "逐字段核对" in checklist["field_copy_rule"]
     assert "identity/join 字段或字段分量" in checklist["field_copy_rule"]
@@ -355,19 +367,41 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
     assert "除此以外的普通自由文本字段才必须" in checklist["field_copy_rule"]
     assert "绝对行号" in checklist["field_copy_rule"]
     assert "time 与 anchor 兼容" in checklist["rule_preconditions"]
-    assert "ABSTAIN 是正确终局" in checklist["uncertainty_policy"]
+    assert "只核对 candidate 新记录" in checklist["rule_preconditions"]
+    assert "不重证 anchor" in checklist["rule_preconditions"]
+    assert "仍缺失、矛盾或确有多义" in checklist["uncertainty_policy"]
+    assert "臆测未陈述例外" in checklist["uncertainty_policy"]
+    assert "不是默认答案" in checklist["uncertainty_policy"]
     verdict_tools = {
         tool.name: tool.description for tool in provider.requests[2]["tools"]
     }
-    assert "最终确认" in verdict_tools["SUBMIT_VERDICT"]
+    read_tools = {
+        tool.name: tool.description for tool in provider.requests[1]["tools"]
+    }
+    assert "最直接支持一条完整非 anchor 新记录" in read_tools["READ_SPAN"]
+    assert "一条最佳非 anchor 新记录" in verdict_tools["SUBMIT_VERDICT"]
     assert "安全兜底" in verdict_tools["SUBMIT_VERDICT"]
     assert "不得用于试探" in verdict_tools["SUBMIT_VERDICT"]
     assert "正确终局" in verdict_tools["ABSTAIN"]
+    assert "不是默认答案" in verdict_tools["ABSTAIN"]
+    submit_schema = next(
+        tool.parameters
+        for tool in provider.requests[2]["tools"]
+        if tool.name == "SUBMIT_VERDICT"
+    )
+    assert submit_schema["properties"]["candidates"]["minItems"] == 1
+    assert submit_schema["properties"]["candidates"]["maxItems"] == 1
     assert all(
-        "validator 只做安全兜底" in request["system"]
+        "current_seed.anchor.fields 是服务端已接受" in request["system"]
+        and "必须只 SUBMIT 这一条" in request["system"]
+        and "证据没有否认候选关系已发生" in request["system"]
+        and "候选本身为明确否定型 fact 不算" in request["system"]
+        and "臆测未陈述例外均不是理由" in request["system"]
         and "ABSTAIN 是正确终局" in request["system"]
+        and "不是默认或更安全的答案" in request["system"]
         for request in provider.requests
     )
+    assert all("无显式否定、" not in request["system"] for request in provider.requests)
     assert all(row["tool_choice"] == "required" for row in provider.requests)
     assert all(row["limits"].max_calls == 1 for row in provider.requests)
     assert len(retriever.requests) == 1
@@ -504,7 +538,11 @@ def test_knowledge_evidence_guidance_is_present_in_model_visible_prompt():
             "uses",
             (
                 "许可、授权、计划、准备或演示安排",
-                "不等于使用已经发生",
+                "不等于实际使用",
+                "anchor 的 owner 在 candidate time 仍适用",
+                "不同 user 明确实际使用该 item",
+                "应提交 uses",
+                "不得臆测未陈述的交接或例外",
             ),
         ),
     ],
@@ -529,8 +567,50 @@ def test_family_guidance_keeps_fact_and_item_decisions_conservative():
     assert "仍按真实冲突规则判断" in fact
     assert "不得仅因状态转变措辞而放弃" in fact
     assert "许可、授权、计划、准备或演示安排" in item
-    assert "不证明交接已经发生" in item
-    assert "不证明物品已经被使用" in item
+    assert "不证明交接或实际使用" in item
+    assert "anchor 的 owner 在 candidate time 仍适用" in item
+    assert "不同 user 明确实际使用该 item" in item
+    assert "应提交 uses" in item
+    assert "不得臆测未陈述的交接或例外" in item
+
+
+@pytest.mark.parametrize(
+    ("family", "positive_boundary", "negative_boundary"),
+    [
+        (
+            IssueCategory.fact_conflict,
+            "肯定取值互异",
+            "阶段演进并 ABSTAIN",
+        ),
+        (
+            IssueCategory.location_collision,
+            "同一参与者在同一精确时间",
+            "只是相邻时刻时必须 ABSTAIN",
+        ),
+        (
+            IssueCategory.knowledge_without_acquisition,
+            "应提交 knows",
+            "猜测、试探、假口令、错误信息",
+        ),
+        (
+            IssueCategory.item_ownership,
+            "应提交 uses",
+            "许可、授权、计划、准备或演示安排",
+        ),
+        (
+            IssueCategory.world_rule_conflict,
+            "已经完成的规则相关行为",
+            "未完成行为不能作为已执行事实",
+        ),
+    ],
+)
+def test_five_family_guides_keep_positive_and_negative_decision_boundaries(
+    family, positive_boundary, negative_boundary
+):
+    guidance = get_family_semantic_guidance(family)
+
+    assert positive_boundary in guidance
+    assert negative_boundary in guidance
 
 
 def test_usage_is_reported_immediately_and_checkpoints_wrap_external_work():
@@ -747,6 +827,84 @@ def test_anchor_read_is_content_free_recoverable_then_non_anchor_subrange_succee
     safe = json.dumps(outcome.safe_dict(), ensure_ascii=False)
     assert CONTENT not in safe
     assert "result_tok0000000000001" not in safe
+
+
+def test_two_candidate_submit_is_corrected_once_to_one_final_candidate():
+    scope, seeds, chunk = context()
+    seed_ref = seeds[0].seed_ref
+
+    def submitted_candidate(value):
+        return {
+            "kind": "fact",
+            "span_ref": "span_tok0000000000002",
+            "source_line_start": 2,
+            "source_line_end": 2,
+            "fields": {
+                "subject": "岚",
+                "predicate": "发色",
+                "value": value,
+            },
+        }
+
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", search_args(seed_ref)),
+        result(
+            "READ_SPAN",
+            {
+                "seed_ref": seed_ref,
+                "result_ref": "result_tok0000000000001",
+                "line_start": 2,
+                "line_end": 2,
+            },
+        ),
+        result(
+            "SUBMIT_VERDICT",
+            {
+                "seed_ref": seed_ref,
+                "verdict": "candidate_conflict",
+                "candidates": [
+                    submitted_candidate("黑色"),
+                    submitted_candidate("紫色"),
+                ],
+            },
+        ),
+        result(
+            "SUBMIT_VERDICT",
+            {
+                "seed_ref": seed_ref,
+                "verdict": "candidate_conflict",
+                "candidates": [submitted_candidate("黑色")],
+            },
+        ),
+    )
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever((chunk,)),
+        scope=scope,
+        seeds=seeds,
+        token_factory=Tokens(),
+        limits=InvestigatorLimits(
+            max_decision_rounds=4,
+            max_charged_tokens=20_000,
+        ),
+    ).run()
+
+    assert outcome.outcome == "completed"
+    assert outcome.provider_calls == 4
+    assert outcome.executed_tool_calls == 3
+    assert outcome.recoverable_rejections == 1
+    assert len(outcome.envelopes) == 1
+    assert len(outcome.envelopes[0].candidate_payloads) == 1
+    assert len(outcome.authorized_candidates) == 1
+    correction = json.loads(provider.requests[3]["user"])
+    assert correction["current_phase"] == "verdict"
+    assert correction["allowed_next_actions"] == ["SUBMIT_VERDICT", "ABSTAIN"]
+    assert correction["observations"][-1] == {
+        "kind": "retryable_tool_rejection",
+        "reason_code": "invalid_tool_arguments",
+        "remaining_corrections": 0,
+    }
 
 
 def test_anchor_read_without_recovery_degrades_before_span_is_minted():

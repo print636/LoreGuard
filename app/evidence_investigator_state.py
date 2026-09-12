@@ -150,7 +150,7 @@ class UntrustedCandidateEnvelope:
             not isinstance(self.seed_ref, str)
             or re.fullmatch(SEED_REF_PATTERN, self.seed_ref) is None
             or type(self.candidate_payloads) is not tuple
-            or not 1 <= len(self.candidate_payloads) <= 2
+            or len(self.candidate_payloads) != 1
             or type(self.authorized_span_hashes) is not tuple
             or len(self.authorized_span_hashes) != len(self.candidate_payloads)
             or any(not _is_hash(value) for value in self.authorized_span_hashes)

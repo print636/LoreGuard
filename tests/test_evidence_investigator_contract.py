@@ -32,6 +32,7 @@ from app.evidence_investigator_state import (
     InvestigatorLimits,
     InvestigatorRunResult,
     InvestigatorTraceEvent,
+    UntrustedCandidateEnvelope,
 )
 
 
@@ -571,7 +572,7 @@ def test_search_reconstructs_malformed_chunks_before_seen_state(mutation):
     }
 
 
-def test_candidate_transport_rejects_reserved_non_json_and_duplicate_payloads():
+def test_candidate_transport_and_envelope_require_exactly_one_candidate():
     seed_ref = fact_seed().seed_ref
     base = {
         "kind": "fact",
@@ -591,14 +592,31 @@ def test_candidate_transport_rejects_reserved_non_json_and_duplicate_payloads():
             CandidateRecordSubmission.model_validate({**base, "fields": fields})
 
     row = CandidateRecordSubmission.model_validate(base)
-    with pytest.raises(ValidationError):
-        SubmitVerdictArgs.model_validate(
-            {
-                "seed_ref": seed_ref,
-                "verdict": "candidate_conflict",
-                "candidates": [row.model_dump(), row.model_dump()],
-            }
-        )
+    other = row.model_copy(
+        update={"span_ref": f"span_{'C' * 16}"},
+        deep=True,
+    )
+    schema = SubmitVerdictArgs.model_json_schema()["properties"]["candidates"]
+    assert schema["minItems"] == schema["maxItems"] == 1
+    for candidates in ([], [row.model_dump(), other.model_dump()]):
+        with pytest.raises(ValidationError):
+            SubmitVerdictArgs.model_validate(
+                {
+                    "seed_ref": seed_ref,
+                    "verdict": "candidate_conflict",
+                    "candidates": candidates,
+                }
+            )
+    for candidates, hashes in (
+        ((), ()),
+        ((row, other), ("0" * 64, "1" * 64)),
+    ):
+        with pytest.raises(ValueError, match="untrusted candidate envelope"):
+            UntrustedCandidateEnvelope.create(
+                seed_ref=seed_ref,
+                candidates=candidates,
+                authorized_span_hashes=hashes,
+            )
     assert "模型自拟问题" not in repr(row)
 
 

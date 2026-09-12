@@ -102,8 +102,9 @@ _CANDIDATE_FIELD_CONTRACTS: dict[str, CandidateFieldContract] = {
         ("item", "user"),
         ("time",),
         (
-            "仅表示角色已经实际使用该物品。许可、授权、计划、准备或演示安排"
-            "不等于使用已经发生。"
+            "仅表示角色已经实际使用该物品；许可、授权、计划、准备或演示安排不等于"
+            "实际使用。若 anchor 的 owner 在 candidate time 仍适用，而不同 user 明确"
+            "实际使用该 item，应提交 uses，不得臆测未陈述的交接或例外。"
         ),
     ),
     "world_rule": CandidateFieldContract(
@@ -114,7 +115,8 @@ _CANDIDATE_FIELD_CONTRACTS: dict[str, CandidateFieldContract] = {
         ("key", "value"),
         ("actor", "time"),
         (
-            "value=performed 仅表示动作真实完成；命令、计划、转述或缺少执行结果时必须 ABSTAIN。"
+            "value=performed 仅表示动作真实完成；命令、计划、转述或缺少执行结果时必须 "
+            "ABSTAIN。"
         ),
     ),
 }
@@ -144,7 +146,8 @@ _FAMILY_SEMANTIC_GUIDANCE: dict[IssueCategory, str] = {
         "time 相同，仍按真实冲突规则判断，不得仅因状态转变措辞而放弃。"
     ),
     IssueCategory.location_collision: (
-        "只调查同一参与者在同一精确时间出现在不同地点的冲突。"
+        "只调查同一参与者在同一精确时间（合法且可排序）出现在不同地点的冲突。候选"
+        "缺少与 anchor 相同的精确 time，或只是相邻时刻时必须 ABSTAIN。"
     ),
     IssueCategory.knowledge_without_acquisition: (
         "区分实际获得知识与仅声称知道；没有获得证据时不得把声称当作已知。"
@@ -160,8 +163,9 @@ _FAMILY_SEMANTIC_GUIDANCE: dict[IssueCategory, str] = {
         "最小引用范围必须同时支持角色、具体知识、精确 time 和对应的获知或声称关系。"
     ),
     IssueCategory.item_ownership: (
-        "区分物品的所有或保管关系与已经发生的实际使用。许可、授权、计划、准备或"
-        "演示安排既不证明交接已经发生，也不证明物品已经被使用。"
+        "anchor 是所有或保管关系；若 anchor 的 owner 在 candidate time 仍适用，而不同 "
+        "user 明确实际使用该 item，应提交 uses。许可、授权、计划、准备或演示安排不证明"
+        "交接或实际使用；不得臆测未陈述的交接或例外。"
     ),
     IssueCategory.world_rule_conflict: (
         "区分世界规则与已经完成的规则相关行为；未完成行为不能作为已执行事实。"
@@ -347,7 +351,7 @@ class SubmitVerdictArgs(_StrictToolModel):
     seed_ref: str = Field(pattern=SEED_REF_PATTERN)
     verdict: Literal["candidate_conflict"]
     candidates: list[CandidateRecordSubmission] = Field(
-        min_length=1, max_length=2, repr=False
+        min_length=1, max_length=1, repr=False
     )
 
     @field_validator("candidates")
