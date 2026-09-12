@@ -6,6 +6,7 @@ code: neither the manifest nor its ground truth may be exposed to the provider.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import sys
@@ -39,6 +40,11 @@ from app.evidence_investigator_loop import (  # noqa: E402
     EvidenceInvestigatorLoopResult,
 )
 from app.evidence_investigator_state import UntrustedCandidateEnvelope  # noqa: E402
+from app.pipeline import (  # noqa: E402
+    AnalysisPipeline,
+    BaselineExtractor,
+    DocumentInput,
+)
 from app.parser import parse_document  # noqa: E402
 from app.rules import detect_issues  # noqa: E402
 from app.semantic_quality import (  # noqa: E402
@@ -200,6 +206,7 @@ def _run_actual_promotion(
         authorized_candidates=(binding,),
         provider_calls=1,
         completed_seeds=1,
+        executed_tool_calls=1,
     )
     resolver = CandidateEvidenceResolver(
         scope=scope,
@@ -215,7 +222,7 @@ def _run_actual_promotion(
     )
 
 
-def main() -> None:
+def main(*, selected_split: str | None = None) -> None:
     manifest = json.loads((DATASET_ROOT / "manifest.json").read_text(encoding="utf-8"))
     freeze = json.loads((DATASET_ROOT / "freeze.json").read_text(encoding="utf-8"))
     frozen_rows = freeze["frozen_files"]
@@ -237,15 +244,15 @@ def main() -> None:
         actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual_hash != row["sha256"]:
             raise AssertionError(f"frozen file hash mismatch: {row['path']}")
-    cases = manifest["cases"]
-    if len(cases) < 12:
+    all_cases = manifest["cases"]
+    if len(all_cases) < 12:
         raise AssertionError("at least 12 cases are required")
-    case_ids = [case["case_id"] for case in cases]
+    case_ids = [case["case_id"] for case in all_cases]
     if len(case_ids) != len(set(case_ids)):
         raise AssertionError("case ids must be unique")
 
     split_counts = {
-        split: sum(case["split"] == split for case in cases)
+        split: sum(case["split"] == split for case in all_cases)
         for split in ("dev", "holdout")
     }
     declared_counts = {
@@ -256,6 +263,13 @@ def main() -> None:
         raise AssertionError("declared split counts do not match cases")
     if manifest["live_model_status"]["state"] != "not_run":
         raise AssertionError("fixture validation cannot claim a live-model run")
+    if selected_split not in {None, "dev", "holdout"}:
+        raise AssertionError("selected split must be dev, holdout, or omitted")
+    cases = [
+        case
+        for case in all_cases
+        if selected_split is None or case["split"] == selected_split
+    ]
 
     positive_count = 0
     negative_count = 0
@@ -267,7 +281,8 @@ def main() -> None:
             _fail(case_id, "case content must be forbidden as a prompt example")
 
         documents: dict[str, tuple[dict, str, Path]] = {}
-        baseline: list[ParsedDirective] = []
+        production_documents: list[DocumentInput] = []
+        fixture_baseline: list[ParsedDirective] = []
         for source in case["sources"]:
             document_id = source["document_id"]
             if document_id in documents:
@@ -275,6 +290,15 @@ def main() -> None:
             path = _source_path(source["path"])
             content = path.read_text(encoding="utf-8")
             documents[document_id] = (source, content, path)
+            production_documents.append(
+                DocumentInput(
+                    id=f"{case_id}:{document_id}",
+                    name=path.name,
+                    content=content,
+                    role=source["role"],
+                    scope=source["story_scope"],
+                )
+            )
             if source["role"] == "chapter" and any(
                 line.lstrip().startswith("@") for line in content.splitlines()
             ):
@@ -284,7 +308,7 @@ def main() -> None:
                 path.name,
                 content,
             )
-            baseline.extend(
+            fixture_baseline.extend(
                 _bind_context(
                     directive,
                     role=source["role"],
@@ -294,10 +318,23 @@ def main() -> None:
                 for directive in parsed.directives
             )
 
+        # Exercise the same deterministic production closure used by an
+        # analysis run: parser -> candidate normalizer -> semantic quality ->
+        # canonical rules.  BaselineExtractor is explicit, so validation can
+        # never contact a provider even when a developer has API credentials.
+        production_baseline = AnalysisPipeline(extractor=BaselineExtractor()).run(
+            production_documents
+        )
+        baseline = fixture_baseline
         baseline_issues = detect_issues(baseline)
         expected = case["expected"]
         if len(baseline_issues) != expected["baseline_issue_count"]:
-            _fail(case_id, "the no-model baseline already emits an unexpected issue")
+            _fail(case_id, "the fixture parse baseline emits an unexpected issue")
+        if len(production_baseline.issues) != expected["baseline_issue_count"]:
+            _fail(
+                case_id,
+                "the production normalizer/quality/rules closure emits an unexpected issue",
+            )
 
         anchor = case["anchor"]
         anchor_source, anchor_content, _ = documents[anchor["document_id"]]
@@ -439,21 +476,32 @@ def main() -> None:
             _range_text(content, evidence["lines"])
 
     required_families = set(manifest["issue_families"])
-    for split, covered in covered_positive_families.items():
+    checked_splits = (
+        (selected_split,) if selected_split is not None else ("dev", "holdout")
+    )
+    for split in checked_splits:
+        covered = covered_positive_families[split]
         if covered != required_families:
             raise AssertionError(
                 f"{split}: positive coverage differs from the five rule families"
             )
 
+    split_summary = (
+        f"{split_counts['dev']} dev / {split_counts['holdout']} holdout"
+        if selected_split is None
+        else f"{selected_split} only"
+    )
     print(
         "fixture valid: "
-        f"{len(cases)} cases "
-        f"({split_counts['dev']} dev / {split_counts['holdout']} holdout), "
+        f"{len(cases)} cases ({split_summary}), "
         f"{positive_count} positive / {negative_count} abstain; "
-        "baseline issues=0; five positive families present in each split; "
+        "baseline issues=0; five positive families present in checked splits; "
         "live model not run"
     )
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--split", choices=("dev", "holdout"))
+    args = parser.parse_args()
+    main(selected_split=args.split)

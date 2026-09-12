@@ -65,6 +65,150 @@ class CandidateNormalizerTests(unittest.TestCase):
         issue = next(row for row in result.issues if row.category.value == "world_rule_conflict")
         self.assertEqual({"world.md", "chapter.md"}, {span.document_name for span in issue.evidence})
 
+    def test_orders_plans_and_unfinished_actions_are_not_performed_assertions(self):
+        rule = "在寂灯环廊中，余光信标会失效。"
+        non_actions = [
+            "总站长命令砚霜在寂灯环廊中启动余光信标。",
+            "砚霜计划在寂灯环廊中启动余光信标。",
+            "砚霜将在寂灯环廊中启动余光信标。",
+            "砚霜未能成功在寂灯环廊中启动余光信标。",
+            "砚霜并没有实际在寂灯环廊中启动余光信标。",
+            (
+                "值班纪要转述：总站长命令砚霜在寂灯环廊中启动余光信标；"
+                "后续记录停在命令下达处，缺少任何执行结果。"
+            ),
+        ]
+        for index, chapter in enumerate(non_actions):
+            with self.subTest(chapter=chapter):
+                result = AnalysisPipeline(extractor=BaselineExtractor()).run(
+                    [
+                        DocumentInput(
+                            id=f"world-{index}", name="world.md", content=rule
+                        ),
+                        DocumentInput(
+                            id=f"chapter-{index}", name="chapter.md", content=chapter
+                        ),
+                    ]
+                )
+                self.assertFalse(
+                    any(row.kind == "world_assert" for row in result.directives)
+                )
+                self.assertFalse(
+                    any(
+                        row.category.value == "world_rule_conflict"
+                        for row in result.issues
+                    )
+                )
+
+    def test_actual_action_after_order_bridge_remains_a_performed_assertion(self):
+        result = AnalysisPipeline(extractor=BaselineExtractor()).run(
+            [
+                DocumentInput(
+                    id="world",
+                    name="world.md",
+                    content="在寂灯环廊中，余光信标会失效。",
+                ),
+                DocumentInput(
+                    id="chapter",
+                    name="chapter.md",
+                    content=(
+                        "接到命令后，砚霜在寂灯环廊中启动余光信标，"
+                        "指示灯当场亮起。"
+                    ),
+                ),
+            ]
+        )
+        assertion = next(row for row in result.directives if row.kind == "world_assert")
+        self.assertEqual("砚霜", assertion.attrs["actor"])
+        self.assertTrue(
+            any(row.category.value == "world_rule_conflict" for row in result.issues)
+        )
+
+    def test_actual_action_survives_missing_logs_and_non_modal_word_fragments(self):
+        chapters = (
+            (
+                "现场没有任何执行日志，但砚霜确实在寂灯环廊中启动余光信标，"
+                "指示灯当场亮起。"
+            ),
+            "指示灯恢复后，砚霜在寂灯环廊中启动余光信标，信标稳定发光。",
+            "模拟演练结束后，砚霜在寂灯环廊中启动余光信标，信标稳定发光。",
+            (
+                "砚霜没有使用门钥；随后她在寂灯环廊中启动余光信标，"
+                "信标稳定发光。"
+            ),
+        )
+        for index, chapter in enumerate(chapters):
+            with self.subTest(chapter=chapter):
+                result = AnalysisPipeline(extractor=BaselineExtractor()).run(
+                    [
+                        DocumentInput(
+                            id=f"world-positive-{index}",
+                            name="world.md",
+                            content="在寂灯环廊中，余光信标会失效。",
+                        ),
+                        DocumentInput(
+                            id=f"chapter-positive-{index}",
+                            name="chapter.md",
+                            content=chapter,
+                        ),
+                    ]
+                )
+                self.assertTrue(
+                    any(row.kind == "world_assert" for row in result.directives)
+                )
+                self.assertTrue(
+                    any(
+                        row.category.value == "world_rule_conflict"
+                        for row in result.issues
+                    )
+                )
+
+    def test_command_or_report_before_independent_execution_does_not_hide_action(self):
+        chapters = (
+            (
+                "总站长命令砚霜在寂灯环廊中启动余光信标；"
+                "砚霜随后在寂灯环廊中启动余光信标，指示灯当场亮起。"
+            ),
+            (
+                "值班员转述：昨夜风暴猛烈。"
+                "随后砚霜在寂灯环廊中启动余光信标，指示灯当场亮起。"
+            ),
+            (
+                "未经核验的报告声称旧桥已经坍塌。"
+                "随后砚霜在寂灯环廊中启动余光信标，指示灯当场亮起。"
+            ),
+            (
+                "听从总站长的指示后，砚霜在寂灯环廊中启动余光信标，"
+                "指示灯当场亮起。"
+            ),
+        )
+        for index, chapter in enumerate(chapters):
+            with self.subTest(chapter=chapter):
+                result = AnalysisPipeline(extractor=BaselineExtractor()).run(
+                    [
+                        DocumentInput(
+                            id=f"world-mixed-{index}",
+                            name="world.md",
+                            content="在寂灯环廊中，余光信标会失效。",
+                        ),
+                        DocumentInput(
+                            id=f"chapter-mixed-{index}",
+                            name="chapter.md",
+                            content=chapter,
+                        ),
+                    ]
+                )
+                assertion = next(
+                    row for row in result.directives if row.kind == "world_assert"
+                )
+                self.assertEqual("narrator", assertion.attrs["source_scope"])
+                self.assertTrue(
+                    any(
+                        row.category.value == "world_rule_conflict"
+                        for row in result.issues
+                    )
+                )
+
     def test_mentions_of_use_are_not_treated_as_item_actions(self):
         document = DocumentInput(
             id="doc",
@@ -221,6 +365,28 @@ class CandidateNormalizerTests(unittest.TestCase):
             DocumentInput(id="late", name="chapter.md", content=claim + "\n" + sources[0].replace("08:00", "10:00")),
         ])
         self.assertTrue(any(row.category.value == "knowledge_without_acquisition" for row in late.issues))
+
+    def test_prose_normalizer_cannot_replace_explicit_knowledge_directive(self):
+        result = AnalysisPipeline(extractor=BaselineExtractor()).run(
+            [
+                DocumentInput(
+                    id="canon",
+                    name="canon.md",
+                    role="canon",
+                    scope="main",
+                    content=(
+                        '@claims_knows character=季纱 fact="无昼门的逆序开启码" '
+                        'time="2027-06-02 08:10" | '
+                        "2027-06-02 08:10，季纱在问询中完整说出无昼门的逆序开启码。"
+                    ),
+                )
+            ]
+        )
+        claim = next(row for row in result.directives if row.kind == "claims_knows")
+        self.assertEqual("季纱", claim.attrs["character"])
+        self.assertEqual("无昼门的逆序开启码", claim.attrs["fact"])
+        self.assertEqual("2027-06-02 08:10", claim.attrs["time"])
+        self.assertEqual("directive", claim.attrs["input_form"])
 
     def test_rule_exception_must_match_actor_key_and_active_state(self):
         rule = "在静潮域中，任何回声术都会失效。"

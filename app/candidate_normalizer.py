@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from .domain import EvidenceSpan, ParsedDirective
 from .pipeline import DocumentInput
+from .semantic_quality import evidence_presents_unrealized_action
 
 
 NAME = r"[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·_-]{0,11}?"
@@ -291,27 +292,38 @@ def _rule_candidate(
 def _assertion_candidate(
     document: DocumentInput, line_no: int, text: str, last_actor: str | None
 ) -> ParsedDirective | None:
-    match = re.search(
-        rf"(?:(?P<actor>{ACTOR_NAME})(?:仍|依然|却|竟然)?)?在(?P<context>[^，,。；;]{{2,24}}?)"
+    matches = re.finditer(
+        rf"(?:(?:但|而|随后|随即|最终|终于)?(?P<actor>{ACTOR_NAME})"
+        rf"(?:仍|依然|却|竟然|确实|实际)?)?在(?P<context>[^，,。；;]{{2,24}}?)"
         r"(?:中央|中心|内部|境内|区域|范围|之中|中|内)"
         r"(?:仍|依然|却|竟然)?(?:发动|使用|施展|启动|开启)"
         r"(?P<action>[^，,。；;]{2,24})",
         text,
     )
-    if not match:
-        return None
-    context = _canonical_scope(match.group("context"))
-    action = _canonical_action(match.group("action"))
-    actor = _resolve_actor(match.group("actor") or "", last_actor)
-    if not context or not action:
-        return None
-    return _directive(
-        "world_assert",
-        {"key": f"scope_action:{context}:{action}", "value": "performed", "actor": actor or ""},
-        document,
-        line_no,
-        text,
-    )
+    for match in matches:
+        context = _canonical_scope(match.group("context"))
+        action = _canonical_action(match.group("action"))
+        actor = _resolve_actor(match.group("actor") or "", last_actor)
+        if not context or not action:
+            continue
+        candidate = _directive(
+            "world_assert",
+            {
+                "key": f"scope_action:{context}:{action}",
+                "value": "performed",
+                "actor": actor or "",
+            },
+            document,
+            line_no,
+            text,
+        )
+        # A line can first quote an order and later narrate its execution.
+        # Keep scanning after an unrealized mention instead of allowing the
+        # first regex hit to hide a later performed action.
+        if evidence_presents_unrealized_action(candidate):
+            continue
+        return candidate
+    return None
 
 
 def _body_state_candidate(
@@ -554,6 +566,11 @@ def _dedupe_semantic_records(directives: list[ParsedDirective]) -> list[ParsedDi
         existing_index = indexes[key]
         existing = result[existing_index]
         if directive.kind in {"knows", "claims_knows"}:
+            # Explicit author directives are the closed baseline contract.
+            # A looser prose recognizer from the same line may add coverage,
+            # but it must never replace the already parsed structured row.
+            if existing.attrs.get("input_form") == "directive":
+                continue
             new_character = directive.attrs.get("character", "")
             old_character = existing.attrs.get("character", "")
             new_fact = directive.attrs.get("fact", "")

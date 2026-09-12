@@ -333,6 +333,125 @@ class BaselineSemanticQualityTests(unittest.TestCase):
         self.assertFalse(eligible_for_deterministic_rules(reported_fact))
         self.assertTrue(eligible_for_deterministic_rules(observed_claim))
 
+    def test_semantic_gate_downgrades_command_plan_and_missing_execution(self):
+        candidates = (
+            (
+                "总站长命令砚霜在寂灯环廊中启动余光信标。",
+                "tentative_fact",
+                "narrator",
+            ),
+            (
+                "砚霜计划在寂灯环廊中启动余光信标。",
+                "tentative_fact",
+                "narrator",
+            ),
+            (
+                (
+                    "值班纪要转述：总站长命令砚霜在寂灯环廊中启动余光信标；"
+                    "后续记录缺少任何执行结果。"
+                ),
+                "character_claim",
+                "character_dialogue",
+            ),
+        )
+        for source, expected_kind, expected_scope in candidates:
+            with self.subTest(source=source):
+                directive = ParsedDirective(
+                    kind="world_assert",
+                    attrs={
+                        "key": "scope_action:寂灯环廊:余光信标",
+                        "value": "performed",
+                        "actor": "砚霜",
+                        "modality": "asserted",
+                        "source_scope": "narrator",
+                        "certainty": "certain",
+                    },
+                    evidence=evidence(source),
+                    provenance_sources=frozenset({"model"}),
+                )
+                assessed, reason = assess_directive(directive)
+                self.assertEqual("unrealized_action", reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual(expected_kind, assessed.kind)
+                self.assertEqual(expected_scope, assessed.attrs["source_scope"])
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_semantic_gate_keeps_plain_performed_action_asserted(self):
+        directive = ParsedDirective(
+            kind="world_assert",
+            attrs={
+                "key": "scope_action:寂灯环廊:余光信标",
+                "value": "performed",
+                "actor": "砚霜",
+                "modality": "asserted",
+                "source_scope": "narrator",
+                "certainty": "certain",
+            },
+            evidence=evidence("砚霜在寂灯环廊中启动余光信标，指示灯当场亮起。"),
+        )
+        assessed, reason = assess_directive(directive)
+        self.assertIsNone(reason)
+        self.assertEqual("world_assert", assessed.kind)
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_semantic_gate_localizes_action_modality_and_source(self):
+        sources = (
+            (
+                "现场没有任何执行日志，但砚霜确实在寂灯环廊中启动余光信标，"
+                "指示灯当场亮起。"
+            ),
+            (
+                "总站长命令砚霜在寂灯环廊中启动余光信标。"
+                "随后砚霜在寂灯环廊中启动余光信标，指示灯当场亮起。"
+            ),
+            (
+                "值班员转述：昨夜风暴猛烈。"
+                "随后砚霜在寂灯环廊中启动余光信标，指示灯当场亮起。"
+            ),
+            (
+                "未经核验的报告声称旧桥已经坍塌。"
+                "随后砚霜在寂灯环廊中启动余光信标，指示灯当场亮起。"
+            ),
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                directive = ParsedDirective(
+                    kind="world_assert",
+                    attrs={
+                        "key": "scope_action:寂灯环廊:余光信标",
+                        "value": "performed",
+                        "actor": "砚霜",
+                        "modality": "asserted",
+                        "source_scope": "narrator",
+                        "certainty": "certain",
+                    },
+                    evidence=evidence(source),
+                    provenance_sources=frozenset({"model"}),
+                )
+                assessed, reason = assess_directive(directive)
+                self.assertIsNone(reason)
+                self.assertEqual("world_assert", assessed.kind)
+                self.assertEqual("narrator", assessed.attrs["source_scope"])
+                self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_explicit_performed_directive_is_not_downgraded_by_missing_telemetry(self):
+        parsed = parse_document(
+            "explicit-action",
+            "canon.md",
+            (
+                '@world_assert key="scope_action:寂灯环廊:余光信标" '
+                'value=performed actor=砚霜 | '
+                "现场没有任何执行日志，但砚霜确实在寂灯环廊中启动余光信标，"
+                "指示灯当场亮起。"
+            ),
+        )
+        self.assertEqual(1, len(parsed.directives))
+        assessed, reason = assess_directive(parsed.directives[0])
+        self.assertIsNone(reason)
+        self.assertEqual("world_assert", assessed.kind)
+        self.assertEqual("directive", assessed.attrs["input_form"])
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
     def test_noncanonical_frame_is_internal_and_does_not_change_fingerprint(self):
         row = ParsedDirective(
             kind="event",

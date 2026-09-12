@@ -83,7 +83,39 @@ _QUOTED_SOURCE_MARKERS = re.compile(
 )
 _REPORTED_SOURCE_MARKERS = re.compile(
     r"据[^，。；\n]{0,20}(?:所述|说法|声称|转述|口述)|"
-    r"(?:转述|口述|传话)(?:中|称|提到|表示)"
+    r"(?:转述|口述|传话)(?:中|称|提到|表示)|"
+    r"(?:纪要|记录|日志|报告|录音|口供|旁白)?(?:的)?(?:转述|口述|传话)[：:]"
+)
+
+# An action mentioned as the content of an order, intention or unfinished
+# attempt is not evidence that the action happened.  These are syntactic
+# frames rather than a bag of keywords: a completed temporal bridge such as
+# “接到命令后，某人在…启动…” starts a new, asserted action clause.
+_ACTION_VERBS = re.compile(r"驱动|启动|开启|发动|施展|执行|使用|启用")
+_UNREALIZED_ACTION_FRAME = re.compile(
+    r"命令|下令|责令|要求|吩咐|嘱咐|敦促|通知|建议|提议|"
+    r"指示(?!灯|器|牌|标|线|针|状态|系统|图)|"
+    r"计划|打算|预备|预定|意图|试图|尝试|决定|即将|将要|"
+    r"准备(?!室|区|舱|间|站|台|工作|状态|材料|物资)|"
+    r"拟定|拟(?=于|在|将|由|启动|开启|执行|使用|发动|施展|启用)|"
+    r"将(?:会)?(?=(?:在|于)[^，,。；;！!？?：:]{0,36}$)"
+)
+_COMPLETED_ORDER_BRIDGE = re.compile(
+    r"(?:接令|奉命)(?:后|之后|以后)|"
+    r"(?:接到|收到|得到|接受|听从|遵照|按照|依照|执行完?|完成)"
+    r"[^，,。；;！!？?：:]{0,20}?(?:命令|指令|要求|通知|指示|安排|决定)"
+    r"(?:下达|发布|确认|批准|完成)?(?:后|之后|以后)|"
+    r"(?:命令|指令|要求|通知)(?:下达|发布|确认|批准)(?:后|之后|以后)|"
+    r"(?:下令|吩咐|嘱咐|决定)(?:后|之后|以后)|"
+    r"(?:计划|准备|预备|尝试|安排)(?:已经|已)?(?:完成|结束|取消|中止|失败)"
+    r"(?:后|之后|以后)"
+)
+_ACTION_NEGATION = re.compile(
+    r"尚未|还未|并未|从未|未曾|不曾|没有|并没有|未能|没能"
+)
+_NEGATION_SCOPE_RESET = re.compile(r"但|却|而是|反而")
+_ACTION_ASSERTION_RESET = re.compile(
+    r"但|却|而是|反而|仍然?|实际|确实|最终|随后|随即|终于|成功|当场"
 )
 
 # These expressions describe narrative frames, not isolated keywords.  In
@@ -422,6 +454,13 @@ def _support_text(directive: ParsedDirective) -> str:
     # unrelated sentence. Commas are deliberately retained: an opening
     # “if” clause governs the consequence after the comma.
     units = _semantic_units(text)
+    if directive.kind in {"world_assert", "uses"}:
+        # A cited line can quote a plan first and narrate the actual action
+        # afterwards.  Prefer the local performed-action clause so source and
+        # modality classification do not inherit the earlier quotation.
+        action_support = _realized_action_support(directive, units)
+        if action_support:
+            return action_support
     unit_scores = [
         (sum(anchor in _clean(unit) for anchor in anchors), unit) for unit in units
     ]
@@ -445,22 +484,182 @@ def _support_text(directive: ParsedDirective) -> str:
     return unit
 
 
+def _action_signature(directive: ParsedDirective) -> tuple[str, str]:
+    """Return the candidate's normalized action label and optional scope."""
+
+    if directive.kind == "uses":
+        return _clean(directive.attrs.get("item", "")), ""
+    if directive.kind != "world_assert":
+        return "", ""
+    key = _clean(directive.attrs.get("key", ""))
+    if not key.startswith("scope_action:"):
+        return "", ""
+    parts = key.split(":", 2)
+    if len(parts) != 3:
+        return "", ""
+    return parts[2], parts[1]
+
+
+def _candidate_action_matches(
+    text: str, directive: ParsedDirective
+) -> list[re.Match[str]]:
+    action_label, context = _action_signature(directive)
+    compact = _clean(text)
+    if context and context not in compact:
+        return []
+    matches: list[re.Match[str]] = []
+    for match in _ACTION_VERBS.finditer(text):
+        if action_label:
+            _, clause_end = _clause_bounds(text, match.start())
+            tail = _clean(text[match.end() : min(clause_end, match.end() + 48)])
+            if action_label not in tail:
+                continue
+        matches.append(match)
+    return matches
+
+
+def _clause_bounds(text: str, offset: int) -> tuple[int, int]:
+    separators = "，,。；;！!？?：:"
+    start = max((text.rfind(token, 0, offset) for token in separators), default=-1) + 1
+    ends = [
+        position
+        for token in separators
+        if (position := text.find(token, offset)) >= 0
+    ]
+    return start, min(ends, default=len(text))
+
+
+def _negation_governs_action(prefix: str) -> bool:
+    matches = list(_ACTION_NEGATION.finditer(prefix))
+    if not matches:
+        return False
+    tail = prefix[matches[-1].end() :]
+    if _ACTION_VERBS.search(tail) or _NEGATION_SCOPE_RESET.search(tail):
+        return False
+    compact = _clean(tail)
+    # Only grammatical material that can sit between an action negator and
+    # its verb is accepted.  This prevents “从未迟疑便启动” and a negated
+    # different action from contaminating the candidate action.
+    return bool(
+        re.fullmatch(
+            r"(?:真正|实际|成功|亲自|正式|立即|直接|擅自|继续|再次|再)*"
+            r"(?:(?:在|于)[^，,。；;！!？?：:]{0,24}?(?:中|内)?)?",
+            compact,
+        )
+    )
+
+
+def _action_match_is_unrealized(text: str, match: re.Match[str]) -> bool:
+    clause_start, _ = _clause_bounds(text, match.start())
+    prefix = text[clause_start : match.start()]
+    # Once an instruction/plan is explicitly completed, a following action is
+    # narration rather than the still-unrealized content of that instruction.
+    prefix = _COMPLETED_ORDER_BRIDGE.sub("", prefix)
+    if _negation_governs_action(prefix):
+        return True
+    frames = list(_UNREALIZED_ACTION_FRAME.finditer(prefix))
+    if not frames:
+        return False
+    after_frame = prefix[frames[-1].end() :]
+    if _ACTION_VERBS.search(after_frame):
+        return False
+    return not bool(_ACTION_ASSERTION_RESET.search(after_frame))
+
+
+def _action_realization(text: str, directive: ParsedDirective) -> bool | None:
+    matches = _candidate_action_matches(text, directive)
+    if not matches:
+        return None
+    return any(not _action_match_is_unrealized(text, match) for match in matches)
+
+
+def _realized_action_support(
+    directive: ParsedDirective, units: list[str]
+) -> str | None:
+    for unit in units:
+        for match in _candidate_action_matches(unit, directive):
+            if _action_match_is_unrealized(unit, match):
+                continue
+            start, end = _clause_bounds(unit, match.start())
+            return unit[start:end].strip()
+    return None
+
+
+def evidence_presents_unrealized_action(directive: ParsedDirective) -> bool:
+    """Return whether cited prose presents an action without completing it.
+
+    The check is deliberately conservative and evidence-bound.  It only
+    applies when the candidate itself is an action record, and an order or
+    intention must govern the candidate action inside the same punctuation
+    clause.  This keeps ordinary narration, including narration after a
+    completed-order bridge, eligible.
+    """
+
+    if directive.kind not in {"world_assert", "uses"}:
+        return False
+    states = [
+        state
+        for unit in _semantic_units(directive.evidence.text)
+        if (state := _action_realization(unit, directive)) is not None
+    ]
+    # Missing telemetry is not proof of a missing action.  Downgrade only when
+    # the cited candidate action is actually present and every matching mention
+    # is syntactically an order, intention, attempt, or direct negation.
+    return bool(states) and not any(states)
+
+
+def _local_source_context(text: str, directive: ParsedDirective) -> str:
+    """Keep source attribution attached to the supporting semantic unit."""
+
+    full = directive.evidence.text
+    support = text.strip()
+    if not support or support == full.strip():
+        return full
+    start = full.find(support)
+    if start < 0:
+        return support
+    end = start + len(support)
+    context = support
+    prefix = full[:start]
+    boundary = max(
+        (prefix.rfind(token) for token in "。；;！!？?\n"),
+        default=-1,
+    )
+    direct_intro = prefix[boundary + 1 :]
+    if re.search(r"[：:]\s*$", direct_intro):
+        context = direct_intro + context
+    # Attribution can immediately follow a closing quote in the next semantic
+    # unit (for example “……”值班员说道).  Preserve only that adjacent suffix;
+    # an earlier report must not taint a later independent narration sentence.
+    if any(token in support for token in ('“', '"')):
+        suffix = full[end:]
+        adjacent = re.match(r'^[”"]?(?:，|,)?[^。！？?!；;]{0,32}[。！？?!；;]?', suffix)
+        if adjacent:
+            context += adjacent.group(0)
+    return context
+
+
 def _source_scope(text: str, directive: ParsedDirective) -> SourceScope:
     full_evidence = directive.evidence.text
-    if _UNVERIFIED_SOURCE_MARKERS.search(full_evidence) or re.search(
-        r"信中声称", full_evidence
+    local_evidence = _local_source_context(text, directive)
+    authority_evidence = (
+        local_evidence
+        if directive.kind in {"world_assert", "uses"}
+        else full_evidence
+    )
+    if _UNVERIFIED_SOURCE_MARKERS.search(authority_evidence) or re.search(
+        r"信中声称", authority_evidence
     ):
         return SourceScope.unverified_report
-    # Attribution often follows a quoted sentence. `_support_text` may select
-    # only the proposition before the full stop, so source authority must be
-    # classified from the complete cited evidence rather than that slice.
-    if _DIALOGUE_MARKERS.search(full_evidence) or _REPORTED_SOURCE_MARKERS.search(
-        full_evidence
+    # Attribution can follow the quoted proposition. `_local_source_context`
+    # keeps that adjacent attribution while excluding unrelated earlier prose.
+    if _DIALOGUE_MARKERS.search(local_evidence) or _REPORTED_SOURCE_MARKERS.search(
+        local_evidence
     ):
         return SourceScope.character_dialogue
-    if _ACTUAL_QUOTE_MARKERS.search(full_evidence):
+    if _ACTUAL_QUOTE_MARKERS.search(local_evidence):
         return SourceScope.quoted_material
-    if _QUOTED_SOURCE_MARKERS.search(full_evidence):
+    if _QUOTED_SOURCE_MARKERS.search(local_evidence):
         return SourceScope.quoted_material
     if directive.kind == "world_rule" or re.search(
         r"根据(?:世界观)?规则[^：:]{0,12}[：:]", text
@@ -762,6 +961,34 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
                 certainty=CertaintyLevel.possible,
             ),
             "noncanonical_frame",
+        )
+
+    if evidence_presents_unrealized_action(directive):
+        action_scope = _source_scope(support, directive)
+        if action_scope in {
+            SourceScope.character_dialogue,
+            SourceScope.quoted_material,
+            SourceScope.unverified_report,
+        }:
+            return (
+                _to_noncanonical(
+                    directive,
+                    kind="character_claim",
+                    modality=SemanticModality.reported,
+                    source_scope=action_scope,
+                    certainty=CertaintyLevel.unknown,
+                ),
+                "unrealized_action",
+            )
+        return (
+            _to_noncanonical(
+                directive,
+                kind="tentative_fact",
+                modality=SemanticModality.uncertain,
+                source_scope=action_scope,
+                certainty=CertaintyLevel.unknown,
+            ),
+            "unrealized_action",
         )
 
     scope = _source_scope(support, directive)
