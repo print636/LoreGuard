@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from itertools import islice
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeAlias
 
 from .evidence_authority import (
     InvestigationScope,
@@ -21,12 +21,14 @@ from .evidence_investigator import (
     CandidateRecordSubmission,
     InvestigationSeed,
     InvestigatorRejected,
+    MAX_LINE_NUMBER,
     ReadSpanArgs,
     SAFE_REASON_CODES,
     SEED_REF_PATTERN,
     SearchEvidenceArgs,
     SubmitVerdictArgs,
     ToolArguments,
+    candidate_kinds,
     clone_investigation_seed,
     get_candidate_field_contract,
     get_family_semantic_guidance,
@@ -105,8 +107,27 @@ _LOOP_REASON_CODES = frozenset(
     }
 )
 _MAX_SAFE_COUNTER = 1_000_000_000
+_MAX_DECISION_TRACE_ACTIONS = 64
+_MAX_TRACE_SEED_ORDINAL = 64
+_MAX_TRACE_RESULT_COUNT = 512
+_MAX_TRACE_READ_LINES = 20
 _MAX_TOOL_ARGUMENT_DEPTH = 32
 _MAX_TOOL_ARGUMENT_NODES = 8_192
+_SAFE_TRACE_SCHEMA_VERSION = "evidence_investigator_safe_trace_v1"
+_SAFE_TRACE_ACTIONS = frozenset(
+    {"SEARCH_EVIDENCE", "READ_SPAN", "SUBMIT_VERDICT", "ABSTAIN"}
+)
+_SAFE_TRACE_PHASES = frozenset({"search", "read", "verdict"})
+_SAFE_ABSTAIN_REASONS = frozenset(
+    {
+        "no_relevant_evidence",
+        "insufficient_evidence",
+        "ambiguous_source",
+        "contextual_exception",
+        "no_rule_validated_conflict",
+    }
+)
+_SAFE_CANDIDATE_KINDS = frozenset(candidate_kinds())
 _SAFE_PROVIDER_CATEGORIES = frozenset(
     {
         "success",
@@ -268,6 +289,28 @@ class InvestigatorBudgetPreflight:
         }
 
 
+def clone_investigator_budget_preflight(
+    value: InvestigatorBudgetPreflight,
+) -> InvestigatorBudgetPreflight:
+    """Defensively reconstruct local preflight metadata without duck typing."""
+
+    if type(value) is not InvestigatorBudgetPreflight:
+        raise ValueError("investigator budget preflight is invalid")
+    try:
+        return InvestigatorBudgetPreflight(
+            seed_count=value.seed_count,
+            minimum_required_rounds=value.minimum_required_rounds,
+            minimum_initial_reservation=value.minimum_initial_reservation,
+            maximum_local_round_reservation=value.maximum_local_round_reservation,
+            maximum_local_run_reservation=value.maximum_local_run_reservation,
+            oversized_initial_prompts=value.oversized_initial_prompts,
+            max_charged_tokens=value.max_charged_tokens,
+            minimum_path_admissible=value.minimum_path_admissible,
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("investigator budget preflight is invalid") from None
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorizedCandidateBinding:
     """Server-derived candidate/evidence binding for a later promotion stage.
@@ -391,6 +434,782 @@ class AuthorizedCandidateBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateShapeDecisionTrace:
+    """Value-free shape of one submitted candidate."""
+
+    kind: str
+    field_names: tuple[str, ...]
+    source_line_count: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.kind) is not str
+            or len(self.kind) > 32
+            or self.kind not in _SAFE_CANDIDATE_KINDS
+        ):
+            raise ValueError("investigator trace candidate kind is invalid")
+        if (
+            type(self.field_names) is not tuple
+            or len(self.field_names) > 20
+            or any(
+                type(value) is not str or len(value) > 64
+                for value in self.field_names
+            )
+            or self.field_names != tuple(sorted(set(self.field_names)))
+        ):
+            raise ValueError("investigator trace candidate fields are invalid")
+        contract = get_candidate_field_contract(self.kind)
+        allowed_fields = frozenset((*contract.required, *contract.optional))
+        if not set(self.field_names).issubset(allowed_fields):
+            raise ValueError("investigator trace candidate fields are invalid")
+        if (
+            type(self.source_line_count) is not int
+            or not 1 <= self.source_line_count <= _MAX_TRACE_READ_LINES
+        ):
+            raise ValueError("investigator trace candidate line count is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SearchEvidenceDecisionTrace:
+    provider_decision_index: int
+    seed_ordinal: int
+    result_count: int
+    phase: Literal["search"] = field(default="search", init=False)
+    action: Literal["SEARCH_EVIDENCE"] = field(
+        default="SEARCH_EVIDENCE", init=False
+    )
+
+    def __post_init__(self) -> None:
+        _validate_trace_position(
+            self.provider_decision_index, self.seed_ordinal
+        )
+        if (
+            type(self.result_count) is not int
+            or not 0 <= self.result_count <= _MAX_TRACE_RESULT_COUNT
+        ):
+            raise ValueError("investigator trace result count is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ReadSpanDecisionTrace:
+    provider_decision_index: int
+    seed_ordinal: int
+    document_ref_hash: str
+    line_start: int
+    line_end: int
+    selected_result_rank: int
+    overlaps_anchor: bool
+    covers_entire_result: bool
+    phase: Literal["read"] = field(default="read", init=False)
+    action: Literal["READ_SPAN"] = field(default="READ_SPAN", init=False)
+
+    def __post_init__(self) -> None:
+        _validate_trace_position(
+            self.provider_decision_index, self.seed_ordinal
+        )
+        if (
+            type(self.document_ref_hash) is not str
+            or len(self.document_ref_hash) != 64
+            or re.fullmatch(r"[a-f0-9]{64}", self.document_ref_hash) is None
+            or type(self.line_start) is not int
+            or type(self.line_end) is not int
+            or not 1 <= self.line_start <= self.line_end <= MAX_LINE_NUMBER
+            or self.line_end - self.line_start + 1 > _MAX_TRACE_READ_LINES
+            or type(self.selected_result_rank) is not int
+            or not 1 <= self.selected_result_rank <= _MAX_TRACE_RESULT_COUNT
+            or type(self.overlaps_anchor) is not bool
+            or type(self.covers_entire_result) is not bool
+        ):
+            raise ValueError("investigator read trace is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitVerdictDecisionTrace:
+    provider_decision_index: int
+    seed_ordinal: int
+    candidate_count: int
+    candidate_shapes: tuple[CandidateShapeDecisionTrace, ...]
+    phase: Literal["verdict"] = field(default="verdict", init=False)
+    action: Literal["SUBMIT_VERDICT"] = field(
+        default="SUBMIT_VERDICT", init=False
+    )
+
+    def __post_init__(self) -> None:
+        _validate_trace_position(
+            self.provider_decision_index, self.seed_ordinal
+        )
+        if (
+            type(self.candidate_count) is not int
+            or self.candidate_count != 1
+            or type(self.candidate_shapes) is not tuple
+            or len(self.candidate_shapes) != self.candidate_count
+            or any(
+                type(value) is not CandidateShapeDecisionTrace
+                for value in self.candidate_shapes
+            )
+        ):
+            raise ValueError("investigator submit trace is invalid")
+        for shape in self.candidate_shapes:
+            _clone_candidate_shape_trace(shape)
+
+
+@dataclass(frozen=True, slots=True)
+class AbstainDecisionTrace:
+    provider_decision_index: int
+    seed_ordinal: int
+    reason: str
+    phase: InvestigationPhase
+    action: Literal["ABSTAIN"] = field(default="ABSTAIN", init=False)
+
+    def __post_init__(self) -> None:
+        _validate_trace_position(
+            self.provider_decision_index, self.seed_ordinal
+        )
+        if (
+            type(self.phase) is not str
+            or len(self.phase) > 8
+            or self.phase not in _SAFE_TRACE_PHASES
+            or type(self.reason) is not str
+            or len(self.reason) > 64
+            or self.reason not in _SAFE_ABSTAIN_REASONS
+        ):
+            raise ValueError("investigator abstain trace is invalid")
+
+
+EvidenceInvestigatorDecisionTraceAction: TypeAlias = (
+    SearchEvidenceDecisionTrace
+    | ReadSpanDecisionTrace
+    | SubmitVerdictDecisionTrace
+    | AbstainDecisionTrace
+)
+
+
+def _validate_trace_position(
+    provider_decision_index: int, seed_ordinal: int
+) -> None:
+    if (
+        type(provider_decision_index) is not int
+        or not 1 <= provider_decision_index <= _MAX_DECISION_TRACE_ACTIONS
+        or type(seed_ordinal) is not int
+        or not 1 <= seed_ordinal <= _MAX_TRACE_SEED_ORDINAL
+    ):
+        raise ValueError("investigator trace position is invalid")
+
+
+def _clone_candidate_shape_trace(
+    value: CandidateShapeDecisionTrace,
+) -> CandidateShapeDecisionTrace:
+    if type(value) is not CandidateShapeDecisionTrace:
+        raise ValueError("investigator trace candidate shape is invalid")
+    try:
+        kind = value.kind
+        field_names = value.field_names
+        source_line_count = value.source_line_count
+        if (
+            type(kind) is not str
+            or len(kind) > 32
+            or type(field_names) is not tuple
+            or len(field_names) > 20
+            or any(
+                type(field_name) is not str or len(field_name) > 64
+                for field_name in field_names
+            )
+            or type(source_line_count) is not int
+        ):
+            raise ValueError
+        return CandidateShapeDecisionTrace(
+            kind=kind,
+            field_names=field_names,
+            source_line_count=source_line_count,
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("investigator trace candidate shape is invalid") from None
+
+
+def safe_candidate_trace_field_names(
+    kind: str, fields: dict[str, Any]
+) -> tuple[str, ...]:
+    """Return only server-known field names; never echo model-authored keys."""
+
+    if type(kind) is not str or kind not in _SAFE_CANDIDATE_KINDS:
+        raise ValueError("investigator trace candidate kind is invalid")
+    if (
+        type(fields) is not dict
+        or len(fields) > 20
+        or any(type(key) is not str or len(key) > 64 for key in fields)
+    ):
+        raise ValueError("investigator trace candidate fields are invalid")
+    contract = get_candidate_field_contract(kind)
+    allowed = frozenset((*contract.required, *contract.optional))
+    return tuple(sorted(key for key in fields if key in allowed))
+
+
+def _clone_decision_trace_action(
+    value: EvidenceInvestigatorDecisionTraceAction,
+) -> EvidenceInvestigatorDecisionTraceAction:
+    try:
+        if type(value) not in {
+            SearchEvidenceDecisionTrace,
+            ReadSpanDecisionTrace,
+            SubmitVerdictDecisionTrace,
+            AbstainDecisionTrace,
+        }:
+            raise ValueError
+        if (
+            type(value.action) is not str
+            or len(value.action) > 32
+            or value.action not in _SAFE_TRACE_ACTIONS
+        ):
+            raise ValueError
+        if type(value) is SearchEvidenceDecisionTrace:
+            if (
+                type(value.phase) is not str
+                or len(value.phase) > 8
+                or value.phase != "search"
+                or value.action != "SEARCH_EVIDENCE"
+            ):
+                raise ValueError
+            return SearchEvidenceDecisionTrace(
+                provider_decision_index=value.provider_decision_index,
+                seed_ordinal=value.seed_ordinal,
+                result_count=value.result_count,
+            )
+        if type(value) is ReadSpanDecisionTrace:
+            if (
+                type(value.phase) is not str
+                or len(value.phase) > 8
+                or value.phase != "read"
+                or value.action != "READ_SPAN"
+                or type(value.document_ref_hash) is not str
+                or len(value.document_ref_hash) != 64
+            ):
+                raise ValueError
+            return ReadSpanDecisionTrace(
+                provider_decision_index=value.provider_decision_index,
+                seed_ordinal=value.seed_ordinal,
+                document_ref_hash=value.document_ref_hash,
+                line_start=value.line_start,
+                line_end=value.line_end,
+                selected_result_rank=value.selected_result_rank,
+                overlaps_anchor=value.overlaps_anchor,
+                covers_entire_result=value.covers_entire_result,
+            )
+        if type(value) is SubmitVerdictDecisionTrace:
+            if (
+                type(value.phase) is not str
+                or len(value.phase) > 8
+                or value.phase != "verdict"
+                or value.action != "SUBMIT_VERDICT"
+                or type(value.candidate_shapes) is not tuple
+                or len(value.candidate_shapes) != 1
+                or any(
+                    type(row) is not CandidateShapeDecisionTrace
+                    for row in value.candidate_shapes
+                )
+            ):
+                raise ValueError
+            return SubmitVerdictDecisionTrace(
+                provider_decision_index=value.provider_decision_index,
+                seed_ordinal=value.seed_ordinal,
+                candidate_count=value.candidate_count,
+                candidate_shapes=tuple(
+                    _clone_candidate_shape_trace(row)
+                    for row in value.candidate_shapes
+                ),
+            )
+        if type(value) is AbstainDecisionTrace:
+            if (
+                type(value.phase) is not str
+                or len(value.phase) > 8
+                or value.phase not in _SAFE_TRACE_PHASES
+                or value.action != "ABSTAIN"
+                or type(value.reason) is not str
+                or len(value.reason) > 64
+            ):
+                raise ValueError
+            return AbstainDecisionTrace(
+                provider_decision_index=value.provider_decision_index,
+                seed_ordinal=value.seed_ordinal,
+                reason=value.reason,
+                phase=value.phase,
+            )
+    except (AttributeError, TypeError, ValueError):
+        pass
+    raise ValueError("investigator decision trace action is invalid")
+
+
+def _clone_decision_trace(
+    value: tuple[EvidenceInvestigatorDecisionTraceAction, ...],
+) -> tuple[EvidenceInvestigatorDecisionTraceAction, ...]:
+    if (
+        type(value) is not tuple
+        or len(value) > _MAX_DECISION_TRACE_ACTIONS
+        or any(
+            type(row)
+            not in {
+                SearchEvidenceDecisionTrace,
+                ReadSpanDecisionTrace,
+                SubmitVerdictDecisionTrace,
+                AbstainDecisionTrace,
+            }
+            for row in value
+        )
+    ):
+        raise ValueError("investigator decision trace is invalid")
+    return tuple(_clone_decision_trace_action(row) for row in value)
+
+
+def _clone_snapshot_for_loop_result(
+    value: SnapshotDocumentKey,
+) -> SnapshotDocumentKey:
+    if type(value) is not SnapshotDocumentKey:
+        raise ValueError("investigator authorized candidate snapshot is invalid")
+    try:
+        project_id = value.project_id
+        document_id = value.document_id
+        document_version = value.document_version
+        content_sha256 = value.content_sha256
+        if (
+            type(project_id) is not str
+            or not 1 <= len(project_id) <= 36
+            or type(document_id) is not str
+            or not 1 <= len(document_id) <= 36
+            or type(document_version) is not int
+            or type(content_sha256) is not str
+            or len(content_sha256) != 64
+        ):
+            raise ValueError
+        return SnapshotDocumentKey(
+            project_id=project_id,
+            document_id=document_id,
+            document_version=document_version,
+            content_sha256=content_sha256,
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(
+            "investigator authorized candidate snapshot is invalid"
+        ) from None
+
+
+def _clone_untrusted_candidate_envelope(
+    value: UntrustedCandidateEnvelope,
+) -> UntrustedCandidateEnvelope:
+    if type(value) is not UntrustedCandidateEnvelope:
+        raise ValueError("investigator loop envelope is invalid")
+    try:
+        seed_ref = value.seed_ref
+        candidate_payloads = value.candidate_payloads
+        authorized_span_hashes = value.authorized_span_hashes
+        trusted = value.trusted
+        if (
+            type(seed_ref) is not str
+            or len(seed_ref) != 37
+            or type(candidate_payloads) is not tuple
+            or len(candidate_payloads) != 1
+            or any(type(payload) is not str for payload in candidate_payloads)
+            or any(
+                len(payload.encode("utf-8")) > 32 * 1024
+                for payload in candidate_payloads
+            )
+            or type(authorized_span_hashes) is not tuple
+            or len(authorized_span_hashes) != 1
+            or any(
+                type(span_hash) is not str or len(span_hash) != 64
+                for span_hash in authorized_span_hashes
+            )
+            or type(trusted) is not bool
+            or trusted is not False
+        ):
+            raise ValueError
+        return UntrustedCandidateEnvelope(
+            seed_ref=seed_ref,
+            candidate_payloads=candidate_payloads,
+            authorized_span_hashes=authorized_span_hashes,
+        )
+    except (AttributeError, TypeError, ValueError, UnicodeError):
+        raise ValueError("investigator loop envelope is invalid") from None
+
+
+def _clone_authorized_candidate_binding(
+    value: AuthorizedCandidateBinding,
+) -> AuthorizedCandidateBinding:
+    if type(value) is not AuthorizedCandidateBinding:
+        raise ValueError("investigator authorized candidate is invalid")
+    try:
+        seed_ref = value.seed_ref
+        candidate_payload = value.candidate_payload
+        span_ref = value.span_ref
+        snapshot = value.snapshot
+        line_start = value.line_start
+        line_end = value.line_end
+        char_start = value.char_start
+        char_end = value.char_end
+        text = value.text
+        text_sha256 = value.text_sha256
+        authorized_span_char_start = value.authorized_span_char_start
+        authorized_span_char_end = value.authorized_span_char_end
+        authorized_span_sha256 = value.authorized_span_sha256
+        if (
+            type(seed_ref) is not str
+            or len(seed_ref) != 37
+            or type(candidate_payload) is not str
+            or len(candidate_payload.encode("utf-8")) > 32 * 1024
+            or type(span_ref) is not str
+            or not 21 <= len(span_ref) <= 69
+            or type(snapshot) is not SnapshotDocumentKey
+            or type(line_start) is not int
+            or type(line_end) is not int
+            or type(char_start) is not int
+            or type(char_end) is not int
+            or type(text) is not str
+            or len(text) > 100_000
+            or type(text_sha256) is not str
+            or len(text_sha256) != 64
+            or type(authorized_span_char_start) is not int
+            or type(authorized_span_char_end) is not int
+            or type(authorized_span_sha256) is not str
+            or len(authorized_span_sha256) != 64
+        ):
+            raise ValueError
+        checked_snapshot = _clone_snapshot_for_loop_result(snapshot)
+        return AuthorizedCandidateBinding(
+            seed_ref=seed_ref,
+            candidate_payload=candidate_payload,
+            span_ref=span_ref,
+            snapshot=checked_snapshot,
+            line_start=line_start,
+            line_end=line_end,
+            char_start=char_start,
+            char_end=char_end,
+            text=text,
+            text_sha256=text_sha256,
+            authorized_span_char_start=authorized_span_char_start,
+            authorized_span_char_end=authorized_span_char_end,
+            authorized_span_sha256=authorized_span_sha256,
+        )
+    except (AttributeError, TypeError, ValueError, UnicodeError):
+        raise ValueError("investigator authorized candidate is invalid") from None
+
+
+def _clone_loop_products(
+    envelopes: tuple[UntrustedCandidateEnvelope, ...],
+    authorized_candidates: tuple[AuthorizedCandidateBinding, ...],
+) -> tuple[
+    tuple[UntrustedCandidateEnvelope, ...],
+    tuple[AuthorizedCandidateBinding, ...],
+]:
+    if (
+        type(envelopes) is not tuple
+        or len(envelopes) > _MAX_TRACE_SEED_ORDINAL
+        or any(type(row) is not UntrustedCandidateEnvelope for row in envelopes)
+        or type(authorized_candidates) is not tuple
+        or len(authorized_candidates) > _MAX_TRACE_SEED_ORDINAL
+        or any(
+            type(row) is not AuthorizedCandidateBinding
+            for row in authorized_candidates
+        )
+    ):
+        raise ValueError("investigator loop products are invalid")
+    return (
+        tuple(_clone_untrusted_candidate_envelope(row) for row in envelopes),
+        tuple(
+            _clone_authorized_candidate_binding(row)
+            for row in authorized_candidates
+        ),
+    )
+
+
+def _trace_seed_order_is_valid(
+    trace: tuple[EvidenceInvestigatorDecisionTraceAction, ...],
+    *,
+    outcome: LoopOutcome,
+    terminal_seed_count: int,
+) -> bool:
+    if not trace:
+        return terminal_seed_count == 0
+    if trace[0].seed_ordinal != 1:
+        return False
+    current_seed = 1
+    prior_phase = -1
+    current_terminal = False
+    latest_search_result_count = 0
+    read_completed = False
+    terminals = 0
+    phase_order = {"search": 0, "read": 1, "verdict": 2}
+    for row in trace:
+        if row.seed_ordinal == current_seed + 1:
+            if not current_terminal:
+                return False
+            current_seed += 1
+            prior_phase = -1
+            current_terminal = False
+            latest_search_result_count = 0
+            read_completed = False
+        elif row.seed_ordinal != current_seed or current_terminal:
+            return False
+        expected_phase = (
+            "verdict"
+            if read_completed
+            else "read"
+            if latest_search_result_count > 0
+            else "search"
+        )
+        if row.phase != expected_phase:
+            return False
+        current_phase = phase_order.get(row.phase, -1)
+        if current_phase < prior_phase:
+            return False
+        prior_phase = current_phase
+        if type(row) is SearchEvidenceDecisionTrace:
+            if latest_search_result_count > 0 or read_completed:
+                return False
+            latest_search_result_count = row.result_count
+        elif type(row) is ReadSpanDecisionTrace:
+            if (
+                latest_search_result_count < 1
+                or read_completed
+                or row.selected_result_rank > latest_search_result_count
+            ):
+                return False
+            read_completed = True
+        elif type(row) is SubmitVerdictDecisionTrace and not read_completed:
+            return False
+        if type(row) in {SubmitVerdictDecisionTrace, AbstainDecisionTrace}:
+            current_terminal = True
+            terminals += 1
+    if terminals != terminal_seed_count:
+        return False
+    if outcome == "completed":
+        return current_terminal and current_seed == terminal_seed_count
+    return current_seed in {terminal_seed_count, terminal_seed_count + 1}
+
+
+def _decision_trace_matches_products(
+    trace: tuple[EvidenceInvestigatorDecisionTraceAction, ...],
+    *,
+    outcome: LoopOutcome,
+    envelopes: tuple[UntrustedCandidateEnvelope, ...],
+    authorized_candidates: tuple[AuthorizedCandidateBinding, ...],
+) -> bool:
+    if type(outcome) is not str or outcome not in {"completed", "degraded"}:
+        return False
+    try:
+        checked_envelopes, checked_bindings = _clone_loop_products(
+            envelopes, authorized_candidates
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if outcome == "degraded":
+        return not checked_envelopes and not checked_bindings
+
+    submissions = tuple(
+        row for row in trace if type(row) is SubmitVerdictDecisionTrace
+    )
+    if (
+        len(submissions) != len(checked_envelopes)
+        or len(submissions) != len(checked_bindings)
+        or len({row.seed_ref for row in checked_envelopes})
+        != len(checked_envelopes)
+    ):
+        return False
+
+    for submission, envelope, binding in zip(
+        submissions, checked_envelopes, checked_bindings, strict=True
+    ):
+        if (
+            len(envelope.candidate_payloads) != 1
+            or len(envelope.authorized_span_hashes) != 1
+            or binding.seed_ref != envelope.seed_ref
+            or binding.candidate_payload != envelope.candidate_payloads[0]
+            or binding.authorized_span_sha256
+            != envelope.authorized_span_hashes[0]
+        ):
+            return False
+        try:
+            candidate = CandidateRecordSubmission.model_validate_json(
+                envelope.candidate_payloads[0]
+            )
+            expected_shape = CandidateShapeDecisionTrace(
+                kind=candidate.kind,
+                field_names=safe_candidate_trace_field_names(
+                    candidate.kind, candidate.fields
+                ),
+                source_line_count=(
+                    candidate.source_line_end - candidate.source_line_start + 1
+                ),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return False
+        if (
+            submission.candidate_count != 1
+            or len(submission.candidate_shapes) != 1
+            or submission.candidate_shapes[0].kind != expected_shape.kind
+            or submission.candidate_shapes[0].field_names
+            != expected_shape.field_names
+            or submission.candidate_shapes[0].source_line_count
+            != expected_shape.source_line_count
+        ):
+            return False
+    return True
+
+
+def _decision_trace_matches_accounting(
+    trace: tuple[EvidenceInvestigatorDecisionTraceAction, ...],
+    *,
+    outcome: LoopOutcome,
+    provider_calls: int,
+    completed_seeds: int,
+    abstained_seeds: int,
+    executed_tool_calls: int,
+    executed_searches: int,
+    executed_reads: int,
+) -> bool:
+    counters = (
+        provider_calls,
+        completed_seeds,
+        abstained_seeds,
+        executed_tool_calls,
+        executed_searches,
+        executed_reads,
+    )
+    return (
+        type(outcome) is str
+        and outcome in {"completed", "degraded"}
+        and all(type(value) is int and value >= 0 for value in counters)
+        and provider_calls <= _MAX_DECISION_TRACE_ACTIONS
+        and executed_tool_calls <= _MAX_DECISION_TRACE_ACTIONS
+        and completed_seeds + abstained_seeds <= _MAX_TRACE_SEED_ORDINAL
+        and len(trace) == executed_tool_calls
+        and sum(type(row) is SearchEvidenceDecisionTrace for row in trace)
+        == executed_searches
+        and sum(type(row) is ReadSpanDecisionTrace for row in trace)
+        == executed_reads
+        and sum(type(row) is SubmitVerdictDecisionTrace for row in trace)
+        == completed_seeds
+        and sum(type(row) is AbstainDecisionTrace for row in trace)
+        == abstained_seeds
+        and all(row.provider_decision_index <= provider_calls for row in trace)
+        and all(
+            left.provider_decision_index < right.provider_decision_index
+            for left, right in zip(trace, trace[1:])
+        )
+        and _trace_seed_order_is_valid(
+            trace,
+            outcome=outcome,
+            terminal_seed_count=(completed_seeds + abstained_seeds),
+        )
+    )
+
+
+def _decision_trace_action_safe_dict(
+    row: EvidenceInvestigatorDecisionTraceAction,
+) -> dict[str, Any]:
+    if type(row) is SearchEvidenceDecisionTrace:
+        return {
+            "provider_decision_index": row.provider_decision_index,
+            "seed_ordinal": row.seed_ordinal,
+            "phase": "search",
+            "action": "SEARCH_EVIDENCE",
+            "result_count": row.result_count,
+        }
+    if type(row) is ReadSpanDecisionTrace:
+        return {
+            "provider_decision_index": row.provider_decision_index,
+            "seed_ordinal": row.seed_ordinal,
+            "phase": "read",
+            "action": "READ_SPAN",
+            "document_ref_hash": row.document_ref_hash,
+            "line_start": row.line_start,
+            "line_end": row.line_end,
+            "selected_result_rank": row.selected_result_rank,
+            "overlaps_anchor": row.overlaps_anchor,
+            "covers_entire_result": row.covers_entire_result,
+        }
+    if type(row) is SubmitVerdictDecisionTrace:
+        return {
+            "provider_decision_index": row.provider_decision_index,
+            "seed_ordinal": row.seed_ordinal,
+            "phase": "verdict",
+            "action": "SUBMIT_VERDICT",
+            "candidate_count": row.candidate_count,
+            "candidate_shapes": [
+                {
+                    "kind": shape.kind,
+                    "field_names": list(shape.field_names),
+                    "source_line_count": shape.source_line_count,
+                }
+                for shape in row.candidate_shapes
+            ],
+        }
+    if type(row) is AbstainDecisionTrace:
+        return {
+            "provider_decision_index": row.provider_decision_index,
+            "seed_ordinal": row.seed_ordinal,
+            "phase": row.phase,
+            "action": "ABSTAIN",
+            "reason": row.reason,
+        }
+    raise ValueError("investigator decision trace action is invalid")
+
+
+def _safe_decision_trace_dict(
+    value: tuple[EvidenceInvestigatorDecisionTraceAction, ...],
+    *,
+    outcome: LoopOutcome,
+    reason_code: str,
+    envelopes: tuple[UntrustedCandidateEnvelope, ...],
+    authorized_candidates: tuple[AuthorizedCandidateBinding, ...],
+    provider_calls: int,
+    completed_seeds: int,
+    abstained_seeds: int,
+    executed_tool_calls: int,
+    executed_searches: int,
+    executed_reads: int,
+) -> dict[str, Any]:
+    failed = {
+        "schema_version": _SAFE_TRACE_SCHEMA_VERSION,
+        "complete": False,
+        "actions": [],
+    }
+    try:
+        if (
+            type(outcome) is not str
+            or outcome not in {"completed", "degraded"}
+            or type(reason_code) is not str
+            or reason_code not in _LOOP_REASON_CODES
+            or (outcome == "completed" and reason_code != "completed")
+        ):
+            return failed
+        trace = _clone_decision_trace(value)
+        if not _decision_trace_matches_accounting(
+            trace,
+            outcome=outcome,
+            provider_calls=provider_calls,
+            completed_seeds=completed_seeds,
+            abstained_seeds=abstained_seeds,
+            executed_tool_calls=executed_tool_calls,
+            executed_searches=executed_searches,
+            executed_reads=executed_reads,
+        ):
+            return failed
+        if not _decision_trace_matches_products(
+            trace,
+            outcome=outcome,
+            envelopes=envelopes,
+            authorized_candidates=authorized_candidates,
+        ):
+            return failed
+        actions = [_decision_trace_action_safe_dict(row) for row in trace]
+    except (AttributeError, TypeError, ValueError):
+        return failed
+    return {
+        "schema_version": _SAFE_TRACE_SCHEMA_VERSION,
+        "complete": True,
+        "actions": actions,
+    }
+
+
+@dataclass(frozen=True, slots=True)
 class EvidenceInvestigatorLoopResult:
     """Fail-closed loop result.
 
@@ -417,47 +1236,24 @@ class EvidenceInvestigatorLoopResult:
     executed_searches: int = 0
     executed_reads: int = 0
     recoverable_rejections: int = 0
+    decision_trace: tuple[EvidenceInvestigatorDecisionTraceAction, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.outcome not in {"completed", "degraded"}:
+        if (
+            type(self.outcome) is not str
+            or self.outcome not in {"completed", "degraded"}
+        ):
             raise ValueError("investigator loop outcome is invalid")
-        if self.reason_code not in _LOOP_REASON_CODES:
+        if (
+            type(self.reason_code) is not str
+            or self.reason_code not in _LOOP_REASON_CODES
+        ):
             raise ValueError("investigator loop reason is invalid")
         if self.outcome == "completed" and self.reason_code != "completed":
             raise ValueError("completed loop result has an invalid reason")
-        if self.outcome == "degraded" and (
-            self.envelopes or self.authorized_candidates
-        ):
-            raise ValueError("degraded loop result must not expose candidates")
-        if type(self.envelopes) is not tuple or any(
-            type(row) is not UntrustedCandidateEnvelope for row in self.envelopes
-        ):
-            raise ValueError("investigator loop envelopes are invalid")
-        if type(self.authorized_candidates) is not tuple or any(
-            type(row) is not AuthorizedCandidateBinding
-            for row in self.authorized_candidates
-        ):
-            raise ValueError("investigator authorized candidates are invalid")
-        if self.outcome == "completed" and len(self.authorized_candidates) != sum(
-            len(row.candidate_payloads) for row in self.envelopes
-        ):
-            raise ValueError("investigator candidate bindings are incomplete")
-        if self.outcome == "completed":
-            expected = tuple(
-                (envelope.seed_ref, payload, span_hash)
-                for envelope in self.envelopes
-                for payload, span_hash in zip(
-                    envelope.candidate_payloads,
-                    envelope.authorized_span_hashes,
-                    strict=True,
-                )
-            )
-            actual = tuple(
-                (row.seed_ref, row.candidate_payload, row.authorized_span_sha256)
-                for row in self.authorized_candidates
-            )
-            if actual != expected:
-                raise ValueError("investigator candidate bindings do not match envelopes")
+        checked_envelopes, checked_bindings = _clone_loop_products(
+            self.envelopes, self.authorized_candidates
+        )
         for counter in (
             self.provider_calls,
             self.reported_prompt_tokens,
@@ -489,6 +1285,25 @@ class EvidenceInvestigatorLoopResult:
             or (self.outcome == "completed" and self.usage_unavailable_calls != 0)
         ):
             raise ValueError("investigator loop accounting is invalid")
+        checked_trace = _clone_decision_trace(self.decision_trace)
+        if not _decision_trace_matches_accounting(
+            checked_trace,
+            outcome=self.outcome,
+            provider_calls=self.provider_calls,
+            completed_seeds=self.completed_seeds,
+            abstained_seeds=self.abstained_seeds,
+            executed_tool_calls=self.executed_tool_calls,
+            executed_searches=self.executed_searches,
+            executed_reads=self.executed_reads,
+        ):
+            raise ValueError("investigator decision trace is invalid")
+        if not _decision_trace_matches_products(
+            checked_trace,
+            outcome=self.outcome,
+            envelopes=checked_envelopes,
+            authorized_candidates=checked_bindings,
+        ):
+            raise ValueError("investigator decision trace products are invalid")
 
     def safe_dict(self) -> dict[str, Any]:
         outcome = (
@@ -502,11 +1317,27 @@ class EvidenceInvestigatorLoopResult:
             if type(self.reason_code) is str and self.reason_code in _LOOP_REASON_CODES
             else "internal_failure"
         )
-        envelopes = (
-            self.envelopes
-            if type(self.envelopes) is tuple
-            and all(type(row) is UntrustedCandidateEnvelope for row in self.envelopes)
-            else ()
+        decision_trace = _safe_decision_trace_dict(
+            self.decision_trace,
+            outcome=self.outcome,
+            reason_code=self.reason_code,
+            envelopes=self.envelopes,
+            authorized_candidates=self.authorized_candidates,
+            provider_calls=self.provider_calls,
+            completed_seeds=self.completed_seeds,
+            abstained_seeds=self.abstained_seeds,
+            executed_tool_calls=self.executed_tool_calls,
+            executed_searches=self.executed_searches,
+            executed_reads=self.executed_reads,
+        )
+        submitted_count = (
+            sum(
+                row.get("action") == "SUBMIT_VERDICT"
+                for row in decision_trace["actions"]
+                if type(row) is dict
+            )
+            if decision_trace["complete"] is True and outcome == "completed"
+            else 0
         )
         return {
             "protocol": "evidence_investigator_native_tools_v1",
@@ -531,23 +1362,56 @@ class EvidenceInvestigatorLoopResult:
             "recoverable_rejections": _safe_counter(
                 self.recoverable_rejections
             ),
-            "submitted_envelopes": len(envelopes) if outcome == "completed" else 0,
-            "authorized_candidates": (
-                len(self.authorized_candidates)
-                if outcome == "completed"
-                and type(self.authorized_candidates) is tuple
-                and all(
-                    type(row) is AuthorizedCandidateBinding
-                    for row in self.authorized_candidates
-                )
-                else 0
+            "decision_trace": decision_trace,
+            "submitted_envelopes": submitted_count,
+            "authorized_candidates": submitted_count,
+            "boundary": (
+                "Candidates are untrusted and no consistency issue is created. "
+                "Decision actions contain bounded metadata only; document refs "
+                "are run-scoped pseudonyms, never content hashes."
             ),
-            "boundary": "Candidates are untrusted and no consistency issue is created.",
             "accounting": (
                 "reported_* are provider telemetry; charged_tokens is the "
                 "max of reported usage and a heuristic admission reservation"
             ),
         }
+
+
+def clone_evidence_investigator_loop_result(
+    value: EvidenceInvestigatorLoopResult,
+) -> EvidenceInvestigatorLoopResult:
+    """Defensively reconstruct a result before a diagnostics trust boundary."""
+
+    if type(value) is not EvidenceInvestigatorLoopResult:
+        raise ValueError("investigator loop result is invalid")
+    try:
+        envelopes = value.envelopes
+        authorized_candidates = value.authorized_candidates
+        decision_trace = value.decision_trace
+        checked_envelopes, checked_bindings = _clone_loop_products(
+            envelopes, authorized_candidates
+        )
+        checked_trace = _clone_decision_trace(decision_trace)
+        return EvidenceInvestigatorLoopResult(
+            outcome=value.outcome,
+            reason_code=value.reason_code,
+            envelopes=checked_envelopes,
+            authorized_candidates=checked_bindings,
+            provider_calls=value.provider_calls,
+            reported_prompt_tokens=value.reported_prompt_tokens,
+            reported_completion_tokens=value.reported_completion_tokens,
+            charged_tokens=value.charged_tokens,
+            usage_unavailable_calls=value.usage_unavailable_calls,
+            completed_seeds=value.completed_seeds,
+            abstained_seeds=value.abstained_seeds,
+            executed_tool_calls=value.executed_tool_calls,
+            executed_searches=value.executed_searches,
+            executed_reads=value.executed_reads,
+            recoverable_rejections=value.recoverable_rejections,
+            decision_trace=checked_trace,
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("investigator loop result is invalid") from None
 
 
 class EvidenceInvestigatorToolLoop:
@@ -752,6 +1616,7 @@ class EvidenceInvestigatorToolLoop:
         total_results = 0
         recoverable_rejections = 0
         authorized_candidates: list[AuthorizedCandidateBinding] = []
+        decision_trace: list[EvidenceInvestigatorDecisionTraceAction] = []
 
         def degraded(reason_code: str) -> EvidenceInvestigatorLoopResult:
             return self._degraded(
@@ -767,12 +1632,16 @@ class EvidenceInvestigatorToolLoop:
                 executed_searches,
                 executed_reads,
                 recoverable_rejections,
+                decision_trace,
             )
 
-        for internal_seed in self._seeds:
+        for seed_ordinal, internal_seed in enumerate(self._seeds, start=1):
             observations: list[dict[str, Any]] = []
             result_chunks: dict[str, EvidenceChunk] = {}
             read_bindings: dict[str, _ReadBinding] = {}
+            safe_result_bindings: dict[
+                str, _SafeSearchResultTraceBinding
+            ] = {}
             seen_chunk_ids: set[str] = set()
             result_refs = 0
             span_refs = 0
@@ -1073,8 +1942,13 @@ class EvidenceInvestigatorToolLoop:
                         ),
                         result_chunks=result_chunks,
                         read_bindings=read_bindings,
+                        safe_result_bindings=safe_result_bindings,
                         seen_chunk_ids=seen_chunk_ids,
                         authorized_candidates=authorized_candidates,
+                        decision_trace=decision_trace,
+                        provider_decision_index=provider_calls,
+                        seed_ordinal=seed_ordinal,
+                        phase=phase,
                     )
                     executed_tools += 1
                     executed_action_signatures.add(action_signature)
@@ -1138,6 +2012,7 @@ class EvidenceInvestigatorToolLoop:
             executed_searches=executed_searches,
             executed_reads=executed_reads,
             recoverable_rejections=recoverable_rejections,
+            decision_trace=tuple(decision_trace),
         )
 
     def _dispatch(
@@ -1150,8 +2025,13 @@ class EvidenceInvestigatorToolLoop:
         remaining_results: int,
         result_chunks: dict[str, EvidenceChunk],
         read_bindings: dict[str, _ReadBinding],
+        safe_result_bindings: dict[str, _SafeSearchResultTraceBinding],
         seen_chunk_ids: set[str],
         authorized_candidates: list[AuthorizedCandidateBinding],
+        decision_trace: list[EvidenceInvestigatorDecisionTraceAction],
+        provider_decision_index: int,
+        seed_ordinal: int,
+        phase: InvestigationPhase,
     ) -> tuple[bool, int, int, bool]:
         if type(arguments) is SearchEvidenceArgs:
             if remaining_results <= 0:
@@ -1191,11 +2071,30 @@ class EvidenceInvestigatorToolLoop:
             )
             if len(rows) != len(fresh_chunks):
                 raise InvestigatorRejected("internal_failure")
-            for row, chunk in zip(rows, fresh_chunks, strict=True):
+            anchor = seed.anchor.evidence
+            for rank, (row, chunk) in enumerate(
+                zip(rows, fresh_chunks, strict=True), start=1
+            ):
                 result_chunks[row.result_ref] = chunk
+                overlaps_anchor = (
+                    chunk.snapshot.document_id == anchor.document_id
+                    and chunk.line_start <= anchor.line_end
+                    and chunk.line_end >= anchor.line_start
+                )
+                safe_result_bindings[row.result_ref] = (
+                    _SafeSearchResultTraceBinding(
+                        document_ref_hash=_run_scoped_document_ref_hash(
+                            run_hash=self._scope.run_hash,
+                            document_id=chunk.snapshot.document_id,
+                        ),
+                        result_rank=rank,
+                        line_start=row.line_start,
+                        line_end=row.line_end,
+                        overlaps_anchor=overlaps_anchor,
+                    )
+                )
             seen_chunk_ids.update(chunk.chunk_id for chunk in fresh_chunks)
             if rows:
-                anchor = seed.anchor.evidence
                 observations.extend(
                     {
                         "kind": "search_result",
@@ -1203,11 +2102,9 @@ class EvidenceInvestigatorToolLoop:
                         "result_ref": row.result_ref,
                         "line_start": row.line_start,
                         "line_end": row.line_end,
-                        "overlaps_anchor": (
-                            chunk.snapshot.document_id == anchor.document_id
-                            and chunk.line_start <= anchor.line_end
-                            and chunk.line_end >= anchor.line_start
-                        ),
+                        "overlaps_anchor": safe_result_bindings[
+                            row.result_ref
+                        ].overlaps_anchor,
                     }
                     for rank, (row, chunk) in enumerate(
                         zip(rows, fresh_chunks, strict=True), start=1
@@ -1218,11 +2115,19 @@ class EvidenceInvestigatorToolLoop:
                 # refined query (or ABSTAIN) is needed.  No document metadata or
                 # rejected query text is echoed into the next prompt.
                 observations.append({"kind": "search_empty"})
+            decision_trace.append(
+                SearchEvidenceDecisionTrace(
+                    provider_decision_index=provider_decision_index,
+                    seed_ordinal=seed_ordinal,
+                    result_count=len(rows),
+                )
+            )
             return False, len(rows), 0, False
         if type(arguments) is ReadSpanArgs:
             row = session.read(arguments)
             source_chunk = result_chunks.get(arguments.result_ref)
-            if source_chunk is None:
+            safe_result = safe_result_bindings.get(arguments.result_ref)
+            if source_chunk is None or safe_result is None:
                 raise InvestigatorRejected("internal_failure")
             read_bindings[row.span_ref] = _ReadBinding(
                 snapshot=_copy_snapshot(source_chunk.snapshot),
@@ -1245,6 +2150,21 @@ class EvidenceInvestigatorToolLoop:
                         line_end=row.line_end,
                     ),
                 }
+            )
+            decision_trace.append(
+                ReadSpanDecisionTrace(
+                    provider_decision_index=provider_decision_index,
+                    seed_ordinal=seed_ordinal,
+                    document_ref_hash=safe_result.document_ref_hash,
+                    line_start=row.line_start,
+                    line_end=row.line_end,
+                    selected_result_rank=safe_result.result_rank,
+                    overlaps_anchor=safe_result.overlaps_anchor,
+                    covers_entire_result=(
+                        row.line_start == safe_result.line_start
+                        and row.line_end == safe_result.line_end
+                    ),
+                )
             )
             return False, 0, 1, False
         if type(arguments) is SubmitVerdictArgs:
@@ -1283,9 +2203,38 @@ class EvidenceInvestigatorToolLoop:
                     )
                 )
             authorized_candidates.extend(new_bindings)
+            decision_trace.append(
+                SubmitVerdictDecisionTrace(
+                    provider_decision_index=provider_decision_index,
+                    seed_ordinal=seed_ordinal,
+                    candidate_count=len(arguments.candidates),
+                    candidate_shapes=tuple(
+                        CandidateShapeDecisionTrace(
+                            kind=candidate.kind,
+                            field_names=safe_candidate_trace_field_names(
+                                candidate.kind, candidate.fields
+                            ),
+                            source_line_count=(
+                                candidate.source_line_end
+                                - candidate.source_line_start
+                                + 1
+                            ),
+                        )
+                        for candidate in arguments.candidates
+                    ),
+                )
+            )
             return True, 0, 0, False
         if type(arguments) is AbstainArgs:
             session.abstain(arguments)
+            decision_trace.append(
+                AbstainDecisionTrace(
+                    provider_decision_index=provider_decision_index,
+                    seed_ordinal=seed_ordinal,
+                    reason=arguments.reason,
+                    phase=phase,
+                )
+            )
             return True, 0, 0, True
         raise InvestigatorRejected("unknown_tool")
 
@@ -1309,6 +2258,7 @@ class EvidenceInvestigatorToolLoop:
         executed_searches: int,
         executed_reads: int,
         recoverable_rejections: int,
+        decision_trace: Sequence[EvidenceInvestigatorDecisionTraceAction],
     ) -> EvidenceInvestigatorLoopResult:
         safe_reason = (
             reason_code if reason_code in _LOOP_REASON_CODES else "internal_failure"
@@ -1329,6 +2279,7 @@ class EvidenceInvestigatorToolLoop:
             executed_searches=_safe_counter(executed_searches),
             executed_reads=_safe_counter(executed_reads),
             recoverable_rejections=_safe_counter(recoverable_rejections),
+            decision_trace=tuple(decision_trace),
         )
 
 
@@ -1351,6 +2302,52 @@ class _ReadBinding:
     char_start: int
     char_end: int
     text: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _SafeSearchResultTraceBinding:
+    """Ephemeral raw-capability lookup; only its safe fields enter diagnostics."""
+
+    document_ref_hash: str
+    result_rank: int
+    line_start: int
+    line_end: int
+    overlaps_anchor: bool
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.document_ref_hash) is not str
+            or re.fullmatch(r"[a-f0-9]{64}", self.document_ref_hash) is None
+            or type(self.result_rank) is not int
+            or not 1 <= self.result_rank <= _MAX_TRACE_RESULT_COUNT
+            or type(self.line_start) is not int
+            or type(self.line_end) is not int
+            or not 1 <= self.line_start <= self.line_end <= MAX_LINE_NUMBER
+            or type(self.overlaps_anchor) is not bool
+        ):
+            raise ValueError("investigator safe result binding is invalid")
+
+
+def _run_scoped_document_ref_hash(*, run_hash: str, document_id: str) -> str:
+    """Return a domain-separated per-run document pseudonym.
+
+    This hash is allowed only in server diagnostics.  It is not an evidence or
+    content hash and must be reduced to aggregate booleans by later exported
+    evaluation artifacts.
+    """
+
+    if (
+        type(run_hash) is not str
+        or re.fullmatch(r"[a-f0-9]{64}", run_hash) is None
+        or type(document_id) is not str
+        or not document_id
+        or len(document_id) > 256
+    ):
+        raise ValueError("investigator document trace input is invalid")
+    material = (
+        "loreguard:evidence-read-ref:v1\0" + run_hash + "\0" + document_id
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _tool_definitions(

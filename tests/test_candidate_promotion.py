@@ -30,8 +30,13 @@ from app.evidence_investigator import (
 )
 from app.evidence_investigator_state import UntrustedCandidateEnvelope
 from app.evidence_investigator_loop import (
+    CandidateShapeDecisionTrace,
     AuthorizedCandidateBinding,
     EvidenceInvestigatorLoopResult,
+    ReadSpanDecisionTrace,
+    SearchEvidenceDecisionTrace,
+    SubmitVerdictDecisionTrace,
+    safe_candidate_trace_field_names,
 )
 from app.rules import detect_issues
 
@@ -131,14 +136,67 @@ def _completed_result(
     envelopes: tuple[UntrustedCandidateEnvelope, ...],
     bindings: tuple[AuthorizedCandidateBinding, ...],
 ) -> EvidenceInvestigatorLoopResult:
+    if not envelopes:
+        return EvidenceInvestigatorLoopResult(
+            outcome="completed",
+            reason_code="completed",
+            envelopes=(),
+            authorized_candidates=bindings,
+        )
+    trace = []
+    for seed_ordinal, envelope in enumerate(envelopes, start=1):
+        candidate = CandidateRecordSubmission.model_validate_json(
+            envelope.candidate_payloads[0]
+        )
+        decision_index = (seed_ordinal - 1) * 3
+        trace.extend(
+            (
+                SearchEvidenceDecisionTrace(
+                    provider_decision_index=decision_index + 1,
+                    seed_ordinal=seed_ordinal,
+                    result_count=1,
+                ),
+                ReadSpanDecisionTrace(
+                    provider_decision_index=decision_index + 2,
+                    seed_ordinal=seed_ordinal,
+                    document_ref_hash="a" * 64,
+                    line_start=candidate.source_line_start,
+                    line_end=candidate.source_line_end,
+                    selected_result_rank=1,
+                    overlaps_anchor=False,
+                    covers_entire_result=True,
+                ),
+                SubmitVerdictDecisionTrace(
+                    provider_decision_index=decision_index + 3,
+                    seed_ordinal=seed_ordinal,
+                    candidate_count=1,
+                    candidate_shapes=(
+                        CandidateShapeDecisionTrace(
+                            kind=candidate.kind,
+                            field_names=safe_candidate_trace_field_names(
+                                candidate.kind, candidate.fields
+                            ),
+                            source_line_count=(
+                                candidate.source_line_end
+                                - candidate.source_line_start
+                                + 1
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        )
     return EvidenceInvestigatorLoopResult(
         outcome="completed",
         reason_code="completed",
         envelopes=envelopes,
         authorized_candidates=bindings,
-        provider_calls=max(1, len(envelopes)),
+        provider_calls=len(trace),
         completed_seeds=len({row.seed_ref for row in envelopes}),
-        executed_tool_calls=max(1, len(envelopes)),
+        executed_tool_calls=len(trace),
+        executed_searches=len(envelopes),
+        executed_reads=len(envelopes),
+        decision_trace=tuple(trace),
     )
 
 

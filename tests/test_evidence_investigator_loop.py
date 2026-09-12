@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 
 import httpx
 import pytest
@@ -18,8 +19,15 @@ from app.evidence_investigator import (
     get_family_semantic_guidance,
 )
 from app.evidence_investigator_loop import (
+    AbstainDecisionTrace,
+    CandidateShapeDecisionTrace,
+    EvidenceInvestigatorLoopResult,
     EvidenceInvestigatorToolLoop,
     InvestigatorLoopPolicy,
+    ReadSpanDecisionTrace,
+    SearchEvidenceDecisionTrace,
+    SubmitVerdictDecisionTrace,
+    clone_evidence_investigator_loop_result,
 )
 from app.evidence_investigator_state import InvestigatorLimits
 from app.provider import (
@@ -431,13 +439,101 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
         assert forbidden not in schemas
 
     # Safe diagnostics cannot leak source text, model fields or document ids.
-    safe = json.dumps(outcome.safe_dict(), ensure_ascii=False)
+    safe_payload = outcome.safe_dict()
+    trace = safe_payload["decision_trace"]
+    assert set(trace) == {"schema_version", "complete", "actions"}
+    assert trace["schema_version"] == "evidence_investigator_safe_trace_v1"
+    assert trace["complete"] is True
+    assert trace["actions"] == [
+        {
+            "provider_decision_index": 1,
+            "seed_ordinal": 1,
+            "phase": "search",
+            "action": "SEARCH_EVIDENCE",
+            "result_count": 1,
+        },
+        {
+            "provider_decision_index": 2,
+            "seed_ordinal": 1,
+            "phase": "read",
+            "action": "READ_SPAN",
+            "document_ref_hash": trace["actions"][1]["document_ref_hash"],
+            "line_start": 2,
+            "line_end": 2,
+            "selected_result_rank": 1,
+            "overlaps_anchor": True,
+            "covers_entire_result": False,
+        },
+        {
+            "provider_decision_index": 3,
+            "seed_ordinal": 1,
+            "phase": "verdict",
+            "action": "SUBMIT_VERDICT",
+            "candidate_count": 1,
+            "candidate_shapes": [
+                {
+                    "kind": "fact",
+                    "field_names": ["predicate", "subject", "value"],
+                    "source_line_count": 1,
+                }
+            ],
+        },
+    ]
+    assert re.fullmatch(r"[a-f0-9]{64}", trace["actions"][1]["document_ref_hash"])
+    safe = json.dumps(safe_payload, ensure_ascii=False)
     binding_safe = json.dumps(binding.safe_dict(), ensure_ascii=False)
-    for secret in (CONTENT, "黑色", "doc-1", "chapter.md"):
+    for secret in (
+        CONTENT,
+        "岚的发色是否发生冲突",
+        "岚",
+        "黑色",
+        "doc-1",
+        "chapter.md",
+        seed_ref,
+        "result_tok0000000000001",
+        "span_tok0000000000002",
+        "call_1",
+    ):
         assert secret not in safe
         assert secret not in binding_safe
+    for secret in (CONTENT, "黑色", "doc-1", "chapter.md"):
         assert secret not in repr(outcome)
         assert secret not in repr(binding)
+
+    class ActivePayloads:
+        touched = False
+
+        def __iter__(self):
+            self.touched = True
+            raise RuntimeError("CANARY-PRODUCT-ITER")
+
+    envelope = outcome.envelopes[0]
+    original_payloads = envelope.candidate_payloads
+    active_payloads = ActivePayloads()
+    object.__setattr__(envelope, "candidate_payloads", active_payloads)
+    assert outcome.safe_dict()["decision_trace"]["complete"] is False
+    assert active_payloads.touched is False
+    object.__setattr__(envelope, "candidate_payloads", original_payloads)
+
+    mismatched_submit = SubmitVerdictDecisionTrace(
+        provider_decision_index=3,
+        seed_ordinal=1,
+        candidate_count=1,
+        candidate_shapes=(
+            CandidateShapeDecisionTrace(
+                kind="fact",
+                field_names=("subject",),
+                source_line_count=1,
+            ),
+        ),
+    )
+    object.__setattr__(
+        outcome,
+        "decision_trace",
+        (*outcome.decision_trace[:2], mismatched_submit),
+    )
+    with pytest.raises(ValueError, match="loop result"):
+        clone_evidence_investigator_loop_result(outcome)
 
 
 def test_knowledge_evidence_guidance_is_present_in_model_visible_prompt():
@@ -511,6 +607,249 @@ def test_knowledge_evidence_guidance_is_present_in_model_visible_prompt():
         "仅接触信息载体",
     ):
         assert required in knows_guidance
+
+
+def test_decision_trace_models_reject_unreachable_or_unbounded_metadata():
+    with pytest.raises(ValueError, match="trace position"):
+        SearchEvidenceDecisionTrace(
+            provider_decision_index=65,
+            seed_ordinal=1,
+            result_count=0,
+        )
+    with pytest.raises(ValueError, match="abstain trace"):
+        AbstainDecisionTrace(
+            provider_decision_index=1,
+            seed_ordinal=1,
+            phase="search",
+            reason="private provider explanation",
+        )
+    with pytest.raises(ValueError, match="candidate fields"):
+        CandidateShapeDecisionTrace(
+            kind="fact",
+            field_names=("value", "subject"),
+            source_line_count=1,
+        )
+    with pytest.raises(ValueError, match="read trace"):
+        ReadSpanDecisionTrace(
+            provider_decision_index=1,
+            seed_ordinal=1,
+            document_ref_hash="a" * 64,
+            line_start=1,
+            line_end=1,
+            selected_result_rank=1,
+            overlaps_anchor=1,
+            covers_entire_result=False,
+        )
+    with pytest.raises(ValueError, match="decision trace"):
+        EvidenceInvestigatorLoopResult(
+            outcome="completed",
+            reason_code="completed",
+            provider_calls=1,
+            abstained_seeds=1,
+            executed_tool_calls=1,
+            decision_trace=(),
+        )
+
+
+def test_tampered_decision_trace_is_suppressed_without_touching_foreign_objects():
+    action = AbstainDecisionTrace(
+        provider_decision_index=1,
+        seed_ordinal=1,
+        phase="search",
+        reason="insufficient_evidence",
+    )
+    outcome = EvidenceInvestigatorLoopResult(
+        outcome="completed",
+        reason_code="completed",
+        provider_calls=1,
+        abstained_seeds=1,
+        executed_tool_calls=1,
+        decision_trace=(action,),
+    )
+
+    class ForeignTraceAction:
+        touched = False
+
+        @property
+        def action(self):
+            self.touched = True
+            return "CANARY-RAW-PAYLOAD"
+
+    foreign = ForeignTraceAction()
+    object.__setattr__(outcome, "decision_trace", (foreign,))
+
+    trace = outcome.safe_dict()["decision_trace"]
+    assert trace == {
+        "schema_version": "evidence_investigator_safe_trace_v1",
+        "complete": False,
+        "actions": [],
+    }
+    assert foreign.touched is False
+    assert "CANARY-RAW-PAYLOAD" not in json.dumps(trace)
+
+
+def test_tampered_nested_trace_values_fail_closed_without_executing_dunders():
+    outcome = EvidenceInvestigatorLoopResult(
+        outcome="completed",
+        reason_code="completed",
+        provider_calls=1,
+        abstained_seeds=1,
+        executed_tool_calls=1,
+        decision_trace=(
+            AbstainDecisionTrace(
+                provider_decision_index=1,
+                seed_ordinal=1,
+                phase="search",
+                reason="insufficient_evidence",
+            ),
+        ),
+    )
+
+    class ActiveValue:
+        def __init__(self):
+            self.touched = False
+
+        def __hash__(self):
+            self.touched = True
+            raise RuntimeError("CANARY-HASH")
+
+        def __ne__(self, other):
+            self.touched = True
+            raise RuntimeError("CANARY-NE")
+
+        def __iter__(self):
+            self.touched = True
+            raise RuntimeError("CANARY-ITER")
+
+    phase_canary = ActiveValue()
+    action = SearchEvidenceDecisionTrace(
+        provider_decision_index=1,
+        seed_ordinal=1,
+        result_count=0,
+    )
+    object.__setattr__(action, "phase", phase_canary)
+    object.__setattr__(outcome, "decision_trace", (action,))
+    assert outcome.safe_dict()["decision_trace"]["complete"] is False
+    assert phase_canary.touched is False
+
+    shapes_canary = ActiveValue()
+    submit = SubmitVerdictDecisionTrace(
+        provider_decision_index=1,
+        seed_ordinal=1,
+        candidate_count=1,
+        candidate_shapes=(
+            CandidateShapeDecisionTrace(
+                kind="fact",
+                field_names=("predicate", "subject", "value"),
+                source_line_count=1,
+            ),
+        ),
+    )
+    object.__setattr__(submit, "candidate_shapes", shapes_canary)
+    object.__setattr__(outcome, "decision_trace", (submit,))
+    assert outcome.safe_dict()["decision_trace"]["complete"] is False
+    assert shapes_canary.touched is False
+
+    field_names_canary = ActiveValue()
+    shape = CandidateShapeDecisionTrace(
+        kind="fact",
+        field_names=("predicate", "subject", "value"),
+        source_line_count=1,
+    )
+    object.__setattr__(shape, "field_names", field_names_canary)
+    object.__setattr__(submit, "candidate_shapes", (shape,))
+    object.__setattr__(outcome, "decision_trace", (submit,))
+    assert outcome.safe_dict()["decision_trace"]["complete"] is False
+    assert field_names_canary.touched is False
+
+    hash_canary = ActiveValue()
+    object.__setattr__(outcome, "outcome", hash_canary)
+    assert outcome.safe_dict()["decision_trace"]["complete"] is False
+    assert hash_canary.touched is False
+
+    object.__setattr__(outcome, "outcome", "completed")
+    reason_hash_canary = ActiveValue()
+    object.__setattr__(outcome, "reason_code", reason_hash_canary)
+    assert outcome.safe_dict()["decision_trace"]["complete"] is False
+    assert reason_hash_canary.touched is False
+
+
+@pytest.mark.parametrize("field_name", ["outcome", "reason_code"])
+def test_loop_result_rejects_non_string_enum_without_hashing_it(field_name):
+    class ActiveHash:
+        touched = False
+
+        def __hash__(self):
+            self.touched = True
+            raise RuntimeError("CANARY-HASH")
+
+    active = ActiveHash()
+    values = {
+        "outcome": "degraded",
+        "reason_code": "provider_timeout",
+    }
+    values[field_name] = active
+    with pytest.raises(ValueError, match="loop (outcome|reason)"):
+        EvidenceInvestigatorLoopResult(**values)
+    assert active.touched is False
+
+
+def test_completed_submit_requires_matching_products_and_read_rank_is_bounded():
+    shape = CandidateShapeDecisionTrace(
+        kind="fact",
+        field_names=("predicate", "subject", "value"),
+        source_line_count=1,
+    )
+    with pytest.raises(ValueError, match="trace products"):
+        EvidenceInvestigatorLoopResult(
+            outcome="completed",
+            reason_code="completed",
+            provider_calls=3,
+            completed_seeds=1,
+            executed_tool_calls=3,
+            executed_searches=1,
+            executed_reads=1,
+            decision_trace=(
+                SearchEvidenceDecisionTrace(1, 1, 1),
+                ReadSpanDecisionTrace(2, 1, "a" * 64, 1, 1, 1, False, True),
+                SubmitVerdictDecisionTrace(3, 1, 1, (shape,)),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="decision trace"):
+        EvidenceInvestigatorLoopResult(
+            outcome="degraded",
+            reason_code="provider_timeout",
+            provider_calls=2,
+            executed_tool_calls=2,
+            executed_searches=1,
+            executed_reads=1,
+            decision_trace=(
+                SearchEvidenceDecisionTrace(1, 1, 1),
+                ReadSpanDecisionTrace(2, 1, "a" * 64, 1, 1, 2, False, True),
+            ),
+        )
+
+
+def test_loop_result_clone_rejects_active_container_without_iterating_it():
+    outcome = EvidenceInvestigatorLoopResult(
+        outcome="degraded",
+        reason_code="provider_timeout",
+    )
+
+    class ActiveIterable:
+        touched = False
+
+        def __iter__(self):
+            self.touched = True
+            raise RuntimeError("CANARY-ACTIVE-CONTAINER")
+
+    active = ActiveIterable()
+    object.__setattr__(outcome, "envelopes", active)
+
+    with pytest.raises(ValueError, match="loop result"):
+        clone_evidence_investigator_loop_result(outcome)
+    assert active.touched is False
 
 
 @pytest.mark.parametrize(
@@ -663,6 +1002,56 @@ def test_usage_is_reported_immediately_and_checkpoints_wrap_external_work():
             completion_reserve=768,
         )
         assert expected > without_schemas
+    assert outcome.safe_dict()["decision_trace"]["actions"][-1] == {
+        "provider_decision_index": 2,
+        "seed_ordinal": 1,
+        "phase": "read",
+        "action": "ABSTAIN",
+        "reason": "insufficient_evidence",
+    }
+
+
+def test_abstain_after_read_records_only_allowlisted_verdict_metadata():
+    scope, seeds, chunk = context()
+    seed_ref = seeds[0].seed_ref
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", search_args(seed_ref)),
+        result(
+            "READ_SPAN",
+            {
+                "seed_ref": seed_ref,
+                "result_ref": "result_tok0000000000001",
+                "line_start": 2,
+                "line_end": 2,
+            },
+        ),
+        result(
+            "ABSTAIN",
+            {
+                "seed_ref": seed_ref,
+                "reason": "no_rule_validated_conflict",
+            },
+        ),
+    )
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever((chunk,)),
+        scope=scope,
+        seeds=seeds,
+        token_factory=Tokens(),
+        limits=InvestigatorLimits(max_charged_tokens=20_000),
+    ).run()
+
+    assert (outcome.outcome, outcome.abstained_seeds) == ("completed", 1)
+    terminal = outcome.safe_dict()["decision_trace"]["actions"][-1]
+    assert terminal == {
+        "provider_decision_index": 3,
+        "seed_ordinal": 1,
+        "phase": "verdict",
+        "action": "ABSTAIN",
+        "reason": "no_rule_validated_conflict",
+    }
 
 
 def test_search_observation_marks_non_anchor_chunk_without_leaking_document_id():
@@ -827,6 +1216,13 @@ def test_anchor_read_is_content_free_recoverable_then_non_anchor_subrange_succee
     safe = json.dumps(outcome.safe_dict(), ensure_ascii=False)
     assert CONTENT not in safe
     assert "result_tok0000000000001" not in safe
+    trace_actions = outcome.safe_dict()["decision_trace"]["actions"]
+    assert [row["provider_decision_index"] for row in trace_actions] == [1, 3, 4]
+    assert [row["action"] for row in trace_actions] == [
+        "SEARCH_EVIDENCE",
+        "READ_SPAN",
+        "SUBMIT_VERDICT",
+    ]
 
 
 def test_two_candidate_submit_is_corrected_once_to_one_final_candidate():
@@ -1154,6 +1550,86 @@ def test_server_schedules_each_seed_and_model_can_only_abstain_for_current_seed(
         for row in provider.requests
     ]
     assert prompted_refs == [seed.seed_ref for seed in seeds]
+
+
+def test_multi_seed_trace_binds_only_submitted_seed_products_in_action_order():
+    directives = [
+        directive("岚", predicate="发色", value="银色", line=1),
+        directive(
+            "洛",
+            predicate="发色",
+            value="黑色",
+            line=2,
+            text=CONTENT.splitlines()[1],
+        ),
+    ]
+    scope, seeds, chunk = context(directives=directives)
+    submitted_seed_ref = seeds[1].seed_ref
+    provider = ScriptedProvider(
+        abstain_for_current,
+        result("SEARCH_EVIDENCE", search_args(submitted_seed_ref)),
+        result(
+            "READ_SPAN",
+            {
+                "seed_ref": submitted_seed_ref,
+                "result_ref": "result_tok0000000000001",
+                "line_start": 1,
+                "line_end": 1,
+            },
+        ),
+        result(
+            "SUBMIT_VERDICT",
+            {
+                "seed_ref": submitted_seed_ref,
+                "verdict": "candidate_conflict",
+                "candidates": [
+                    {
+                        "kind": "fact",
+                        "span_ref": "span_tok0000000000002",
+                        "source_line_start": 1,
+                        "source_line_end": 1,
+                        "fields": {
+                            "subject": "洛",
+                            "predicate": "发色",
+                            "value": "银色",
+                        },
+                    }
+                ],
+            },
+        ),
+    )
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever((chunk,)),
+        scope=scope,
+        seeds=seeds,
+        token_factory=Tokens(),
+        limits=InvestigatorLimits(max_charged_tokens=20_000),
+    ).run()
+
+    assert (
+        outcome.outcome,
+        outcome.reason_code,
+        outcome.completed_seeds,
+        outcome.abstained_seeds,
+    ) == (
+        "completed",
+        "completed",
+        1,
+        1,
+    )
+    assert len(outcome.envelopes) == len(outcome.authorized_candidates) == 1
+    actions = outcome.safe_dict()["decision_trace"]["actions"]
+    assert [row["seed_ordinal"] for row in actions] == [1, 2, 2, 2]
+    assert [row["action"] for row in actions] == [
+        "ABSTAIN",
+        "SEARCH_EVIDENCE",
+        "READ_SPAN",
+        "SUBMIT_VERDICT",
+    ]
+    assert outcome.safe_dict()["submitted_envelopes"] == 1
+    assert outcome.safe_dict()["authorized_candidates"] == 1
 
 
 def test_budget_preflight_exposes_default_eight_seed_structural_mismatch():
@@ -1809,6 +2285,113 @@ def test_degraded_loop_reports_only_tools_that_finished_before_timeout():
     assert safe["executed_tool_calls"] == 1
     assert safe["executed_searches"] == 1
     assert safe["executed_reads"] == 0
+    assert safe["decision_trace"]["complete"] is True
+    assert [
+        row["action"] for row in safe["decision_trace"]["actions"]
+    ] == ["SEARCH_EVIDENCE"]
+
+
+def test_degraded_loop_preserves_content_free_trace_through_completed_read():
+    scope, seeds, chunk = context()
+    seed_ref = seeds[0].seed_ref
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", search_args(seed_ref)),
+        result(
+            "READ_SPAN",
+            {
+                "seed_ref": seed_ref,
+                "result_ref": "result_tok0000000000001",
+                "line_start": 2,
+                "line_end": 2,
+            },
+        ),
+        ProviderRetryExhausted(
+            "safe timeout",
+            category="read_timeout",
+            attempt_no=1,
+        ),
+    )
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever((chunk,)),
+        scope=scope,
+        seeds=seeds,
+        token_factory=Tokens(),
+        limits=InvestigatorLimits(max_charged_tokens=20_000),
+    ).run()
+
+    assert (outcome.outcome, outcome.reason_code) == (
+        "degraded",
+        "provider_timeout",
+    )
+    assert (outcome.executed_tool_calls, outcome.executed_reads) == (2, 1)
+    trace = outcome.safe_dict()["decision_trace"]
+    assert trace["complete"] is True
+    assert [row["action"] for row in trace["actions"]] == [
+        "SEARCH_EVIDENCE",
+        "READ_SPAN",
+    ]
+    serialized = json.dumps(trace, ensure_ascii=False)
+    for forbidden in (
+        CONTENT,
+        "岚",
+        "黑色",
+        seed_ref,
+        "result_tok0000000000001",
+        "span_tok0000000000002",
+    ):
+        assert forbidden not in serialized
+
+
+def test_document_trace_pseudonym_is_stable_within_run_and_changes_across_runs():
+    base_scope, _, chunk = context()
+
+    def read_document_hash(run_id: str) -> str:
+        scope = InvestigationScope.create(
+            run_id=run_id,
+            project_id="project-a",
+            documents=base_scope.documents,
+        )
+        seeds = build_investigation_seeds(run_id, [directive()], limit=8)
+        seed_ref = seeds[0].seed_ref
+        outcome = EvidenceInvestigatorToolLoop(
+            provider=ScriptedProvider(
+                result("SEARCH_EVIDENCE", search_args(seed_ref)),
+                result(
+                    "READ_SPAN",
+                    {
+                        "seed_ref": seed_ref,
+                        "result_ref": "result_tok0000000000001",
+                        "line_start": 2,
+                        "line_end": 2,
+                    },
+                ),
+                result(
+                    "ABSTAIN",
+                    {
+                        "seed_ref": seed_ref,
+                        "reason": "no_rule_validated_conflict",
+                    },
+                ),
+            ),
+            retriever=FakeRetriever((chunk,)),
+            scope=scope,
+            seeds=seeds,
+            token_factory=Tokens(),
+        ).run()
+        assert outcome.outcome == "completed"
+        return outcome.safe_dict()["decision_trace"]["actions"][1][
+            "document_ref_hash"
+        ]
+
+    first = read_document_hash("run-a")
+    repeated = read_document_hash("run-a")
+    another_run = read_document_hash("run-b")
+
+    assert re.fullmatch(r"[a-f0-9]{64}", first)
+    assert first == repeated
+    assert first != another_run
 
 
 @pytest.mark.parametrize("invalid", [-1, 2, True, "1"])
@@ -2322,6 +2905,15 @@ def test_real_openai_compatible_provider_drives_an_abstain_turn():
     assert outcome.reported_prompt_tokens == 5
     assert outcome.reported_completion_tokens == 2
     assert outcome.charged_tokens > 7
+    assert outcome.safe_dict()["decision_trace"]["actions"] == [
+        {
+            "provider_decision_index": 1,
+            "seed_ordinal": 1,
+            "phase": "search",
+            "action": "ABSTAIN",
+            "reason": "insufficient_evidence",
+        }
+    ]
 
 
 @pytest.mark.parametrize(

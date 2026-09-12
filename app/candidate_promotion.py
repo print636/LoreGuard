@@ -34,6 +34,7 @@ from .evidence_investigator_state import UntrustedCandidateEnvelope
 from .evidence_investigator_loop import (
     AuthorizedCandidateBinding,
     EvidenceInvestigatorLoopResult,
+    clone_evidence_investigator_loop_result,
 )
 from .evidence_chunks import SnapshotDocumentKey
 from .rules import detect_issues
@@ -222,28 +223,8 @@ class CandidateEvidenceResolver:
         if type(investigator_result) is not EvidenceInvestigatorLoopResult:
             raise ValueError("completed investigator result is invalid")
         try:
-            checked_result = EvidenceInvestigatorLoopResult(
-                outcome=investigator_result.outcome,
-                reason_code=investigator_result.reason_code,
-                envelopes=tuple(investigator_result.envelopes),
-                authorized_candidates=tuple(
-                    investigator_result.authorized_candidates
-                ),
-                provider_calls=investigator_result.provider_calls,
-                reported_prompt_tokens=investigator_result.reported_prompt_tokens,
-                reported_completion_tokens=(
-                    investigator_result.reported_completion_tokens
-                ),
-                charged_tokens=investigator_result.charged_tokens,
-                usage_unavailable_calls=investigator_result.usage_unavailable_calls,
-                completed_seeds=investigator_result.completed_seeds,
-                abstained_seeds=investigator_result.abstained_seeds,
-                executed_tool_calls=investigator_result.executed_tool_calls,
-                executed_searches=investigator_result.executed_searches,
-                executed_reads=investigator_result.executed_reads,
-                recoverable_rejections=(
-                    investigator_result.recoverable_rejections
-                ),
+            checked_result = clone_evidence_investigator_loop_result(
+                investigator_result
             )
         except (AttributeError, TypeError, ValueError):
             raise ValueError("completed investigator result is invalid") from None

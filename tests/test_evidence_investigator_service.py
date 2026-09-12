@@ -324,6 +324,7 @@ def test_real_runtime_tool_calls_are_merged_into_service_usage(db_session):
     class NativeProvider:
         def __init__(self):
             self.calls = 0
+            self.raw_refs = []
 
         def complete_with_tools(self, _system, user, **_kwargs):
             self.calls += 1
@@ -338,21 +339,25 @@ def test_real_runtime_tool_calls_are_merged_into_service_usage(db_session):
                 }
             elif self.calls == 2:
                 name = "READ_SPAN"
+                result_ref = find_nested_string(state, "result_ref")
+                self.raw_refs.append(result_ref)
                 arguments = {
                     "seed_ref": seed_ref,
-                    "result_ref": find_nested_string(state, "result_ref"),
+                    "result_ref": result_ref,
                     "line_start": 2,
                     "line_end": 2,
                 }
             else:
                 name = "SUBMIT_VERDICT"
+                span_ref = find_nested_string(state, "span_ref")
+                self.raw_refs.append(span_ref)
                 arguments = {
                     "seed_ref": seed_ref,
                     "verdict": "candidate_conflict",
                     "candidates": [
                         {
                             "kind": "fact",
-                            "span_ref": find_nested_string(state, "span_ref"),
+                            "span_ref": span_ref,
                             "source_line_start": 2,
                             "source_line_end": 2,
                             "fields": {
@@ -479,6 +484,27 @@ def test_real_runtime_tool_calls_are_merged_into_service_usage(db_session):
     assert usage["charged_tokens"] >= 27
     assert saved_run.prompt_tokens == 12 + 21
     assert saved_run.completion_tokens == 8 + 6
+    loop_diagnostics = diagnostic.payload["evidence_investigator"]["loop"]
+    trace = loop_diagnostics["decision_trace"]
+    assert trace["schema_version"] == "evidence_investigator_safe_trace_v1"
+    assert trace["complete"] is True
+    assert [row["action"] for row in trace["actions"]] == [
+        "SEARCH_EVIDENCE",
+        "READ_SPAN",
+        "SUBMIT_VERDICT",
+    ]
+    serialized_trace = json.dumps(trace, ensure_ascii=False)
+    for forbidden in (
+        CONTENT,
+        "岚的发色是否冲突",
+        "岚",
+        "银色",
+        "黑色",
+        document_id,
+        *native.raw_refs,
+        "call_1",
+    ):
+        assert forbidden not in serialized_trace
 
 
 def test_success_is_atomically_appended_before_reviewer_and_usage_budgets_merge(db_session):

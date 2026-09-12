@@ -111,6 +111,96 @@ class ApiFlowTests(unittest.TestCase):
             self.assertNotEqual(0, model.get("empty_response_chunks"))
             self.assertNotIn("provenance", response.json())
 
+    def test_diagnostics_api_round_trips_prevalidated_investigator_trace(self):
+        safe_trace = {
+            "schema_version": "evidence_investigator_safe_trace_v1",
+            "complete": True,
+            "actions": [
+                {
+                    "provider_decision_index": 1,
+                    "seed_ordinal": 1,
+                    "phase": "search",
+                    "action": "SEARCH_EVIDENCE",
+                    "result_count": 1,
+                },
+                {
+                    "provider_decision_index": 2,
+                    "seed_ordinal": 1,
+                    "phase": "read",
+                    "action": "READ_SPAN",
+                    "document_ref_hash": "a" * 64,
+                    "line_start": 7,
+                    "line_end": 8,
+                    "selected_result_rank": 1,
+                    "overlaps_anchor": False,
+                    "covers_entire_result": True,
+                },
+                {
+                    "provider_decision_index": 3,
+                    "seed_ordinal": 1,
+                    "phase": "verdict",
+                    "action": "SUBMIT_VERDICT",
+                    "candidate_count": 1,
+                    "candidate_shapes": [
+                        {
+                            "kind": "fact",
+                            "field_names": ["predicate", "subject", "value"],
+                            "source_line_count": 2,
+                        }
+                    ],
+                },
+            ],
+        }
+        with TestClient(app) as client:
+            with SessionLocal() as db:
+                project = ProjectRow(name="安全决策轨迹 API")
+                db.add(project)
+                db.flush()
+                run = AnalysisRunRow(project_id=project.id, status="completed")
+                db.add(run)
+                db.flush()
+                db.add(
+                    AnalysisDiagnosticRow(
+                        run_id=run.id,
+                        payload={
+                            "evidence_investigator": {
+                                "loop": {
+                                    "provider_calls": 3,
+                                    "completed_seeds": 1,
+                                    "abstained_seeds": 0,
+                                    "executed_tool_calls": 3,
+                                    "executed_searches": 1,
+                                    "executed_reads": 1,
+                                    "decision_trace": safe_trace,
+                                }
+                            }
+                        },
+                    )
+                )
+                db.commit()
+                run_id = run.id
+
+            response = client.get(
+                f"/api/v1/analysis-runs/{run_id}/diagnostics"
+            )
+
+        self.assertEqual(200, response.status_code)
+        returned = response.json()["evidence_investigator"]["loop"][
+            "decision_trace"
+        ]
+        self.assertEqual(safe_trace, returned)
+        serialized = json.dumps(returned, ensure_ascii=False)
+        for forbidden in (
+            "source text",
+            "query",
+            "candidate value",
+            "seed_raw-capability",
+            "result_raw-capability",
+            "span_raw-capability",
+            "provider payload",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
     def test_health_is_passive_and_provider_check_is_safe_and_actionable(self):
         with patch("app.main.OpenAICompatibleProvider") as provider_class:
             with TestClient(app) as client:

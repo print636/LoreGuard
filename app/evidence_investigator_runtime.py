@@ -29,8 +29,12 @@ from .evidence_authority import InvestigationScope, ScopedEvidenceDocument
 from .evidence_chunks import EvidenceChunker, SnapshotDocumentKey
 from .evidence_investigator import build_investigation_seeds
 from .evidence_investigator_loop import (
+    EvidenceInvestigatorLoopResult,
     EvidenceInvestigatorToolLoop,
+    InvestigatorBudgetPreflight,
     InvestigatorLoopPolicy,
+    clone_evidence_investigator_loop_result,
+    clone_investigator_budget_preflight,
 )
 from .evidence_investigator_rag import (
     InvestigatorRagPolicy,
@@ -708,7 +712,20 @@ class EvidenceInvestigatorRuntime:
                 ),
                 monotonic=self._monotonic,
             )
-            preflight = loop.budget_preflight()
+            raw_preflight = loop.budget_preflight()
+            try:
+                preflight = clone_investigator_budget_preflight(
+                    raw_preflight
+                )
+            except (AttributeError, TypeError, ValueError):
+                return self._result(
+                    "degraded",
+                    "internal_failure",
+                    bundle,
+                    len(seeds),
+                    rag=rag,
+                    embedding=deadline_embedding,
+                )
             if (
                 not preflight.minimum_path_admissible
                 or preflight.minimum_initial_reservation > remaining_run_tokens
@@ -725,7 +742,21 @@ class EvidenceInvestigatorRuntime:
             guarded_checkpoint()
             rag.prepare()
             guarded_checkpoint()
-            loop_result = loop.run()
+            raw_loop_result = loop.run()
+            try:
+                loop_result = clone_evidence_investigator_loop_result(
+                    raw_loop_result
+                )
+            except (AttributeError, TypeError, ValueError):
+                return self._result(
+                    "degraded",
+                    "internal_failure",
+                    bundle,
+                    len(seeds),
+                    preflight=preflight,
+                    rag=rag,
+                    embedding=deadline_embedding,
+                )
             if loop_result.outcome != "completed":
                 return self._result(
                     "degraded",
@@ -812,10 +843,8 @@ class EvidenceInvestigatorRuntime:
             "reason_code": _safe_reason(reason),
             "seed_count": _safe_count(seed_count),
             "snapshot_fingerprint": bundle.fingerprint,
-            "budget_preflight": (
-                preflight.safe_dict() if preflight is not None else None
-            ),
-            "loop": loop_result.safe_dict() if loop_result is not None else None,
+            "budget_preflight": _safe_preflight_diagnostics(preflight),
+            "loop": _safe_loop_diagnostics(loop_result),
             "rag": _safe_rag_diagnostics(rag, embedding=embedding),
             "promotion": promotion.safe_dict() if promotion is not None else None,
             "usage": self._usage.safe_dict(terminal_status="running"),
@@ -830,6 +859,27 @@ class EvidenceInvestigatorRuntime:
             diagnostics=diagnostics,
             promotion=promotion,
         )
+
+
+def _safe_preflight_diagnostics(value: Any) -> dict[str, Any] | None:
+    if type(value) is not InvestigatorBudgetPreflight:
+        return None
+    try:
+        return clone_investigator_budget_preflight(value).safe_dict()
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _safe_loop_diagnostics(value: Any) -> dict[str, Any] | None:
+    """Accept only a fully reconstructed local result; never trust duck typing."""
+
+    if type(value) is not EvidenceInvestigatorLoopResult:
+        return None
+    try:
+        checked = clone_evidence_investigator_loop_result(value)
+        return checked.safe_dict()
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _safe_rag_diagnostics(

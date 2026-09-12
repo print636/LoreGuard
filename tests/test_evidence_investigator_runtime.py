@@ -9,6 +9,7 @@ from app.config import Settings
 from app.domain import AnalysisCancelled, EvidenceSpan, ParsedDirective
 from app.embeddings import EmbeddingInputError
 from app.evidence_chunks import EvidenceChunker
+from app.evidence_investigator_loop import InvestigatorBudgetPreflight
 from app.evidence_investigator_runtime import (
     EvidenceInvestigatorRuntime,
     InvestigatorUsageAccumulator,
@@ -338,7 +339,20 @@ def test_runtime_real_loop_promotes_only_deterministically_reproduced_issue():
     assert CONTENT not in serialized
     assert "CANARYREQUEST" not in serialized
     assert "span_" not in serialized
-    assert "result_" not in serialized
+    assert "result_tok" not in serialized
+    trace = outcome.diagnostics["loop"]["decision_trace"]
+    assert trace["schema_version"] == "evidence_investigator_safe_trace_v1"
+    assert trace["complete"] is True
+    assert [row["action"] for row in trace["actions"]] == [
+        "SEARCH_EVIDENCE",
+        "READ_SPAN",
+        "SUBMIT_VERDICT",
+    ]
+    assert set(trace["actions"][2]["candidate_shapes"][0]) == {
+        "kind",
+        "field_names",
+        "source_line_count",
+    }
     assert outcome.diagnostics["rag"]["runtime_embedding_quota"] == {
         "calls": 0,
         "input_chars": 0,
@@ -525,23 +539,21 @@ def test_rag_diagnostic_boundary_drops_content_query_endpoint_key_and_refs():
     assert "api_key" not in serialized
 
 
-class _Preflight:
-    minimum_path_admissible = False
-    minimum_initial_reservation = 9_999
-
-    def safe_dict(self):
-        return {
-            "minimum_path_admissible": False,
-            "minimum_initial_reservation": 9_999,
-        }
-
-
 class PreflightRejectingLoop:
     def __init__(self, **_kwargs):
         pass
 
     def budget_preflight(self):
-        return _Preflight()
+        return InvestigatorBudgetPreflight(
+            seed_count=1,
+            minimum_required_rounds=1,
+            minimum_initial_reservation=9_999,
+            maximum_local_round_reservation=9_999,
+            maximum_local_run_reservation=9_999,
+            oversized_initial_prompts=0,
+            max_charged_tokens=8_000,
+            minimum_path_admissible=False,
+        )
 
     def run(self):
         raise AssertionError("inadmissible preflight must stop before run")
@@ -574,6 +586,129 @@ def test_budget_preflight_happens_before_rag_prepare_or_external_call():
     assert (outcome.outcome, outcome.reason_code) == ("skipped", "token_budget")
     assert created[0].prepare_calls == 0
     assert provider.calls == 0
+
+
+def test_runtime_rejects_duck_typed_preflight_without_touching_payload():
+    canary = "CANARY-SOURCE-QUERY-PROVIDER-PREFLIGHT"
+
+    class ForeignPreflight:
+        property_touched = False
+        safe_dict_touched = False
+
+        @property
+        def minimum_path_admissible(self):
+            self.property_touched = True
+            return True
+
+        def safe_dict(self):
+            self.safe_dict_touched = True
+            return {"query": canary, "source": canary, "provider": canary}
+
+    foreign = ForeignPreflight()
+
+    class ForeignPreflightLoop:
+        def __init__(self, **_kwargs):
+            pass
+
+        def budget_preflight(self):
+            return foreign
+
+        def run(self):
+            raise AssertionError("foreign preflight must stop before loop run")
+
+    created = []
+
+    def rag_factory(**kwargs):
+        rag = PreparedRag(kwargs["scope"])
+        created.append(rag)
+        return rag
+
+    outcome = EvidenceInvestigatorRuntime(
+        session_factory=lambda: None,
+        settings=configured_settings(),
+        native_provider=SuccessfulProvider(),
+        embedding_provider=object(),
+        rag_factory=rag_factory,
+        loop_factory=ForeignPreflightLoop,
+    ).run(
+        run_id="run-a",
+        bundle=frozen_bundle(),
+        baseline_directives=(baseline_directive(),),
+        baseline_issues=(),
+        remaining_run_tokens=20_000,
+    )
+
+    assert (outcome.outcome, outcome.reason_code) == (
+        "degraded",
+        "internal_failure",
+    )
+    assert outcome.diagnostics["budget_preflight"] is None
+    assert created[0].prepare_calls == 0
+    assert canary not in json.dumps(outcome.diagnostics, ensure_ascii=False)
+    assert foreign.property_touched is False
+    assert foreign.safe_dict_touched is False
+
+
+def test_runtime_rejects_duck_typed_loop_result_without_touching_payload_methods():
+    canary = "CANARY-STORY-QUERY-FIELDS-REFS-PROVIDER-PAYLOAD"
+
+    class ForeignLoopResult:
+        outcome_touched = False
+        safe_dict_touched = False
+
+        @property
+        def outcome(self):
+            self.outcome_touched = True
+            return "completed"
+
+        def safe_dict(self):
+            self.safe_dict_touched = True
+            return {"source": canary, "query": canary, "provider": canary}
+
+    foreign = ForeignLoopResult()
+
+    class ForeignResultLoop:
+        def __init__(self, **_kwargs):
+            pass
+
+        def budget_preflight(self):
+            return InvestigatorBudgetPreflight(
+                seed_count=1,
+                minimum_required_rounds=1,
+                minimum_initial_reservation=1,
+                maximum_local_round_reservation=1,
+                maximum_local_run_reservation=1,
+                oversized_initial_prompts=0,
+                max_charged_tokens=8_000,
+                minimum_path_admissible=True,
+            )
+
+        def run(self):
+            return foreign
+
+    outcome = EvidenceInvestigatorRuntime(
+        session_factory=lambda: None,
+        settings=configured_settings(),
+        native_provider=SuccessfulProvider(),
+        embedding_provider=object(),
+        rag_factory=lambda **kwargs: PreparedRag(kwargs["scope"]),
+        loop_factory=ForeignResultLoop,
+    ).run(
+        run_id="run-a",
+        bundle=frozen_bundle(),
+        baseline_directives=(baseline_directive(),),
+        baseline_issues=(),
+        remaining_run_tokens=20_000,
+    )
+
+    assert (outcome.outcome, outcome.reason_code) == (
+        "degraded",
+        "internal_failure",
+    )
+    assert outcome.diagnostics["loop"] is None
+    assert canary not in json.dumps(outcome.diagnostics, ensure_ascii=False)
+    assert foreign.outcome_touched is False
+    assert foreign.safe_dict_touched is False
 
 
 class FailingProvider:

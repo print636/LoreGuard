@@ -37,7 +37,12 @@ from app.evidence_investigator import (  # noqa: E402
 )
 from app.evidence_investigator_loop import (  # noqa: E402
     AuthorizedCandidateBinding,
+    CandidateShapeDecisionTrace,
     EvidenceInvestigatorLoopResult,
+    ReadSpanDecisionTrace,
+    SearchEvidenceDecisionTrace,
+    SubmitVerdictDecisionTrace,
+    safe_candidate_trace_field_names,
 )
 from app.evidence_investigator_state import UntrustedCandidateEnvelope  # noqa: E402
 from app.pipeline import (  # noqa: E402
@@ -204,9 +209,45 @@ def _run_actual_promotion(
         reason_code="completed",
         envelopes=(envelope,),
         authorized_candidates=(binding,),
-        provider_calls=1,
+        provider_calls=3,
         completed_seeds=1,
-        executed_tool_calls=1,
+        executed_tool_calls=3,
+        executed_searches=1,
+        executed_reads=1,
+        decision_trace=(
+            SearchEvidenceDecisionTrace(
+                provider_decision_index=1,
+                seed_ordinal=1,
+                result_count=1,
+            ),
+            ReadSpanDecisionTrace(
+                provider_decision_index=2,
+                seed_ordinal=1,
+                document_ref_hash="a" * 64,
+                line_start=line_start,
+                line_end=line_end,
+                selected_result_rank=1,
+                overlaps_anchor=False,
+                covers_entire_result=(
+                    line_start == chunk.line_start
+                    and line_end == chunk.line_end
+                ),
+            ),
+            SubmitVerdictDecisionTrace(
+                provider_decision_index=3,
+                seed_ordinal=1,
+                candidate_count=1,
+                candidate_shapes=(
+                    CandidateShapeDecisionTrace(
+                        kind=candidate.kind,
+                        field_names=safe_candidate_trace_field_names(
+                            candidate.kind, candidate.fields
+                        ),
+                        source_line_count=line_end - line_start + 1,
+                    ),
+                ),
+            ),
+        ),
     )
     resolver = CandidateEvidenceResolver(
         scope=scope,
