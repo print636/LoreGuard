@@ -160,6 +160,65 @@ class ParserAndRuleTests(unittest.TestCase):
         ]
         self.assertFalse(any(issue.category.value == "knowledge_without_acquisition" for issue in detect_issues(directives)))
 
+    def test_knowledge_ordering_keeps_iso_before_and_after_behavior(self):
+        cases = (
+            ("1026-01-01 09:00", "1026-01-01 12:00", True),
+            ("1026-01-01 12:00", "1026-01-01 09:00", False),
+            ("1026-01-01T09:00:30", "1026-01-01T09:00:31", True),
+            ("1026-01-01T09:00:31", "1026-01-01T09:00:30", False),
+        )
+        for index, (claim_time, acquisition_time, expected_issue) in enumerate(cases):
+            with self.subTest(
+                claim_time=claim_time,
+                acquisition_time=acquisition_time,
+            ):
+                parsed = parse_document(
+                    f"knowledge-iso-{index}",
+                    "chapter.md",
+                    (
+                        '@claims_knows character="林澈" fact="航线入口" '
+                        f'time="{claim_time}" | 林澈说出航线入口。\n'
+                        '@knows character="林澈" fact="航线入口" '
+                        f'time="{acquisition_time}" | 林澈得知航线入口。'
+                    ),
+                )
+                has_issue = any(
+                    issue.category.value == "knowledge_without_acquisition"
+                    for issue in detect_issues(parsed.directives)
+                )
+                self.assertEqual(expected_issue, has_issue)
+
+    def test_natural_relative_or_invalid_times_never_drive_knowledge_ordering(self):
+        cases = (
+            ("清晨", "午后"),
+            ("午后", "清晨"),
+            ("此前", "之后"),
+            ("之后", "此前"),
+            ("1026-01-01 09:00", "午后"),
+            ("午后", "1026-01-01 12:00"),
+            ("1026-13-01 09:00", "1026-01-01 12:00"),
+            ("1026-01-01 09:00", "1026-02-30 12:00"),
+        )
+        for index, (claim_time, acquisition_time) in enumerate(cases):
+            with self.subTest(
+                claim_time=claim_time,
+                acquisition_time=acquisition_time,
+            ):
+                parsed = parse_document(
+                    f"knowledge-natural-{index}",
+                    "chapter.md",
+                    (
+                        '@claims_knows character="林澈" fact="航线入口" '
+                        f'time="{claim_time}" | 林澈说出航线入口。\n'
+                        '@knows character="林澈" fact="航线入口" '
+                        f'time="{acquisition_time}" | 林澈得知航线入口。'
+                    ),
+                )
+                self.assertFalse(any(
+                    issue.category.value == "knowledge_without_acquisition"
+                    for issue in detect_issues(parsed.directives)
+                ))
+
 
 class EvaluationTests(unittest.TestCase):
     def test_dataset_has_eighty_independent_cases(self):

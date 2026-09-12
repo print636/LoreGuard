@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 import re
 
 from .domain import ConsistencyIssue, IssueCategory, ParsedDirective, Severity
@@ -41,6 +42,22 @@ def _precise_timestamp(value: str) -> bool:
             value.strip(),
         )
     )
+
+
+def _ordered_knowledge_time(value: str) -> datetime | None:
+    """Return only valid ISO-like times that have a total chronological order."""
+
+    candidate = value.strip()
+    if not _precise_timestamp(candidate):
+        return None
+    normalized = candidate.replace("T", " ")
+    time_format = (
+        "%Y-%m-%d %H:%M:%S" if len(normalized) == 19 else "%Y-%m-%d %H:%M"
+    )
+    try:
+        return datetime.strptime(normalized, time_format)
+    except ValueError:
+        return None
 
 
 def _explicit_state_active(state: ParsedDirective, action_time: str) -> bool:
@@ -376,10 +393,20 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
             row for row in knows.get(key, []) if _scopes_compatible(row, claim)
         ]
         claim_time = claim.attrs.get("time", "")
+        claim_order = _ordered_knowledge_time(claim_time)
+        if claim_order is None:
+            continue
         # Absence of an acquisition record is incomplete information, not
-        # proof of a continuity error.  A knowledge issue needs an explicit
-        # later acquisition (or equivalent canonical constraint).
-        if not acquisitions:
+        # proof of a continuity error. Only valid ISO-like times can establish
+        # a before/after relation; natural labels remain displayable evidence
+        # but must never be compared by string order.
+        ordered_acquisitions = [
+            (row, order)
+            for row in acquisitions
+            if (order := _ordered_knowledge_time(row.attrs.get("time", "")))
+            is not None
+        ]
+        if not ordered_acquisitions:
             continue
         claim_span = (
             claim.evidence.document_id,
@@ -388,21 +415,17 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
         )
         if any(
             (
-                acquisition.evidence.document_id,
-                acquisition.evidence.line_start,
-                acquisition.evidence.line_end,
+                row.evidence.document_id,
+                row.evidence.line_start,
+                row.evidence.line_end,
             ) == claim_span
-            for acquisition in acquisitions
+            for row, _ in ordered_acquisitions
         ):
             continue
-        valid = [
-            d for d in acquisitions
-            if d.attrs.get("time", "") and _time_key(d.attrs.get("time", "")) <= _time_key(claim_time)
-        ]
-        if not valid:
+        if not any(order <= claim_order for _, order in ordered_acquisitions):
             evidence = [claim.evidence]
-            if acquisitions:
-                evidence.append(sorted(acquisitions, key=lambda d: d.attrs.get("time", ""))[0].evidence)
+            earliest, _ = min(ordered_acquisitions, key=lambda row: row[1])
+            evidence.append(earliest.evidence)
             issues.append(_issue(
                 IssueCategory.knowledge_without_acquisition,
                 f"{key[0]}过早掌握“{key[1]}”",
