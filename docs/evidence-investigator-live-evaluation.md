@@ -44,6 +44,25 @@ python scripts/run_evidence_investigator_live.py `
 
 冻结校验始终认证共享 manifest 与 freeze 索引，但 dev 运行只打开并哈希 dev 正文，holdout 运行才打开并哈希 holdout 正文；校验得到的正文 bytes 会直接用于上传，不会再次打开文件。`verify_frozen_dataset(split=None)` 仅用于显式的离线全夹具审计。共享 manifest 仍包含两个 split 的索引与期望元数据，因此这里保证的是“正文 bytes 隔离”，不是 holdout 元数据盲化。任何 holdout 正文篡改都会在建立 HTTP 客户端、创建项目或调用 Provider 前终止 holdout 运行。
 
+## 首次冻结真实运行结果（2026-09-13）
+
+本节只汇总本机保留的脱敏、gitignored 产物。被评代码为 commit `618ca991b314f9331e284454becee2fe15c34b91`，运行时报告的模型别名为 `deepseek-v4-pro`；别名只能证明 LoreGuard 的请求配置，不能证明上游实际权重、版本或服务质量。主模型抽取、旧记录修复 Agent 和 Issue Evidence Reviewer 均保持关闭，只有 Evidence Investigator 与真实 embedding/RAG 开启。
+
+两次连续 DEV 运行均由 `evidence-investigator-live-dev-pair-v3` checker 复算通过，并具有相同的复现指纹 `ef8052440b9d0432d95deea5f08fa255b541c74f28726a6ae2ad0ccc25a62fc8`：
+
+| 运行 | strict | 正例 | 负例主动弃答 | 正常终止 | 错误新增 | 全流程墙钟 P50 / P95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| DEV 1 | 8/8 | 5/5 | 3/3 | 8/8 | 0 | 9.250 s / 10.485 s |
+| DEV 2 | 8/8 | 5/5 | 3/3 | 8/8 | 0 | 10.344 s / 12.312 s |
+
+pair 通过后仅运行一次冻结 holdout。10 个案例全部正常终止且通过能力隔离与运行时 provenance 校验，strict 为 8/10；按案例计算为 TP 4、FN 1、TN 4、FP 1，因此 precision 与 recall 均为 80%。这是 5 个正例、5 个负例的小样本，不提供置信区间意义上的稳定质量结论。
+
+需要区分 Agent 候选与系统最终输出：本次 holdout 中，Agent 提交 8 个候选，确定性 promotion 接受 4 个、拒绝 4 个；被接受的 4 个均为目标正例，没有错误候选通过 promotion。最终 1 个 FP 来自同次分析中的确定性主链路，而不是 Agent 候选被错误接受。因此既不能用“Agent 没有错误接受”掩盖系统级误报，也不能把该误报归因给 Agent promotion。
+
+本次 holdout 已封存，不再用于修改 Prompt、规则、阈值或候选 promotion。后续改动只能把它当历史结果；如需重新估计质量，应另建并冻结未见数据。DEV 和 holdout 都是开发者编写的小型原创夹具，不是人工盲测、公开基准、开放文本准确率、商业剧情验证或生产 SLA，结果也不代表多智能体能力或生产质量。
+
+真实运行前还修复了 OpenAI-compatible Provider 对标准 HTTP `Content-Encoding: gzip` 成功响应的有界解压与失败分类。该变更只解决传输兼容性和内存边界，不改变模型 JSON/tool schema，也不构成模型推理质量提升。
+
 ## 结果边界
 
 产物只保存案例编号、期望类别、分类结果、计数、行号授权判定、耗时、Token 计数、RAG 模式和哈希指纹，不保存故事正文、请求内容、模型原始响应、凭据或服务地址。项目 ID 与 run ID 仅保存单向哈希。
@@ -60,13 +79,13 @@ python scripts/run_evidence_investigator_live.py `
 - `wrong_candidate`：输出了错误问题、漏掉正例，或证据没有命中冻结授权行；
 - `runner_failure`：HTTP/协议/本地执行失败，不得计作模型主动 abstain。
 
-产物格式 `evidence-investigator-live-http-v4` 会逐案例保存脱敏的 capability isolation 证明：主模型抽取必须明确为 disabled、unconfigured、unused 且零逻辑/Provider 调用；`ai_evidence_review` 必须按服务分支契约缺席或明确关闭且零调用；运行级 prompt、completion 与 charged token 还必须和 Investigator 账本完全相等。任一条件不满足都会得到 `isolation_failure`，即使最终问题恰好命中也不能通过。v2/v3 产物仅保留作历史记录，不能用于取得 dev pair 资格。
+产物格式 `evidence-investigator-live-http-v5` 会逐案例保存脱敏的 capability isolation 证明：主模型抽取必须明确为 disabled、unconfigured、unused 且零逻辑/Provider 调用；`ai_evidence_review` 必须按服务分支契约缺席或明确关闭且零调用；运行级 prompt、completion 与 charged token 还必须和 Investigator 账本完全相等。任一条件不满足都会得到 `isolation_failure`，即使最终问题恰好命中也不能通过。v2/v3/v4 产物仅保留作历史记录，不能用于取得 dev pair 资格。
 
 ### Dev 晋级门槛
 
 单次 dev 产物必须同时满足：固定的 8 案例结构（5 正例、3 负例）、strict 至少 5/8、正例至少 3/5、负例最终安全 3/3、Agent 主动 abstain 至少 2/3、正常终止 8/8、零执行类失败、零错误新增、8/8 最终输出可观察、能力隔离与 promotion 计数均为 8/8。执行类失败明确为 `timeout_or_budget`、`provider_failure`、`runner_failure`、`isolation_failure` 和 `agent_protocol_failure`；任何一个出现都会阻止晋级。
 
-runtime provenance 还必须证明 API 与全部 worker 案例使用同一服务代码包哈希、Git revision、模型别名、不可逆 endpoint 配置哈希、核心 Investigator 有效上限和 RAG profile/chunker 配置。runner 会用同一算法独立计算本地 `app/**/*.py + requirements.txt` 哈希；API 在任何案例调用前必须匹配，全部 worker 也必须匹配。该哈希不是 OCI image digest，Git revision 也不能证明 relay 背后的真实模型权重。产物不保存 API key、hostname 或完整 base URL。缺少任一 v4 provenance/gate 字段都会 fail closed；两次合格 dev 还必须具有同一 `reproducibility_fingerprint` 且时间不重叠。
+runtime provenance 还必须证明 API 与全部 worker 案例使用同一服务代码包哈希、Git revision、模型别名、不可逆 endpoint 配置哈希、核心 Investigator 有效上限和 RAG profile/chunker 配置。runner 会用同一算法独立计算本地 `app/**/*.py + requirements.txt` 哈希；API 在任何案例调用前必须匹配，全部 worker 也必须匹配。该哈希不是 OCI image digest，Git revision 也不能证明上游实际模型权重。产物不保存 API key、hostname 或完整 base URL。缺少任一 v5 provenance/gate 字段都会 fail closed；两次合格 dev 还必须具有同一 `reproducibility_fingerprint` 且时间不重叠。
 
 pair checker 会按已认证 manifest 复核每个 dev case 的 ID、期望 decision/category 和完整脱敏字段合同，然后从逐案例记录重新计算 summary、provenance gate 与 development gate；不能用手写 summary 掩盖超时或 Provider 失败。该检查只证明产物内部自洽并与当前 evaluator 源码包一致，不提供数字签名或来源真实性证明。
 
