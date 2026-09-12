@@ -128,7 +128,7 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
       { timeout: 45_000 },
     );
 
-    await page.getByRole("button", { name: "完整报告" }).click();
+    await page.getByRole("button", { name: "完整报告", exact: true }).click();
     const issueCards = page.locator(".issues article");
     await expect(issueCards).toHaveCount(1);
     await expect(issueCards.first()).toContainText("事实冲突");
