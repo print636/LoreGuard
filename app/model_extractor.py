@@ -700,6 +700,18 @@ class ModelEnhancedExtractor:
         """Return content-free call accounting, including interrupted calls."""
         return deepcopy(self._review_agent_safe_accounting)
 
+    def conservative_run_token_debit(self) -> int:
+        """Return the run-local admission debit after a completed extraction.
+
+        This counter is deliberately distinct from reported prompt/completion
+        usage: every model path charges the greater of provider telemetry and
+        the local request estimate. Optional post-pipeline stages use it only
+        to calculate remaining admission budget, never as a billing claim.
+        """
+
+        value = self._run_tokens_used
+        return value if type(value) is int and value >= 0 else 0
+
     def _bounded_repair_provider(self) -> Any:
         settings = self.provider.settings
         configured_caps = [

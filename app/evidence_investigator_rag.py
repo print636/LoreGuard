@@ -84,6 +84,25 @@ _SAFE_UNAVAILABLE_REASONS = frozenset(
         "retrieval_invalid",
     }
 )
+# ``require_hybrid=False`` is a narrow availability policy, not a way to run
+# the Investigator without an embedding capability. Only failures which may
+# recover on a later run are eligible for deterministic lexical/entity
+# fallback. Configuration, response-shape, and authorization failures remain
+# terminal even when the deployment opts into fallback.
+_TRANSIENT_INDEX_FALLBACK_REASONS = frozenset(
+    {
+        "embedding_retry_exhausted",
+        "embedding_provider_failed",
+        "concurrent_write_incomplete",
+    }
+)
+_TRANSIENT_QUERY_FALLBACK_REASONS = frozenset(
+    {
+        "embedding_retry_exhausted",
+        "embedding_provider_failed",
+        "vector_search_unavailable",
+    }
+)
 _STRATEGIES = frozenset(
     {
         "keyword-only",
@@ -114,7 +133,12 @@ class InvestigatorRagUnavailable(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class InvestigatorRagPolicy:
-    """Server-owned retrieval policy; no field is supplied by the model."""
+    """Server-owned retrieval policy; no field is supplied by the model.
+
+    ``require_hybrid=False`` does not disable embeddings. It only permits a
+    diagnosed lexical/entity fallback after a transient index or query-vector
+    failure.
+    """
 
     strategy: RetrievalStrategy = "keyword+vector+entity-rrf"
     top_k: int = 12
@@ -408,7 +432,11 @@ class InvestigatorRagRetriever:
                 self._index_failure_reason = (
                     reason if reason in _SAFE_UNAVAILABLE_REASONS else "index_incomplete"
                 )
-                raise InvestigatorRagUnavailable(self._index_failure_reason)
+                if (
+                    self._policy.require_hybrid
+                    or reason not in _TRANSIENT_INDEX_FALLBACK_REASONS
+                ):
+                    raise InvestigatorRagUnavailable(self._index_failure_reason)
             # Publish the index and its exact-chunk lookup in one pointer write.
             # A concurrent search can therefore observe either no ready state
             # (and wait on the lock) or the complete immutable pair, never a
@@ -440,6 +468,21 @@ class InvestigatorRagRetriever:
             or diagnostics.document_count != len(self._documents)
             or diagnostics.expected_chunks != len(supplied.chunks)
             or (diagnostics.outcome == "complete" and diagnostics.reason is not None)
+            or (
+                diagnostics.outcome == "provider_unavailable"
+                and diagnostics.reason
+                not in {
+                    "embedding_not_configured",
+                    "embedding_input_rejected",
+                    "embedding_response_invalid",
+                    "embedding_retry_exhausted",
+                    "embedding_provider_failed",
+                }
+            )
+            or (
+                diagnostics.outcome == "write_conflict"
+                and diagnostics.reason != "concurrent_write_incomplete"
+            )
         ):
             raise ValueError("investigator index diagnostics are invalid")
         chunks = tuple(_copy_chunk(row) for row in supplied.chunks)
@@ -517,7 +560,11 @@ class InvestigatorRagRetriever:
             raise InvestigatorRagUnavailable("retrieval_invalid")
         if diagnostics.mode != _expected_mode(diagnostics):
             raise InvestigatorRagUnavailable("retrieval_invalid")
-        if diagnostics.reason is not None:
+        if diagnostics.reason is not None and not _lexical_fallback_is_allowed(
+            diagnostics,
+            indexed=indexed,
+            require_hybrid=self._policy.require_hybrid,
+        ):
             raise InvestigatorRagUnavailable(diagnostics.reason)
         if self._policy.require_hybrid and diagnostics.mode != "hybrid":
             raise InvestigatorRagUnavailable("hybrid_unavailable")
@@ -774,6 +821,33 @@ def _retrieval_counts_are_valid(
     if diagnostics.strategy == "keyword+dense-rrf":
         return diagnostics.entity_hits == 0
     return True
+
+
+def _lexical_fallback_is_allowed(
+    diagnostics: RetrievalDiagnostics,
+    *,
+    indexed: EvidenceIndexResult,
+    require_hybrid: bool,
+) -> bool:
+    """Authorize only a diagnosed transient vector-to-lexical fallback."""
+
+    if (
+        require_hybrid
+        or diagnostics.mode != "lexical_only"
+        or diagnostics.vector_hits != 0
+    ):
+        return False
+    if diagnostics.reason == "index_incomplete":
+        return (
+            not indexed.complete
+            and indexed.diagnostics.reason in _TRANSIENT_INDEX_FALLBACK_REASONS
+            and diagnostics.provider_calls == 0
+            and diagnostics.provider_input_chars == 0
+        )
+    return (
+        indexed.complete
+        and diagnostics.reason in _TRANSIENT_QUERY_FALLBACK_REASONS
+    )
 
 
 def _expected_mode(

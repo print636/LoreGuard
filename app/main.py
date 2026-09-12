@@ -196,7 +196,9 @@ def enforce_daily_model_budget(db) -> None:
     local jobs.
     """
     model_requested = (
-        settings.enable_model_extraction or settings.enable_issue_evidence_review
+        settings.enable_model_extraction
+        or settings.enable_evidence_investigator
+        or settings.enable_issue_evidence_review
     ) and bool(settings.openai_api_key.strip())
     if not model_requested:
         return
@@ -311,6 +313,7 @@ def health() -> dict:
         "model": {
             "configured": (
                 settings.enable_model_extraction
+                or settings.enable_evidence_investigator
                 or settings.enable_issue_evidence_review
             )
             and bool(settings.openai_api_key.strip()),
@@ -321,7 +324,9 @@ def health() -> dict:
 
 def _provider_check_suggestions(category: str) -> list[str]:
     if category == "not_configured":
-        return ["启用模型抽取或 AI 证据复核，并配置有效的 API 凭据后重试。"]
+        return [
+            "启用模型抽取、证据调查器或 AI 证据复核，并配置有效的 API 凭据后重试。"
+        ]
     if category == "unauthorized":
         return [
             "检查 API 凭据是否有效、未过期，并确认凭据属于当前租户或项目。",

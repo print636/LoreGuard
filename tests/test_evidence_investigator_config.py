@@ -25,6 +25,11 @@ def settings(**overrides):
         "openai_api_key": "unit-test-placeholder",
         "openai_base_url": "https://mock.invalid/v1",
         "openai_model": "mock",
+        "embedding_base_url": "https://embedding.invalid/v1",
+        "embedding_model": "mock-embedding",
+        "embedding_model_revision": "r1",
+        "embedding_deployment_fingerprint": "test-deployment-v1",
+        "embedding_dimensions": 2,
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
@@ -59,6 +64,9 @@ def test_evidence_investigator_defaults_are_bounded_and_disabled():
         ),
         "top_k": configured.evidence_investigator_top_k,
         "branch_limit": configured.evidence_investigator_branch_limit,
+        "embedding_max_input_chars": (
+            configured.evidence_investigator_embedding_max_input_chars
+        ),
         "require_hybrid": configured.evidence_investigator_require_hybrid,
     } == {
         "max_seeds": 1,
@@ -77,6 +85,7 @@ def test_evidence_investigator_defaults_are_bounded_and_disabled():
         "max_response_bytes": 64_000,
         "top_k": 6,
         "branch_limit": 30,
+        "embedding_max_input_chars": 250_000,
         "require_hybrid": True,
     }
 
@@ -100,6 +109,7 @@ def test_evidence_investigator_defaults_are_bounded_and_disabled():
         ("evidence_investigator_max_response_bytes", 128_001),
         ("evidence_investigator_top_k", 13),
         ("evidence_investigator_branch_limit", 51),
+        ("evidence_investigator_embedding_max_input_chars", 1_000_001),
         ("evidence_investigator_require_hybrid", []),
     ],
 )
@@ -166,7 +176,6 @@ def test_evidence_investigator_maximum_seed_setting_has_a_valid_configuration():
         {
             "enable_evidence_investigator": True,
             "enable_embeddings": False,
-            "evidence_investigator_require_hybrid": True,
         },
     ],
 )
@@ -175,14 +184,46 @@ def test_evidence_investigator_cross_field_invariants(overrides):
         settings(**overrides)
 
 
-def test_non_hybrid_investigator_can_be_enabled_without_embeddings():
+def test_non_hybrid_investigator_still_requires_embedding_capability():
+    with pytest.raises(ValidationError, match="requires the embeddings capability"):
+        settings(
+            enable_evidence_investigator=True,
+            enable_embeddings=False,
+            evidence_investigator_require_hybrid=False,
+        )
+
+
+def test_non_hybrid_investigator_allows_diagnosed_fallback_when_embeddings_enabled():
     configured = settings(
         enable_evidence_investigator=True,
-        enable_embeddings=False,
+        enable_embeddings=True,
         evidence_investigator_require_hybrid=False,
     )
 
     assert configured.enable_evidence_investigator is True
+    assert configured.enable_embeddings is True
+    assert configured.evidence_investigator_require_hybrid is False
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"embedding_base_url": ""},
+        {"embedding_base_url": "http://embedding.invalid/v1"},
+        {"embedding_base_url": "https://user:secret@embedding.invalid/v1"},
+        {"embedding_model": ""},
+        {"embedding_model_revision": "unspecified"},
+        {"embedding_deployment_fingerprint": "unspecified"},
+        {"embedding_dimensions": None},
+    ],
+)
+def test_enabled_investigator_requires_a_complete_embedding_profile(overrides):
+    with pytest.raises(ValidationError, match="complete embedding profile"):
+        settings(
+            enable_evidence_investigator=True,
+            enable_embeddings=True,
+            **overrides,
+        )
 
 
 def test_provider_configured_includes_but_does_not_borrow_investigator_capability():
@@ -412,6 +453,7 @@ def test_compose_passes_investigator_limits_without_rag_implicitly_enabling_it()
         "EVIDENCE_INVESTIGATOR_MAX_RESPONSE_BYTES": "64000",
         "EVIDENCE_INVESTIGATOR_TOP_K": "6",
         "EVIDENCE_INVESTIGATOR_BRANCH_LIMIT": "30",
+        "EVIDENCE_INVESTIGATOR_EMBEDDING_MAX_INPUT_CHARS": "250000",
         "EVIDENCE_INVESTIGATOR_REQUIRE_HYBRID": "true",
     }
     expected = {

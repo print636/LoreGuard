@@ -5,7 +5,8 @@ import hashlib
 import json
 import re
 from time import perf_counter
-from typing import Callable, Protocol
+from itertools import islice
+from typing import Callable, Protocol, Sequence
 
 from .domain import (
     ConsistencyIssue,
@@ -119,6 +120,34 @@ class AnalysisPipeline:
             return None
         accounting = getter()
         return accounting if isinstance(accounting, dict) else None
+
+    def conservative_run_token_debit(self, result: PipelineResult) -> int:
+        """Return a safe admission debit for later optional model stages.
+
+        Reported prompt/completion tokens remain the persisted billing-facing
+        counters. The extractor may additionally expose its conservative
+        estimate-or-reported run debit so a later stage cannot reuse budget
+        already reserved by extraction, repair, or the repair Agent.
+        """
+
+        reported = (
+            result.prompt_tokens + result.completion_tokens
+            if type(result.prompt_tokens) is int
+            and result.prompt_tokens >= 0
+            and type(result.completion_tokens) is int
+            and result.completion_tokens >= 0
+            else 0
+        )
+        getter = getattr(self.extractor, "conservative_run_token_debit", None)
+        if not callable(getter):
+            return reported
+        try:
+            charged = getter()
+        except Exception:
+            return reported
+        if type(charged) is not int or charged < 0:
+            return reported
+        return max(reported, charged)
 
     def run(
         self,
@@ -750,6 +779,47 @@ def _build_provenance(
         "directives": sorted(directive_rows, key=lambda row: row["fingerprint"]),
         "issues": sorted(issue_rows, key=lambda row: row["fingerprint"]),
     }
+
+
+def build_result_provenance(
+    directives: Sequence[ParsedDirective],
+    issues: Sequence[ConsistencyIssue],
+    documents: Sequence[DocumentInput],
+) -> dict:
+    """Rebuild the stable provenance sidecar for an additive post-stage.
+
+    The public boundary is deliberately read-only and bounded.  Callers can
+    calculate the replacement sidecar before mutating a ``PipelineResult``;
+    if validation fails, its baseline provenance remains untouched.
+    """
+
+    def bounded(values, maximum: int, expected_type: type, label: str) -> list:
+        if isinstance(values, (str, bytes, bytearray)):
+            raise ValueError(f"{label} are invalid")
+        try:
+            prepared = list(islice(iter(values), maximum + 1))
+        except TypeError:
+            raise ValueError(f"{label} are invalid") from None
+        if len(prepared) > maximum or any(
+            type(row) is not expected_type for row in prepared
+        ):
+            raise ValueError(f"{label} are invalid")
+        return prepared
+
+    prepared_directives = bounded(
+        directives, 100_000, ParsedDirective, "provenance directives"
+    )
+    prepared_issues = bounded(
+        issues, 100_000, ConsistencyIssue, "provenance issues"
+    )
+    prepared_documents = bounded(
+        documents, 256, DocumentInput, "provenance documents"
+    )
+    return _build_provenance(
+        prepared_directives,
+        prepared_issues,
+        prepared_documents,
+    )
 
 
 def _dedupe_issues(issues: list[ConsistencyIssue]) -> list[ConsistencyIssue]:

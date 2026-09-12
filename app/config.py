@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -144,6 +145,14 @@ class Settings(BaseSettings):
     )
     evidence_investigator_top_k: int = Field(default=6, ge=1, le=12)
     evidence_investigator_branch_limit: int = Field(default=30, ge=1, le=50)
+    # Per-run embedding input resource quota. This is deliberately measured in
+    # characters and is neither a chat-token budget nor an API billing claim.
+    evidence_investigator_embedding_max_input_chars: int = Field(
+        default=250_000, ge=1, le=1_000_000
+    )
+    # Embeddings are always required when the Investigator is enabled. False
+    # permits a clearly diagnosed lexical fallback only after a transient
+    # index/query-vector failure; it is not a no-embedding operating mode.
     evidence_investigator_require_hybrid: bool = True
     per_run_token_budget: int = 20_000
     daily_token_budget: int = 100_000
@@ -225,14 +234,43 @@ class Settings(BaseSettings):
             raise ValueError(
                 "evidence investigator token budget cannot reserve minimum outputs"
             )
-        if (
-            self.enable_evidence_investigator
-            and self.evidence_investigator_require_hybrid
-            and not self.enable_embeddings
-        ):
+        if self.enable_evidence_investigator and not self.enable_embeddings:
             raise ValueError(
-                "hybrid evidence investigator requires the embeddings capability"
+                "evidence investigator requires the embeddings capability"
             )
+        if self.enable_evidence_investigator:
+            revision = self.embedding_model_revision.strip()
+            deployment = self.embedding_deployment_fingerprint.strip()
+            try:
+                endpoint = urlsplit(self.embedding_base_url.strip())
+                valid_endpoint = (
+                    endpoint.scheme in {"http", "https"}
+                    and bool(endpoint.hostname)
+                    and endpoint.username is None
+                    and endpoint.password is None
+                    and not endpoint.query
+                    and not endpoint.fragment
+                    and (
+                        endpoint.scheme == "https"
+                        or self.embedding_allow_insecure_http
+                    )
+                )
+                # Accessing ``port`` also rejects malformed/out-of-range ports.
+                _ = endpoint.port
+            except (TypeError, ValueError):
+                valid_endpoint = False
+            if (
+                not self.embedding_model.strip()
+                or not revision
+                or revision.lower() == "unspecified"
+                or not deployment
+                or deployment.lower() == "unspecified"
+                or self.embedding_dimensions is None
+                or not valid_endpoint
+            ):
+                raise ValueError(
+                    "evidence investigator requires a complete embedding profile"
+                )
         return self
 
 

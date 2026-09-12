@@ -25,14 +25,17 @@ from .db import (
     SessionLocal,
 )
 from .domain import AnalysisCancelled
-from .evidence_chunks import SnapshotDocumentKey
-from .evidence_rag import EvidenceDocument
+from .evidence_investigator_runtime import (
+    EvidenceInvestigatorRuntime,
+    InvestigatorUsageAccumulator,
+    build_frozen_investigation_bundle,
+)
 from .issue_evidence_review import (
     IssueEvidenceReviewUsageAccumulator,
     IssueEvidenceReviewer,
     failed_issue_evidence_review,
 )
-from .pipeline import AnalysisPipeline, DocumentInput
+from .pipeline import AnalysisPipeline, DocumentInput, build_result_provenance
 from .time_utils import utc_now_naive
 from .usage import configured_cost_usd
 
@@ -425,6 +428,39 @@ def emit(db, run_id: str, stage: str, progress: int, message: str) -> bool:
     return True
 
 
+def _emit_owned(
+    db,
+    run_id: str,
+    worker_token: str,
+    stage: str,
+    progress: int,
+    message: str,
+) -> bool:
+    """Fence an optional-stage event in the same transaction as ownership.
+
+    The no-op conditional update obtains the execution-row write lock and is
+    re-evaluated against the current owner before ``emit`` commits the event.
+    A stale worker can therefore neither append progress nor overwrite a newer
+    worker's lower progress after losing its lease.
+    """
+
+    owned = db.execute(
+        update(AnalysisRunExecutionRow)
+        .where(
+            AnalysisRunExecutionRow.run_id == run_id,
+            AnalysisRunExecutionRow.worker_token == worker_token,
+        )
+        .values(worker_token=worker_token)
+    ).rowcount
+    if owned != 1:
+        db.rollback()
+        raise WorkerLeaseLost("analysis worker lease was lost")
+    emitted = emit(db, run_id, stage, progress, message)
+    if not emitted:
+        db.rollback()
+    return emitted
+
+
 def analysis_mode(result) -> tuple[str, bool]:
     execution = getattr(result, "diagnostics", {}).get("model")
     required_counters = (
@@ -797,21 +833,25 @@ def _interrupted_review_agent_usage(pipeline) -> dict | None:
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "charged_tokens": charged_tokens,
-        "charged_token_semantics": "conservative_internal_budget_debit",
+        "charged_token_semantics": "heuristic_or_reported_internal_debit",
         "provider_calls": provider_calls,
     }
 
 
 def _combined_interrupted_usage(
     pipeline,
+    investigator_usage: InvestigatorUsageAccumulator,
     issue_review_usage: IssueEvidenceReviewUsageAccumulator,
     *,
     terminal_status: str,
 ) -> dict | None:
     """Combine independently content-free completed-call ledgers."""
     agent = _interrupted_review_agent_usage(pipeline) if pipeline is not None else None
+    investigator = investigator_usage.safe_dict(
+        terminal_status=terminal_status
+    )
     evidence = issue_review_usage.safe_dict(terminal_status=terminal_status)
-    parts = [row for row in (agent, evidence) if row is not None]
+    parts = [row for row in (agent, investigator, evidence) if row is not None]
     if not parts:
         return None
     if len(parts) == 1:
@@ -833,7 +873,7 @@ def _combined_interrupted_usage(
         "prompt_tokens": sum(int(row["prompt_tokens"]) for row in parts),
         "completion_tokens": sum(int(row["completion_tokens"]) for row in parts),
         "charged_tokens": sum(int(row["charged_tokens"]) for row in parts),
-        "charged_token_semantics": "conservative_internal_budget_debit",
+        "charged_token_semantics": "heuristic_or_reported_internal_debit",
         "provider_calls": calls,
     }
 
@@ -862,6 +902,11 @@ def _merge_usage_accounting(
                 for value in values
             )
             and values[3] >= values[1] + values[2]
+            and row.get("charged_token_semantics")
+            in {
+                "conservative_internal_budget_debit",
+                "heuristic_or_reported_internal_debit",
+            }
         )
 
     older = previous if valid(previous) else None
@@ -871,10 +916,16 @@ def _merge_usage_accounting(
             return None
         result = dict(newer)
         result["terminal_status"] = terminal_status
+        result[
+            "charged_token_semantics"
+        ] = "heuristic_or_reported_internal_debit"
         return result
     if newer is None:
         result = dict(older)
         result["terminal_status"] = terminal_status
+        result[
+            "charged_token_semantics"
+        ] = "heuristic_or_reported_internal_debit"
         return result
     sums = {
         key: int(older[key]) + int(newer[key])
@@ -895,7 +946,7 @@ def _merge_usage_accounting(
         "scope": "combined_model_usage",
         "terminal_status": terminal_status,
         **sums,
-        "charged_token_semantics": "conservative_internal_budget_debit",
+        "charged_token_semantics": "heuristic_or_reported_internal_debit",
         # Aggregate counters remain exact. A multi-attempt per-call series is
         # intentionally unavailable instead of pretending it is complete.
         "provider_calls": None,
@@ -1126,6 +1177,7 @@ def execute_analysis(
     heartbeat = (heartbeat_factory or ExecutionLeaseHeartbeat)(run_id, token)
     heartbeat.start()
     pipeline = None
+    investigator_usage = InvestigatorUsageAccumulator()
     issue_review_usage = IssueEvidenceReviewUsageAccumulator()
     previous_usage: dict | None = None
     try:
@@ -1154,48 +1206,231 @@ def execute_analysis(
             _checkpoint(run_id, token, heartbeat)
             review_result = None
             settings = get_settings()
-            if settings.enable_issue_evidence_review:
-                emit(
+            baseline_reported_tokens = (
+                result.prompt_tokens + result.completion_tokens
+            )
+            pipeline_budget_debit = baseline_reported_tokens
+            if settings.enable_evidence_investigator:
+                pipeline_budget_getter = getattr(
+                    pipeline, "conservative_run_token_debit", None
+                )
+                if callable(pipeline_budget_getter):
+                    try:
+                        candidate_debit = pipeline_budget_getter(result)
+                    except Exception:
+                        candidate_debit = baseline_reported_tokens
+                    if (
+                        type(candidate_debit) is int
+                        and candidate_debit >= baseline_reported_tokens
+                    ):
+                        pipeline_budget_debit = candidate_debit
+            historical_charged_tokens = (
+                int(previous_usage["charged_tokens"])
+                if previous_usage is not None
+                else 0
+            )
+            frozen_bundle = None
+            if (
+                settings.enable_evidence_investigator
+                or settings.enable_issue_evidence_review
+            ):
+                run = db.get(AnalysisRunRow, run_id)
+                try:
+                    if run is None:
+                        raise ValueError("analysis run is unavailable")
+                    frozen_bundle = build_frozen_investigation_bundle(
+                        project_id=run.project_id,
+                        documents=documents,
+                        metadata=input_metadata,
+                    )
+                except Exception:
+                    # Optional model stages may only consume the verified
+                    # in-memory projection. A binding defect therefore closes
+                    # both stages without consulting live DocumentRow values.
+                    frozen_bundle = None
+
+            if settings.enable_evidence_investigator:
+                _checkpoint(run_id, token, heartbeat)
+                _emit_owned(
                     db,
                     run_id,
+                    token,
+                    "evidence_investigator",
+                    76,
+                    "正在用冻结版本建立证据调查范围",
+                )
+                investigator_runtime_result = None
+                try:
+                    if frozen_bundle is None:
+                        raise ValueError("investigator snapshot bundle unavailable")
+                    investigator_runtime_result = EvidenceInvestigatorRuntime(
+                        session_factory=SessionLocal,
+                        settings=settings,
+                        checkpoint=lambda: _checkpoint(
+                            run_id, token, heartbeat
+                        ),
+                        usage=investigator_usage,
+                        passthrough_exceptions=(
+                            AnalysisCancelled,
+                            WorkerLeaseLost,
+                        ),
+                    ).run(
+                        run_id=run_id,
+                        bundle=frozen_bundle,
+                        baseline_directives=tuple(result.directives),
+                        baseline_issues=tuple(result.issues),
+                        remaining_run_tokens=max(
+                            0,
+                            settings.per_run_token_budget
+                            - pipeline_budget_debit
+                            - historical_charged_tokens,
+                        ),
+                    )
+                    investigator_diagnostics = dict(
+                        investigator_runtime_result.diagnostics
+                    )
+                except (AnalysisCancelled, WorkerLeaseLost):
+                    raise
+                except Exception:
+                    # Provider, RAG, promotion, and integration defects are
+                    # local to this optional additive path. Never turn them
+                    # into a Celery retry or erase deterministic baseline rows.
+                    investigator_diagnostics = {
+                        "enabled": True,
+                        "outcome": "degraded",
+                        "reason_code": "internal_failure",
+                        "seed_count": 0,
+                        "snapshot_fingerprint": (
+                            frozen_bundle.fingerprint
+                            if frozen_bundle is not None
+                            else None
+                        ),
+                        "budget_preflight": None,
+                        "loop": None,
+                        "rag": None,
+                        "promotion": None,
+                        "usage": investigator_usage.safe_dict(
+                            terminal_status="completed"
+                        ),
+                        "boundary": (
+                            "Optional additive stage; any degradation preserves "
+                            "the baseline directives, issues, IDs, order and "
+                            "provenance."
+                        ),
+                    }
+
+                completed_investigator_usage = investigator_usage.safe_dict(
+                    terminal_status="completed"
+                )
+                investigator_diagnostics["usage"] = (
+                    completed_investigator_usage
+                )
+                _checkpoint(run_id, token, heartbeat)
+                _emit_owned(
+                    db,
+                    run_id,
+                    token,
+                    "evidence_investigator",
+                    78,
+                    (
+                        "证据调查已完成受控检索"
+                        if investigator_diagnostics.get("outcome") == "completed"
+                        else "证据调查已安全跳过或降级"
+                    ),
+                )
+
+                accepted_candidates = 0
+                added_issues = 0
+                if (
+                    investigator_runtime_result is not None
+                    and investigator_runtime_result.applied
+                    and investigator_runtime_result.promotion is not None
+                ):
+                    promotion = investigator_runtime_result.promotion
+                    try:
+                        promoted_directives = list(promotion.directives)
+                        promoted_issues = list(promotion.issues)
+                        promoted_provenance = build_result_provenance(
+                            promoted_directives,
+                            promoted_issues,
+                            documents,
+                        )
+                        # Compute every replacement before mutating the
+                        # PipelineResult. The reviewer below can therefore see
+                        # the complete promoted issue set, or the exact
+                        # baseline—never a partially applied candidate.
+                        promoted_diagnostics = dict(result.diagnostics)
+                        promoted_diagnostics["provenance"] = promoted_provenance
+                        promoted_diagnostics[
+                            "evidence_investigator"
+                        ] = investigator_diagnostics
+                        accepted_candidates = promotion.accepted_candidates
+                        added_issues = len(promotion.added_issues)
+                    except (AnalysisCancelled, WorkerLeaseLost):
+                        raise
+                    except Exception:
+                        investigator_diagnostics.update(
+                            {
+                                "outcome": "degraded",
+                                "reason_code": "promotion_failed",
+                                "promotion": None,
+                            }
+                        )
+                    else:
+                        result.directives = promoted_directives
+                        result.issues = promoted_issues
+                        result.diagnostics = promoted_diagnostics
+
+                result.diagnostics[
+                    "evidence_investigator"
+                ] = investigator_diagnostics
+                result.prompt_tokens += investigator_usage.prompt_tokens
+                result.completion_tokens += (
+                    investigator_usage.completion_tokens
+                )
+                _checkpoint(run_id, token, heartbeat)
+                _emit_owned(
+                    db,
+                    run_id,
+                    token,
+                    "evidence_investigator",
+                    81,
+                    (
+                        f"确定性复核接受 {accepted_candidates} 条候选，新增 "
+                        f"{added_issues} 条问题"
+                        if accepted_candidates
+                        else "确定性复核未追加问题，基线结果保持原样"
+                    ),
+                )
+                _checkpoint(run_id, token, heartbeat)
+
+            if settings.enable_issue_evidence_review:
+                _checkpoint(run_id, token, heartbeat)
+                _emit_owned(
+                    db,
+                    run_id,
+                    token,
                     "evidence_review",
                     82,
                     "正在用冻结版本的检索证据复核规则问题",
                 )
-                run = db.get(AnalysisRunRow, run_id)
                 try:
-                    frozen_documents = tuple(
-                        EvidenceDocument(
-                            snapshot=SnapshotDocumentKey(
-                                project_id=run.project_id,
-                                document_id=metadata["document_id"],
-                                document_version=metadata["document_version"],
-                                content_sha256=metadata["content_sha256"],
-                            ),
-                            content=document.content,
-                        )
-                        for document, metadata in zip(
-                            documents, input_metadata, strict=True
-                        )
-                    )
+                    if frozen_bundle is None:
+                        raise ValueError("review snapshot bundle unavailable")
                     review_result = IssueEvidenceReviewer(
                         session_factory=SessionLocal,
                         settings=settings,
                         checkpoint=lambda: _checkpoint(run_id, token, heartbeat),
                         usage_accounting=issue_review_usage.record,
                     ).review(
-                        documents=frozen_documents,
+                        documents=frozen_bundle.evidence_documents,
                         issues=tuple(result.issues),
                         remaining_run_tokens=max(
                             0,
                             settings.per_run_token_budget
-                            - result.prompt_tokens
-                            - result.completion_tokens
-                            - (
-                                int(previous_usage["charged_tokens"])
-                                if previous_usage is not None
-                                else 0
-                            ),
+                            - pipeline_budget_debit
+                            - historical_charged_tokens
+                            - investigator_usage.charged_tokens,
                         ),
                     )
                 except (AnalysisCancelled, WorkerLeaseLost):
@@ -1220,9 +1455,11 @@ def execute_analysis(
                     # not expose the immediate accounting callback.
                     result.prompt_tokens += review_result.prompt_tokens
                     result.completion_tokens += review_result.completion_tokens
-                emit(
+                _checkpoint(run_id, token, heartbeat)
+                _emit_owned(
                     db,
                     run_id,
+                    token,
                     "evidence_review",
                     88,
                     (
@@ -1232,9 +1469,14 @@ def execute_analysis(
                     ),
                 )
                 _checkpoint(run_id, token, heartbeat)
+            current_optional_usage = _merge_usage_accounting(
+                investigator_usage.safe_dict(terminal_status="completed"),
+                issue_review_usage.safe_dict(terminal_status="completed"),
+                terminal_status="completed",
+            )
             cumulative_usage = _merge_usage_accounting(
                 previous_usage,
-                issue_review_usage.safe_dict(terminal_status="completed"),
+                current_optional_usage,
                 terminal_status="completed",
             )
             if cumulative_usage is not None:
@@ -1372,6 +1614,7 @@ def execute_analysis(
     except AnalysisCancelled:
         interrupted_usage = _combined_interrupted_usage(
             pipeline,
+            investigator_usage,
             issue_review_usage,
             terminal_status="cancelled",
         )
@@ -1395,6 +1638,7 @@ def execute_analysis(
         except AnalysisCancelled:
             interrupted_usage = _combined_interrupted_usage(
                 pipeline,
+                investigator_usage,
                 issue_review_usage,
                 terminal_status="cancelled",
             )
@@ -1420,6 +1664,7 @@ def execute_analysis(
         if finalize_failure:
             interrupted_usage = _combined_interrupted_usage(
                 pipeline,
+                investigator_usage,
                 issue_review_usage,
                 terminal_status="failed",
             )
@@ -1434,6 +1679,7 @@ def execute_analysis(
         else:
             interrupted_usage = _combined_interrupted_usage(
                 pipeline,
+                investigator_usage,
                 issue_review_usage,
                 terminal_status="running",
             )

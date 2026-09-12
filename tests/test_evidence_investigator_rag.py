@@ -288,6 +288,7 @@ def _retrieval_result(
     keyword_hits=2,
     vector_hits=2,
     entity_hits=1,
+    provider_calls=1,
 ) -> EvidenceRetrievalResult:
     return EvidenceRetrievalResult(
         matches=matches,
@@ -302,8 +303,8 @@ def _retrieval_result(
             vector_hits=min(vector_hits, len(runtime.chunks)),
             entity_hits=min(entity_hits, len(runtime.chunks)),
             result_count=len(matches),
-            provider_calls=1,
-            provider_input_chars=len("岚 发色 冲突"),
+            provider_calls=provider_calls,
+            provider_input_chars=(len("岚 发色 冲突") if provider_calls else 0),
             elapsed_ms=1,
         ),
     )
@@ -679,6 +680,7 @@ def test_embedding_not_configured_index_result_is_terminal(runtime):
         runtime,
         index_coordinator=coordinator,
         rrf_retriever=ScriptedRetriever(),
+        policy=InvestigatorRagPolicy(require_hybrid=False),
     )
     with pytest.raises(InvestigatorRagUnavailable) as caught:
         adapter.search(
@@ -720,7 +722,7 @@ def test_hybrid_requirement_rejects_successful_lexical_only_mode(runtime):
     assert caught.value.reason_code == "hybrid_unavailable"
 
 
-def test_vector_degradation_reason_is_failure_even_when_hybrid_not_required(runtime):
+def test_vector_degradation_falls_back_to_lexical_when_hybrid_not_required(runtime):
     match = RankedEvidence(
         chunk=runtime.chunks[0],
         rrf_score=0.02,
@@ -743,13 +745,122 @@ def test_vector_degradation_reason_is_failure_even_when_hybrid_not_required(runt
         rrf_retriever=ScriptedRetriever(degraded),
         policy=InvestigatorRagPolicy(require_hybrid=False),
     )
+    rows = adapter.search(
+        seed=runtime.seed,
+        query=EvidenceQuery(text="岚 发色 冲突"),
+        limit=2,
+    )
+
+    assert tuple(row.chunk_id for row in rows) == (match.chunk.chunk_id,)
+    diagnostics = adapter.safe_diagnostics()
+    assert diagnostics["retrievals"][0]["mode"] == "lexical_only"
+    assert diagnostics["retrievals"][0]["reason"] == "vector_search_unavailable"
+
+
+def test_transient_index_failure_falls_back_lexically_and_is_published_once(runtime):
+    incomplete = EvidenceIndexResult(
+        profile=runtime.profile,
+        snapshots=(runtime.scope.documents[0].snapshot,),
+        chunks=runtime.chunks,
+        diagnostics=EvidenceIndexDiagnostics(
+            outcome="provider_unavailable",
+            reason="embedding_retry_exhausted",
+            profile_id=runtime.profile.profile_id,
+            chunker_version=runtime.chunker.version,
+            document_count=1,
+            expected_chunks=len(runtime.chunks),
+            reused_chunks=0,
+            embedded_chunks=0,
+            provider_calls=2,
+            provider_input_chars=sum(len(row.text) for row in runtime.chunks),
+            elapsed_ms=1,
+        ),
+    )
+    match = RankedEvidence(
+        chunk=runtime.chunks[0],
+        rrf_score=0.02,
+        keyword_rank=1,
+        vector_rank=None,
+        entity_rank=None,
+    )
+    lexical = _retrieval_result(
+        runtime,
+        (match,),
+        mode="lexical_only",
+        reason="index_incomplete",
+        keyword_hits=1,
+        vector_hits=0,
+        entity_hits=0,
+        provider_calls=0,
+    )
+    coordinator = CountingCoordinator(result=incomplete)
+    retriever = ScriptedRetriever(lexical)
+    adapter = _adapter(
+        runtime,
+        index_coordinator=coordinator,
+        rrf_retriever=retriever,
+        policy=InvestigatorRagPolicy(require_hybrid=False),
+    )
+
+    first = adapter.search(
+        seed=runtime.seed,
+        query=EvidenceQuery(text="岚 发色 冲突"),
+        limit=2,
+    )
+    second = adapter.search(
+        seed=runtime.seed,
+        query=EvidenceQuery(text="岚 发色 冲突"),
+        limit=2,
+    )
+
+    assert tuple(row.chunk_id for row in first) == (match.chunk.chunk_id,)
+    assert tuple(row.chunk_id for row in second) == (match.chunk.chunk_id,)
+    assert coordinator.calls == 1
+    assert len(retriever.calls) == 2
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "embedding_not_configured",
+        "embedding_input_rejected",
+        "embedding_response_invalid",
+        "vector_scope_invalid",
+    ],
+)
+def test_non_transient_query_failures_remain_terminal_without_hybrid_requirement(
+    runtime, reason
+):
+    match = RankedEvidence(
+        chunk=runtime.chunks[0],
+        rrf_score=0.02,
+        keyword_rank=1,
+        vector_rank=None,
+        entity_rank=None,
+    )
+    degraded = _retrieval_result(
+        runtime,
+        (match,),
+        mode="lexical_only",
+        reason=reason,
+        keyword_hits=1,
+        vector_hits=0,
+        entity_hits=0,
+    )
+    adapter = _adapter(
+        runtime,
+        index_coordinator=CountingCoordinator(result=_complete_index(runtime)),
+        rrf_retriever=ScriptedRetriever(degraded),
+        policy=InvestigatorRagPolicy(require_hybrid=False),
+    )
+
     with pytest.raises(InvestigatorRagUnavailable) as caught:
         adapter.search(
             seed=runtime.seed,
             query=EvidenceQuery(text="岚 发色 冲突"),
             limit=2,
         )
-    assert caught.value.reason_code == "vector_search_unavailable"
+    assert caught.value.reason_code == reason
 
 
 def test_index_chunk_content_must_match_frozen_scope(runtime):

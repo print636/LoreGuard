@@ -135,7 +135,7 @@ class IssueEvidenceReviewUsageAccumulator:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "charged_tokens": self.charged_tokens,
-            "charged_token_semantics": "conservative_internal_budget_debit",
+            "charged_token_semantics": "heuristic_or_reported_internal_debit",
             "provider_calls": list(self.provider_calls),
         }
 

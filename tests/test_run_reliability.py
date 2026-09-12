@@ -626,7 +626,7 @@ class RunReliabilityTests(unittest.TestCase):
             self.assertEqual("cancelled", usage["terminal_status"])
             self.assertEqual(23, usage["charged_tokens"])
             self.assertEqual(
-                "conservative_internal_budget_debit",
+                "heuristic_or_reported_internal_debit",
                 usage["charged_token_semantics"],
             )
             self.assertEqual(1, usage["logical_calls"])

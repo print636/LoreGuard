@@ -12,7 +12,7 @@ from sqlalchemy import select
 os.environ["OPENAI_API_KEY"] = ""
 os.environ["ENABLE_MODEL_EXTRACTION"] = "false"
 
-from app.main import app, settings, write_limiter
+from app.main import app, enforce_daily_model_budget, settings, write_limiter
 from app.db import AnalysisDiagnosticRow, AnalysisRecordRow, AnalysisRunRow, DocumentContextRow, DocumentRow, IssueRow, ProjectRow, RunEventRow, SessionLocal, init_db
 from app.service import capture_run_inputs, execute_analysis
 from app.provider import ProviderError
@@ -180,6 +180,35 @@ class ApiFlowTests(unittest.TestCase):
                 settings.enable_model_extraction,
                 settings.enable_issue_evidence_review,
                 settings.openai_api_key,
+            ) = previous
+
+    def test_health_and_daily_budget_recognize_evidence_investigator_capability(self):
+        previous = (
+            settings.enable_model_extraction,
+            settings.enable_evidence_investigator,
+            settings.enable_issue_evidence_review,
+            settings.openai_api_key,
+            settings.daily_token_budget,
+        )
+        try:
+            settings.enable_model_extraction = False
+            settings.enable_evidence_investigator = True
+            settings.enable_issue_evidence_review = False
+            settings.openai_api_key = "unit-test-placeholder"
+            settings.daily_token_budget = 0
+            with TestClient(app) as client:
+                response = client.get("/health")
+            self.assertTrue(response.json()["model"]["configured"])
+            with SessionLocal() as db:
+                with self.assertRaisesRegex(Exception, "Token 预算已用尽"):
+                    enforce_daily_model_budget(db)
+        finally:
+            (
+                settings.enable_model_extraction,
+                settings.enable_evidence_investigator,
+                settings.enable_issue_evidence_review,
+                settings.openai_api_key,
+                settings.daily_token_budget,
             ) = previous
 
     def test_provider_check_reports_unconfigured_without_calling_complete(self):
