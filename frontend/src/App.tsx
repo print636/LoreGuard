@@ -631,11 +631,15 @@ export default function App() {
       }
     });
     es.onerror = () => {
-      es.close();
-      if (epoch !== viewEpochRef.current) return;
-      streamRef.current = null;
-      setMessage("SSE 连接中断，可从运行历史恢复");
-      setBusy(false);
+      if (epoch !== viewEpochRef.current || streamRef.current !== es) {
+        es.close();
+        return;
+      }
+      // Keep this EventSource alive so the browser can reconnect with its
+      // native Last-Event-ID cursor. Closing here silently disabled that
+      // recovery path and could make an active run look idle.
+      setMessage("连接暂时中断，正在自动重连");
+      setBusy(true);
     };
   }
   async function loadProjectRuns(id: string) {

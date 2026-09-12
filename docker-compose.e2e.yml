@@ -1,0 +1,23 @@
+services:
+  api:
+    environment:
+      OPENAI_API_KEY: ""
+      OPENAI_BASE_URL: http://127.0.0.1:9/v1
+      OPENAI_MODEL: e2e-disabled
+      ENABLE_MODEL_EXTRACTION: "false"
+      ENABLE_EMBEDDINGS: "false"
+      EMBEDDING_API_KEY: ""
+      ENABLE_ISSUE_EVIDENCE_REVIEW: "false"
+      ENABLE_REVIEW_AGENT: "false"
+  worker:
+    environment:
+      OPENAI_API_KEY: ""
+      OPENAI_BASE_URL: http://127.0.0.1:9/v1
+      OPENAI_MODEL: e2e-disabled
+      ENABLE_MODEL_EXTRACTION: "false"
+      ENABLE_EMBEDDINGS: "false"
+      EMBEDDING_API_KEY: ""
+      ENABLE_ISSUE_EVIDENCE_REVIEW: "false"
+      ENABLE_REVIEW_AGENT: "false"
+  prometheus:
+    profiles: [observability]

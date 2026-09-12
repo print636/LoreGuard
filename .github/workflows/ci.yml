@@ -37,3 +37,26 @@ jobs:
         run: docker compose logs --no-color
       - if: always()
         run: docker compose down --volumes
+  system-e2e:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.12"}
+      - uses: actions/setup-node@v7
+        with: {node-version: "22"}
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: frontend
+      - run: python scripts/run_system_e2e.py
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-system-e2e
+          path: artifacts/playwright
+          if-no-files-found: ignore
+          retention-days: 7
