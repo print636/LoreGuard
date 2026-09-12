@@ -1,3 +1,4 @@
+import gzip
 import json
 import unittest
 
@@ -209,6 +210,201 @@ class ProviderHardeningTests(unittest.TestCase):
         self.assertEqual(len(body), result.telemetry.received_bytes)
         self.assertTrue(stream.closed)
 
+    def test_gzip_success_is_decoded_across_wire_chunk_boundaries(self):
+        body = self.success_bytes()
+        compressed = gzip.compress(body)
+        stream = TrackingStream(
+            [compressed[:1], compressed[1:7], compressed[7:19], compressed[19:]]
+        )
+        observed_accept_encoding = []
+
+        def handler(request):
+            observed_accept_encoding.append(request.headers["accept-encoding"])
+            return httpx.Response(
+                200,
+                headers={
+                    "Content-Encoding": "GZip",
+                    "Content-Length": str(len(compressed)),
+                },
+                stream=stream,
+            )
+
+        provider = self.provider(
+            handler,
+            settings=self.settings(
+                provider_max_response_bytes=max(len(body), len(compressed))
+            ),
+        )
+
+        result = provider.complete("s", "u")
+
+        self.assertEqual('{"records":[]}', result.text)
+        self.assertEqual(["gzip"], observed_accept_encoding)
+        self.assertEqual(len(compressed), result.telemetry.received_bytes)
+        self.assertEqual(len(body.decode("utf-8")), result.telemetry.response_chars)
+        self.assertEqual(4, stream.yielded)
+        self.assertTrue(stream.closed)
+
+    def test_gzip_decoded_body_cannot_expand_beyond_response_cap(self):
+        compressed = gzip.compress(b"private-expanded-body" * 1_000)
+        self.assertLess(len(compressed), 256)
+        stream = TrackingStream([compressed])
+        provider = self.provider(
+            lambda _: httpx.Response(
+                200,
+                headers={
+                    "Content-Encoding": "gzip",
+                    "Content-Length": str(len(compressed)),
+                },
+                stream=stream,
+            ),
+            settings=self.settings(provider_max_response_bytes=256),
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("s", "u")
+
+        self.assertEqual("response_too_large", caught.exception.category)
+        self.assertEqual(len(compressed), caught.exception.telemetry.received_bytes)
+        self.assertEqual(0, caught.exception.telemetry.response_chars)
+        self.assertNotIn("private-expanded-body", str(caught.exception))
+        self.assertTrue(stream.closed)
+
+    def test_preconsumed_gzip_response_fails_closed_without_body_access(self):
+        encoded = gzip.compress(self.success_bytes())
+        provider = self.provider(
+            lambda _: httpx.Response(
+                200,
+                headers={"Content-Encoding": "gzip"},
+                content=encoded,
+            )
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("s", "u")
+
+        self.assertEqual("response_decompression", caught.exception.category)
+        self.assertEqual(0, caught.exception.telemetry.received_bytes)
+        self.assertEqual(0, caught.exception.telemetry.response_chars)
+
+    def test_gzip_wire_bytes_are_bounded_before_decompression(self):
+        encoded = gzip.compress(b"{}")
+        wire_cap = len(encoded) - 1
+        stream = TrackingStream([encoded[:wire_cap], encoded[wire_cap:]])
+        provider = self.provider(
+            lambda _: httpx.Response(
+                200,
+                headers={"Content-Encoding": "gzip"},
+                stream=stream,
+            ),
+            settings=self.settings(provider_max_response_bytes=wire_cap),
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("s", "u")
+
+        self.assertEqual("response_too_large", caught.exception.category)
+        self.assertEqual(len(encoded), caught.exception.telemetry.received_bytes)
+        self.assertEqual(2, stream.yielded)
+        self.assertTrue(stream.closed)
+
+    def test_gzip_corruption_truncation_and_trailing_bytes_fail_closed(self):
+        valid = gzip.compress(self.success_bytes())
+        crc_corrupt = bytearray(valid)
+        crc_corrupt[-8] ^= 0xFF
+        cases = (
+            ("invalid_header", [b"not-a-gzip-stream-private"]),
+            ("truncated_trailer", [valid[:-3]]),
+            ("crc_mismatch", [bytes(crc_corrupt)]),
+            ("trailing_garbage_same_chunk", [valid + b"private trailing bytes"]),
+            ("trailing_garbage_next_chunk", [valid, b"private trailing bytes"]),
+            (
+                "second_member_same_chunk",
+                [valid + gzip.compress(b"private second member")],
+            ),
+            (
+                "second_member_at_chunk_boundary",
+                [valid, gzip.compress(b"private second member")],
+            ),
+        )
+        for name, chunks in cases:
+            with self.subTest(name=name):
+                stream = TrackingStream(chunks)
+                provider = self.provider(
+                    lambda _, candidate=stream: httpx.Response(
+                        200,
+                        headers={"Content-Encoding": "gzip"},
+                        stream=candidate,
+                    ),
+                    settings=self.settings(provider_max_response_bytes=4_096),
+                )
+
+                with self.assertRaises(ProviderRetryExhausted) as caught:
+                    provider.complete("s", "u")
+
+                self.assertEqual(
+                    "response_decompression", caught.exception.category
+                )
+                self.assertEqual(0, caught.exception.telemetry.response_chars)
+                self.assertNotIn("private", str(caught.exception))
+                self.assertTrue(stream.closed)
+
+    def test_unknown_or_multiple_content_encodings_are_rejected_without_read(self):
+        cases = (
+            [(b"Content-Encoding", b"br")],
+            [(b"Content-Encoding", b"deflate")],
+            [(b"Content-Encoding", b"zstd")],
+            [(b"Content-Encoding", b"private-coding")],
+            [(b"Content-Encoding", b"")],
+            [(b"Content-Encoding", b"gzip, br")],
+            [
+                (b"Content-Encoding", b"gzip"),
+                (b"Content-Encoding", b"gzip"),
+            ],
+            [
+                (b"Content-Encoding", b"gzip"),
+                (b"Content-Encoding", b"identity"),
+            ],
+        )
+        for headers in cases:
+            with self.subTest(header_count=len(headers)):
+                stream = TrackingStream([b"private body must not be consumed"])
+                provider = self.provider(
+                    lambda _, values=headers, candidate=stream: httpx.Response(
+                        200, headers=values, stream=candidate
+                    )
+                )
+
+                with self.assertRaises(ProviderRetryExhausted) as caught:
+                    provider.complete("s", "u")
+
+                self.assertEqual(
+                    "unsupported_content_encoding", caught.exception.category
+                )
+                self.assertEqual(0, stream.yielded)
+                self.assertEqual(0, caught.exception.telemetry.received_bytes)
+                self.assertNotIn("private", str(caught.exception))
+                self.assertTrue(stream.closed)
+
+    def test_none_response_cap_still_has_an_absolute_wire_ceiling(self):
+        stream = TrackingStream([self.success_bytes()])
+        provider = self.provider(
+            lambda _: httpx.Response(
+                200,
+                headers={"Content-Length": str(16 * 1_024 * 1_024 + 1)},
+                stream=stream,
+            ),
+            settings=self.settings(provider_max_response_bytes=None),
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("s", "u")
+
+        self.assertEqual("response_too_large", caught.exception.category)
+        self.assertEqual(0, stream.yielded)
+        self.assertEqual(0, caught.exception.telemetry.received_bytes)
+        self.assertTrue(stream.closed)
+
     def test_untrusted_content_length_cannot_bypass_stream_limit(self):
         stream = TrackingStream([b"1234", b"56", b"must-not-be-read"])
         provider = self.provider(
@@ -256,7 +452,12 @@ class ProviderHardeningTests(unittest.TestCase):
         stream = TrackingStream([b"private" * 100_000])
         provider = self.provider(lambda _: httpx.Response(
             403,
-            headers={"X-Request-ID": "safe-error-request"},
+            headers={
+                "X-Request-ID": "safe-error-request",
+                # Encoded HTTP error bodies must never enter the success-body
+                # reader or decompressor.
+                "Content-Encoding": "gzip",
+            },
             stream=stream,
         ))
 
@@ -301,6 +502,57 @@ class ProviderHardeningTests(unittest.TestCase):
             "private partial body",
             json.dumps(caught.exception.telemetry.model_dump()),
         )
+
+    def test_stream_decoding_and_generic_request_errors_have_safe_categories(self):
+        cases = (
+            (
+                "response_decompression",
+                httpx.DecodingError("private decoding detail"),
+                False,
+            ),
+            ("transport", httpx.RequestError("private request detail"), True),
+        )
+        for expected, error, retryable in cases:
+            with self.subTest(category=expected):
+                streams = []
+
+                def handler(_):
+                    stream = TrackingStream([b"private partial body"], error=error)
+                    streams.append(stream)
+                    return httpx.Response(200, stream=stream)
+
+                attempts = 2 if retryable else 1
+                provider = self.provider(
+                    handler,
+                    retry_policy=RetryPolicy(
+                        max_attempts=attempts,
+                        base_delay_seconds=0,
+                        jitter_ratio=0,
+                    ),
+                )
+                with self.assertRaises(ProviderRetryExhausted) as caught:
+                    provider.complete("s", "u")
+
+                self.assertEqual(expected, caught.exception.category)
+                self.assertEqual(attempts, len(streams))
+                self.assertTrue(all(stream.closed for stream in streams))
+                self.assertEqual(0, caught.exception.telemetry.response_chars)
+                serialized = json.dumps(caught.exception.telemetry.model_dump())
+                self.assertNotIn("private", serialized)
+                self.assertNotIn("private", str(caught.exception))
+
+    def test_decoding_error_raised_before_response_context_is_sanitized(self):
+        def handler(_):
+            raise httpx.DecodingError("private pre-response decoding detail")
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            self.provider(handler).complete("s", "u")
+
+        self.assertEqual("response_decompression", caught.exception.category)
+        self.assertEqual(1, caught.exception.attempt_no)
+        self.assertEqual(0, caught.exception.telemetry.received_bytes)
+        self.assertEqual(0, caught.exception.telemetry.response_chars)
+        self.assertNotIn("private", str(caught.exception))
 
     def test_response_failure_categories_are_structured_and_not_retried(self):
         cases = (
@@ -566,6 +818,107 @@ class ProviderHardeningTests(unittest.TestCase):
         self.assertEqual(1, calls)
         self.assertEqual("read_timeout", caught.exception.category)
         self.assertEqual(200, caught.exception.elapsed_ms)
+
+    def test_total_deadline_is_checked_between_success_body_chunks(self):
+        clock = {"now": 100.0}
+
+        class DeadlineCrossingStream(httpx.SyncByteStream):
+            def __init__(self):
+                self.yielded = 0
+                self.closed = False
+
+            def __iter__(self):
+                self.yielded += 1
+                yield b"{}"
+                clock["now"] = 102.0
+                self.yielded += 1
+                yield b"private after deadline"
+
+            def close(self):
+                self.closed = True
+
+        stream = DeadlineCrossingStream()
+        provider = self.provider(
+            lambda _: httpx.Response(200, stream=stream),
+            settings=self.settings(provider_total_deadline_seconds=1.0),
+            retry_policy=RetryPolicy(
+                max_attempts=1,
+                base_delay_seconds=0,
+                jitter_ratio=0,
+            ),
+            monotonic=lambda: clock["now"],
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("s", "u")
+
+        self.assertEqual("read_timeout", caught.exception.category)
+        self.assertEqual(2, caught.exception.telemetry.received_bytes)
+        self.assertEqual(0, caught.exception.telemetry.response_chars)
+        self.assertEqual(2, stream.yielded)
+        self.assertTrue(stream.closed)
+        self.assertNotIn("private", str(caught.exception))
+
+    def test_total_deadline_precedes_preconsumed_identity_body_access(self):
+        clock = {"now": 100.0}
+
+        def handler(_):
+            clock["now"] = 102.0
+            return self.success()
+
+        provider = self.provider(
+            handler,
+            settings=self.settings(provider_total_deadline_seconds=1.0),
+            retry_policy=RetryPolicy(
+                max_attempts=1,
+                base_delay_seconds=0,
+                jitter_ratio=0,
+            ),
+            monotonic=lambda: clock["now"],
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("s", "u")
+
+        self.assertEqual("read_timeout", caught.exception.category)
+        self.assertEqual(0, caught.exception.telemetry.received_bytes)
+        self.assertEqual(0, caught.exception.telemetry.response_chars)
+
+    def test_total_deadline_is_checked_after_waiting_for_stream_eof(self):
+        clock = {"now": 100.0}
+        body = self.success_bytes()
+
+        class SlowEofStream(httpx.SyncByteStream):
+            def __init__(self):
+                self.closed = False
+
+            def __iter__(self):
+                yield body
+                # Simulate waiting for EOF after the complete last body chunk.
+                clock["now"] = 102.0
+
+            def close(self):
+                self.closed = True
+
+        stream = SlowEofStream()
+        provider = self.provider(
+            lambda _: httpx.Response(200, stream=stream),
+            settings=self.settings(provider_total_deadline_seconds=1.0),
+            retry_policy=RetryPolicy(
+                max_attempts=1,
+                base_delay_seconds=0,
+                jitter_ratio=0,
+            ),
+            monotonic=lambda: clock["now"],
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("s", "u")
+
+        self.assertEqual("read_timeout", caught.exception.category)
+        self.assertEqual(len(body), caught.exception.telemetry.received_bytes)
+        self.assertEqual(0, caught.exception.telemetry.response_chars)
+        self.assertTrue(stream.closed)
 
 
 if __name__ == "__main__":

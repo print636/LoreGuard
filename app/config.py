@@ -51,8 +51,9 @@ class Settings(BaseSettings):
     provider_thinking_mode: Literal["disabled", "enabled"] | None = None
     provider_total_deadline_seconds: float | None = Field(default=None, gt=0)
     provider_max_completion_tokens: int | None = Field(default=None, gt=0)
-    # Bound successful upstream response bodies independently of model token
-    # controls, which OpenAI-compatible relays may ignore or not support.
+    # Tightly bound successful upstream response bodies independently of model
+    # token controls, which compatible relays may ignore. ``None`` disables
+    # only this configurable cap; the provider retains a hard safety ceiling.
     provider_max_response_bytes: int | None = Field(
         default=2 * 1024 * 1024, ge=1
     )

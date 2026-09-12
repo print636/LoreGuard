@@ -66,6 +66,8 @@ _SAFE_INTERRUPTED_PROVIDER_CATEGORIES = {
     "unauthorized",
     "forbidden",
     "nonretry_http",
+    "unsupported_content_encoding",
+    "response_decompression",
     "body_json",
     "response_shape",
     "empty_content",

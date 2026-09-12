@@ -5,6 +5,7 @@ import math
 import random
 import re
 import time
+import zlib
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -26,6 +27,10 @@ _MAX_TOOL_SCHEMA_BYTES = 64 * 1_024
 _MAX_TOOL_REQUEST_BYTES = 256 * 1_024
 _ABSOLUTE_MAX_TOOL_CALLS = 32
 _ABSOLUTE_MAX_TOOL_ARGUMENT_BYTES = 256 * 1_024
+# ``provider_max_response_bytes=None`` only disables a deployment-specific
+# tighter ceiling.  Successful response transport and decompression must still
+# have a hard memory bound, especially when an upstream enables compression.
+_ABSOLUTE_MAX_PROVIDER_RESPONSE_BYTES = 16 * 1_024 * 1_024
 
 _ParsedResponse = TypeVar("_ParsedResponse")
 
@@ -451,6 +456,9 @@ class OpenAICompatibleProvider:
         headers = {
             "Authorization": f"Bearer {self.settings.openai_api_key}",
             "Content-Type": "application/json",
+            # Advertise only the transfer coding that the bounded success-body
+            # reader implements. Identity remains acceptable by HTTP default.
+            "Accept-Encoding": "gzip",
         }
         endpoint = f"{self.settings.openai_base_url.rstrip('/')}/chat/completions"
         deadline = (
@@ -519,7 +527,9 @@ class OpenAICompatibleProvider:
                             )
                         else:
                             raw_body, received_bytes, failure = (
-                                self._read_success_body(response, attempt_no)
+                                self._read_success_body(
+                                    response, attempt_no, deadline=deadline
+                                )
                             )
                             if failure is None:
                                 assert raw_body is not None
@@ -570,7 +580,9 @@ class OpenAICompatibleProvider:
                     failure = _Failure("connect_timeout", attempt_no, retryable=True)
                 except httpx.ReadTimeout:
                     failure = _Failure("read_timeout", attempt_no, retryable=True)
-                except (httpx.TimeoutException, httpx.TransportError):
+                except httpx.DecodingError:
+                    failure = _Failure("response_decompression", attempt_no)
+                except httpx.RequestError:
                     failure = _Failure("transport", attempt_no, retryable=True)
 
                 # Every branch above either returned or recorded a safe failure.
@@ -616,6 +628,13 @@ class OpenAICompatibleProvider:
             error_type: type[ProviderError] = ProviderRetryExhausted
         elif failure.category in {"unauthorized", "forbidden", "nonretry_http"}:
             error_type = ProviderError
+        elif failure.category in {
+            "unsupported_content_encoding",
+            "response_decompression",
+        }:
+            # These are upstream representation/availability failures, not a
+            # defect in a caller's native-tool schema or tool arguments.
+            error_type = ProviderRetryExhausted
         elif tool_contract:
             error_type = ProviderToolCallError
         else:
@@ -957,26 +976,55 @@ class OpenAICompatibleProvider:
         return False
 
     def _read_success_body(
-        self, response: httpx.Response, attempt_no: int
+        self,
+        response: httpx.Response,
+        attempt_no: int,
+        *,
+        deadline: float | None = None,
     ) -> tuple[bytes | None, int, _Failure | None]:
-        max_bytes = self.settings.provider_max_response_bytes
-        if max_bytes is not None and self._content_length_exceeds(
-            response, max_bytes
-        ):
+        encoding, encoding_failure = self._success_content_encoding(
+            response, attempt_no
+        )
+        if encoding_failure is not None:
+            response.close()
+            return None, 0, encoding_failure
+
+        configured_max = self.settings.provider_max_response_bytes
+        max_bytes = min(
+            configured_max
+            if configured_max is not None
+            else _ABSOLUTE_MAX_PROVIDER_RESPONSE_BYTES,
+            _ABSOLUTE_MAX_PROVIDER_RESPONSE_BYTES,
+        )
+        if self._content_length_exceeds(response, max_bytes):
             response.close()
             return None, 0, _Failure(
                 "response_too_large",
                 attempt_no,
                 http_status=response.status_code,
             )
+        if deadline is not None and self.monotonic() >= deadline:
+            response.close()
+            return None, 0, _Failure(
+                "read_timeout", attempt_no, retryable=True
+            )
 
         # MockTransport commonly receives pre-buffered Response objects from
-        # test handlers. Preserve that injection contract while production
-        # responses still take the streaming path below.
+        # test handlers. HTTPX has already decoded an encoded response at this
+        # point, so its original wire length, checksum and member boundary can
+        # no longer be verified. Fail closed instead of trusting the decoded
+        # cache; production responses take the raw bounded path below.
         if response.is_stream_consumed:
+            if encoding != "identity":
+                response.close()
+                return None, 0, _Failure(
+                    "response_decompression",
+                    attempt_no,
+                    http_status=response.status_code,
+                )
             raw_body = response.content
             received_bytes = len(raw_body)
-            if max_bytes is not None and received_bytes > max_bytes:
+            if received_bytes > max_bytes:
                 response.close()
                 return None, received_bytes, _Failure(
                     "response_too_large",
@@ -987,10 +1035,21 @@ class OpenAICompatibleProvider:
 
         body = bytearray()
         received_bytes = 0
+        decompressor = (
+            zlib.decompressobj(zlib.MAX_WBITS | 16)
+            if encoding == "gzip"
+            else None
+        )
         try:
             for chunk in response.iter_raw():
+                if deadline is not None and self.monotonic() >= deadline:
+                    body.clear()
+                    response.close()
+                    return None, received_bytes, _Failure(
+                        "read_timeout", attempt_no, retryable=True
+                    )
                 received_bytes += len(chunk)
-                if max_bytes is not None and received_bytes > max_bytes:
+                if received_bytes > max_bytes:
                     body.clear()
                     response.close()
                     return None, received_bytes, _Failure(
@@ -998,7 +1057,48 @@ class OpenAICompatibleProvider:
                         attempt_no,
                         http_status=response.status_code,
                     )
-                body.extend(chunk)
+                if decompressor is None:
+                    decoded = chunk
+                else:
+                    # Ask zlib for at most one byte beyond the remaining
+                    # decoded allowance.  This detects expansion beyond the
+                    # ceiling without ever materializing an unbounded output.
+                    remaining = max_bytes - len(body)
+                    try:
+                        decoded = decompressor.decompress(chunk, remaining + 1)
+                    except zlib.error:
+                        body.clear()
+                        return None, received_bytes, _Failure(
+                            "response_decompression",
+                            attempt_no,
+                            http_status=response.status_code,
+                        )
+                if len(body) + len(decoded) > max_bytes:
+                    body.clear()
+                    response.close()
+                    return None, received_bytes, _Failure(
+                        "response_too_large",
+                        attempt_no,
+                        http_status=response.status_code,
+                    )
+                body.extend(decoded)
+
+                # A second gzip member or arbitrary trailing bytes are not a
+                # second HTTP content encoding and are rejected rather than
+                # being silently ignored.
+                if decompressor is not None and decompressor.unused_data:
+                    body.clear()
+                    return None, received_bytes, _Failure(
+                        "response_decompression",
+                        attempt_no,
+                        http_status=response.status_code,
+                    )
+                if deadline is not None and self.monotonic() >= deadline:
+                    body.clear()
+                    response.close()
+                    return None, received_bytes, _Failure(
+                        "read_timeout", attempt_no, retryable=True
+                    )
         except httpx.ConnectTimeout:
             body.clear()
             return None, received_bytes, _Failure(
@@ -1009,12 +1109,52 @@ class OpenAICompatibleProvider:
             return None, received_bytes, _Failure(
                 "read_timeout", attempt_no, retryable=True
             )
-        except (httpx.TimeoutException, httpx.TransportError):
+        except httpx.DecodingError:
+            body.clear()
+            return None, received_bytes, _Failure(
+                "response_decompression", attempt_no
+            )
+        except httpx.RequestError:
             body.clear()
             return None, received_bytes, _Failure(
                 "transport", attempt_no, retryable=True
             )
+        if deadline is not None and self.monotonic() >= deadline:
+            body.clear()
+            response.close()
+            return None, received_bytes, _Failure(
+                "read_timeout", attempt_no, retryable=True
+            )
+        if decompressor is not None and not decompressor.eof:
+            body.clear()
+            return None, received_bytes, _Failure(
+                "response_decompression",
+                attempt_no,
+                http_status=response.status_code,
+            )
         return bytes(body), received_bytes, None
+
+    @staticmethod
+    def _success_content_encoding(
+        response: httpx.Response, attempt_no: int
+    ) -> tuple[Literal["identity", "gzip"] | None, _Failure | None]:
+        values = response.headers.get_list("content-encoding", split_commas=True)
+        if not values:
+            return "identity", None
+        if len(values) != 1:
+            return None, _Failure(
+                "unsupported_content_encoding",
+                attempt_no,
+                http_status=response.status_code,
+            )
+        encoding = values[0].strip().lower()
+        if encoding not in {"identity", "gzip"}:
+            return None, _Failure(
+                "unsupported_content_encoding",
+                attempt_no,
+                http_status=response.status_code,
+            )
+        return encoding, None
 
     @staticmethod
     def _content_length_exceeds(

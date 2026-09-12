@@ -141,6 +141,8 @@ _SAFE_PROVIDER_CATEGORIES = frozenset(
         "connect_timeout",
         "read_timeout",
         "transport",
+        "unsupported_content_encoding",
+        "response_decompression",
         *_PROVIDER_CONTRACT_CATEGORIES,
         "tool_calls_missing",
         "usage_unavailable",

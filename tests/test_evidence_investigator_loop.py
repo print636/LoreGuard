@@ -2449,6 +2449,18 @@ def test_scope_arguments_and_cross_seed_attempts_are_rejected_before_retrieval()
             ProviderToolCallError("safe", category="tool_response_shape"),
             "provider_contract_invalid",
         ),
+        (
+            ProviderRetryExhausted(
+                "safe", category="unsupported_content_encoding", attempt_no=1
+            ),
+            "provider_unavailable",
+        ),
+        (
+            ProviderRetryExhausted(
+                "safe", category="response_decompression", attempt_no=1
+            ),
+            "provider_unavailable",
+        ),
     ],
 )
 def test_provider_failures_map_to_allowlisted_content_free_diagnostics(failure, reason):

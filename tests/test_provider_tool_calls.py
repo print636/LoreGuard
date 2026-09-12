@@ -1,3 +1,4 @@
+import gzip
 import json
 import unittest
 
@@ -169,6 +170,44 @@ class ProviderNativeToolCallingTests(unittest.TestCase):
             "private user prompt",
         ):
             self.assertNotIn(forbidden, serialized_transport_result)
+
+    def test_gzip_success_uses_the_same_bounded_reader_for_native_tools(self):
+        raw = completion([call()]).content
+        encoded = gzip.compress(raw)
+
+        provider = self.provider(
+            lambda _: httpx.Response(
+                200,
+                headers={
+                    "Content-Encoding": "gzip",
+                    "Content-Length": str(len(encoded)),
+                },
+                stream=httpx.ByteStream(encoded),
+            )
+        )
+        result = provider.complete_with_tools("s", "u", tools=[tool()])
+
+        self.assertEqual(1, len(result.tool_calls))
+        self.assertEqual("read_span", result.tool_calls[0].name)
+        self.assertEqual(len(encoded), result.telemetry.received_bytes)
+
+    def test_encoded_representation_failure_is_availability_not_tool_contract(self):
+        provider = self.provider(
+            lambda _: httpx.Response(
+                200,
+                headers={"Content-Encoding": "br"},
+                stream=httpx.ByteStream(b"private encoded response"),
+            )
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete_with_tools("s", "u", tools=[tool()])
+
+        self.assertIs(type(caught.exception), ProviderRetryExhausted)
+        self.assertEqual(
+            "unsupported_content_encoding", caught.exception.category
+        )
+        self.assertNotIn("private", str(caught.exception))
 
     def test_multiple_calls_and_object_arguments_are_supported_within_limits(self):
         response_calls = [
