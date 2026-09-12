@@ -1500,14 +1500,27 @@ def _fact_relation_grounded(attrs: Mapping[str, str], text: str) -> bool:
             ):
                 return True
             continue
-        relation = re.compile(
+        affirmative_relation = re.compile(
             rf"{subject}(?:的)?{re.escape(_compact(predicate))}"
             rf"(?:是否)?(?:是|为|变成|变为|呈现为|保持为|仍是|依旧是)"
             rf"{re.escape(_compact(value))}"
         )
-        match = relation.search(clause)
-        if match is not None and not _externally_modalized(clause, match.start()):
-            return True
+        # Facts carry polarity as server-derived semantic metadata rather than
+        # a model-authored field.  Accept only a narrow, explicit copular
+        # negation of the submitted value.  The boundary prevents unrelated
+        # mentions ("不是黑色，银色是制服颜色") and double
+        # negations ("并非不是银色") from grounding the candidate.
+        negative_relation = re.compile(
+            rf"{subject}(?:的)?{re.escape(_compact(predicate))}"
+            rf"(?:不是|并非(?:是|为)?|不为){re.escape(_compact(value))}"
+            rf"(?=$|而(?:是|非|为)|却(?:是|为))"
+        )
+        for relation in (affirmative_relation, negative_relation):
+            match = relation.search(clause)
+            if match is not None and not _externally_modalized(
+                clause, match.start()
+            ):
+                return True
     return False
 
 

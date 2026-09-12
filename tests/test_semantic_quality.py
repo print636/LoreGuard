@@ -476,6 +476,26 @@ class BaselineSemanticQualityTests(unittest.TestCase):
         )
         self.assertEqual([], detect_issues(compatible.directives))
 
+    def test_closed_fact_semantics_recognize_explicit_copular_negators(self):
+        for index, negator in enumerate(("不是", "并非", "不为"), start=1):
+            with self.subTest(negator=negator):
+                row = ParsedDirective(
+                    kind="fact",
+                    attrs={"subject": "林澈", "predicate": "发色", "value": "银色"},
+                    evidence=evidence(
+                        f"林澈的发色{negator}银色。", line=index
+                    ),
+                )
+
+                assessed, reason = assess_directive(row)
+
+                self.assertIsNone(reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("fact", assessed.kind)
+                self.assertEqual("negated", assessed.attrs["modality"])
+                self.assertEqual("negative", assessed.attrs["polarity"])
+                self.assertTrue(eligible_for_deterministic_rules(assessed))
+
     def test_dialogue_and_reported_document_have_different_source_scope(self):
         spoken = ParsedDirective(
             kind="fact",

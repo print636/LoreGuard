@@ -781,6 +781,39 @@ def test_question_evidence_is_rejected_by_semantic_gate_even_when_fields_are_vis
     assert dict(result.rejection_counts) == {"candidate_semantics_rejected": 1}
 
 
+@pytest.mark.parametrize("negator", ["不是", "并非", "不为"])
+def test_explicit_same_value_fact_negation_is_grounded_with_negative_polarity(
+    negator,
+):
+    result, *_ = _promote(
+        IssueCategory.fact_conflict,
+        candidate_fields={"subject": "岚", "predicate": "发色", "value": "银色"},
+        candidate_text=f"岚的发色{negator}银色。",
+    )
+
+    assert result.accepted_candidates == 1
+    assert len(result.added_issues) == 1
+    assert result.promoted_directives[0].attrs["polarity"] == "negative"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "岚的发色不是黑色，银色只是制服颜色。",
+        "岚的发色并非不是银色。",
+    ],
+)
+def test_unrelated_or_double_negation_does_not_ground_same_value_fact(text):
+    result, *_ = _promote(
+        IssueCategory.fact_conflict,
+        candidate_fields={"subject": "岚", "predicate": "发色", "value": "银色"},
+        candidate_text=text,
+    )
+
+    assert result.accepted_candidates == 0
+    assert dict(result.rejection_counts) == {"candidate_not_grounded": 1}
+
+
 def test_json_node_limit_is_independent_of_transport_field_count():
     result, baseline, envelope, seed, resolver = _promote(
         IssueCategory.fact_conflict
