@@ -1239,7 +1239,11 @@ class EvidenceInvestigatorToolLoop:
                     "span_ref": row.span_ref,
                     "line_start": row.line_start,
                     "line_end": row.line_end,
-                    "text": row.text,
+                    "absolute_lines": _absolute_line_rows(
+                        text=row.text,
+                        line_start=row.line_start,
+                        line_end=row.line_end,
+                    ),
                 }
             )
             return False, 0, 1, False
@@ -1369,7 +1373,9 @@ def _tool_definitions(
         definitions.append(
             ToolDefinition(
                 name="READ_SPAN",
-                description="读取一次检索返回的授权行范围。",
+                description=(
+                    "读取一次检索返回的授权行范围，并取得服务器生成的绝对行号原文结构。"
+                ),
                 parameters=ReadSpanArgs.model_json_schema(),
             )
         )
@@ -1377,14 +1383,20 @@ def _tool_definitions(
         definitions.append(
             ToolDefinition(
                 name="SUBMIT_VERDICT",
-                description="提交引用已读取证据的候选记录；服务器仍会独立验证。",
+                description=(
+                    "仅在你已最终确认已读证据满足全部字段和冲突规则时提交候选；"
+                    "服务器验证只是安全兜底，不能代替你的判断，也不得用于试探。"
+                ),
                 parameters=SubmitVerdictArgs.model_json_schema(),
             )
         )
     definitions.append(
         ToolDefinition(
             name="ABSTAIN",
-            description="证据不足或没有规则可验证冲突时停止当前调查。",
+            description=(
+                "关系是否发生、时间是否兼容或规则前提存在任何不确定时结束当前调查；"
+                "这是正确终局，不是失败。"
+            ),
             parameters=AbstainArgs.model_json_schema(),
         )
     )
@@ -1438,10 +1450,13 @@ def _system_prompt() -> str:
         "检索结果的 rank 越小越相关；若可选，优先读取 overlaps_anchor=false 的结果，"
         "但该标记只是行范围提示，不能替代读取和证据判断。READ_SPAN 的行范围不得与 anchor 证据行重叠；"
         "同一结果中与 anchor 完全不重叠的子范围仍可读取。"
+        "READ_SPAN 返回的 absolute_lines 由服务器生成，其中 line_number 是原文绝对行号。"
         "提交时只能使用 current_seed 给出的候选类型和字段合同，所有字段值必须是原文可支持的非空字符串。"
         "候选 source_line_start/source_line_end 必须是支持全部字段的最小充分原文范围。"
         "若 observations 出现 retryable_tool_rejection，只修正工具参数或改选工具，不要重复同一动作。"
-        "证据不足时调用 ABSTAIN。SUBMIT_VERDICT 仅提交未受信候选，不创建问题。"
+        "SUBMIT_VERDICT 表示你已经作出最终冲突判断，不是交给服务器试探的提案。"
+        "后续 validator 只做安全兜底，不能代替你的判断。任何关系发生性、time 兼容性或"
+        "family 规则前提不确定时必须调用 ABSTAIN；ABSTAIN 是正确终局，不是失败。"
     )
 
 
@@ -1497,6 +1512,26 @@ def _user_prompt(
         },
         "observations": list(observations),
     }
+    if phase == "verdict":
+        payload["verdict_checklist"] = {
+            "submission_boundary": (
+                "SUBMIT_VERDICT 是当前 seed 的最终冲突判断；validator 只做安全兜底，"
+                "不得代替判断或用于试探。"
+            ),
+            "field_copy_rule": (
+                "逐字段核对：除合同明确要求的固定枚举或规范化值外，每个自由文本字段值"
+                "必须从所引 absolute_lines 的最小充分连续范围按原文精确复制，不得同义"
+                "改写、概括或补全；source_line_start/source_line_end 必须使用其中的绝对行号。"
+            ),
+            "rule_preconditions": (
+                "关系已经实际发生、time 与 anchor 兼容且 family 的全部规则前提均须由"
+                "已读证据直接支持。"
+            ),
+            "uncertainty_policy": (
+                "任一字段、关系、时间或规则前提不确定时调用 ABSTAIN；ABSTAIN 是正确终局，"
+                "不是失败。"
+            ),
+        }
     return json.dumps(
         payload,
         ensure_ascii=False,
@@ -1515,6 +1550,31 @@ def _candidate_field_contract(kind: str) -> dict[str, Any]:
         "optional_fields": list(contract.optional),
         "semantic_guidance": contract.semantic_guidance,
     }
+
+
+def _absolute_line_rows(
+    *, text: str, line_start: int, line_end: int
+) -> list[dict[str, Any]]:
+    """Present one authorized span with server-owned absolute line numbers."""
+
+    if (
+        type(text) is not str
+        or not text
+        or type(line_start) is not int
+        or type(line_end) is not int
+        or line_start < 1
+        or line_end < line_start
+    ):
+        raise ValueError("read observation is invalid")
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines.pop()
+    if len(lines) != line_end - line_start + 1:
+        raise ValueError("read observation line mapping is invalid")
+    return [
+        {"line_number": line_start + offset, "text": value}
+        for offset, value in enumerate(lines)
+    ]
 
 
 def _recoverable_rejection_observation(reason_code: str) -> dict[str, Any]:

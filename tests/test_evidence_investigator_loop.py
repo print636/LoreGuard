@@ -290,12 +290,16 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
             "optional_fields": ["time"],
             "semantic_guidance": (
                 "候选必须与 anchor 的 subject、predicate 相同；冲突须为两条肯定事实的 value 不同，"
-                "或同一 value 的一肯定一明确否定。"
+                "或同一 value 的一肯定一明确否定。若双方都提供精确 time 且时间不同，"
+                "这是阶段演进而非同时冲突，必须 ABSTAIN；不得把变更、恢复、更新或替代后的"
+                "状态与旧记录直接判为冲突。"
             ),
         }
     }
     assert prompts[0]["current_seed"]["family_semantic_guidance"] == (
-        "只调查同一主体同一属性的冲突：肯定取值互异，或同一取值一肯定一明确否定。"
+        "只调查同一主体同一属性的同时冲突：肯定取值互异，或同一取值一肯定一明确否定。"
+        "若两条记录都有精确 time 且时间不同，应视为可能的阶段演进并 ABSTAIN；"
+        "明确的状态变更、恢复、更新或替代不是前后矛盾。"
     )
     assert prompts[0]["current_seed"]["source_line_guidance"] == (
         "选择支持候选全部字段的最小充分行范围；不得覆盖 anchor 证据行。"
@@ -311,6 +315,46 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
             "overlaps_anchor": True,
         }
     ]
+    assert prompts[2]["observations"][-1] == {
+        "kind": "read_span",
+        "span_ref": "span_tok0000000000002",
+        "line_start": 2,
+        "line_end": 2,
+        "absolute_lines": [
+            {
+                "line_number": 2,
+                "text": "岚在镜中发现自己的发色已经变成黑色。",
+            }
+        ],
+    }
+    assert "verdict_checklist" not in prompts[0]
+    assert "verdict_checklist" not in prompts[1]
+    checklist = prompts[2]["verdict_checklist"]
+    assert set(checklist) == {
+        "submission_boundary",
+        "field_copy_rule",
+        "rule_preconditions",
+        "uncertainty_policy",
+    }
+    assert "最终冲突判断" in checklist["submission_boundary"]
+    assert "安全兜底" in checklist["submission_boundary"]
+    assert "逐字段核对" in checklist["field_copy_rule"]
+    assert "absolute_lines" in checklist["field_copy_rule"]
+    assert "绝对行号" in checklist["field_copy_rule"]
+    assert "time 与 anchor 兼容" in checklist["rule_preconditions"]
+    assert "ABSTAIN 是正确终局" in checklist["uncertainty_policy"]
+    verdict_tools = {
+        tool.name: tool.description for tool in provider.requests[2]["tools"]
+    }
+    assert "最终确认" in verdict_tools["SUBMIT_VERDICT"]
+    assert "安全兜底" in verdict_tools["SUBMIT_VERDICT"]
+    assert "不得用于试探" in verdict_tools["SUBMIT_VERDICT"]
+    assert "正确终局" in verdict_tools["ABSTAIN"]
+    assert all(
+        "validator 只做安全兜底" in request["system"]
+        and "ABSTAIN 是正确终局" in request["system"]
+        for request in provider.requests
+    )
     assert all(row["tool_choice"] == "required" for row in provider.requests)
     assert all(row["limits"].max_calls == 1 for row in provider.requests)
     assert len(retriever.requests) == 1
@@ -319,8 +363,6 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
     assert query.text == "岚的发色是否发生冲突"
     assert query.entity_terms == ("岚",)
     assert limit == 6
-
-
     # Model-visible schemas contain no project/document/snapshot/evidence fields.
     schemas = json.dumps(
         [
@@ -402,6 +444,75 @@ def test_knowledge_evidence_guidance_is_present_in_model_visible_prompt():
         assert prompt["candidate_field_contracts"][kind]["semantic_guidance"] == (
             get_candidate_field_contract(kind).semantic_guidance
         )
+    family_guidance = prompt["family_semantic_guidance"]
+    knows_guidance = prompt["candidate_field_contracts"]["knows"][
+        "semantic_guidance"
+    ]
+    for required in (
+        "同一角色对同一知识",
+        "claims_knows",
+        "更早的精确可排序时间",
+        "较晚的实际获知",
+        "应提交 knows",
+        "猜测、试探、假口令、错误信息",
+    ):
+        assert required in family_guidance
+    for required in (
+        "更晚的精确可排序 time",
+        "应提交 knows",
+        "猜测、试探、假口令、错误信息",
+        "仅接触信息载体",
+    ):
+        assert required in knows_guidance
+
+
+@pytest.mark.parametrize(
+    ("kind", "required_boundaries"),
+    [
+        (
+            "fact",
+            (
+                "双方都提供精确 time",
+                "时间不同",
+                "阶段演进",
+                "必须 ABSTAIN",
+            ),
+        ),
+        (
+            "item",
+            (
+                "许可、授权、计划或演示安排",
+                "不等于交接、领取、持有或保管已经发生",
+            ),
+        ),
+        (
+            "uses",
+            (
+                "许可、授权、计划、准备或演示安排",
+                "不等于使用已经发生",
+            ),
+        ),
+    ],
+)
+def test_candidate_guidance_covers_general_temporal_and_modal_boundaries(
+    kind, required_boundaries
+):
+    guidance = get_candidate_field_contract(kind).semantic_guidance
+
+    for boundary in required_boundaries:
+        assert boundary in guidance
+
+
+def test_family_guidance_keeps_fact_and_item_decisions_conservative():
+    fact = get_family_semantic_guidance(IssueCategory.fact_conflict)
+    item = get_family_semantic_guidance(IssueCategory.item_ownership)
+
+    assert "两条记录都有精确 time 且时间不同" in fact
+    assert "阶段演进并 ABSTAIN" in fact
+    assert "状态变更、恢复、更新或替代不是前后矛盾" in fact
+    assert "许可、授权、计划、准备或演示安排" in item
+    assert "不证明交接已经发生" in item
+    assert "不证明物品已经被使用" in item
 
 
 def test_usage_is_reported_immediately_and_checkpoints_wrap_external_work():

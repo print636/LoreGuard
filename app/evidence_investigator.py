@@ -59,7 +59,9 @@ _CANDIDATE_FIELD_CONTRACTS: dict[str, CandidateFieldContract] = {
         ("time",),
         (
             "候选必须与 anchor 的 subject、predicate 相同；冲突须为两条肯定事实的 value 不同，"
-            "或同一 value 的一肯定一明确否定。"
+            "或同一 value 的一肯定一明确否定。若双方都提供精确 time 且时间不同，"
+            "这是阶段演进而非同时冲突，必须 ABSTAIN；不得把变更、恢复、更新或替代后的"
+            "状态与旧记录直接判为冲突。"
         ),
     ),
     "event": CandidateFieldContract(
@@ -74,6 +76,9 @@ _CANDIDATE_FIELD_CONTRACTS: dict[str, CandidateFieldContract] = {
             "仅表示角色已经实际获得该知识。candidate 的 character、fact 必须与 "
             "anchor 分别指向同一角色、同一项知识，不得换入相关角色、相近知识或扩大"
             "知识含义。引用范围须同时支持角色、具体知识、精确 time 和实际获知关系。"
+            "当 anchor 是同角色同知识、时间更早的 claims_knows，且本证据在更晚的精确"
+            "可排序 time 明确显示实际获知时，应提交 knows。猜测、试探、假口令、错误"
+            "信息或仅接触信息载体均不是实际获知。"
         ),
     ),
     "claims_knows": CandidateFieldContract(
@@ -87,12 +92,18 @@ _CANDIDATE_FIELD_CONTRACTS: dict[str, CandidateFieldContract] = {
     "item": CandidateFieldContract(
         ("item", "owner"),
         ("time",),
-        "仅表示物品的所有或保管关系。",
+        (
+            "仅表示已经实际成立的物品所有或保管关系。许可、授权、计划或演示安排"
+            "不等于交接、领取、持有或保管已经发生。"
+        ),
     ),
     "uses": CandidateFieldContract(
         ("item", "user"),
         ("time",),
-        "仅表示角色已经实际使用该物品。",
+        (
+            "仅表示角色已经实际使用该物品。许可、授权、计划、准备或演示安排"
+            "不等于使用已经发生。"
+        ),
     ),
     "world_rule": CandidateFieldContract(
         ("key", "value"),
@@ -126,13 +137,19 @@ def candidate_kinds() -> tuple[str, ...]:
 
 _FAMILY_SEMANTIC_GUIDANCE: dict[IssueCategory, str] = {
     IssueCategory.fact_conflict: (
-        "只调查同一主体同一属性的冲突：肯定取值互异，或同一取值一肯定一明确否定。"
+        "只调查同一主体同一属性的同时冲突：肯定取值互异，或同一取值一肯定一明确否定。"
+        "若两条记录都有精确 time 且时间不同，应视为可能的阶段演进并 ABSTAIN；"
+        "明确的状态变更、恢复、更新或替代不是前后矛盾。"
     ),
     IssueCategory.location_collision: (
         "只调查同一参与者在同一精确时间出现在不同地点的冲突。"
     ),
     IssueCategory.knowledge_without_acquisition: (
         "区分实际获得知识与仅声称知道；没有获得证据时不得把声称当作已知。"
+        "只有同一角色对同一知识的 claims_knows 发生在更早的精确可排序时间，且 actual "
+        "knows 发生在更晚时间，才构成目标时序关系；若 anchor 是较早的 claims_knows，"
+        "已读证据明确支持较晚的实际获知，应提交 knows。猜测、试探、假口令、错误信息"
+        "或仅接触信息载体不是真实知识。"
         "candidate 的 character、fact 必须与 anchor 分别指向同一角色、同一项知识，"
         "不得换入相关角色、相近知识或扩大知识含义。若原文只说明角色出现于、"
         "接触、持有或拆封信息载体，却未明确说明该角色已听到、看到、读到或得知"
@@ -141,7 +158,8 @@ _FAMILY_SEMANTIC_GUIDANCE: dict[IssueCategory, str] = {
         "最小引用范围必须同时支持角色、具体知识、精确 time 和对应的获知或声称关系。"
     ),
     IssueCategory.item_ownership: (
-        "区分物品的所有或保管关系与已经发生的实际使用。"
+        "区分物品的所有或保管关系与已经发生的实际使用。许可、授权、计划、准备或"
+        "演示安排既不证明交接已经发生，也不证明物品已经被使用。"
     ),
     IssueCategory.world_rule_conflict: (
         "区分世界规则与已经完成的规则相关行为；未完成行为不能作为已执行事实。"
