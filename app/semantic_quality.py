@@ -38,6 +38,13 @@ NON_CANONICAL_KINDS = {
 
 SEMANTIC_KINDS = CANONICAL_KINDS | NON_CANONICAL_KINDS | {"entity"}
 
+KNOWLEDGE_ACQUISITION_VERB_PATTERN = (
+    r"得知|获知|知道|知晓|了解到|了解|掌握|记起|想起|听到|看到|读到"
+)
+KNOWLEDGE_CLAIM_VERB_PATTERN = (
+    r"说出|说了|提到|引用|念出|喊出|回答出|透露|宣称|声称"
+)
+
 _QUESTION_MARKERS = re.compile(
     r"[?？]|是否|能否|可否|会不会|是不是|有没有|究竟|为何|为什么|怎么可能|"
     r"(?:是|会|将|应该).{0,28}还是"
@@ -1220,7 +1227,12 @@ def _closed_baseline_semantics(
             )
         )
     elif kind in {"knows", "claims_knows"}:
-        closed = bool(re.search(r"得知|获知|知道|说出|提到|引用", support))
+        relation_pattern = (
+            KNOWLEDGE_ACQUISITION_VERB_PATTERN
+            if kind == "knows"
+            else KNOWLEDGE_CLAIM_VERB_PATTERN
+        )
+        closed = bool(re.search(relation_pattern, support))
     elif kind == "item":
         closed = bool(re.search(r"获得|持有|保管|掌管|交给|移交|归还|接收", support))
     elif kind == "uses":

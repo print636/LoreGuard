@@ -342,6 +342,60 @@ def test_ungrounded_value_and_join_mismatch_cannot_reach_rules():
     assert dict(wrong_join.rejection_counts) == {"candidate_join_mismatch": 1}
 
 
+@pytest.mark.parametrize("perception", ["听到", "看到", "读到"])
+def test_explicit_perception_of_specific_knowledge_is_grounded(perception):
+    result, *_ = _promote(
+        IssueCategory.knowledge_without_acquisition,
+        candidate_text=f"2026-01-01 12:00，岚{perception}潮门口令。",
+    )
+
+    assert result.accepted_candidates == 1
+    assert len(result.added_issues) == 1
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "2026-01-01 12:00，岚只接触了写有潮门口令的铜片。",
+        "2026-01-01 12:00，岚与苏弦站在潮门口令旁；她拆封了信息载体。",
+        "2026-01-01 12:00，岚站在潮门口令旁；她得知了潮门口令。",
+    ],
+)
+def test_carrier_contact_or_pronoun_relation_does_not_ground_knowledge(
+    candidate_text,
+):
+    result, *_ = _promote(
+        IssueCategory.knowledge_without_acquisition,
+        candidate_text=candidate_text,
+    )
+
+    assert result.accepted_candidates == 0
+    assert dict(result.rejection_counts) == {"candidate_not_grounded": 1}
+
+
+@pytest.mark.parametrize(
+    "candidate_fields",
+    [
+        {"character": "苏弦", "fact": "潮门口令", "time": "2026-01-01 12:00"},
+        {"character": "岚", "fact": "潮门认证信息", "time": "2026-01-01 12:00"},
+    ],
+)
+def test_related_character_or_broader_knowledge_cannot_replace_anchor_join(
+    candidate_fields,
+):
+    result, *_ = _promote(
+        IssueCategory.knowledge_without_acquisition,
+        candidate_fields=candidate_fields,
+        candidate_text=(
+            f"2026-01-01 12:00，{candidate_fields['character']}得知"
+            f"{candidate_fields['fact']}。"
+        ),
+    )
+
+    assert result.accepted_candidates == 0
+    assert dict(result.rejection_counts) == {"candidate_join_mismatch": 1}
+
+
 @pytest.mark.parametrize(
     ("family", "candidate_text", "candidate_fields", "expected_reason"),
     [

@@ -38,6 +38,8 @@ from .evidence_investigator_loop import (
 from .evidence_chunks import SnapshotDocumentKey
 from .rules import detect_issues
 from .semantic_quality import (
+    KNOWLEDGE_ACQUISITION_VERB_PATTERN,
+    KNOWLEDGE_CLAIM_VERB_PATTERN,
     apply_semantic_quality_gate,
     document_context_has_noncanonical_frame,
     eligible_for_deterministic_rules,
@@ -1542,9 +1544,9 @@ def _knowledge_relation_grounded(
     character = re.escape(_compact(attrs["character"]))
     fact = re.escape(_compact(attrs["fact"]))
     if kind == "knows":
-        verbs = r"得知|获知|知道|知晓|了解到|了解|掌握|记起|想起|听到|看到"
+        verbs = KNOWLEDGE_ACQUISITION_VERB_PATTERN
     else:
-        verbs = r"说出|说了|提到|引用|念出|喊出|回答出|透露|宣称|声称"
+        verbs = KNOWLEDGE_CLAIM_VERB_PATTERN
     pattern = re.compile(
         rf"{character}(?:才|已|已经|终于|随后|此时|后来)?"
         rf"(?:{verbs})(?:了)?(?:关于)?{fact}"

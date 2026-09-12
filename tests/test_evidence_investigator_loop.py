@@ -5,13 +5,18 @@ import httpx
 import pytest
 
 from app.config import Settings
-from app.domain import EvidenceSpan, ParsedDirective
+from app.domain import EvidenceSpan, IssueCategory, ParsedDirective
 from app.evidence_authority import (
     InvestigationScope,
     ScopedEvidenceDocument,
 )
 from app.evidence_chunks import EvidenceChunker, SnapshotDocumentKey
-from app.evidence_investigator import InvestigatorRejected, build_investigation_seeds
+from app.evidence_investigator import (
+    InvestigatorRejected,
+    build_investigation_seeds,
+    get_candidate_field_contract,
+    get_family_semantic_guidance,
+)
 from app.evidence_investigator_loop import (
     EvidenceInvestigatorToolLoop,
     InvestigatorLoopPolicy,
@@ -315,6 +320,7 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
     assert query.entity_terms == ("岚",)
     assert limit == 6
 
+
     # Model-visible schemas contain no project/document/snapshot/evidence fields.
     schemas = json.dumps(
         [
@@ -343,6 +349,59 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
         assert secret not in binding_safe
         assert secret not in repr(outcome)
         assert secret not in repr(binding)
+
+
+def test_knowledge_evidence_guidance_is_present_in_model_visible_prompt():
+    content = "2026-01-01 09:00，岚说出潮门口令。"
+    snapshot = SnapshotDocumentKey(
+        project_id="project-a",
+        document_id="doc-knowledge",
+        document_version=1,
+        content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    )
+    scope = InvestigationScope.create(
+        run_id="run-knowledge",
+        project_id="project-a",
+        documents=(ScopedEvidenceDocument(snapshot=snapshot, content=content),),
+    )
+    anchor = ParsedDirective(
+        kind="claims_knows",
+        attrs={
+            "character": "岚",
+            "fact": "潮门口令",
+            "time": "2026-01-01 09:00",
+            "modality": "reported",
+            "source_scope": "character_dialogue",
+            "certainty": "certain",
+        },
+        evidence=EvidenceSpan(
+            document_id="doc-knowledge",
+            document_name="chapter.md",
+            line_start=1,
+            line_end=1,
+            text=content,
+        ),
+        provenance_sources=frozenset({"baseline"}),
+    )
+    seed = build_investigation_seeds("run-knowledge", (anchor,), limit=1)[0]
+    provider = ScriptedProvider(abstain_for_current)
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever(),
+        scope=scope,
+        seeds=(seed,),
+    ).run()
+
+    assert outcome.outcome == "completed"
+    prompt = json.loads(provider.requests[0]["user"])["current_seed"]
+    assert prompt["family_semantic_guidance"] == get_family_semantic_guidance(
+        IssueCategory.knowledge_without_acquisition
+    )
+    for kind in ("knows", "claims_knows"):
+        assert prompt["candidate_field_contracts"][kind]["semantic_guidance"] == (
+            get_candidate_field_contract(kind).semantic_guidance
+        )
 
 
 def test_usage_is_reported_immediately_and_checkpoints_wrap_external_work():
