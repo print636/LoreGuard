@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -107,6 +107,44 @@ class Settings(BaseSettings):
         default=64_000, ge=1, le=64_000
     )
     issue_evidence_review_require_hybrid: bool = True
+    # Evidence Investigator is an independent, default-off capability.  These
+    # values are server-owned safety ceilings, not model-selected tuning knobs.
+    # The token budget is an internal admission/quota budget; it is not a hard
+    # upper bound on provider billing when a relay under-reports or over-runs.
+    enable_evidence_investigator: bool = False
+    evidence_investigator_max_seeds: int = Field(default=1, ge=1, le=8)
+    evidence_investigator_max_decision_rounds: int = Field(
+        default=6, ge=3, le=32
+    )
+    evidence_investigator_max_tool_calls: int = Field(default=6, ge=3, le=32)
+    evidence_investigator_max_searches: int = Field(default=2, ge=1, le=8)
+    evidence_investigator_max_reads: int = Field(default=2, ge=1, le=16)
+    evidence_investigator_max_results: int = Field(default=12, ge=1, le=48)
+    evidence_investigator_max_read_lines: int = Field(default=12, ge=1, le=20)
+    evidence_investigator_max_span_chars: int = Field(
+        default=12_000, ge=256, le=24_000
+    )
+    evidence_investigator_token_budget: int = Field(
+        default=8_000, ge=1_024, le=20_000
+    )
+    evidence_investigator_max_prompt_bytes: int = Field(
+        default=128 * 1_024, ge=4 * 1_024, le=256 * 1_024
+    )
+    evidence_investigator_timeout_seconds: float = Field(
+        default=15.0, gt=0, le=30.0
+    )
+    evidence_investigator_total_deadline_seconds: float = Field(
+        default=45.0, gt=0, le=60.0
+    )
+    evidence_investigator_max_completion_tokens: int = Field(
+        default=768, ge=64, le=2_048
+    )
+    evidence_investigator_max_response_bytes: int = Field(
+        default=64_000, ge=1_024, le=128_000
+    )
+    evidence_investigator_top_k: int = Field(default=6, ge=1, le=12)
+    evidence_investigator_branch_limit: int = Field(default=30, ge=1, le=50)
+    evidence_investigator_require_hybrid: bool = True
     per_run_token_budget: int = 20_000
     daily_token_budget: int = 100_000
     model_input_price_per_million: float | None = None
@@ -141,6 +179,61 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @model_validator(mode="after")
+    def validate_evidence_investigator_limits(self):
+        """Reject internally inconsistent Investigator safety ceilings."""
+
+        minimum_rounds = self.evidence_investigator_max_seeds * 3
+        if (
+            self.evidence_investigator_max_decision_rounds < minimum_rounds
+            or self.evidence_investigator_max_tool_calls < minimum_rounds
+            or self.evidence_investigator_max_tool_calls
+            < self.evidence_investigator_max_decision_rounds
+        ):
+            raise ValueError(
+                "evidence investigator decision/tool limits cannot cover seeds"
+            )
+        if (
+            self.evidence_investigator_max_searches
+            < self.evidence_investigator_max_seeds
+            or self.evidence_investigator_max_reads
+            < self.evidence_investigator_max_seeds
+        ):
+            raise ValueError(
+                "evidence investigator search/read limits cannot cover seeds"
+            )
+        minimum_results = (
+            self.evidence_investigator_max_seeds
+            * self.evidence_investigator_top_k
+        )
+        if (
+            self.evidence_investigator_max_results < minimum_results
+            or self.evidence_investigator_branch_limit
+            < self.evidence_investigator_top_k
+        ):
+            raise ValueError("evidence investigator retrieval limits are inconsistent")
+        if (
+            self.evidence_investigator_total_deadline_seconds
+            < self.evidence_investigator_timeout_seconds
+        ):
+            raise ValueError("evidence investigator deadline is shorter than timeout")
+        minimum_completion_reservation = (
+            minimum_rounds * self.evidence_investigator_max_completion_tokens
+        )
+        if self.evidence_investigator_token_budget < minimum_completion_reservation:
+            raise ValueError(
+                "evidence investigator token budget cannot reserve minimum outputs"
+            )
+        if (
+            self.enable_evidence_investigator
+            and self.evidence_investigator_require_hybrid
+            and not self.enable_embeddings
+        ):
+            raise ValueError(
+                "hybrid evidence investigator requires the embeddings capability"
+            )
+        return self
 
 
 @lru_cache

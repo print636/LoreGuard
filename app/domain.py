@@ -36,7 +36,30 @@ _PROVIDER_TELEMETRY_CATEGORIES = {
     "connect_timeout",
     "read_timeout",
     "transport",
+    "response_too_large",
+    "tool_response_json",
+    "tool_response_shape",
+    "tool_response_finish_reason",
+    "tool_calls_shape",
+    "tool_calls_too_many",
+    "tool_call_shape",
+    "tool_call_id_invalid",
+    "tool_call_id_duplicate",
+    "tool_call_name_invalid",
+    "tool_call_unknown",
+    "tool_choice_mismatch",
+    "tool_call_arguments_json",
+    "tool_call_arguments_shape",
+    "tool_call_arguments_too_large",
+    "tool_calls_missing",
+    "tool_request_rejected",
 }
+ProviderPurpose = Literal[
+    "extract", "repair", "agent", "evidence_review", "investigator"
+]
+_PROVIDER_PURPOSES = frozenset(
+    {"extract", "repair", "agent", "evidence_review", "investigator"}
+)
 
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _SAFE_AGENT_HASH = re.compile(r"^[a-f0-9]{64}$")
@@ -329,7 +352,7 @@ class ProviderCallDiagnostics:
     total_tokens: int | None
     http_status: int | None
     request_id: str | None
-    purpose: Literal["extract", "repair", "agent", "evidence_review"] = "extract"
+    purpose: ProviderPurpose = "extract"
 
     @classmethod
     def from_telemetry(
@@ -337,9 +360,7 @@ class ProviderCallDiagnostics:
         telemetry: Any,
         *,
         succeeded: bool,
-        purpose: Literal[
-            "extract", "repair", "agent", "evidence_review"
-        ] = "extract",
+        purpose: ProviderPurpose = "extract",
     ) -> ProviderCallDiagnostics | None:
         if telemetry is None:
             return None
@@ -387,7 +408,11 @@ class ProviderCallDiagnostics:
             request_id=_optional_request_id(
                 getattr(telemetry, "request_id", None)
             ),
-            purpose=purpose,
+            purpose=(
+                purpose
+                if isinstance(purpose, str) and purpose in _PROVIDER_PURPOSES
+                else "extract"
+            ),
         )
 
     def safe_dict(self) -> dict[str, str | int | None]:
@@ -405,7 +430,12 @@ class ProviderCallDiagnostics:
             "total_tokens": self.total_tokens,
             "http_status": self.http_status,
             "request_id": self.request_id,
-            "purpose": self.purpose,
+            "purpose": (
+                self.purpose
+                if isinstance(self.purpose, str)
+                and self.purpose in _PROVIDER_PURPOSES
+                else "extract"
+            ),
         }
 
 
@@ -507,9 +537,7 @@ class ModelExecutionDiagnostics:
         telemetry: Any,
         *,
         succeeded: bool,
-        purpose: Literal[
-            "extract", "repair", "agent", "evidence_review"
-        ] = "extract",
+        purpose: ProviderPurpose = "extract",
     ) -> None:
         if self.provider_calls is None:
             return

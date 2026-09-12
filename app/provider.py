@@ -221,8 +221,82 @@ class OpenAICompatibleProvider:
         capability_enabled = (
             self.settings.enable_model_extraction
             or self.settings.enable_issue_evidence_review
+            or self.settings.enable_evidence_investigator
         )
         return capability_enabled and bool(self.settings.openai_api_key.strip())
+
+    @property
+    def evidence_investigator_configured(self) -> bool:
+        """Report this capability without borrowing another feature's switch."""
+
+        return self.settings.enable_evidence_investigator and bool(
+            self.settings.openai_api_key.strip()
+        )
+
+    def fork_for_evidence_investigator(
+        self,
+        *,
+        remaining_deadline_seconds: float | None = None,
+    ) -> OpenAICompatibleProvider:
+        """Create a single-attempt provider bounded for Investigator calls.
+
+        Generic provider limits can only tighten the dedicated limits.  Other
+        chat capabilities are disabled in the fork so an enabled extractor or
+        evidence reviewer cannot accidentally make a disabled Investigator
+        appear configured.
+        """
+
+        if remaining_deadline_seconds is not None and (
+            isinstance(remaining_deadline_seconds, bool)
+            or not isinstance(remaining_deadline_seconds, (int, float))
+            or not math.isfinite(float(remaining_deadline_seconds))
+            or float(remaining_deadline_seconds) <= 0
+        ):
+            raise ValueError("investigator remaining deadline is invalid")
+        settings = self.settings
+        deadline_caps = [settings.evidence_investigator_total_deadline_seconds]
+        if settings.provider_total_deadline_seconds is not None:
+            deadline_caps.append(settings.provider_total_deadline_seconds)
+        if remaining_deadline_seconds is not None:
+            deadline_caps.append(float(remaining_deadline_seconds))
+        bounded_deadline = min(deadline_caps)
+
+        completion_caps = [settings.evidence_investigator_max_completion_tokens]
+        if settings.provider_max_completion_tokens is not None:
+            completion_caps.append(settings.provider_max_completion_tokens)
+        response_caps = [settings.evidence_investigator_max_response_bytes]
+        if settings.provider_max_response_bytes is not None:
+            response_caps.append(settings.provider_max_response_bytes)
+
+        bounded_settings = settings.model_copy(
+            update={
+                "enable_model_extraction": False,
+                "enable_review_agent": False,
+                "enable_issue_evidence_review": False,
+                "provider_timeout_seconds": min(
+                    settings.provider_timeout_seconds,
+                    settings.evidence_investigator_timeout_seconds,
+                    bounded_deadline,
+                ),
+                "provider_total_deadline_seconds": bounded_deadline,
+                "provider_max_attempts": 1,
+                "provider_max_completion_tokens": min(completion_caps),
+                "provider_max_response_bytes": min(response_caps),
+            }
+        )
+        return OpenAICompatibleProvider(
+            bounded_settings,
+            transport=self.transport,
+            retry_policy=RetryPolicy(
+                max_attempts=1,
+                base_delay_seconds=0,
+                jitter_ratio=0,
+            ),
+            sleep=self.sleep,
+            monotonic=self.monotonic,
+            wall_time=self.wall_time,
+            random_value=self.random_value,
+        )
 
     def complete(self, system: str, user: str) -> ModelResult:
         call_started = self.monotonic()

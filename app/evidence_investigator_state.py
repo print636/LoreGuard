@@ -419,6 +419,8 @@ class EvidenceInvestigatorSession:
             span_ref=grant.span_ref,
             line_start=grant.line_start,
             line_end=grant.line_end,
+            char_start=grant.char_start,
+            char_end=grant.char_end,
             text=grant.text,
         )
 

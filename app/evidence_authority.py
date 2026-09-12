@@ -196,6 +196,8 @@ class ReadObservation:
     span_ref: str
     line_start: int
     line_end: int
+    char_start: int = field(repr=False)
+    char_end: int = field(repr=False)
     text: str = field(repr=False)
 
 

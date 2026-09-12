@@ -59,6 +59,39 @@ def estimate_issue_evidence_review_tokens(
     return max(1, input_estimate) + max(64, completion_reserve)
 
 
+def estimate_evidence_investigator_tokens(
+    system_prompt: str,
+    user_prompt: str,
+    canonical_tools_json: str,
+    *,
+    completion_reserve: int,
+) -> int:
+    """Heuristic admission reservation for one native-tool decision.
+
+    Native tool schemas are part of the provider input on every turn, so the
+    character heuristic includes their canonical serialized form.  It is not a
+    tokenizer estimate, mathematical upper bound, or provider billing claim.
+    Callers retain reported prompt/completion counters separately and debit the
+    larger of this reservation and reported usage after the response arrives.
+    """
+    if not all(
+        isinstance(value, str)
+        for value in (system_prompt, user_prompt, canonical_tools_json)
+    ):
+        raise TypeError("investigator prompts and tools must be text")
+    if (
+        isinstance(completion_reserve, bool)
+        or not isinstance(completion_reserve, int)
+        or not 64 <= completion_reserve <= 8_192
+    ):
+        raise ValueError("investigator completion reserve is invalid")
+    input_chars = (
+        len(system_prompt) + len(user_prompt) + len(canonical_tools_json)
+    )
+    input_estimate = (input_chars + 1) // 2
+    return max(1, input_estimate) + completion_reserve
+
+
 def configured_cost_usd(
     prompt_tokens: int,
     completion_tokens: int,
