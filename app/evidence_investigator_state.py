@@ -81,7 +81,7 @@ class InvestigatorLimits:
         if (
             isinstance(self.deadline_seconds, bool)
             or not isinstance(self.deadline_seconds, (int, float))
-            or not 0 < float(self.deadline_seconds) <= 300
+            or not 0 < float(self.deadline_seconds) <= 600
         ):
             raise ValueError("investigator deadline is invalid")
 

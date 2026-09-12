@@ -107,8 +107,8 @@ def test_evidence_investigator_defaults_are_bounded_and_disabled():
         ("evidence_investigator_max_span_chars", 24_001),
         ("evidence_investigator_token_budget", 20_001),
         ("evidence_investigator_max_prompt_bytes", 256 * 1_024 + 1),
-        ("evidence_investigator_timeout_seconds", 30.001),
-        ("evidence_investigator_total_deadline_seconds", 60.001),
+        ("evidence_investigator_timeout_seconds", 120.001),
+        ("evidence_investigator_total_deadline_seconds", 600.001),
         ("evidence_investigator_max_completion_tokens", 2_049),
         ("evidence_investigator_max_response_bytes", 128_001),
         ("evidence_investigator_top_k", 13),
@@ -135,6 +135,23 @@ def test_evidence_investigator_maximum_seed_setting_has_a_valid_configuration():
     )
 
     assert configured.evidence_investigator_max_seeds == 8
+
+
+def test_evidence_investigator_slow_provider_diagnostic_ceiling_is_valid():
+    configured = settings(
+        provider_timeout_seconds=180,
+        evidence_investigator_timeout_seconds=120,
+        evidence_investigator_total_deadline_seconds=600,
+    )
+
+    fork = OpenAICompatibleProvider(configured).fork_for_evidence_investigator(
+        remaining_deadline_seconds=600
+    )
+
+    assert configured.evidence_investigator_timeout_seconds == 120
+    assert configured.evidence_investigator_total_deadline_seconds == 600
+    assert fork.settings.provider_timeout_seconds == 120
+    assert fork.settings.provider_total_deadline_seconds == 600
 
 
 def test_each_seed_reserves_one_recoverable_provider_decision():
@@ -192,8 +209,8 @@ def test_each_seed_reserves_one_recoverable_provider_decision():
             "evidence_investigator_top_k": 6,
         },
         {
-            "evidence_investigator_timeout_seconds": 20,
-            "evidence_investigator_total_deadline_seconds": 19,
+            "evidence_investigator_timeout_seconds": 120,
+            "evidence_investigator_total_deadline_seconds": 119,
         },
         {"evidence_investigator_token_budget": 2_000},
         {

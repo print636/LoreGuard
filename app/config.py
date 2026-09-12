@@ -131,11 +131,13 @@ class Settings(BaseSettings):
     evidence_investigator_max_prompt_bytes: int = Field(
         default=128 * 1_024, ge=4 * 1_024, le=256 * 1_024
     )
+    # Defaults remain production-oriented.  The higher ceilings only permit
+    # explicit slow-provider diagnostics; they are not performance targets.
     evidence_investigator_timeout_seconds: float = Field(
-        default=30.0, gt=0, le=30.0
+        default=30.0, gt=0, le=120.0
     )
     evidence_investigator_total_deadline_seconds: float = Field(
-        default=60.0, gt=0, le=60.0
+        default=60.0, gt=0, le=600.0
     )
     evidence_investigator_max_completion_tokens: int = Field(
         default=768, ge=64, le=2_048

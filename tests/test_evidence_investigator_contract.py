@@ -1208,6 +1208,12 @@ def test_deadline_and_content_free_failure_trace_fail_closed():
     assert "chapter.md" not in safe
 
 
+def test_investigator_deadline_accepts_only_the_configurable_ceiling():
+    assert InvestigatorLimits(deadline_seconds=600).deadline_seconds == 600
+    with pytest.raises(ValueError, match="deadline is invalid"):
+        InvestigatorLimits(deadline_seconds=600.001)
+
+
 def test_wrong_model_instance_is_rejected_without_execution():
     scope, _ = scope_for()
     seed = fact_seed()
