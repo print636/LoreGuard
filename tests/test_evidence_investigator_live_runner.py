@@ -195,7 +195,65 @@ class FixtureHttpApi:
                 ]
             if parts[5] == "diagnostics":
                 positive = plan.ground_truth.decision == "added_issue"
-                provider_calls = 3 if positive else 1
+                provider_calls = 3
+                logical_id, target_start, target_end = (
+                    plan.ground_truth.read_target_evidence
+                )
+                actual_id = self.documents[f"project-{case_id}"][logical_id]
+                decision_trace_actions = [
+                    {
+                        "provider_decision_index": 1,
+                        "seed_ordinal": 1,
+                        "phase": "search",
+                        "action": "SEARCH_EVIDENCE",
+                        "result_count": 1,
+                    },
+                    {
+                        "provider_decision_index": 2,
+                        "seed_ordinal": 1,
+                        "phase": "read",
+                        "action": "READ_SPAN",
+                        "document_ref_hash": live_runner._run_scoped_document_ref_hash(
+                            run_id=run_id, document_id=actual_id
+                        ),
+                        "line_start": target_start,
+                        "line_end": target_end,
+                        "selected_result_rank": 1,
+                        "overlaps_anchor": False,
+                        "covers_entire_result": True,
+                    },
+                ]
+                if positive:
+                    decision_trace_actions.append(
+                        {
+                            "provider_decision_index": 3,
+                            "seed_ordinal": 1,
+                            "phase": "verdict",
+                            "action": "SUBMIT_VERDICT",
+                            "candidate_count": 1,
+                            "candidate_shapes": [
+                                {
+                                    "kind": "fact",
+                                    "field_names": [
+                                        "predicate",
+                                        "subject",
+                                        "value",
+                                    ],
+                                    "source_line_count": 1,
+                                }
+                            ],
+                        },
+                    )
+                else:
+                    decision_trace_actions.append(
+                        {
+                            "provider_decision_index": 3,
+                            "seed_ordinal": 1,
+                            "phase": "verdict",
+                            "action": "ABSTAIN",
+                            "reason": "insufficient_evidence",
+                        }
+                    )
                 return {
                     "runtime_provenance": runtime_provenance(),
                     "model": {
@@ -215,13 +273,18 @@ class FixtureHttpApi:
                             "reason_code": "completed",
                             "provider_calls": provider_calls,
                             "executed_tool_calls": provider_calls,
-                            "executed_searches": 1 if positive else 0,
-                            "executed_reads": 1 if positive else 0,
+                            "executed_searches": 1,
+                            "executed_reads": 1,
                             "recoverable_rejections": 0,
                             "completed_seeds": 1 if positive else 0,
                             "abstained_seeds": 0 if positive else 1,
                             "submitted_envelopes": 1 if positive else 0,
                             "authorized_candidates": 1 if positive else 0,
+                            "decision_trace": {
+                                "schema_version": "evidence_investigator_safe_trace_v1",
+                                "complete": True,
+                                "actions": decision_trace_actions,
+                            },
                         },
                         "promotion": {
                             "submitted_candidates": 1 if positive else 0,
@@ -316,7 +379,7 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(
         "active_abstain": 3,
         "positive_added_issue": 5,
     }
-    assert artifact["schema_version"] == "evidence-investigator-live-http-v4"
+    assert artifact["schema_version"] == "evidence-investigator-live-http-v5"
     assert artifact["provenance_gate"]["passed"] is True
     assert artifact["development_gate"]["passed"] is True
     assert artifact["reproducibility_fingerprint"] == artifact[
@@ -344,6 +407,17 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(
         "promotion_acceptance_rate": 1.0,
         "normally_terminated_cases": 8,
         "normal_termination_rate": 1.0,
+        "decision_trace_validation_counts": {"verified": 8},
+        "decision_trace_verified_cases": 8,
+        "decision_trace_action_counts": {
+            "ABSTAIN": 3,
+            "READ_SPAN": 8,
+            "SEARCH_EVIDENCE": 8,
+            "SUBMIT_VERDICT": 5,
+        },
+        "read_target_evidence_observed_cases": 8,
+        "read_target_evidence_matched_cases": 8,
+        "read_target_evidence_match_rate": 1.0,
     }
     assert {
         key: artifact["summary"][key] for key in expected_outcome_metrics
@@ -371,6 +445,13 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(
         == "server_reported_executed_tools"
         for row in artifact["cases"]
     )
+    assert [
+        row["read_target_evidence_match"] for row in artifact["cases"]
+    ] == [True, True, True, True, True, True, True, True]
+    assert all(
+        row["decision_trace_attribution"]["validation_outcome"] == "verified"
+        for row in artifact["cases"]
+    )
     upload_payloads = [
         payload for method, path, payload in api.calls if path.endswith("/documents/text")
     ]
@@ -386,8 +467,24 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(
     persisted = (tmp_path / "dev-result.json").read_text(encoding="utf-8")
     assert "http://service.test:8000" not in persisted
     assert "CANARY source body" not in persisted
+    for forbidden in (
+        "document_ref_hash",
+        "line_start",
+        "line_end",
+        "selected_result_rank",
+        "candidate_shapes",
+        "field_names",
+        '"actions"',
+    ):
+        assert forbidden not in persisted
     assert "sk-" not in persisted
     assert "https://relay.example" not in persisted
+    for run_id, case_id in api.runs.items():
+        target_logical_id = api.plans[case_id].ground_truth.read_target_evidence[0]
+        target_actual_id = api.documents[f"project-{case_id}"][target_logical_id]
+        assert live_runner._run_scoped_document_ref_hash(
+            run_id=run_id, document_id=target_actual_id
+        ) not in persisted
     assert all(document.content not in persisted for plan in plans for document in plan.documents)
 
 
@@ -490,6 +587,30 @@ def test_outcome_summary_separates_safety_agent_judgment_and_liveness():
         "promotion_acceptance_rate": 0.5,
         "normally_terminated_cases": 4,
         "normal_termination_rate": 0.8,
+        "decision_trace_validation_counts": {},
+        "decision_trace_verified_cases": 0,
+        "decision_trace_action_counts": {
+            "ABSTAIN": 0,
+            "READ_SPAN": 0,
+            "SEARCH_EVIDENCE": 0,
+            "SUBMIT_VERDICT": 0,
+        },
+        "read_target_evidence_observed_cases": 0,
+        "read_target_evidence_matched_cases": 0,
+        "read_target_evidence_match_rate": None,
+    }
+
+
+def test_non_dev_development_gate_has_the_exact_export_shape():
+    gate = live_runner._build_development_gate("holdout", {}, {})
+
+    assert set(gate) == live_runner._DEVELOPMENT_GATE_KEYS
+    assert gate == {
+        "applicable": False,
+        "passed": None,
+        "checks": {},
+        "reason_codes": [],
+        "boundary": "Development qualification thresholds apply only to dev.",
     }
 
 
@@ -566,6 +687,7 @@ def test_mock_http_e2e_persists_split_outcome_metrics_without_frozen_fixture_rea
             issue_category="fact_conflict",
             added_issue_count=1,
             allowed_evidence=(("canon", 1, 1), ("chapter", 1, 1)),
+            read_target_evidence=("chapter", 1, 1),
         ),
     )
     negative = CasePlan(
@@ -580,12 +702,17 @@ def test_mock_http_e2e_persists_split_outcome_metrics_without_frozen_fixture_rea
             issue_category="fact_conflict",
             added_issue_count=0,
             allowed_evidence=(),
+            read_target_evidence=("chapter", 1, 1),
         ),
     )
     plans = (positive, negative)
     monkeypatch.setattr(
         "scripts.run_evidence_investigator_live.load_case_plans",
-        lambda split, dataset_root: (plans, "a" * 64, "b" * 64),
+        lambda split, dataset_root: (
+            plans,
+            live_runner.PINNED_MANIFEST_SHA256,
+            live_runner.PINNED_FREEZE_SHA256,
+        ),
     )
     monkeypatch.setattr(
         live_runner,
@@ -807,6 +934,383 @@ def test_safe_diagnostics_keeps_only_safe_budget_and_execution_counters():
     assert "secret" not in sanitized["budget_preflight"]
 
 
+def test_safe_diagnostics_never_echoes_unknown_reason_like_strings():
+    canary = "sk-private-diagnostic-canary"
+    sanitized = _safe_diagnostics(
+        {
+            "evidence_investigator": {
+                "outcome": "completed",
+                "reason_code": canary,
+                "loop": {
+                    "outcome": "completed",
+                    "reason_code": canary,
+                },
+                "rag": {
+                    "index": {"outcome": "complete", "reason": canary}
+                },
+            }
+        }
+    )
+
+    assert sanitized["reason_code"] == "internal_failure"
+    assert sanitized["loop"]["reason_code"] == "internal_failure"
+    assert sanitized["rag"]["index_reason"] == "internal_failure"
+    assert canary not in json.dumps(sanitized)
+
+
+def _synthetic_trace_diagnostics():
+    run_id = "run-synthetic-trace"
+    actual_document_id = "doc-synthetic-chapter"
+    return run_id, actual_document_id, {
+        "evidence_investigator": {
+            "seed_count": 1,
+            "loop": {
+                "outcome": "completed",
+                "reason_code": "completed",
+                "provider_calls": 4,
+                "executed_tool_calls": 3,
+                "executed_searches": 1,
+                "executed_reads": 1,
+                "recoverable_rejections": 1,
+                "completed_seeds": 1,
+                "abstained_seeds": 0,
+                "submitted_envelopes": 1,
+                "authorized_candidates": 1,
+                "decision_trace": {
+                    "schema_version": "evidence_investigator_safe_trace_v1",
+                    "complete": True,
+                    "actions": [
+                        {
+                            "provider_decision_index": 1,
+                            "seed_ordinal": 1,
+                            "phase": "search",
+                            "action": "SEARCH_EVIDENCE",
+                            "result_count": 1,
+                        },
+                        {
+                            "provider_decision_index": 2,
+                            "seed_ordinal": 1,
+                            "phase": "read",
+                            "action": "READ_SPAN",
+                            "document_ref_hash": live_runner._run_scoped_document_ref_hash(
+                                run_id=run_id, document_id=actual_document_id
+                            ),
+                            "line_start": 6,
+                            "line_end": 9,
+                            "selected_result_rank": 1,
+                            "overlaps_anchor": False,
+                            "covers_entire_result": True,
+                        },
+                        {
+                            "provider_decision_index": 4,
+                            "seed_ordinal": 1,
+                            "phase": "verdict",
+                            "action": "SUBMIT_VERDICT",
+                            "candidate_count": 1,
+                            "candidate_shapes": [
+                                {
+                                    "kind": "world_rule",
+                                    "field_names": ["key", "value"],
+                                    "source_line_count": 4,
+                                }
+                            ],
+                        },
+                    ],
+                },
+            },
+        }
+    }
+
+
+@pytest.mark.parametrize("scenario", ["first_call_failed", "search_then_failed"])
+def test_decision_trace_parser_accepts_service_valid_degraded_prefixes(scenario):
+    actions = []
+    provider_calls = 1
+    executed_tool_calls = 0
+    executed_searches = 0
+    if scenario == "search_then_failed":
+        provider_calls = 2
+        executed_tool_calls = 1
+        executed_searches = 1
+        actions = [
+            {
+                "provider_decision_index": 1,
+                "seed_ordinal": 1,
+                "phase": "search",
+                "action": "SEARCH_EVIDENCE",
+                "result_count": 1,
+            }
+        ]
+    diagnostics = {
+        "evidence_investigator": {
+            "seed_count": 1,
+            "loop": {
+                "outcome": "degraded",
+                "reason_code": "provider_timeout",
+                "provider_calls": provider_calls,
+                "executed_tool_calls": executed_tool_calls,
+                "executed_searches": executed_searches,
+                "executed_reads": 0,
+                "recoverable_rejections": 0,
+                "completed_seeds": 0,
+                "abstained_seeds": 0,
+                "submitted_envelopes": 0,
+                "authorized_candidates": 0,
+                "decision_trace": {
+                    "schema_version": "evidence_investigator_safe_trace_v1",
+                    "complete": True,
+                    "actions": actions,
+                },
+            },
+        }
+    }
+
+    parsed = live_runner._parse_safe_decision_trace(diagnostics)
+
+    assert parsed.validation_outcome == "verified"
+    assert dict(parsed.action_counts)["SEARCH_EVIDENCE"] == executed_searches
+
+
+def test_decision_trace_parser_accepts_discarded_submission_before_degradation():
+    _, _, diagnostics = _synthetic_trace_diagnostics()
+    investigator = diagnostics["evidence_investigator"]
+    investigator["seed_count"] = 2
+    loop = investigator["loop"]
+    loop.update(
+        {
+            "outcome": "degraded",
+            "reason_code": "provider_timeout",
+            "provider_calls": 5,
+            "recoverable_rejections": 1,
+            "submitted_envelopes": 0,
+            "authorized_candidates": 0,
+        }
+    )
+
+    parsed = live_runner._parse_safe_decision_trace(diagnostics)
+
+    assert parsed.validation_outcome == "verified"
+    assert dict(parsed.action_counts)["SUBMIT_VERDICT"] == 1
+
+
+@pytest.mark.parametrize(
+    "scenario", ["terminal_count", "partial_seed", "declared_seed_count"]
+)
+def test_decision_trace_parser_rejects_degraded_seed_count_overflow(scenario):
+    _, _, diagnostics = _synthetic_trace_diagnostics()
+    investigator = diagnostics["evidence_investigator"]
+    loop = investigator["loop"]
+    loop.update(
+        {
+            "outcome": "degraded",
+            "reason_code": "provider_timeout",
+            "submitted_envelopes": 0,
+            "authorized_candidates": 0,
+        }
+    )
+    if scenario == "terminal_count":
+        investigator["seed_count"] = 0
+    elif scenario == "partial_seed":
+        investigator["seed_count"] = 1
+        loop.update(
+            {
+                "provider_calls": 6,
+                "executed_tool_calls": 4,
+                "executed_searches": 2,
+            }
+        )
+        loop["decision_trace"]["actions"].append(
+            {
+                "provider_decision_index": 5,
+                "seed_ordinal": 2,
+                "phase": "search",
+                "action": "SEARCH_EVIDENCE",
+                "result_count": 1,
+            }
+        )
+    else:
+        investigator["seed_count"] = 65
+
+    parsed = live_runner._parse_safe_decision_trace(diagnostics)
+
+    assert parsed.validation_outcome == "invalid"
+
+
+def test_decision_trace_parser_rejects_multiple_unrecorded_degraded_calls():
+    _, _, diagnostics = _synthetic_trace_diagnostics()
+    loop = diagnostics["evidence_investigator"]["loop"]
+    loop.update(
+        {
+            "outcome": "degraded",
+            "reason_code": "provider_timeout",
+            "provider_calls": 6,
+            "submitted_envelopes": 0,
+            "authorized_candidates": 0,
+        }
+    )
+
+    parsed = live_runner._parse_safe_decision_trace(diagnostics)
+
+    assert parsed.validation_outcome == "invalid"
+
+
+def test_decision_trace_parser_attributes_full_read_in_memory_only():
+    run_id, actual_document_id, diagnostics = _synthetic_trace_diagnostics()
+
+    parsed = live_runner._bind_decision_trace_to_case(
+        live_runner._parse_safe_decision_trace(diagnostics),
+        run_id=run_id,
+        actual_to_logical={actual_document_id: "chapter"},
+        line_counts={"chapter": 20},
+    )
+
+    assert parsed.validation_outcome == "verified"
+    assert parsed.artifact_summary() == {
+        "validation_outcome": "verified",
+        "action_counts": {
+            "ABSTAIN": 0,
+            "READ_SPAN": 1,
+            "SEARCH_EVIDENCE": 1,
+            "SUBMIT_VERDICT": 1,
+        },
+    }
+    ground_truth = GroundTruth(
+        decision="added_issue",
+        issue_category="world_rule_conflict",
+        added_issue_count=1,
+        allowed_evidence=(),
+        read_target_evidence=("chapter", 7, 8),
+    )
+    assert live_runner._read_target_evidence_match(
+        parsed,
+        ground_truth=ground_truth,
+        run_id=run_id,
+        actual_to_logical={actual_document_id: "chapter"},
+    ) is True
+    assert live_runner._read_target_evidence_match(
+        parsed,
+        ground_truth=ground_truth,
+        run_id=run_id,
+        actual_to_logical={"doc-different": "chapter"},
+    ) is False
+    _, _, partial_diagnostics = _synthetic_trace_diagnostics()
+    partial_diagnostics["evidence_investigator"]["loop"]["decision_trace"][
+        "actions"
+    ][1]["line_end"] = 7
+    partial_diagnostics["evidence_investigator"]["loop"]["decision_trace"][
+        "actions"
+    ][2]["candidate_shapes"][0]["source_line_count"] = 1
+    partial = live_runner._bind_decision_trace_to_case(
+        live_runner._parse_safe_decision_trace(partial_diagnostics),
+        run_id=run_id,
+        actual_to_logical={actual_document_id: "chapter"},
+        line_counts={"chapter": 20},
+    )
+    assert partial.validation_outcome == "verified"
+    assert live_runner._read_target_evidence_match(
+        partial,
+        ground_truth=ground_truth,
+        run_id=run_id,
+        actual_to_logical={actual_document_id: "chapter"},
+    ) is False
+    persisted_summary = json.dumps(parsed.artifact_summary(), sort_keys=True)
+    for forbidden in (
+        "document_ref_hash",
+        "line_start",
+        "line_end",
+        "selected_result_rank",
+        "field_names",
+        "actions",
+    ):
+        assert forbidden not in persisted_summary
+
+
+@pytest.mark.parametrize("mutation", ["unknown_ref", "wrong_run", "line_overflow"])
+def test_decision_trace_case_binding_rejects_out_of_scope_reads(mutation):
+    run_id, actual_document_id, diagnostics = _synthetic_trace_diagnostics()
+    read = diagnostics["evidence_investigator"]["loop"]["decision_trace"][
+        "actions"
+    ][1]
+    if mutation == "unknown_ref":
+        read["document_ref_hash"] = "f" * 64
+    elif mutation == "wrong_run":
+        read["document_ref_hash"] = live_runner._run_scoped_document_ref_hash(
+            run_id="run-different", document_id=actual_document_id
+        )
+    else:
+        read["line_end"] = 9
+
+    parsed = live_runner._parse_safe_decision_trace(diagnostics)
+    bound = live_runner._bind_decision_trace_to_case(
+        parsed,
+        run_id=run_id,
+        actual_to_logical={actual_document_id: "chapter"},
+        line_counts={"chapter": 8 if mutation == "line_overflow" else 20},
+    )
+
+    assert bound.validation_outcome == "invalid"
+    assert bound.artifact_summary()["action_counts"] is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "extra_trace_key",
+        "last_decision_gap",
+        "read_rank_outside_search",
+        "boolean_candidate_count",
+        "unknown_candidate_field",
+        "candidate_line_count_exceeds_read",
+        "partial_server_trace",
+    ],
+)
+def test_decision_trace_parser_fails_closed_on_malformed_contract(mutation):
+    _, _, diagnostics = _synthetic_trace_diagnostics()
+    trace = diagnostics["evidence_investigator"]["loop"]["decision_trace"]
+    actions = trace["actions"]
+    if mutation == "extra_trace_key":
+        trace["raw_payload"] = "must-not-be-accepted"
+    elif mutation == "last_decision_gap":
+        actions[-1]["provider_decision_index"] = 3
+    elif mutation == "read_rank_outside_search":
+        actions[1]["selected_result_rank"] = 2
+    elif mutation == "boolean_candidate_count":
+        actions[-1]["candidate_count"] = True
+    elif mutation == "unknown_candidate_field":
+        actions[-1]["candidate_shapes"][0]["field_names"] = ["secret"]
+    elif mutation == "candidate_line_count_exceeds_read":
+        actions[-1]["candidate_shapes"][0]["source_line_count"] = 5
+    else:
+        trace["complete"] = False
+
+    parsed = live_runner._parse_safe_decision_trace(diagnostics)
+
+    assert parsed.validation_outcome == "invalid"
+    assert parsed.artifact_summary() == {
+        "validation_outcome": "invalid",
+        "action_counts": None,
+    }
+
+
+def test_missing_decision_trace_is_unavailable_not_a_false_read():
+    diagnostics = {"evidence_investigator": {"seed_count": 1, "loop": {}}}
+    parsed = live_runner._parse_safe_decision_trace(diagnostics)
+
+    assert parsed.validation_outcome == "unavailable"
+    assert live_runner._read_target_evidence_match(
+        parsed,
+        ground_truth=GroundTruth(
+            decision="abstain",
+            issue_category="fact_conflict",
+            added_issue_count=0,
+            allowed_evidence=(),
+            read_target_evidence=("chapter", 1, 1),
+        ),
+        run_id="run-synthetic",
+        actual_to_logical={"doc-synthetic": "chapter"},
+    ) is None
+
+
 def test_runtime_provenance_parser_is_exact_and_fail_closed():
     value = runtime_provenance()
 
@@ -821,9 +1325,11 @@ def test_runtime_provenance_parser_is_exact_and_fail_closed():
     assert _safe_runtime_provenance(unexpected_url) is None
 
 
-def _qualified_case(case_id, expected_decision, expected_category, provenance):
+def _qualified_case(
+    case_id, expected_decision, expected_category, provenance, *, identity_nonce=""
+):
     positive = expected_decision == "added_issue"
-    provider_calls = 3 if positive else 1
+    provider_calls = 3
     diagnostics_payload = {
         "model": {
             "enabled": False,
@@ -842,8 +1348,8 @@ def _qualified_case(case_id, expected_decision, expected_category, provenance):
                 "reason_code": "completed",
                 "provider_calls": provider_calls,
                 "executed_tool_calls": provider_calls,
-                "executed_searches": 1 if positive else 0,
-                "executed_reads": 1 if positive else 0,
+                "executed_searches": 1,
+                "executed_reads": 1,
                 "recoverable_rejections": 0,
                 "completed_seeds": 1 if positive else 0,
                 "abstained_seeds": 0 if positive else 1,
@@ -926,13 +1432,25 @@ def _qualified_case(case_id, expected_decision, expected_category, provenance):
         "passed": passed,
         "run_status": "completed",
         "project_ref_hash": live_runner._sha256_bytes(
-            f"project-{case_id}".encode()
+            f"project-{case_id}-{identity_nonce}".encode()
         ),
-        "run_ref_hash": live_runner._sha256_bytes(f"run-{case_id}".encode()),
+        "run_ref_hash": live_runner._sha256_bytes(
+            f"run-{case_id}-{identity_nonce}".encode()
+        ),
         "case_wall_latency_ms": 100,
         "issue_category_counts": counts,
         "citation_scope_authorized": True,
         "target_evidence_match": evidence_match,
+        "read_target_evidence_match": True,
+        "decision_trace_attribution": {
+            "validation_outcome": "verified",
+            "action_counts": {
+                "ABSTAIN": 0 if positive else 1,
+                "READ_SPAN": 1,
+                "SEARCH_EVIDENCE": 1,
+                "SUBMIT_VERDICT": 1 if positive else 0,
+            },
+        },
         "analysis_usage": {
             "reported_prompt_tokens": 29,
             "reported_completion_tokens": 5,
@@ -959,7 +1477,13 @@ def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
     oracle = live_runner._authenticated_dev_oracle()
     assert oracle is not None
     cases = [
-        _qualified_case(case_id, decision, category, provenance)
+        _qualified_case(
+            case_id,
+            decision,
+            category,
+            provenance,
+            identity_nonce=started_at,
+        )
         for case_id, (decision, category) in sorted(oracle.items())
     ]
     summary = live_runner._build_summary(cases)
@@ -967,7 +1491,7 @@ def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
         provenance, cases, git, bundle_hash
     )
     safe_configuration = {
-        "artifact_schema": "evidence-investigator-live-http-v4",
+        "artifact_schema": "evidence-investigator-live-http-v5",
         "dataset_id": "evidence-investigator-live-v2",
         "split": "dev",
         "manifest_sha256": live_runner.PINNED_MANIFEST_SHA256,
@@ -994,7 +1518,7 @@ def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
         live_runner._canonical_json_bytes(safe_configuration)
     )
     return {
-        "schema_version": "evidence-investigator-live-http-v4",
+        "schema_version": "evidence-investigator-live-http-v5",
         "dataset_id": "evidence-investigator-live-v2",
         "split": "dev",
         "execution_source": "live_http_service",
@@ -1014,17 +1538,12 @@ def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
         ),
         "summary": summary,
         "cases": cases,
-        "privacy_boundary": {
-            "source_bodies_persisted": False,
-            "provider_payloads_persisted": False,
-            "credentials_persisted": False,
-            "service_address_persisted": False,
-        },
-        "diagnostic_boundary": "fixture",
+        "privacy_boundary": dict(live_runner._PRIVACY_BOUNDARY),
+        "diagnostic_boundary": live_runner._DIAGNOSTIC_BOUNDARY,
     }
 
 
-def test_dev_pair_requires_v4_qualified_identical_nonoverlapping_runs():
+def test_dev_pair_requires_v5_qualified_identical_nonoverlapping_runs():
     first = _qualified_dev_artifact(
         started_at="2026-09-12T10:00:00+00:00",
         completed_at="2026-09-12T10:05:00+00:00",
@@ -1070,6 +1589,11 @@ def test_dev_pair_treats_old_schemas_and_missing_fields_as_historical_only():
     assert result["passed"] is False
     assert "first_artifact_historical_only" in result["reason_codes"]
 
+    historical["schema_version"] = "evidence-investigator-live-http-v4"
+    result = compare_dev_artifact_payloads(historical, current)
+    assert result["passed"] is False
+    assert "first_artifact_historical_only" in result["reason_codes"]
+
     missing = dict(current)
     missing.pop("provenance_gate")
     result = compare_dev_artifact_payloads(current, missing)
@@ -1091,6 +1615,161 @@ def test_dev_pair_treats_old_schemas_and_missing_fields_as_historical_only():
     result = compare_dev_artifact_payloads(current, incomplete)
     assert result["passed"] is False
     assert "second_development_gate_not_reproducible" in result["reason_codes"]
+
+
+def test_dev_pair_rejects_replayed_case_run_or_project_identity():
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    replayed = json.loads(json.dumps(first))
+    replayed["started_at"] = "2026-09-12T10:06:00+00:00"
+    replayed["completed_at"] = "2026-09-12T10:11:00+00:00"
+
+    result = compare_dev_artifact_payloads(first, replayed)
+
+    assert result["passed"] is False
+    assert "dev_case_identity_reused_between_runs" in result["reason_codes"]
+
+
+@pytest.mark.parametrize("boundary", ["privacy", "diagnostic", "git"])
+def test_dev_pair_rejects_mutated_nested_export_boundaries(boundary):
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    second = _qualified_dev_artifact(
+        started_at="2026-09-12T10:06:00+00:00",
+        completed_at="2026-09-12T10:11:00+00:00",
+    )
+    if boundary == "privacy":
+        second["privacy_boundary"]["raw_trace_persisted"] = False
+    elif boundary == "diagnostic":
+        second["diagnostic_boundary"] += " unreviewed"
+    else:
+        second["git"]["branch"] = "untrusted"
+
+    result = compare_dev_artifact_payloads(first, second)
+
+    assert result["passed"] is False
+    assert "second_artifact_shape_invalid" in result["reason_codes"]
+
+
+@pytest.mark.parametrize("mutation", ["trace_count", "loop_tool_total"])
+def test_export_validator_rejects_trace_counts_not_bound_to_sanitized_loop(
+    mutation,
+):
+    artifact = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    case = artifact["cases"][0]
+    if mutation == "trace_count":
+        case["decision_trace_attribution"]["action_counts"][
+            "SEARCH_EVIDENCE"
+        ] += 1
+    else:
+        case["investigator"]["loop"]["tool_calls"] += 1
+    artifact["summary"] = live_runner._build_summary(artifact["cases"])
+    artifact["development_gate"] = live_runner._build_development_gate(
+        "dev", artifact["summary"], artifact["provenance_gate"]
+    )
+
+    assert live_runner._artifact_export_contract_is_valid(artifact) is False
+
+
+def test_dev_pair_rejects_invalid_trace_attribution_even_if_recomputed():
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    second = _qualified_dev_artifact(
+        started_at="2026-09-12T10:06:00+00:00",
+        completed_at="2026-09-12T10:11:00+00:00",
+    )
+    second["cases"][0]["decision_trace_attribution"] = {
+        "validation_outcome": "invalid",
+        "action_counts": None,
+    }
+    second["cases"][0]["read_target_evidence_match"] = None
+    second["summary"] = live_runner._build_summary(second["cases"])
+    second["development_gate"] = live_runner._build_development_gate(
+        "dev", second["summary"], second["provenance_gate"]
+    )
+
+    result = compare_dev_artifact_payloads(first, second)
+
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+    assert "second_development_gate_not_reproducible" in result["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("schema_version",), []),
+        (("cases", 0, "case_id"), []),
+        (("safe_configuration", "service_observation", "thinking_mode"), []),
+        (("cases", 0, "investigator", "rag", "modes"), [[]]),
+    ],
+)
+def test_dev_pair_fails_closed_on_unhashable_json_fields(path, replacement):
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    second = _qualified_dev_artifact(
+        started_at="2026-09-12T10:06:00+00:00",
+        completed_at="2026-09-12T10:11:00+00:00",
+    )
+    target = second
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = replacement
+
+    result = compare_dev_artifact_payloads(first, second)
+
+    assert result["passed"] is False
+
+
+def test_dev_pair_rejects_claimed_read_after_direct_terminal_tamper():
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    second = _qualified_dev_artifact(
+        started_at="2026-09-12T10:06:00+00:00",
+        completed_at="2026-09-12T10:11:00+00:00",
+    )
+    case = second["cases"][-1]
+    loop = case["investigator"]["loop"]
+    loop.update(
+        {
+            "provider_decision_calls": 1,
+            "tool_calls": 1,
+            "searches": 0,
+            "reads": 0,
+            "recoverable_rejections": 0,
+            "completed_seeds": 0,
+            "abstained_seeds": 1,
+        }
+    )
+    case["decision_trace_attribution"]["action_counts"] = {
+        "ABSTAIN": 1,
+        "READ_SPAN": 0,
+        "SEARCH_EVIDENCE": 0,
+        "SUBMIT_VERDICT": 0,
+    }
+    case["investigator"]["usage"]["provider_category_counts"] = {"success": 1}
+    second["summary"] = live_runner._build_summary(second["cases"])
+    second["development_gate"] = live_runner._build_development_gate(
+        "dev", second["summary"], second["provenance_gate"]
+    )
+
+    result = compare_dev_artifact_payloads(first, second)
+
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
 
 
 def test_dev_pair_recomputes_cases_summary_and_frozen_oracle():
@@ -1416,6 +2095,18 @@ def test_dev_plan_loading_never_reads_holdout_source_bytes(monkeypatch):
     plans, manifest_hash, freeze_hash = load_case_plans("dev")
 
     assert len(plans) == 8
+    assert all(plan.ground_truth.read_target_evidence is not None for plan in plans)
+    assert all(
+        plan.ground_truth.read_target_evidence[0]
+        in {document.logical_id for document in plan.documents}
+        for plan in plans
+    )
+    assert all(
+        set(document.upload_payload())
+        == {"name", "content", "document_role", "story_scope"}
+        for plan in plans
+        for document in plan.documents
+    )
     assert dev_source_reads
     assert set(dev_source_reads.values()) == {1}
     assert len(manifest_hash) == 64
