@@ -94,6 +94,18 @@ class TokenBudgetTests(unittest.TestCase):
                 Settings(_env_file=None).review_agent_max_completion_tokens
             )
 
+    def test_compose_passes_daily_token_budget_to_api_and_worker(self):
+        compose = yaml.safe_load(
+            (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        )
+        expected = "${DAILY_TOKEN_BUDGET:-100000}"
+        for service_name in ("api", "worker"):
+            environment = compose["services"][service_name]["environment"]
+            self.assertEqual(expected, environment.get("DAILY_TOKEN_BUDGET"))
+
+        example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("DAILY_TOKEN_BUDGET=100000", example)
+
     def test_exact_conservative_budget_allows_request_and_one_less_rejects(self):
         document = DocumentInput(id="doc", name="doc.md", content="普通叙述没有结构化状态。")
         chunk = chunk_document(document, 64, 0)[0]
