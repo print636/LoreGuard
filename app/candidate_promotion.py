@@ -1444,7 +1444,10 @@ def _fields_are_grounded(kind: str, attrs: Mapping[str, str], text: str) -> bool
         else:
             aliases = {
                 "disabled": r"失效|禁止|不得|不能|无法",
-                "performed": r"发动|使用|施展|启动|开启|执行",
+                "performed": (
+                    r"发动|使用|施展|启动|开启|执行|通过|借助|凭借|利用|依靠|"
+                    r"完成|越过|穿过|抵达|到达|(?:终端|系统).*(?:确认|显示|记录)"
+                ),
                 "allowed": r"允许|获准|许可|豁免|可以",
                 "denied": r"拒绝|禁止|未获|没有.*(?:授权|许可)",
             }
@@ -1608,20 +1611,37 @@ def _world_relation_grounded(
         if value == "performed":
             prefix = (
                 rf"{actor}(?:(?:获准|得到许可|获得授权)后)?"
-                rf"(?:已经|随后|立即|此时|正|正在)?"
+                rf"(?:已经|随后|立即|此时|正|正在|仍|仍然|依然|却|还是)?"
                 if actor
                 else ""
             )
-            if _non_actual_action(clause):
-                continue
             patterns = (
                 rf"{prefix}(?:在){scope}(?:中|内)?(?:发动|使用|施展|启动|开启|执行)(?:了)?{action}",
                 rf"{prefix}(?:发动|使用|施展|启动|开启|执行)(?:了)?{action}.{{0,8}}(?:在){scope}",
+                # A narrator may express completion through its observable
+                # result instead of the literal word “成功”.  Keep the join
+                # bounded to the same actor/scope/action and require a closed
+                # result such as crossing or arrival; a mere plan/attempt is
+                # rejected by the relation-local modal guard below.
+                rf"{prefix}(?:在){scope}(?:中|内)?.{{0,8}}"
+                rf"(?:通过|借助|凭借|利用|以|依靠)(?:了)?{action}.{{0,24}}"
+                rf"(?:越过|穿过|通过|抵达|到达)",
+                rf"{prefix}(?:在){scope}(?:中|内)?.{{0,8}}完成(?:了)?{action}",
+                rf"(?:终端|系统|航行记录|任务记录).{{0,8}}"
+                rf"(?:确认|显示|记录).{{0,24}}{prefix}(?:在){scope}"
+                rf"(?:中|内)?.{{0,8}}(?:通过|借助|凭借|利用|以|依靠)?"
+                rf"(?:了)?{action}",
             )
-            for pattern in patterns:
+            for pattern_index, pattern in enumerate(patterns):
                 match = re.search(pattern, clause)
-                if match is not None and not _externally_modalized(
-                    clause, match.start()
+                if match is not None and not _world_performed_match_is_unrealized(
+                    clause,
+                    match,
+                    actor=_compact(actor_value),
+                    scope=_compact(scope_value),
+                    action=_compact(action_value),
+                    closed_result=pattern_index >= 2,
+                    full_text=text,
                 ):
                     return True
         elif value == "disabled" and re.search(
@@ -1673,7 +1693,7 @@ def _reported_or_hypothetical(clause: str) -> bool:
     return bool(
         has_unrealized_heading_frame(clause)
         or re.search(
-            r"据说|听说|传闻|声称|表示|认为|猜测|可能|或许|似乎|"
+            r"据说|听说|传闻|转述|声称|表示|认为|猜测|可能|或许|似乎|"
             r"假如|如果|若是|说|提问|询问|用户指南|维护规程|操作说明|"
             r"使用说明|应当|应该|务必",
             clause,
@@ -1681,14 +1701,168 @@ def _reported_or_hypothetical(clause: str) -> bool:
     )
 
 
+def _world_performed_match_is_unrealized(
+    clause: str,
+    match: re.Match[str],
+    *,
+    actor: str,
+    scope: str,
+    action: str,
+    closed_result: bool,
+    full_text: str,
+) -> bool:
+    """Reject modal action mentions while preserving explicit rule violations."""
+
+    modal_surface = match.group(0)
+    # Completion patterns stop at the result verb (for example ``抵达``).
+    # Include the rest of this already clause-bounded fragment only for
+    # failure binding, so result nouns containing 能/可/将 cannot look modal.
+    failure_surface = (
+        clause[match.start() :] if closed_result else modal_surface
+    )
+    if _world_action_has_bound_failure(failure_surface, action=action):
+        return True
+    if _world_action_surface_is_modal(
+        modal_surface,
+        actor=actor,
+        scope=scope,
+        action=action,
+    ):
+        return True
+    prefix = clause[max(0, match.start() - 48) : match.start()]
+    if _externally_modalized(clause, match.start()) or re.search(
+        r"据说|听说|传闻|转述|声称|报道称|报告称|记录称|表示|认为|猜测|"
+        r"提问|询问|说(?:道)?",
+        prefix,
+    ):
+        return True
+    if re.search(r"禁止|不得|不能|无法", prefix):
+        contrary_surface = bool(
+            actor
+            and re.match(
+                rf"{re.escape(actor)}(?:仍|仍然|依然|却|还是)",
+                modal_surface,
+            )
+        )
+        if not contrary_surface:
+            return True
+    full = _compact_preserving_sentence_boundaries(full_text)
+    surface_start = full.find(failure_surface)
+    if surface_start < 0:
+        return True
+    tail = full[surface_start + len(failure_surface) :]
+    for failure in _world_action_failure_matches(tail, action=action):
+        lead = tail[: failure.start()]
+        if _world_failure_lead_is_local(lead, actor=actor, action=action):
+            return True
+    return False
+
+
+def _world_action_surface_is_modal(
+    surface: str,
+    *,
+    actor: str,
+    scope: str,
+    action: str,
+) -> bool:
+    """Recognize modal grammar without reading it from bound entity names."""
+
+    bound_values = sorted(
+        {value for value in (actor, scope, action) if value},
+        key=len,
+        reverse=True,
+    )
+    masked = surface
+    if bound_values:
+        masked = re.sub(
+            "|".join(re.escape(value) for value in bound_values),
+            "<bound>",
+            masked,
+        )
+    if re.search(
+        r"打算|计划|准备|试图|尝试|试着|想要|可能|或许|如果|假如|"
+        r"是否|能否|可否|会不会|是不是|有没有|即将|"
+        r"应当|应该|需要|决定|命令|要求|被?禁止|不得|不能|不许|不准|"
+        r"(?:获准|得到许可|获得授权|被允许|允许|许可|授权|获批|有权|"
+        r"可以|能够)(?!后)",
+        masked,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"(?:能|可|将(?:会|要)?)(?:在<bound>)?"
+            r"(?:直接|继续|再次|立即|随后)?"
+            r"(?:通过|借助|凭借|利用|以|依靠|发动|使用|施展|启动|开启|执行|"
+            r"完成)?<bound>",
+            masked,
+        )
+    )
+
+
+def _world_failure_lead_is_local(lead: str, *, actor: str, action: str) -> bool:
+    """Bind a failed result only to this action or its immediate continuation."""
+
+    sentence_parts = re.split(r"[。.!！？?]", lead)
+    if len(sentence_parts) > 2:
+        return False
+    if len(sentence_parts) == 2 and sentence_parts[0].strip("，,；;：: "):
+        return False
+    residual = sentence_parts[-1].strip("，,；;：: ")
+    markers = [
+        re.compile(
+            r"^(?:但|却|然而|可是|不过|其实|实际上|事实上|最终|结果|随后|然后|接着|"
+            r"这次|此次|本次|该次|(?:他|她)(?!们)|其(?!他)|该角色|此人|"
+            r"(?:终端|系统)(?:确认|显示|记录)?|"
+            r"(?:航行|任务)?记录(?:确认|显示)?)"
+        )
+    ]
+    if actor:
+        markers.append(re.compile(rf"^{re.escape(actor)}"))
+    if action:
+        markers.append(re.compile(rf"^{re.escape(action)}"))
+    for _ in range(8):
+        for marker in markers:
+            match = marker.match(residual)
+            if match is not None:
+                residual = residual[match.end() :]
+                break
+        else:
+            break
+    return not residual.strip("，,；;：: ")
+
+
+def _world_action_failure_matches(
+    text: str,
+    *,
+    action: str,
+) -> tuple[re.Match[str], ...]:
+    action_pattern = re.escape(action) if action else r"(?!)"
+    pattern = re.compile(
+        r"(?:未|未能|没有|没|没能|尚未|仍未|无法)(?:抵达|到达|越过|穿过|通过)|"
+        rf"(?:未能|未|没有|没能|无法)(?:完成|执行)(?:了)?{action_pattern}|"
+        rf"{action_pattern}.{{0,6}}(?:未完成|失败|未果|无反应|没有反应)|"
+        r"未完成|没有完成|无(?:执行|完成)?结果|没有结果|结果(?:未知|不明)|"
+        r"未(?:获|得)?确认|无法确认|确认失败|失败|未果|毫无反应|没有反应"
+    )
+    return tuple(pattern.finditer(text))
+
+
+def _world_action_has_bound_failure(text: str, *, action: str) -> bool:
+    return bool(_world_action_failure_matches(text, action=action))
+
+
 def _non_actual_action(clause: str, *, allow_reported: bool = False) -> bool:
     if re.search(
         r"没有|没在|不在|未在|并不|并未|未曾|尚未|不要|禁止|不得|不能|"
-        r"警告|劝阻|阻止",
+        r"未能|未完成|没有完成|无(?:执行|完成)?结果|结果(?:未知|不明)|"
+        r"未(?:获|得)?确认|无法确认|确认失败|警告|劝阻|阻止",
         clause,
     ):
         return True
-    if re.search(r"打算|计划|准备|试图|想要|可能|或许|如果|假如|是否", clause):
+    if re.search(
+        r"打算|计划|准备|试图|尝试|试着|想要|可能|或许|如果|假如|是否",
+        clause,
+    ):
         return True
     return not allow_reported and _reported_or_hypothetical(clause)
 
@@ -1891,6 +2065,11 @@ def _json_node_count(value: object, *, limit: int) -> int:
 def _compact(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     return re.sub(r"[\s，,。；;：:\"'“”‘’（）()【】\[\]]+", "", normalized)
+
+
+def _compact_preserving_sentence_boundaries(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.sub(r"[\s，,；;：:\"'“”‘’（）()【】\[\]]+", "", normalized)
 
 
 def _json_clone(value: object) -> object:

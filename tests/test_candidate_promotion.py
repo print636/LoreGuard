@@ -203,16 +203,22 @@ def _completed_result(
 def _prepared_case(
     family: IssueCategory,
     *,
+    baseline_fields: dict | None = None,
+    baseline_text: str | None = None,
     candidate_fields: dict | None = None,
     candidate_line: int = 2,
     candidate_text: str | None = None,
 ):
     case = CASES[family]
     lines = list(case["lines"])
+    if baseline_text is not None:
+        lines[0] = baseline_text
     if candidate_text is not None:
         lines[1] = candidate_text
     content = "\n".join(lines)
     baseline_kind, baseline_attrs = case["baseline"]
+    if baseline_fields is not None:
+        baseline_attrs = baseline_fields
     baseline = _directive(baseline_kind, baseline_attrs, 1, lines[0])
     seed = build_investigation_seeds("run-a", [baseline])[0]
     snapshot = SnapshotDocumentKey(
@@ -791,6 +797,119 @@ def test_denied_scope_action_cannot_be_promoted_as_a_conflicting_world_assert(
     assert not result.added_issues
     assert not result.issues
     assert dict(result.rejection_counts) == {"candidate_shape_invalid": 1}
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "岚在北塔通过跃迁越过了封锁线。",
+        "岚在北塔借助跃迁抵达南港。",
+        "任务终端确认岚在北塔完成了跃迁。",
+        "系统记录显示岚在北塔通过跃迁。",
+        "尽管北塔规则禁止跃迁，岚仍在北塔通过跃迁抵达南港。",
+        "北塔禁止跃迁岚仍在北塔通过跃迁抵达南港。",
+        "北塔规则称跃迁无法抵达外界，岚仍在北塔通过跃迁抵达南港。",
+        "岚在北塔通过跃迁抵达南港，苏弦却未抵达南港。",
+        "岚在北塔通过跃迁抵达南港，随后系统记录飞船未能完成停靠。",
+        "岚在北塔启动跃迁，苏弦却未抵达南港。",
+        "岚在北塔启动跃迁，随后系统记录飞船未能完成停靠。",
+        "岚在北塔启动跃迁。苏弦随后未抵达南港。",
+        "岚在北塔通过跃迁抵达能源站。",
+        "岚在北塔通过跃迁抵达可可岛。",
+        "岚在北塔通过跃迁抵达将军府。",
+        "岚在北塔通过跃迁抵达南港并达到要求。",
+    ],
+)
+def test_scope_action_completion_results_ground_performed_without_success_word(
+    candidate_text,
+):
+    result, *_ = _promote(
+        IssueCategory.world_rule_conflict,
+        candidate_text=candidate_text,
+    )
+
+    assert "成功" not in candidate_text
+    assert result.accepted_candidates == 1
+    assert len(result.added_issues) == 1
+    assert result.added_issues[0].category == IssueCategory.world_rule_conflict
+
+
+@pytest.mark.parametrize(
+    ("actor", "action", "candidate_text"),
+    [
+        ("可莉", "折跃", "可莉在南港通过折跃抵达东岛。"),
+        ("雷电将军", "折跃", "雷电将军在南港通过折跃抵达东岛。"),
+        ("洛", "能量跃迁", "洛在南港通过能量跃迁抵达东岛。"),
+    ],
+)
+def test_bound_names_cannot_be_misread_as_single_character_modals(
+    actor,
+    action,
+    candidate_text,
+):
+    key = f"scope_action:南港:{action}"
+    result, *_ = _promote(
+        IssueCategory.world_rule_conflict,
+        baseline_text=f"在南港中，{action}必然失效。",
+        baseline_fields={"key": key, "value": "disabled"},
+        candidate_text=candidate_text,
+        candidate_fields={"key": key, "value": "performed", "actor": actor},
+    )
+
+    assert result.accepted_candidates == 1
+    assert len(result.added_issues) == 1
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "命令岚在北塔执行跃迁。",
+        "岚计划在北塔通过跃迁抵达南港。",
+        "岚尝试在北塔通过跃迁越过封锁线。",
+        "岚获准在北塔使用跃迁。",
+        "岚是否在北塔通过跃迁抵达南港？",
+        "苏弦转述：岚在北塔通过跃迁抵达南港。",
+        "岚在北塔启动跃迁，但终端确认未能抵达南港。",
+        "岚在北塔通过跃迁，最终未抵达南港。",
+        "岚在北塔通过跃迁，但未越过封锁线。",
+        "岚在北塔获准通过跃迁抵达南港。",
+        "岚在北塔可以通过跃迁抵达南港。",
+        "岚在北塔能够通过跃迁抵达南港。",
+        "岚在北塔能通过跃迁抵达南港。",
+        "岚在北塔可通过跃迁抵达南港。",
+        "岚在北塔将通过跃迁抵达南港。",
+        "岚在北塔能否通过跃迁抵达南港？",
+        "报道称岚在北塔通过跃迁抵达南港。",
+        "岚在北塔通过跃迁，但没有抵达南港。",
+        "岚在北塔通过跃迁，但无法越过封锁线。",
+        "岚在北塔通过跃迁，最终结果不明。",
+        "岚在北塔被禁止通过跃迁抵达南港。",
+        "岚在北塔不得通过跃迁抵达南港。",
+        "尽管北塔禁止岚在北塔通过跃迁抵达南港。",
+        "岚在北塔启动跃迁，岚却未抵达南港。",
+        "岚在北塔启动跃迁，他却未抵达南港。",
+        "岚在北塔启动跃迁，这次却未抵达南港。",
+        "岚在北塔启动跃迁，但最终失败。",
+        "岚在北塔启动跃迁，但毫无反应。",
+        "岚在北塔启动跃迁。随后他未抵达南港。",
+        "岚在北塔启动跃迁。岚随后未抵达南港。",
+        "岚在北塔启动跃迁。终端确认未抵达南港。",
+        "岚在北塔通过跃迁抵达南港，但终端确认她其实未抵达南港。",
+        "岚在北塔通过跃迁抵达南港，岚随后却未抵达南港。",
+        "岚在北塔通过跃迁抵达南港。随后他未抵达南港。",
+    ],
+)
+def test_nonfinal_scope_action_language_cannot_be_promoted_as_performed(
+    candidate_text,
+):
+    result, *_ = _promote(
+        IssueCategory.world_rule_conflict,
+        candidate_text=candidate_text,
+    )
+
+    assert result.accepted_candidates == 0
+    assert not result.added_issues
+    assert dict(result.rejection_counts) == {"candidate_not_grounded": 1}
 
 
 def test_authorized_span_hash_and_full_source_line_are_rechecked():

@@ -392,6 +392,19 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
     assert "不得用于试探" in verdict_tools["SUBMIT_VERDICT"]
     assert "正确终局" in verdict_tools["ABSTAIN"]
     assert "不是默认答案" in verdict_tools["ABSTAIN"]
+    search_tool = next(
+        tool for tool in provider.requests[0]["tools"] if tool.name == "SEARCH_EVIDENCE"
+    )
+    assert "0..8 项" in search_tool.description
+    assert "≤80 字符" in search_tool.description
+    assert "casefold 唯一" in search_tool.description
+    assert "query 的连续原文子串" in search_tool.description
+    search_terms_schema = search_tool.parameters["properties"]["entity_terms"]
+    assert search_terms_schema["minItems"] == 0
+    assert search_terms_schema["maxItems"] == 8
+    assert search_terms_schema["uniqueItems"] is True
+    assert search_terms_schema["items"]["minLength"] == 1
+    assert search_terms_schema["items"]["maxLength"] == 80
     submit_schema = next(
         tool.parameters
         for tool in provider.requests[2]["tools"]
@@ -409,6 +422,7 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
         and "不是默认或更安全的答案" in request["system"]
         for request in provider.requests
     )
+    assert all("作用域阻断" not in request["system"] for request in provider.requests)
     assert all("无显式否定、" not in request["system"] for request in provider.requests)
     assert all(row["tool_choice"] == "required" for row in provider.requests)
     assert all(row["limits"].max_calls == 1 for row in provider.requests)
@@ -534,6 +548,124 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
     )
     with pytest.raises(ValueError, match="loop result"):
         clone_evidence_investigator_loop_result(outcome)
+
+
+def test_world_action_contract_is_consistent_at_verdict_with_default_budget():
+    content = "在北塔中，跃迁必然失效。\n岚在北塔通过跃迁抵达南港。"
+    snapshot = SnapshotDocumentKey(
+        project_id="project-a",
+        document_id="doc-1",
+        document_version=1,
+        content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    )
+    scope = InvestigationScope.create(
+        run_id="run-world",
+        project_id="project-a",
+        documents=(ScopedEvidenceDocument(snapshot=snapshot, content=content),),
+    )
+    anchor = ParsedDirective(
+        kind="world_rule",
+        attrs={
+            "key": "scope_action:北塔:跃迁",
+            "value": "disabled",
+            "modality": "conditional_rule",
+            "source_scope": "world_rule",
+            "certainty": "certain",
+        },
+        evidence=EvidenceSpan(
+            document_id="doc-1",
+            document_name="chapter.md",
+            line_start=1,
+            line_end=1,
+            text=content.splitlines()[0],
+        ),
+        provenance_sources=frozenset({"model"}),
+    )
+    seed = build_investigation_seeds("run-world", (anchor,), limit=1)[0]
+    chunk = EvidenceChunker(
+        target_chars=100,
+        min_chars=1,
+        max_chars=120,
+        overlap_chars=0,
+    ).chunk(
+        project_id=snapshot.project_id,
+        document_id=snapshot.document_id,
+        document_version=snapshot.document_version,
+        content=content,
+        content_sha256=snapshot.content_sha256,
+    )[0]
+    provider = ScriptedProvider(
+        result(
+            "SEARCH_EVIDENCE",
+            {
+                "seed_ref": seed.seed_ref,
+                "query": "北塔跃迁规则冲突",
+                "entity_terms": ["北塔", "跃迁"],
+            },
+        ),
+        result(
+            "READ_SPAN",
+            {
+                "seed_ref": seed.seed_ref,
+                "result_ref": "result_tok0000000000001",
+                "line_start": 2,
+                "line_end": 2,
+            },
+        ),
+        result(
+            "ABSTAIN",
+            {
+                "seed_ref": seed.seed_ref,
+                "reason": "no_rule_validated_conflict",
+            },
+        ),
+    )
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever((chunk,)),
+        scope=scope,
+        seeds=(seed,),
+        token_factory=Tokens(),
+    ).run()
+
+    assert outcome.outcome == "completed"
+    assert outcome.charged_tokens <= 8_000
+    prompts = [json.loads(request["user"]) for request in provider.requests]
+    assert "查找同 key 的已完成章节动作" in prompts[0][
+        "current_seed"
+    ]["family_semantic_guidance"]
+    assert "disabled anchor 是冲突的一侧而非阻断" in prompts[2][
+        "current_seed"
+    ]["family_semantic_guidance"]
+    assert "disabled anchor 是冲突的一侧，不是阻断" in prompts[2][
+        "current_seed"
+    ]["candidate_field_contracts"]["world_assert"]["semantic_guidance"]
+    checklist = prompts[2]["verdict_checklist"]["rule_preconditions"]
+    assert "disabled anchor 是冲突一侧而非阻断" in checklist
+    assert "越过、抵达、终端确认等完成结果闭环" in checklist
+    assert "无需“成功”字样" in checklist
+    assert "命令、计划、尝试、单纯许可、疑问、转述" in checklist
+
+    assert all("作用域阻断" not in row["system"] for row in provider.requests)
+    assert all("作用域不匹配" in row["system"] for row in provider.requests)
+    verdict_system = provider.requests[2]["system"]
+    assert "disabled 的 anchor 是冲突一侧，不是阻断" in verdict_system
+    assert "不以规则不允许反向否认正文" in verdict_system
+    assert "越过、抵达、终端确认等完成结果" in verdict_system
+    assert "无需“成功”字样" in verdict_system
+    assert "命令、计划、尝试、单纯许可、疑问、转述" in verdict_system
+
+    verdict_tools = {
+        tool.name: tool.description for tool in provider.requests[2]["tools"]
+    }
+    assert "disabled anchor 是冲突一侧而非阻断" in verdict_tools[
+        "SUBMIT_VERDICT"
+    ]
+    assert "无需“成功”" in verdict_tools["SUBMIT_VERDICT"]
+    assert "命令、计划、尝试、单纯许可、疑问、转述" in verdict_tools[
+        "ABSTAIN"
+    ]
 
 
 def test_knowledge_evidence_guidance_is_present_in_model_visible_prompt():
@@ -884,6 +1016,17 @@ def test_loop_result_clone_rejects_active_container_without_iterating_it():
                 "不得臆测未陈述的交接或例外",
             ),
         ),
+        (
+            "world_assert",
+            (
+                "disabled anchor 是冲突的一侧，不是阻断",
+                "不用规则反向否定正文",
+                "越过、抵达、终端确认等完成结果闭环",
+                "无需“成功”",
+                "命令、计划、尝试、单纯许可、疑问、转述",
+                "无执行结果须 ABSTAIN",
+            ),
+        ),
     ],
 )
 def test_candidate_guidance_covers_general_temporal_and_modal_boundaries(
@@ -913,6 +1056,18 @@ def test_family_guidance_keeps_fact_and_item_decisions_conservative():
     assert "不得臆测未陈述的交接或例外" in item
 
 
+def test_world_rule_family_guidance_treats_disabled_anchor_as_conflict_side():
+    guidance = get_family_semantic_guidance(IssueCategory.world_rule_conflict)
+
+    assert "世界规则与已经完成行为冲突" in guidance
+    assert "冲突的一侧而非阻断" in guidance
+    assert "不能反向否定正文" in guidance
+    assert "越过、抵达、终端确认闭环" in guidance
+    assert "无需“成功”" in guidance
+    assert "命令、计划、尝试、单纯许可、疑问、转述" in guidance
+    assert "无结果不能作已执行事实" in guidance
+
+
 @pytest.mark.parametrize(
     ("family", "positive_boundary", "negative_boundary"),
     [
@@ -938,8 +1093,8 @@ def test_family_guidance_keeps_fact_and_item_decisions_conservative():
         ),
         (
             IssueCategory.world_rule_conflict,
-            "已经完成的规则相关行为",
-            "未完成行为不能作为已执行事实",
+            "disabled anchor 是冲突的一侧而非阻断",
+            "命令、计划、尝试、单纯许可、疑问、转述",
         ),
     ],
 )
@@ -2090,7 +2245,11 @@ def test_one_invalid_argument_turn_can_be_corrected_without_executing_it():
     provider = ScriptedProvider(
         result(
             "SEARCH_EVIDENCE",
-            {"seed_ref": seed_ref, "query": "", "entity_terms": []},
+            {
+                "seed_ref": seed_ref,
+                "query": "岚的发色是否发生冲突",
+                "entity_terms": ["南港"],
+            },
             prompt_tokens=9,
             completion_tokens=2,
         ),
@@ -2126,9 +2285,20 @@ def test_one_invalid_argument_turn_can_be_corrected_without_executing_it():
             "kind": "retryable_tool_rejection",
             "reason_code": "invalid_tool_arguments",
             "remaining_corrections": 0,
+            "check_before_retry": {
+                "tool": "SEARCH_EVIDENCE",
+                "query": "visible_text_3_to_800_chars",
+                "entity_terms": (
+                    "zero_to_8_trimmed_nonempty_strings_max_80_chars_"
+                    "casefold_unique_each_casefold_verbatim_substring_of_query"
+                ),
+            },
         }
     ]
     assert correction_prompt["remaining_limits"]["corrections"] == 0
+    assert "南港" not in json.dumps(
+        correction_prompt["observations"], ensure_ascii=False
+    )
 
 
 def test_second_invalid_argument_turn_degrades_and_discards_any_candidates():

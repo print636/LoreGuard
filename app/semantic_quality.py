@@ -147,6 +147,9 @@ USE_ACTION_VERB_PATTERN = (
 _ACTION_VERBS = re.compile(
     rf"驱动|施展|执行|(?:{USE_ACTION_VERB_PATTERN})"
 )
+_WORLD_ACTION_COMPLETION_MARKERS = re.compile(
+    r"通过|借助|凭借|利用|依靠|完成|越过|穿过|抵达|到达|确认|显示|记录"
+)
 _UNREALIZED_ACTION_FRAME = re.compile(
     r"命令|下令|责令|要求|吩咐|嘱咐|敦促|通知|建议|提议|"
     r"准许|准予|容许|批准|答应|授意|允许|授权(?!后)|应当|应该|需要|务必|"
@@ -819,6 +822,18 @@ def _candidate_action_matches(
             if action_label not in tail:
                 continue
         matches.append(match)
+    if directive.kind == "world_assert" and action_label:
+        actor = _clean(directive.attrs.get("actor", ""))
+        for match in _WORLD_ACTION_COMPLETION_MARKERS.finditer(text):
+            clause_start, clause_end = _clause_bounds(text, match.start())
+            clause = _clean(text[clause_start:clause_end])
+            if (
+                action_label in clause
+                and (not context or context in clause)
+                and (not actor or actor in clause)
+                and match not in matches
+            ):
+                matches.append(match)
     return matches
 
 
@@ -1434,7 +1449,7 @@ def _closed_baseline_semantics(
     elif kind == "world_rule":
         closed = bool(_DETERMINISTIC_RULE_MARKERS.search(support))
     elif kind == "world_assert":
-        closed = bool(re.search(r"驱动|启动|开启|发动|进入|执行|使用", support))
+        closed = bool(_candidate_action_matches(support, directive))
     if not closed:
         return None
     if kind == "claims_knows":

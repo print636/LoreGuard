@@ -432,6 +432,51 @@ def test_four_tool_argument_contracts_are_strict_and_have_no_scope_fields():
         parse_tool_arguments("SEARCH_EVIDENCE", [valid["SEARCH_EVIDENCE"]])
 
 
+def test_search_entity_term_contract_is_model_visible_and_runtime_enforced():
+    schema = SearchEvidenceArgs.model_json_schema()
+    query_schema = schema["properties"]["query"]
+    terms_schema = schema["properties"]["entity_terms"]
+    item_schema = terms_schema["items"]
+
+    assert query_schema["minLength"] == 3
+    assert query_schema["maxLength"] == 800
+    assert "entity_terms" in query_schema["description"]
+    assert terms_schema["minItems"] == 0
+    assert terms_schema["maxItems"] == 8
+    assert terms_schema["uniqueItems"] is True
+    assert "casefold 后唯一" in terms_schema["description"]
+    assert "query 的连续原文子串" in terms_schema["description"]
+    assert item_schema["minLength"] == 1
+    assert item_schema["maxLength"] == 80
+    assert item_schema["pattern"] == r"^\S(?:[^\r\n]*\S)?$"
+    assert "无首尾空白或换行" in item_schema["description"]
+
+    accepted = SearchEvidenceArgs(
+        seed_ref=f"seed_{'a' * 32}",
+        query="LIN CHE 在北塔使用星钥",
+        entity_terms=["lin che", "北塔", "星钥"],
+    )
+    assert accepted.entity_terms == ["lin che", "北塔", "星钥"]
+
+    invalid_terms = (
+        [" "],
+        [" 岚"],
+        ["岚\n北塔"],
+        ["岚" * 81],
+        ["岚", "岚"],
+        ["LIN CHE", "lin che"],
+        ["南港"],
+        [str(index) for index in range(9)],
+    )
+    for terms in invalid_terms:
+        with pytest.raises(ValidationError):
+            SearchEvidenceArgs(
+                seed_ref=f"seed_{'a' * 32}",
+                query="岚和 LIN CHE 在北塔使用星钥 0 1 2 3 4 5 6 7 8",
+                entity_terms=terms,
+            )
+
+
 def test_malformed_exact_pydantic_inputs_fail_at_each_public_boundary():
     scope, document = scope_for()
     seed = fact_seed()

@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias, get_args
+from typing import Annotated, Any, Literal, TypeAlias, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -115,8 +115,10 @@ _CANDIDATE_FIELD_CONTRACTS: dict[str, CandidateFieldContract] = {
         ("key", "value"),
         ("actor", "time"),
         (
-            "value=performed 仅表示动作真实完成；命令、计划、转述或缺少执行结果时必须 "
-            "ABSTAIN。"
+            "同 key 的 disabled anchor 是冲突的一侧，不是阻断；忠实记录章节主张，"
+            "不用规则反向否定正文。performed 表示同 scope 动作明确执行，或有越过、"
+            "抵达、终端确认等完成结果闭环，无需“成功”。命令、计划、尝试、单纯许可、"
+            "疑问、转述或无执行结果须 ABSTAIN。"
         ),
     ),
 }
@@ -168,7 +170,10 @@ _FAMILY_SEMANTIC_GUIDANCE: dict[IssueCategory, str] = {
         "交接或实际使用；不得臆测未陈述的交接或例外。"
     ),
     IssueCategory.world_rule_conflict: (
-        "区分世界规则与已经完成的规则相关行为；未完成行为不能作为已执行事实。"
+        "世界规则与已经完成行为冲突；同 key disabled anchor 是冲突的一侧而非阻断，"
+        "不能反向否定正文。同 scope 明确执行或有越过、抵达、终端确认闭环即 "
+        "performed，无需“成功”。未完成、命令、计划、尝试、单纯许可、疑问、转述或"
+        "无结果不能作已执行事实。"
     ),
 }
 if set(_FAMILY_SEMANTIC_GUIDANCE) != set(IssueCategory):
@@ -268,10 +273,36 @@ class _StrictToolModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
 
+SearchEntityTerm: TypeAlias = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^\S(?:[^\r\n]*\S)?$",
+        description="1..80 字符，无首尾空白或换行。",
+    ),
+]
+
+
 class SearchEvidenceArgs(_StrictToolModel):
     seed_ref: str = Field(pattern=SEED_REF_PATTERN)
-    query: str = Field(min_length=3, max_length=800, repr=False)
-    entity_terms: list[str] = Field(default_factory=list, max_length=8, repr=False)
+    query: str = Field(
+        min_length=3,
+        max_length=800,
+        repr=False,
+        description="检索文本；每个 entity_terms 项须经 casefold 后成为连续原文子串。",
+    )
+    entity_terms: list[SearchEntityTerm] = Field(
+        default_factory=list,
+        min_length=0,
+        max_length=8,
+        repr=False,
+        description=(
+            "0..8 项；每项 trim 后非空、无首尾空白、≤80 字符；casefold 后唯一，"
+            "且为 query 的连续原文子串。"
+        ),
+        json_schema_extra={"uniqueItems": True},
+    )
 
     @field_validator("query")
     @classmethod
