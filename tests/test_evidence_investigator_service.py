@@ -593,7 +593,7 @@ def test_success_is_atomically_appended_before_reviewer_and_usage_budgets_merge(
     assert diagnostic.payload["evidence_investigator"]["outcome"] == "completed"
     assert (
         diagnostic.payload["runtime_provenance"]["schema_version"]
-        == "loreguard-runtime-provenance-v1"
+        == "loreguard-runtime-provenance-v2"
     )
     assert "openai_api_key" not in str(diagnostic.payload["runtime_provenance"])
     accounting = diagnostic.payload["usage_accounting"]

@@ -31,15 +31,20 @@ ROOT = Path(__file__).resolve().parents[1]
 DATASET_ROOT = ROOT / "data" / "evaluation" / "evidence_investigator_live"
 DEFAULT_ARTIFACT_ROOT = ROOT / "artifacts" / "evidence-investigator-live"
 
-ARTIFACT_SCHEMA = "evidence-investigator-live-http-v3"
-HISTORICAL_ARTIFACT_SCHEMAS = frozenset({"evidence-investigator-live-http-v2"})
-RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v1"
-DEV_PAIR_SCHEMA = "evidence-investigator-live-dev-pair-v1"
+ARTIFACT_SCHEMA = "evidence-investigator-live-http-v4"
+HISTORICAL_ARTIFACT_SCHEMAS = frozenset(
+    {"evidence-investigator-live-http-v2", "evidence-investigator-live-http-v3"}
+)
+RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v2"
+DEV_PAIR_SCHEMA = "evidence-investigator-live-dev-pair-v2"
 DATASET_ID = "evidence-investigator-live-v1"
 PINNED_MANIFEST_SHA256 = "73869e264b6b13f8d6b0543514fe001a24404ae5af8c1979d4b487a5276cca04"
 PINNED_FREEZE_SHA256 = "d7987f0bb5356e633e13761b23d132296e4b8f13298f86678520eb1877948996"
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_SOURCE_BYTES = 512 * 1024
+MAX_BUNDLE_FILES = 512
+MAX_BUNDLE_FILE_BYTES = 4 * 1024 * 1024
+MAX_BUNDLE_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_SAFE_COUNTER = (1 << 63) - 1
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 ACTIVE_STATUSES = frozenset({"queued", "running"})
@@ -59,6 +64,29 @@ SAFE_RAG_MODES = frozenset({"hybrid", "lexical_only", "dense_only", "unavailable
 SAFE_RAG_STRATEGIES = frozenset(
     {"keyword-only", "dense-only", "keyword+dense-rrf", "keyword+vector+entity-rrf"}
 )
+SAFE_CLASSIFICATIONS = frozenset(
+    {
+        "positive_added_issue",
+        "active_abstain",
+        "promotion_rejection",
+        "agent_protocol_failure",
+        "isolation_failure",
+        "provider_failure",
+        "timeout_or_budget",
+        "wrong_candidate",
+        "runner_failure",
+    }
+)
+DISQUALIFYING_EXECUTION_CLASSIFICATIONS = frozenset(
+    {
+        "agent_protocol_failure",
+        "isolation_failure",
+        "provider_failure",
+        "timeout_or_budget",
+        "runner_failure",
+    }
+)
+DEV_CASE_IDS = frozenset(f"EIL-D-{index:02d}" for index in range(1, 9))
 SAFE_REJECTION_REASONS = frozenset(
     {
         "invalid_envelope",
@@ -219,9 +247,6 @@ _INVESTIGATOR_LIMIT_KEYS = (
 )
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _GIT_REVISION = re.compile(r"^[a-f0-9]{40,64}$")
-_SAFE_HOSTNAME = re.compile(
-    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$"
-)
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 _DEV_ARTIFACT_KEYS = frozenset(
     {
@@ -255,6 +280,7 @@ _SAFE_CONFIGURATION_KEYS = frozenset(
         "request_timeout_seconds",
         "poll_interval_seconds",
         "runner_git",
+        "runner_service_artifact_sha256",
         "service_observation",
         "service_reported_effective_limits",
         "worker_runtime_provenance_matches_api_cases",
@@ -266,6 +292,7 @@ _PROVENANCE_GATE_KEYS = frozenset(
         "passed",
         "reason_codes",
         "api_runtime_provenance",
+        "runner_service_artifact_sha256",
         "worker_runtime_provenance_observed_cases",
         "worker_runtime_provenance_matches_api_cases",
         "rag_configuration_verified_cases",
@@ -274,6 +301,102 @@ _PROVENANCE_GATE_KEYS = frozenset(
 )
 _DEVELOPMENT_GATE_KEYS = frozenset(
     {"applicable", "passed", "checks", "reason_codes", "boundary"}
+)
+_CASE_KEYS = frozenset(
+    {
+        "case_id",
+        "expected_decision",
+        "expected_issue_category",
+        "classification",
+        "passed",
+        "run_status",
+        "project_ref_hash",
+        "run_ref_hash",
+        "case_wall_latency_ms",
+        "issue_category_counts",
+        "citation_scope_authorized",
+        "target_evidence_match",
+        "analysis_usage",
+        "investigator",
+        "runtime_provenance",
+        "capability_isolation",
+        "failure_code",
+    }
+)
+_INVESTIGATOR_KEYS = frozenset(
+    {
+        "available",
+        "enabled",
+        "outcome",
+        "reason_code",
+        "seed_count",
+        "loop",
+        "promotion",
+        "usage",
+        "budget_preflight",
+        "effective_limits",
+        "rag",
+    }
+)
+_LOOP_KEYS = frozenset(
+    {
+        "outcome",
+        "reason_code",
+        "provider_decision_calls",
+        "tool_calls",
+        "tool_call_count_basis",
+        "searches",
+        "reads",
+        "recoverable_rejections",
+        "completed_seeds",
+        "abstained_seeds",
+        "submitted_envelopes",
+        "authorized_candidates",
+    }
+)
+_PROMOTION_KEYS = frozenset(
+    {"submitted_candidates", "accepted_candidates", "added_issues", "rejection_counts"}
+)
+_USAGE_KEYS = frozenset(
+    {
+        "reported_prompt_tokens",
+        "reported_completion_tokens",
+        "charged_tokens",
+        "token_count_basis",
+        "provider_category_counts",
+    }
+)
+_BUDGET_PREFLIGHT_KEYS = frozenset(
+    {
+        "seed_count",
+        "minimum_path_admissible",
+        "minimum_required_rounds",
+        "minimum_initial_reservation",
+        "maximum_local_round_reservation",
+        "maximum_local_run_reservation",
+        "max_charged_tokens",
+        "oversized_initial_prompts",
+    }
+)
+_RAG_KEYS = frozenset(
+    {
+        "index_outcome",
+        "index_reason",
+        "profile_fingerprint",
+        "chunker_fingerprint",
+        "modes",
+        "strategies",
+        "total_retrievals",
+    }
+)
+_ISOLATION_KEYS = frozenset(
+    {
+        "verified",
+        "main_extraction",
+        "issue_evidence_review",
+        "aggregate_chat_usage_matches_investigator",
+        "reason_codes",
+    }
 )
 
 
@@ -399,6 +522,14 @@ class CasePlan:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedDataset:
+    manifest: dict[str, Any]
+    manifest_sha256: str
+    freeze_sha256: str
+    source_payloads: tuple[tuple[str, bytes], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RunnerOptions:
     split: Literal["dev", "holdout"]
     base_url: str
@@ -428,6 +559,43 @@ def _canonical_json_bytes(value: Any) -> bytes:
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _local_service_artifact_sha256(root: Path = ROOT) -> str | None:
+    """Independently fingerprint the local service bundle used for evaluation."""
+
+    try:
+        resolved_root = root.resolve(strict=True)
+        app_root = (resolved_root / "app").resolve(strict=True)
+        files = sorted(
+            (path for path in app_root.rglob("*.py") if path.is_file()),
+            key=lambda path: path.relative_to(resolved_root).as_posix(),
+        )
+        requirements = resolved_root / "requirements.txt"
+        if requirements.is_file():
+            files.append(requirements)
+        if not 1 <= len(files) <= MAX_BUNDLE_FILES:
+            return None
+        digest = hashlib.sha256()
+        total_size = 0
+        for path in files:
+            relative = path.relative_to(resolved_root).as_posix().encode("utf-8")
+            size = path.stat().st_size
+            if size < 0 or size > MAX_BUNDLE_FILE_BYTES:
+                return None
+            payload = path.read_bytes()
+            if len(payload) != size:
+                return None
+            total_size += len(payload)
+            if total_size > MAX_BUNDLE_TOTAL_BYTES:
+                return None
+            digest.update(len(relative).to_bytes(4, "big"))
+            digest.update(relative)
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        return digest.hexdigest()
+    except (OSError, ValueError):
+        return None
 
 
 def _utc_now() -> str:
@@ -522,11 +690,45 @@ def _read_bounded(path: Path, maximum: int) -> bytes:
         raise LiveEvaluationError("fixture_integrity_failed") from None
 
 
+def _authenticated_dev_oracle() -> dict[str, tuple[str, str]] | None:
+    """Read only authenticated shared manifest metadata, never story bodies."""
+
+    try:
+        payload = _read_bounded(DATASET_ROOT / "manifest.json", MAX_JSON_BYTES)
+        if _sha256_bytes(payload) != PINNED_MANIFEST_SHA256:
+            return None
+        manifest = json.loads(payload, parse_constant=_reject_json_constant)
+    except (LiveEvaluationError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    cases = manifest.get("cases") if type(manifest) is dict else None
+    if type(cases) is not list:
+        return None
+    oracle: dict[str, tuple[str, str]] = {}
+    for case in cases:
+        if type(case) is not dict or case.get("split") != "dev":
+            continue
+        expected = case.get("expected")
+        case_id = case.get("case_id")
+        if (
+            case_id not in DEV_CASE_IDS
+            or case_id in oracle
+            or type(expected) is not dict
+            or expected.get("decision") not in {"added_issue", "abstain"}
+            or expected.get("issue_category") not in ISSUE_CATEGORIES
+        ):
+            return None
+        oracle[case_id] = (
+            expected["decision"],
+            expected["issue_category"],
+        )
+    return oracle if set(oracle) == DEV_CASE_IDS else None
+
+
 def verify_frozen_dataset(
     dataset_root: Path = DATASET_ROOT,
     *,
     split: Literal["dev", "holdout"] | None = None,
-) -> tuple[dict[str, Any], str, str]:
+) -> VerifiedDataset:
     """Verify the selected split before it is allowed near the network.
 
     The shared manifest and freeze index are always authenticated. A split run
@@ -570,7 +772,8 @@ def verify_frozen_dataset(
         raise LiveEvaluationError("fixture_integrity_failed")
     declared_paths: set[str] = set()
     expected_paths = {"manifest.json", "README.md"}
-    selected_paths = {"manifest.json", "README.md"}
+    selected_paths = {"README.md"}
+    selected_source_paths: set[str] = set()
     for case in cases:
         if (
             type(case) is not dict
@@ -585,6 +788,7 @@ def verify_frozen_dataset(
             expected_paths.add(source["path"])
             if split is None or case["split"] == split:
                 selected_paths.add(source["path"])
+                selected_source_paths.add(source["path"])
     frozen_by_path: dict[str, str] = {}
     for row in rows:
         if type(row) is not dict or set(row) != {"path", "sha256"}:
@@ -602,14 +806,25 @@ def verify_frozen_dataset(
         declared_paths.add(relative)
     if declared_paths != expected_paths or not selected_paths.issubset(declared_paths):
         raise LiveEvaluationError("fixture_integrity_failed")
+    if frozen_by_path.get("manifest.json") != _sha256_bytes(manifest_bytes):
+        raise LiveEvaluationError("fixture_integrity_failed")
+    verified_payloads: list[tuple[str, bytes]] = []
     for relative in sorted(selected_paths):
         try:
             path = _safe_source_path(root, relative)
         except LiveEvaluationError:
             raise LiveEvaluationError("fixture_integrity_failed") from None
-        if _sha256_bytes(path.read_bytes()) != frozen_by_path[relative]:
+        payload = _read_bounded(path, MAX_SOURCE_BYTES)
+        if _sha256_bytes(payload) != frozen_by_path[relative]:
             raise LiveEvaluationError("fixture_integrity_failed")
-    return manifest, _sha256_bytes(manifest_bytes), _sha256_bytes(freeze_bytes)
+        if relative in selected_source_paths:
+            verified_payloads.append((relative, payload))
+    return VerifiedDataset(
+        manifest=manifest,
+        manifest_sha256=_sha256_bytes(manifest_bytes),
+        freeze_sha256=_sha256_bytes(freeze_bytes),
+        source_payloads=tuple(verified_payloads),
+    )
 
 
 def load_case_plans(
@@ -619,9 +834,9 @@ def load_case_plans(
 ) -> tuple[tuple[CasePlan, ...], str, str]:
     if split not in {"dev", "holdout"}:
         raise LiveEvaluationError("internal_runner_error")
-    manifest, manifest_hash, freeze_hash = verify_frozen_dataset(
-        dataset_root, split=split
-    )
+    verified = verify_frozen_dataset(dataset_root, split=split)
+    manifest = verified.manifest
+    source_payloads = dict(verified.source_payloads)
     plans: list[CasePlan] = []
     seen_cases: set[str] = set()
     for case in manifest["cases"]:
@@ -665,10 +880,12 @@ def load_case_plans(
             scope = _safe_identifier(source.get("story_scope"))
             if logical_id in logical_ids or role not in DOCUMENT_ROLES or scope is None:
                 raise LiveEvaluationError("internal_runner_error")
-            path = _safe_source_path(dataset_root, source.get("path"))
+            relative_path = source.get("path")
+            if type(relative_path) is not str or relative_path not in source_payloads:
+                raise LiveEvaluationError("internal_runner_error")
             try:
-                content = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+                content = source_payloads[relative_path].decode("utf-8")
+            except UnicodeDecodeError:
                 raise LiveEvaluationError("internal_runner_error") from None
             if not content or (role == "chapter" and any(
                 line.lstrip().startswith("@") for line in content.splitlines()
@@ -677,7 +894,7 @@ def load_case_plans(
             documents.append(
                 SourceDocument(
                     logical_id=logical_id,
-                    filename=path.name,
+                    filename=Path(relative_path).name,
                     content=content,
                     role=role,
                     story_scope=scope,
@@ -704,7 +921,11 @@ def load_case_plans(
     declared = manifest.get("splits", {}).get(split, {}).get("case_count")
     if not plans or type(declared) is not int or len(plans) != declared:
         raise LiveEvaluationError("internal_runner_error")
-    return tuple(plans), manifest_hash, freeze_hash
+    return (
+        tuple(plans),
+        verified.manifest_sha256,
+        verified.freeze_sha256,
+    )
 
 
 def _request_with_rate_limit(
@@ -1634,6 +1855,25 @@ def _build_outcome_summary(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _build_summary(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    classifications = Counter(result["classification"] for result in results)
+    case_wall_latencies = [result["case_wall_latency_ms"] for result in results]
+    passed = sum(result["passed"] is True for result in results)
+    return {
+        "case_count": len(results),
+        "passed": passed,
+        "failed": len(results) - passed,
+        **_build_outcome_summary(results),
+        "disqualifying_execution_failure_cases": sum(
+            classifications.get(classification, 0)
+            for classification in DISQUALIFYING_EXECUTION_CLASSIFICATIONS
+        ),
+        "classification_counts": dict(sorted(classifications.items())),
+        "case_wall_latency_ms_p50": _percentile(case_wall_latencies, 0.50),
+        "case_wall_latency_ms_p95": _percentile(case_wall_latencies, 0.95),
+    }
+
+
 def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
     root = value if type(value) is dict else None
     if root is None or set(root) != {
@@ -1665,26 +1905,22 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
     provider = root.get("chat_provider")
     if type(provider) is not dict or set(provider) != {
         "model_alias",
-        "relay_hostname",
-        "relay_configuration_sha256",
+        "endpoint_configuration_sha256",
         "temperature",
         "thinking_configured",
         "thinking_mode",
     }:
         return None
     model_alias = provider.get("model_alias")
-    relay_hostname = provider.get("relay_hostname")
-    relay_hash = provider.get("relay_configuration_sha256")
+    endpoint_hash = provider.get("endpoint_configuration_sha256")
     if (
         type(model_alias) is not str
         or model_alias != model_alias.strip()
         or not model_alias
         or len(model_alias) > 255
         or any(ord(character) < 32 for character in model_alias)
-        or type(relay_hostname) is not str
-        or _SAFE_HOSTNAME.fullmatch(relay_hostname) is None
-        or type(relay_hash) is not str
-        or _SHA256.fullmatch(relay_hash) is None
+        or type(endpoint_hash) is not str
+        or _SHA256.fullmatch(endpoint_hash) is None
         or provider.get("temperature") != 0
         or type(provider.get("thinking_configured")) is not bool
         or provider.get("thinking_mode") not in {None, "disabled", "enabled"}
@@ -1763,8 +1999,7 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         },
         "chat_provider": {
             "model_alias": model_alias,
-            "relay_hostname": relay_hostname,
-            "relay_configuration_sha256": relay_hash,
+            "endpoint_configuration_sha256": endpoint_hash,
             "temperature": 0,
             "thinking_configured": provider["thinking_configured"],
             "thinking_mode": provider["thinking_mode"],
@@ -1833,11 +2068,17 @@ def _build_runtime_provenance_gate(
     api_provenance: dict[str, Any] | None,
     results: Sequence[dict[str, Any]],
     git_state: dict[str, Any],
+    runner_service_artifact_sha256: str | None,
 ) -> dict[str, Any]:
     reasons: list[str] = []
     case_count = len(results)
     if api_provenance is None:
         reasons.append("api_runtime_provenance_missing_or_invalid")
+    if (
+        type(runner_service_artifact_sha256) is not str
+        or _SHA256.fullmatch(runner_service_artifact_sha256) is None
+    ):
+        reasons.append("runner_service_artifact_unavailable")
 
     worker_rows = [
         row.get("runtime_provenance")
@@ -1867,6 +2108,11 @@ def _build_runtime_provenance_gate(
         provider = api_provenance["chat_provider"]
         capabilities = api_provenance["capabilities"]
         expected_rag = api_provenance["rag"]
+        if (
+            build.get("service_artifact_sha256")
+            != runner_service_artifact_sha256
+        ):
+            reasons.append("service_artifact_mismatch_with_runner")
         if build.get("git_revision") != git_commit:
             reasons.append("service_build_revision_mismatch")
         if capabilities != {
@@ -1915,6 +2161,7 @@ def _build_runtime_provenance_gate(
         "passed": not reasons,
         "reason_codes": reasons,
         "api_runtime_provenance": api_provenance,
+        "runner_service_artifact_sha256": runner_service_artifact_sha256,
         "worker_runtime_provenance_observed_cases": len(worker_rows),
         "worker_runtime_provenance_matches_api_cases": worker_matches,
         "rag_configuration_verified_cases": rag_verified,
@@ -1955,9 +2202,12 @@ def _build_development_gate(
             type(summary.get("negative_active_abstain_cases")) is int
             and summary["negative_active_abstain_cases"] >= 2
         ),
-        "normal_termination_at_least_7_of_8": (
+        "normal_termination_8_of_8": (
             type(summary.get("normally_terminated_cases")) is int
-            and summary["normally_terminated_cases"] >= 7
+            and summary["normally_terminated_cases"] == 8
+        ),
+        "zero_disqualifying_execution_failures": (
+            summary.get("disqualifying_execution_failure_cases") == 0
         ),
         "zero_erroneous_added_issues": (
             summary.get("erroneous_added_issue_count") == 0
@@ -1988,14 +2238,248 @@ def _build_development_gate(
     }
 
 
+def _safe_counter_dict(value: Any, allowed_keys: frozenset[str]) -> bool:
+    return (
+        type(value) is dict
+        and set(value).issubset(allowed_keys)
+        and all(_safe_int(count) is not None for count in value.values())
+    )
+
+
+def _qualified_case_is_well_formed(
+    value: Any, dev_oracle: dict[str, tuple[str, str]]
+) -> bool:
+    """Validate the complete sanitized case contract used by the dev gate."""
+
+    if type(value) is not dict or set(value) != _CASE_KEYS:
+        return False
+    if (
+        value.get("case_id") not in dev_oracle
+        or (
+            value.get("expected_decision"),
+            value.get("expected_issue_category"),
+        )
+        != dev_oracle.get(value.get("case_id"))
+        or value.get("classification") not in SAFE_CLASSIFICATIONS
+        or type(value.get("passed")) is not bool
+        or value.get("run_status") != "completed"
+        or type(value.get("project_ref_hash")) is not str
+        or _SHA256.fullmatch(value["project_ref_hash"]) is None
+        or type(value.get("run_ref_hash")) is not str
+        or _SHA256.fullmatch(value["run_ref_hash"]) is None
+        or _safe_int(value.get("case_wall_latency_ms")) is None
+        or type(value.get("citation_scope_authorized")) is not bool
+        or type(value.get("target_evidence_match")) is not bool
+        or value.get("failure_code") is not None
+    ):
+        return False
+    issue_counts = value.get("issue_category_counts")
+    if (
+        not _safe_counter_dict(issue_counts, ISSUE_CATEGORIES)
+        or any(count < 1 for count in issue_counts.values())
+    ):
+        return False
+
+    analysis_usage = value.get("analysis_usage")
+    if (
+        type(analysis_usage) is not dict
+        or set(analysis_usage)
+        != {"reported_prompt_tokens", "reported_completion_tokens", "charged_tokens"}
+        or any(_safe_int(count) is None for count in analysis_usage.values())
+    ):
+        return False
+
+    provenance = value.get("runtime_provenance")
+    if _safe_runtime_provenance(provenance) != provenance:
+        return False
+
+    investigator = value.get("investigator")
+    if type(investigator) is not dict or set(investigator) != _INVESTIGATOR_KEYS:
+        return False
+    if (
+        investigator.get("available") is not True
+        or investigator.get("enabled") is not True
+        or investigator.get("outcome") != "completed"
+        or (
+            investigator.get("reason_code") is not None
+            and _safe_identifier(investigator.get("reason_code")) is None
+        )
+        or _safe_int(investigator.get("seed_count")) is None
+    ):
+        return False
+
+    loop = investigator.get("loop")
+    if type(loop) is not dict or set(loop) != _LOOP_KEYS:
+        return False
+    if (
+        loop.get("outcome") != "completed"
+        or (
+            loop.get("reason_code") is not None
+            and _safe_identifier(loop.get("reason_code")) is None
+        )
+        or loop.get("tool_call_count_basis")
+        not in {
+            "server_reported_executed_tools",
+            "completed_loop_protocol_invariant",
+        }
+        or any(
+            _safe_int(loop.get(key)) is None
+            for key in _LOOP_KEYS
+            - {"outcome", "reason_code", "tool_call_count_basis"}
+        )
+    ):
+        return False
+
+    promotion = investigator.get("promotion")
+    if type(promotion) is not dict or set(promotion) != _PROMOTION_KEYS:
+        return False
+    submitted = _safe_int(promotion.get("submitted_candidates"))
+    accepted = _safe_int(promotion.get("accepted_candidates"))
+    added = _safe_int(promotion.get("added_issues"))
+    if (
+        None in {submitted, accepted, added}
+        or accepted > submitted
+        or added > accepted
+        or not _safe_counter_dict(
+            promotion.get("rejection_counts"), SAFE_REJECTION_REASONS
+        )
+    ):
+        return False
+
+    usage = investigator.get("usage")
+    if type(usage) is not dict or set(usage) != _USAGE_KEYS:
+        return False
+    if (
+        any(
+            _safe_int(usage.get(key)) is None
+            for key in {
+                "reported_prompt_tokens",
+                "reported_completion_tokens",
+                "charged_tokens",
+            }
+        )
+        or usage.get("token_count_basis")
+        not in {"investigator_usage_ledger", "legacy_loop_compatibility"}
+        or not _safe_counter_dict(
+            usage.get("provider_category_counts"), SAFE_PROVIDER_CATEGORIES
+        )
+    ):
+        return False
+
+    budget = investigator.get("budget_preflight")
+    if type(budget) is not dict or set(budget) != _BUDGET_PREFLIGHT_KEYS:
+        return False
+    if (
+        type(budget.get("minimum_path_admissible")) is not bool
+        or any(
+            _safe_int(budget.get(key)) is None
+            for key in _BUDGET_PREFLIGHT_KEYS - {"minimum_path_admissible"}
+        )
+    ):
+        return False
+    effective = investigator.get("effective_limits")
+    if (
+        type(effective) is not dict
+        or set(effective) != {"max_charged_tokens", "source"}
+        or _safe_int(effective.get("max_charged_tokens")) is None
+        or effective.get("max_charged_tokens") != budget.get("max_charged_tokens")
+        or effective.get("source") != "service_budget_preflight"
+    ):
+        return False
+
+    rag = investigator.get("rag")
+    if type(rag) is not dict or set(rag) != _RAG_KEYS:
+        return False
+    if (
+        rag.get("index_outcome") != "complete"
+        or rag.get("index_reason") is not None
+        or type(rag.get("profile_fingerprint")) is not str
+        or _SHA256.fullmatch(rag["profile_fingerprint"]) is None
+        or type(rag.get("chunker_fingerprint")) is not str
+        or _SHA256.fullmatch(rag["chunker_fingerprint"]) is None
+        or rag.get("modes") != ["hybrid"]
+        or rag.get("strategies") != ["keyword+vector+entity-rrf"]
+        or _safe_int(rag.get("total_retrievals")) is None
+        or rag["total_retrievals"] < 1
+    ):
+        return False
+
+    isolation = value.get("capability_isolation")
+    if type(isolation) is not dict or set(isolation) != _ISOLATION_KEYS:
+        return False
+    main = isolation.get("main_extraction")
+    review = isolation.get("issue_evidence_review")
+    if (
+        isolation.get("verified") is not True
+        or isolation.get("aggregate_chat_usage_matches_investigator") is not True
+        or isolation.get("reason_codes") != []
+        or type(main) is not dict
+        or set(main)
+        != {
+            "diagnostics_present",
+            "enabled",
+            "configured",
+            "used",
+            "logical_calls",
+            "provider_calls",
+        }
+        or main
+        != {
+            "diagnostics_present": True,
+            "enabled": False,
+            "configured": False,
+            "used": False,
+            "logical_calls": 0,
+            "provider_calls": 0,
+        }
+        or type(review) is not dict
+        or set(review)
+        != {
+            "diagnostics_present",
+            "enabled",
+            "logical_calls",
+            "provider_calls",
+            "switch_proof",
+        }
+        or review.get("enabled") is not False
+        or review.get("logical_calls") != 0
+        or review.get("provider_calls") != 0
+        or review.get("switch_proof")
+        not in {"stage_diagnostics_absent", "explicit_stage_diagnostics"}
+    ):
+        return False
+
+    expected_count = 1 if value["expected_decision"] == "added_issue" else 0
+    expected_classification, expected_passed = _classify(
+        run_status="completed",
+        categories=Counter(issue_counts),
+        diagnostics=investigator,
+        ground_truth=GroundTruth(
+            decision=value["expected_decision"],
+            issue_category=value["expected_issue_category"],
+            added_issue_count=expected_count,
+            allowed_evidence=(),
+        ),
+        target_evidence_match=value["target_evidence_match"],
+        citation_scope_authorized=value["citation_scope_authorized"],
+        capability_isolation=isolation,
+    )
+    return (
+        value["classification"] == expected_classification
+        and value["passed"] is expected_passed
+    )
+
+
 def compare_dev_artifact_payloads(
     first: Any, second: Any
 ) -> dict[str, Any]:
-    """Fail-closed proof that two qualified dev artifacts used one runtime."""
+    """Fail closed unless two dev artifacts are complete and self-consistent."""
 
     reasons: list[str] = []
     fingerprints: list[str] = []
     timestamps: list[tuple[datetime, datetime]] = []
+    current_bundle_hash = _local_service_artifact_sha256()
+    dev_oracle = _authenticated_dev_oracle()
     for label, payload in (("first", first), ("second", second)):
         if type(payload) is not dict:
             reasons.append(f"{label}_artifact_invalid")
@@ -2021,47 +2505,32 @@ def compare_dev_artifact_payloads(
             or fixture.get("freeze_sha256") != PINNED_FREEZE_SHA256
         ):
             reasons.append(f"{label}_fixture_identity_invalid")
-        provenance_gate = payload.get("provenance_gate")
-        if (
-            type(provenance_gate) is not dict
-            or set(provenance_gate) != _PROVENANCE_GATE_KEYS
-            or provenance_gate.get("passed") is not True
-            or provenance_gate.get("reason_codes") != []
-            or provenance_gate.get("case_count") != 8
-            or provenance_gate.get("worker_runtime_provenance_observed_cases") != 8
-            or provenance_gate.get("worker_runtime_provenance_matches_api_cases") != 8
-            or provenance_gate.get("rag_configuration_verified_cases") != 8
-            or _safe_runtime_provenance(
-                provenance_gate.get("api_runtime_provenance")
-            )
-            != provenance_gate.get("api_runtime_provenance")
-        ):
-            reasons.append(f"{label}_provenance_gate_failed")
-        development_gate = payload.get("development_gate")
-        summary = payload.get("summary")
-        expected_development_gate = (
-            _build_development_gate("dev", summary, provenance_gate)
-            if type(summary) is dict and type(provenance_gate) is dict
-            else None
-        )
-        if (
-            type(development_gate) is not dict
-            or set(development_gate) != _DEVELOPMENT_GATE_KEYS
-            or development_gate.get("applicable") is not True
-            or development_gate.get("passed") is not True
-            or development_gate != expected_development_gate
-        ):
-            reasons.append(f"{label}_development_gate_failed")
+
         cases = payload.get("cases")
-        if type(cases) is not list or len(cases) != 8:
+        cases_valid = (
+            type(cases) is list
+            and len(cases) == 8
+            and {case.get("case_id") for case in cases if type(case) is dict}
+            == DEV_CASE_IDS
+            and dev_oracle is not None
+            and all(
+                _qualified_case_is_well_formed(case, dev_oracle)
+                for case in cases
+            )
+        )
+        if not cases_valid:
             reasons.append(f"{label}_case_results_incomplete")
+        computed_summary = _build_summary(cases) if cases_valid else None
+        if payload.get("summary") != computed_summary:
+            reasons.append(f"{label}_summary_not_reproducible_from_cases")
+
         fingerprint = payload.get("reproducibility_fingerprint")
         if type(fingerprint) is not str or _SHA256.fullmatch(fingerprint) is None:
             reasons.append(f"{label}_reproducibility_fingerprint_invalid")
         else:
             fingerprints.append(fingerprint)
         safe_configuration = payload.get("safe_configuration")
-        if (
+        configuration_valid = not (
             type(safe_configuration) is not dict
             or set(safe_configuration) != _SAFE_CONFIGURATION_KEYS
             or payload.get("safe_configuration_fingerprint") != fingerprint
@@ -2071,14 +2540,11 @@ def compare_dev_artifact_payloads(
             or safe_configuration.get("dataset_id") != DATASET_ID
             or safe_configuration.get("split") != "dev"
             or safe_configuration.get("runner_git") != payload.get("git")
+            or safe_configuration.get("runner_service_artifact_sha256")
+            != current_bundle_hash
             or safe_configuration.get("manifest_sha256")
             != PINNED_MANIFEST_SHA256
             or safe_configuration.get("freeze_sha256") != PINNED_FREEZE_SHA256
-            or safe_configuration.get(
-                "worker_runtime_provenance_matches_api_cases"
-            )
-            != 8
-            or safe_configuration.get("rag_configuration_verified_cases") != 8
             or type(safe_configuration.get("service_observation")) is not dict
             or set(safe_configuration.get("service_observation", {}))
             != {
@@ -2092,16 +2558,69 @@ def compare_dev_artifact_payloads(
             is not True
             or safe_configuration["service_observation"].get("model_configured")
             is not True
-            or safe_configuration["service_observation"].get(
-                "runtime_provenance"
-            )
-            != (
-                provenance_gate.get("api_runtime_provenance")
-                if type(provenance_gate) is dict
-                else None
-            )
-        ):
+        )
+        if not configuration_valid:
             reasons.append(f"{label}_configuration_fingerprint_mismatch")
+
+        provenance_gate = payload.get("provenance_gate")
+        api_provenance = (
+            _safe_runtime_provenance(
+                safe_configuration["service_observation"].get(
+                    "runtime_provenance"
+                )
+            )
+            if configuration_valid
+            else None
+        )
+        runner_bundle_hash = (
+            safe_configuration.get("runner_service_artifact_sha256")
+            if configuration_valid
+            else None
+        )
+        expected_provenance_gate = (
+            _build_runtime_provenance_gate(
+                api_provenance,
+                cases,
+                payload.get("git") if type(payload.get("git")) is dict else {},
+                runner_bundle_hash,
+            )
+            if cases_valid
+            else None
+        )
+        if (
+            type(provenance_gate) is not dict
+            or set(provenance_gate) != _PROVENANCE_GATE_KEYS
+            or provenance_gate.get("passed") is not True
+            or provenance_gate != expected_provenance_gate
+            or not configuration_valid
+            or safe_configuration.get(
+                "worker_runtime_provenance_matches_api_cases"
+            )
+            != provenance_gate.get("worker_runtime_provenance_matches_api_cases")
+            or safe_configuration.get("rag_configuration_verified_cases")
+            != provenance_gate.get("rag_configuration_verified_cases")
+            or safe_configuration.get("service_reported_effective_limits")
+            != _service_reported_effective_limits(cases if cases_valid else [])
+        ):
+            reasons.append(f"{label}_provenance_gate_not_reproducible")
+
+        development_gate = payload.get("development_gate")
+        expected_development_gate = (
+            _build_development_gate(
+                "dev", computed_summary, expected_provenance_gate
+            )
+            if computed_summary is not None
+            and expected_provenance_gate is not None
+            else None
+        )
+        if (
+            type(development_gate) is not dict
+            or set(development_gate) != _DEVELOPMENT_GATE_KEYS
+            or development_gate.get("applicable") is not True
+            or development_gate.get("passed") is not True
+            or development_gate != expected_development_gate
+        ):
+            reasons.append(f"{label}_development_gate_not_reproducible")
         try:
             started = datetime.fromisoformat(payload["started_at"])
             completed = datetime.fromisoformat(payload["completed_at"])
@@ -2125,8 +2644,9 @@ def compare_dev_artifact_payloads(
             else None
         ),
         "boundary": (
-            "This proves two developer-visible runs used one recorded service build "
-            "and configuration. It does not turn dev cases into a blind benchmark."
+            "This checks that two developer-visible artifacts are internally "
+            "self-consistent and match the evaluator's current source bundle. It is "
+            "not a signature, authenticity proof, or blind benchmark."
         ),
     }
 
@@ -2205,6 +2725,9 @@ def run_live_evaluation(
         raise LiveEvaluationError("configuration_invalid")
     _normalize_base_url(options.base_url)
     _validate_artifact_target(options.artifact_path)
+    runner_service_artifact_sha256 = _local_service_artifact_sha256()
+    if runner_service_artifact_sha256 is None:
+        raise LiveEvaluationError("service_not_ready")
     git_before = _git_state()
     # Freeze verification intentionally occurs before construction/use of the
     # HTTP client.  A modified holdout can therefore never create a project.
@@ -2224,6 +2747,10 @@ def run_live_evaluation(
         not health["service_ok"]
         or not health["model_configured"]
         or health["runtime_provenance"] is None
+        or health["runtime_provenance"]["build"].get(
+            "service_artifact_sha256"
+        )
+        != runner_service_artifact_sha256
     ):
         raise LiveEvaluationError("service_not_ready")
 
@@ -2240,21 +2767,12 @@ def run_live_evaluation(
     ]
     git_state = _stable_git_state(git_before, _git_state())
     effective_limits = _service_reported_effective_limits(results)
-    classifications = Counter(result["classification"] for result in results)
-    case_wall_latencies = [result["case_wall_latency_ms"] for result in results]
-    passed = sum(result["passed"] is True for result in results)
-    outcome_summary = _build_outcome_summary(results)
-    summary = {
-        "case_count": len(results),
-        "passed": passed,
-        "failed": len(results) - passed,
-        **outcome_summary,
-        "classification_counts": dict(sorted(classifications.items())),
-        "case_wall_latency_ms_p50": _percentile(case_wall_latencies, 0.50),
-        "case_wall_latency_ms_p95": _percentile(case_wall_latencies, 0.95),
-    }
+    summary = _build_summary(results)
     provenance_gate = _build_runtime_provenance_gate(
-        health["runtime_provenance"], results, git_state
+        health["runtime_provenance"],
+        results,
+        git_state,
+        runner_service_artifact_sha256,
     )
     development_gate = _build_development_gate(
         options.split, summary, provenance_gate
@@ -2269,6 +2787,7 @@ def run_live_evaluation(
         "request_timeout_seconds": options.request_timeout_seconds,
         "poll_interval_seconds": options.poll_interval_seconds,
         "runner_git": git_state,
+        "runner_service_artifact_sha256": runner_service_artifact_sha256,
         "service_observation": health,
         "service_reported_effective_limits": effective_limits,
         "worker_runtime_provenance_matches_api_cases": provenance_gate[
@@ -2309,8 +2828,9 @@ def run_live_evaluation(
             "the bounded loop later degrades; provider decision calls and retryable "
             "rejections remain separate counters. Older completed-loop diagnostics may "
             "use the one-decision/one-tool protocol invariant. Runtime provenance exposes "
-            "only a model alias, relay hostname, endpoint hash, content hash and bounded "
-            "configuration; it never exposes credentials or a complete base URL."
+            "only a model alias, irreversible endpoint hash, content hash and bounded "
+            "configuration; it never exposes credentials, a hostname, or a complete "
+            "base URL."
         ),
     }
     artifact_hash = write_artifact_exclusive(options.artifact_path, artifact)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 
+import scripts.run_evidence_investigator_live as live_runner
+
 from app.config import Settings
 from app.runtime_provenance import (
     RUNTIME_PROVENANCE_SCHEMA,
@@ -49,9 +51,8 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     )
     assert result["chat_provider"] == {
         "model_alias": "fixture-model",
-        "relay_hostname": "relay.example",
-        "relay_configuration_sha256": result["chat_provider"][
-            "relay_configuration_sha256"
+        "endpoint_configuration_sha256": result["chat_provider"][
+            "endpoint_configuration_sha256"
         ],
         "temperature": 0,
         "thinking_configured": True,
@@ -59,7 +60,7 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     }
     assert re.fullmatch(
         r"[a-f0-9]{64}",
-        result["chat_provider"]["relay_configuration_sha256"],
+        result["chat_provider"]["endpoint_configuration_sha256"],
     )
     assert result["investigator_limits"]["provider_call_timeout_seconds"] == 60
     assert result["investigator_limits"]["total_deadline_seconds"] == 90
@@ -70,6 +71,7 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     assert "test-only-secret" not in serialized
     assert "https://" not in serialized
     assert "/v1" not in serialized
+    assert "relay.example" not in serialized
 
 
 def test_runtime_provenance_marks_unversioned_build_without_inventing_revision():
@@ -79,3 +81,7 @@ def test_runtime_provenance_marks_unversioned_build_without_inventing_revision()
 
     assert result["build"]["git_revision"] is None
     assert service_artifact_sha256() == result["build"]["service_artifact_sha256"]
+
+
+def test_service_and_runner_independently_hash_the_same_source_bundle():
+    assert service_artifact_sha256() == live_runner._local_service_artifact_sha256()

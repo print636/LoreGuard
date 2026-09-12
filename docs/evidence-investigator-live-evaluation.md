@@ -42,7 +42,7 @@ python scripts/run_evidence_investigator_live.py `
 
 所有结果文件都采用“只创建、不覆盖”语义。默认文件名包含 UTC 时间和随机后缀；显式路径若已存在，runner 会退出而不会改写原始结果。每个案例有独立项目，超时后会尽力取消仍在运行的任务。
 
-冻结校验始终认证共享 manifest 与 freeze 索引，但 dev 运行只打开并哈希 dev 正文，holdout 运行才打开并哈希 holdout 正文；`verify_frozen_dataset(split=None)` 仅用于显式的离线全夹具审计。任何 holdout 篡改都会在建立 HTTP 客户端、创建项目或调用 Provider 前终止 holdout 运行。
+冻结校验始终认证共享 manifest 与 freeze 索引，但 dev 运行只打开并哈希 dev 正文，holdout 运行才打开并哈希 holdout 正文；校验得到的正文 bytes 会直接用于上传，不会再次打开文件。`verify_frozen_dataset(split=None)` 仅用于显式的离线全夹具审计。共享 manifest 仍包含两个 split 的索引与期望元数据，因此这里保证的是“正文 bytes 隔离”，不是 holdout 元数据盲化。任何 holdout 正文篡改都会在建立 HTTP 客户端、创建项目或调用 Provider 前终止 holdout 运行。
 
 ## 结果边界
 
@@ -60,13 +60,15 @@ python scripts/run_evidence_investigator_live.py `
 - `wrong_candidate`：输出了错误问题、漏掉正例，或证据没有命中冻结授权行；
 - `runner_failure`：HTTP/协议/本地执行失败，不得计作模型主动 abstain。
 
-产物格式 `evidence-investigator-live-http-v3` 会逐案例保存脱敏的 capability isolation 证明：主模型抽取必须明确为 disabled、unconfigured、unused 且零逻辑/Provider 调用；`ai_evidence_review` 必须按服务分支契约缺席或明确关闭且零调用；运行级 prompt、completion 与 charged token 还必须和 Investigator 账本完全相等。任一条件不满足都会得到 `isolation_failure`，即使最终问题恰好命中也不能通过。v2 及更早产物仅保留作历史记录，不能用于取得 dev pair 资格。
+产物格式 `evidence-investigator-live-http-v4` 会逐案例保存脱敏的 capability isolation 证明：主模型抽取必须明确为 disabled、unconfigured、unused 且零逻辑/Provider 调用；`ai_evidence_review` 必须按服务分支契约缺席或明确关闭且零调用；运行级 prompt、completion 与 charged token 还必须和 Investigator 账本完全相等。任一条件不满足都会得到 `isolation_failure`，即使最终问题恰好命中也不能通过。v2/v3 产物仅保留作历史记录，不能用于取得 dev pair 资格。
 
 ### Dev 晋级门槛
 
-单次 dev 产物必须同时满足：固定的 8 案例结构（5 正例、3 负例）、strict 至少 5/8、正例至少 3/5、负例最终安全 3/3、Agent 主动 abstain 至少 2/3、正常终止至少 7/8、零错误新增、8/8 最终输出可观察、能力隔离与 promotion 计数均为 8/8。一次超时或 Provider 拒绝不会被伪装为安全通过：它既不算最终输出可观察，也不算主动 abstain；由于最终输出必须 8/8 可观察，实际晋级不允许此类失败。
+单次 dev 产物必须同时满足：固定的 8 案例结构（5 正例、3 负例）、strict 至少 5/8、正例至少 3/5、负例最终安全 3/3、Agent 主动 abstain 至少 2/3、正常终止 8/8、零执行类失败、零错误新增、8/8 最终输出可观察、能力隔离与 promotion 计数均为 8/8。执行类失败明确为 `timeout_or_budget`、`provider_failure`、`runner_failure`、`isolation_failure` 和 `agent_protocol_failure`；任何一个出现都会阻止晋级。
 
-runtime provenance 还必须证明 API 与全部 worker 案例使用同一服务代码包哈希、Git revision、模型别名、relay hostname 与脱敏 endpoint 配置哈希、核心 Investigator 有效上限和 RAG profile/chunker 配置。产物不保存 API key 或完整 base URL。缺少任一 v3 provenance/gate 字段都会 fail closed；两次合格 dev 还必须具有同一 `reproducibility_fingerprint` 且时间不重叠。
+runtime provenance 还必须证明 API 与全部 worker 案例使用同一服务代码包哈希、Git revision、模型别名、不可逆 endpoint 配置哈希、核心 Investigator 有效上限和 RAG profile/chunker 配置。runner 会用同一算法独立计算本地 `app/**/*.py + requirements.txt` 哈希；API 在任何案例调用前必须匹配，全部 worker 也必须匹配。该哈希不是 OCI image digest，Git revision 也不能证明 relay 背后的真实模型权重。产物不保存 API key、hostname 或完整 base URL。缺少任一 v4 provenance/gate 字段都会 fail closed；两次合格 dev 还必须具有同一 `reproducibility_fingerprint` 且时间不重叠。
+
+pair checker 会按已认证 manifest 复核每个 dev case 的 ID、期望 decision/category 和完整脱敏字段合同，然后从逐案例记录重新计算 summary、provenance gate 与 development gate；不能用手写 summary 掩盖超时或 Provider 失败。该检查只证明产物内部自洽并与当前 evaluator 源码包一致，不提供数字签名或来源真实性证明。
 
 ### Summary 指标口径
 

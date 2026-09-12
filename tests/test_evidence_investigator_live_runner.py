@@ -43,15 +43,14 @@ FIXTURE_CHUNKER = "d" * 64
 
 def runtime_provenance():
     return {
-        "schema_version": "loreguard-runtime-provenance-v1",
+        "schema_version": "loreguard-runtime-provenance-v2",
         "build": {
             "git_revision": FIXTURE_GIT_REVISION,
             "service_artifact_sha256": FIXTURE_SERVICE_ARTIFACT,
         },
         "chat_provider": {
             "model_alias": "fixture-model",
-            "relay_hostname": "relay.example",
-            "relay_configuration_sha256": "e" * 64,
+            "endpoint_configuration_sha256": "e" * 64,
             "temperature": 0,
             "thinking_configured": True,
             "thinking_mode": "disabled",
@@ -300,6 +299,11 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(
             "tracked_worktree_dirty": False,
         },
     )
+    monkeypatch.setattr(
+        live_runner,
+        "_local_service_artifact_sha256",
+        lambda: FIXTURE_SERVICE_ARTIFACT,
+    )
     plans, _, _ = load_case_plans("dev")
     api = FixtureHttpApi(plans)
 
@@ -312,7 +316,7 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(
         "active_abstain": 3,
         "positive_added_issue": 5,
     }
-    assert artifact["schema_version"] == "evidence-investigator-live-http-v3"
+    assert artifact["schema_version"] == "evidence-investigator-live-http-v4"
     assert artifact["provenance_gate"]["passed"] is True
     assert artifact["development_gate"]["passed"] is True
     assert artifact["reproducibility_fingerprint"] == artifact[
@@ -583,6 +587,11 @@ def test_mock_http_e2e_persists_split_outcome_metrics_without_frozen_fixture_rea
         "scripts.run_evidence_investigator_live.load_case_plans",
         lambda split, dataset_root: (plans, "a" * 64, "b" * 64),
     )
+    monkeypatch.setattr(
+        live_runner,
+        "_local_service_artifact_sha256",
+        lambda: FIXTURE_SERVICE_ARTIFACT,
+    )
 
     artifact, _ = run_live_evaluation(options(tmp_path), api=FixtureHttpApi(plans))
 
@@ -812,16 +821,153 @@ def test_runtime_provenance_parser_is_exact_and_fail_closed():
     assert _safe_runtime_provenance(unexpected_url) is None
 
 
+def _qualified_case(case_id, expected_decision, expected_category, provenance):
+    positive = expected_decision == "added_issue"
+    provider_calls = 3 if positive else 1
+    diagnostics_payload = {
+        "model": {
+            "enabled": False,
+            "configured": False,
+            "used": False,
+            "logical_call_count": 0,
+            "provider_calls": [],
+        },
+        "evidence_investigator": {
+            "enabled": True,
+            "outcome": "completed",
+            "reason_code": "completed",
+            "seed_count": 1,
+            "loop": {
+                "outcome": "completed",
+                "reason_code": "completed",
+                "provider_calls": provider_calls,
+                "executed_tool_calls": provider_calls,
+                "executed_searches": 1 if positive else 0,
+                "executed_reads": 1 if positive else 0,
+                "recoverable_rejections": 0,
+                "completed_seeds": 1 if positive else 0,
+                "abstained_seeds": 0 if positive else 1,
+                "submitted_envelopes": 1 if positive else 0,
+                "authorized_candidates": 1 if positive else 0,
+            },
+            "promotion": {
+                "submitted_candidates": 1 if positive else 0,
+                "accepted_candidates": 1 if positive else 0,
+                "added_issues": 1 if positive else 0,
+                "rejection_counts": {},
+            },
+            "budget_preflight": {
+                "seed_count": 1,
+                "minimum_path_admissible": True,
+                "minimum_required_rounds": 1,
+                "minimum_initial_reservation": 100,
+                "maximum_local_round_reservation": 200,
+                "maximum_local_run_reservation": 1200,
+                "max_charged_tokens": 16000,
+                "oversized_initial_prompts": 0,
+            },
+            "usage": {
+                "reported_prompt_tokens": 29,
+                "reported_completion_tokens": 5,
+                "charged_tokens": 91,
+                "provider_calls": [
+                    {"category": "success"} for _ in range(provider_calls)
+                ],
+            },
+            "rag": {
+                "index": {
+                    "outcome": "complete",
+                    "reason": None,
+                    "profile_fingerprint": FIXTURE_PROFILE,
+                    "chunker_fingerprint": FIXTURE_CHUNKER,
+                },
+                "retrievals": [
+                    {
+                        "mode": "hybrid",
+                        "strategy": "keyword+vector+entity-rrf",
+                    }
+                ],
+                "total_retrievals": 1,
+            },
+        },
+    }
+    investigator = _safe_diagnostics(diagnostics_payload)
+    status = {
+        "prompt_tokens": 29,
+        "completion_tokens": 5,
+        "usage_accounting": {"charged_tokens": 91},
+    }
+    isolation = _safe_capability_isolation(
+        diagnostics_payload,
+        status_payload=status,
+        investigator=investigator,
+    )
+    counts = {expected_category: 1} if positive else {}
+    evidence_match = positive
+    classification, passed = _classify(
+        run_status="completed",
+        categories=Counter(counts),
+        diagnostics=investigator,
+        ground_truth=GroundTruth(
+            decision=expected_decision,
+            issue_category=expected_category,
+            added_issue_count=1 if positive else 0,
+            allowed_evidence=(),
+        ),
+        target_evidence_match=evidence_match,
+        citation_scope_authorized=True,
+        capability_isolation=isolation,
+    )
+    return {
+        "case_id": case_id,
+        "expected_decision": expected_decision,
+        "expected_issue_category": expected_category,
+        "classification": classification,
+        "passed": passed,
+        "run_status": "completed",
+        "project_ref_hash": live_runner._sha256_bytes(
+            f"project-{case_id}".encode()
+        ),
+        "run_ref_hash": live_runner._sha256_bytes(f"run-{case_id}".encode()),
+        "case_wall_latency_ms": 100,
+        "issue_category_counts": counts,
+        "citation_scope_authorized": True,
+        "target_evidence_match": evidence_match,
+        "analysis_usage": {
+            "reported_prompt_tokens": 29,
+            "reported_completion_tokens": 5,
+            "charged_tokens": 91,
+        },
+        "investigator": investigator,
+        "runtime_provenance": provenance,
+        "capability_isolation": isolation,
+        "failure_code": None,
+    }
+
+
 def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
+    bundle_hash = live_runner._local_service_artifact_sha256()
+    assert bundle_hash is not None
     provenance = runtime_provenance()
+    provenance["build"]["service_artifact_sha256"] = bundle_hash
     provenance["chat_provider"]["model_alias"] = model
     git = {
         "commit": FIXTURE_GIT_REVISION,
         "tracked_worktree_dirty": False,
         "stable_during_run": True,
     }
+    oracle = live_runner._authenticated_dev_oracle()
+    assert oracle is not None
+    cases = [
+        _qualified_case(case_id, decision, category, provenance)
+        for case_id, (decision, category) in sorted(oracle.items())
+    ]
+    summary = live_runner._build_summary(cases)
+    provenance_gate = live_runner._build_runtime_provenance_gate(
+        provenance, cases, git, bundle_hash
+    )
     safe_configuration = {
-        "artifact_schema": "evidence-investigator-live-http-v3",
+        "artifact_schema": "evidence-investigator-live-http-v4",
         "dataset_id": "evidence-investigator-live-v1",
         "split": "dev",
         "manifest_sha256": live_runner.PINNED_MANIFEST_SHA256,
@@ -830,6 +976,7 @@ def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
         "request_timeout_seconds": 30.0,
         "poll_interval_seconds": 1.0,
         "runner_git": git,
+        "runner_service_artifact_sha256": bundle_hash,
         "service_observation": {
             "service_ok": True,
             "model_configured": True,
@@ -837,43 +984,17 @@ def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
             "thinking_mode": "disabled",
             "runtime_provenance": provenance,
         },
-        "service_reported_effective_limits": {
-            "observed_cases": 8,
-            "consistent_across_cases": True,
-            "values": {},
-            "distinct_snapshot_count": 1,
-        },
+        "service_reported_effective_limits": _service_reported_effective_limits(
+            cases
+        ),
         "worker_runtime_provenance_matches_api_cases": 8,
         "rag_configuration_verified_cases": 8,
     }
     fingerprint = live_runner._sha256_bytes(
         live_runner._canonical_json_bytes(safe_configuration)
     )
-    provenance_gate = {
-        "passed": True,
-        "reason_codes": [],
-        "api_runtime_provenance": provenance,
-        "worker_runtime_provenance_observed_cases": 8,
-        "worker_runtime_provenance_matches_api_cases": 8,
-        "rag_configuration_verified_cases": 8,
-        "case_count": 8,
-    }
-    summary = {
-        "case_count": 8,
-        "passed": 5,
-        "positive_cases": 5,
-        "positive_passed": 3,
-        "negative_cases": 3,
-        "negative_safe_cases": 3,
-        "negative_active_abstain_cases": 2,
-        "normally_terminated_cases": 7,
-        "erroneous_added_issue_count": 0,
-        "final_output_observed_cases": 8,
-        "capability_isolation_verified": 8,
-        "promotion_accounting_observed_cases": 8,
-    }
     return {
-        "schema_version": "evidence-investigator-live-http-v3",
+        "schema_version": "evidence-investigator-live-http-v4",
         "dataset_id": "evidence-investigator-live-v1",
         "split": "dev",
         "execution_source": "live_http_service",
@@ -892,7 +1013,7 @@ def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
             "dev", summary, provenance_gate
         ),
         "summary": summary,
-        "cases": [{} for _ in range(8)],
+        "cases": cases,
         "privacy_boundary": {
             "source_bodies_persisted": False,
             "provider_payloads_persisted": False,
@@ -903,7 +1024,7 @@ def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
     }
 
 
-def test_dev_pair_requires_v3_qualified_identical_nonoverlapping_runs():
+def test_dev_pair_requires_v4_qualified_identical_nonoverlapping_runs():
     first = _qualified_dev_artifact(
         started_at="2026-09-12T10:00:00+00:00",
         completed_at="2026-09-12T10:05:00+00:00",
@@ -929,7 +1050,7 @@ def test_dev_pair_requires_v3_qualified_identical_nonoverlapping_runs():
     ]
 
 
-def test_dev_pair_treats_v2_and_missing_fields_as_historical_only():
+def test_dev_pair_treats_old_schemas_and_missing_fields_as_historical_only():
     historical = {
         "schema_version": "evidence-investigator-live-http-v2",
         "dataset_id": "evidence-investigator-live-v1",
@@ -944,11 +1065,16 @@ def test_dev_pair_treats_v2_and_missing_fields_as_historical_only():
     assert result["passed"] is False
     assert "first_artifact_historical_only" in result["reason_codes"]
 
+    historical["schema_version"] = "evidence-investigator-live-http-v3"
+    result = compare_dev_artifact_payloads(historical, current)
+    assert result["passed"] is False
+    assert "first_artifact_historical_only" in result["reason_codes"]
+
     missing = dict(current)
     missing.pop("provenance_gate")
     result = compare_dev_artifact_payloads(current, missing)
     assert result["passed"] is False
-    assert "second_provenance_gate_failed" in result["reason_codes"]
+    assert "second_provenance_gate_not_reproducible" in result["reason_codes"]
 
     incomplete = json.loads(json.dumps(current))
     incomplete["provenance_gate"].pop(
@@ -956,7 +1082,7 @@ def test_dev_pair_treats_v2_and_missing_fields_as_historical_only():
     )
     result = compare_dev_artifact_payloads(current, incomplete)
     assert result["passed"] is False
-    assert "second_provenance_gate_failed" in result["reason_codes"]
+    assert "second_provenance_gate_not_reproducible" in result["reason_codes"]
 
     incomplete = json.loads(json.dumps(current))
     incomplete["development_gate"]["checks"].pop(
@@ -964,7 +1090,62 @@ def test_dev_pair_treats_v2_and_missing_fields_as_historical_only():
     )
     result = compare_dev_artifact_payloads(current, incomplete)
     assert result["passed"] is False
-    assert "second_development_gate_failed" in result["reason_codes"]
+    assert "second_development_gate_not_reproducible" in result["reason_codes"]
+
+
+def test_dev_pair_recomputes_cases_summary_and_frozen_oracle():
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+
+    empty_cases = json.loads(json.dumps(first))
+    empty_cases["cases"] = [{} for _ in range(8)]
+    result = compare_dev_artifact_payloads(first, empty_cases)
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+
+    invented_summary = json.loads(json.dumps(first))
+    invented_summary["summary"]["passed"] = 5
+    invented_summary["summary"]["failed"] = 3
+    invented_summary["development_gate"] = live_runner._build_development_gate(
+        "dev",
+        invented_summary["summary"],
+        invented_summary["provenance_gate"],
+    )
+    result = compare_dev_artifact_payloads(first, invented_summary)
+    assert result["passed"] is False
+    assert "second_summary_not_reproducible_from_cases" in result["reason_codes"]
+
+    changed_oracle = json.loads(json.dumps(first))
+    changed_oracle["cases"][0]["expected_issue_category"] = "item_ownership"
+    changed_oracle["cases"][0]["issue_category_counts"] = {"item_ownership": 1}
+    result = compare_dev_artifact_payloads(first, changed_oracle)
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    ("reason_code", "classification"),
+    [("deadline", "timeout_or_budget"), ("provider_rate_limit", "provider_failure")],
+)
+def test_dev_pair_cannot_disguise_execution_failure_with_old_gate(
+    reason_code, classification
+):
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    disguised = json.loads(json.dumps(first))
+    disguised["cases"][0]["investigator"]["reason_code"] = reason_code
+    disguised["cases"][0]["classification"] = classification
+    disguised["cases"][0]["passed"] = False
+
+    result = compare_dev_artifact_payloads(first, disguised)
+
+    assert result["passed"] is False
+    assert "second_summary_not_reproducible_from_cases" in result["reason_codes"]
+    assert "second_development_gate_not_reproducible" in result["reason_codes"]
 
 
 def test_top_level_usage_survives_missing_loop_and_preserves_failure_reason():
@@ -1099,26 +1280,41 @@ def test_confirmation_gate_precedes_fixture_and_http(tmp_path):
     assert not (tmp_path / "dev-result.json").exists()
 
 
+def test_service_bundle_mismatch_stops_before_case_http(tmp_path, monkeypatch):
+    plans, _, _ = load_case_plans("dev")
+    api = FixtureHttpApi(plans)
+    monkeypatch.setattr(
+        live_runner,
+        "_local_service_artifact_sha256",
+        lambda: "f" * 64,
+    )
+
+    with pytest.raises(LiveEvaluationError, match="service_not_ready"):
+        run_live_evaluation(options(tmp_path), api=api)
+
+    assert [(method, path) for method, path, _ in api.calls] == [
+        ("GET", "/health")
+    ]
+
+
 def test_dev_plan_loading_never_reads_holdout_source_bytes(monkeypatch):
     original_read_bytes = Path.read_bytes
-    original_read_text = Path.read_text
+    dev_source_reads = Counter()
 
     def guarded_read_bytes(path):
         if "holdout" in path.parts:
             raise AssertionError("dev verification opened holdout bytes")
+        if "dev" in path.parts and path.suffix == ".md":
+            dev_source_reads[str(path)] += 1
         return original_read_bytes(path)
 
-    def guarded_read_text(path, *args, **kwargs):
-        if "holdout" in path.parts:
-            raise AssertionError("dev plan loading opened holdout text")
-        return original_read_text(path, *args, **kwargs)
-
     monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
-    monkeypatch.setattr(Path, "read_text", guarded_read_text)
 
     plans, manifest_hash, freeze_hash = load_case_plans("dev")
 
     assert len(plans) == 8
+    assert dev_source_reads
+    assert set(dev_source_reads.values()) == {1}
     assert len(manifest_hash) == 64
     assert len(freeze_hash) == 64
 
@@ -1174,10 +1370,11 @@ def test_cli_refuses_without_explicit_live_confirmation(tmp_path, capsys):
 
 
 def test_frozen_dev_fixture_is_valid_without_running_a_model():
-    manifest, manifest_hash, freeze_hash = verify_frozen_dataset(split="dev")
-    assert manifest["dataset_id"] == "evidence-investigator-live-v1"
-    assert len(manifest_hash) == 64
-    assert len(freeze_hash) == 64
+    verified = verify_frozen_dataset(split="dev")
+    assert verified.manifest["dataset_id"] == "evidence-investigator-live-v1"
+    assert len(verified.manifest_sha256) == 64
+    assert len(verified.freeze_sha256) == 64
+    assert verified.source_payloads
 
 
 def test_http_client_rejects_redirect_without_reading_body(monkeypatch):

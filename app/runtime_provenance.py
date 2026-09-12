@@ -12,17 +12,18 @@ from .evidence_chunks import EvidenceChunker
 from .provider import safe_thinking_configuration
 
 
-RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v1"
+RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v2"
 _MAX_BUNDLE_FILES = 512
 _MAX_BUNDLE_FILE_BYTES = 4 * 1024 * 1024
+_MAX_BUNDLE_TOTAL_BYTES = 32 * 1024 * 1024
 
 
 def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
     """Return content-free runtime identity shared by API and worker.
 
-    The payload deliberately records only a relay hostname and a hash of the
-    normalized endpoint. It never contains a credential, URL query, response,
-    source document, or complete base URL.
+    The payload deliberately records only a hash of the normalized endpoint.
+    It never contains a credential, hostname, URL query, response, source
+    document, or complete base URL.
     """
 
     endpoint = _safe_endpoint_identity(settings.openai_base_url)
@@ -68,10 +69,7 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
         },
         "chat_provider": {
             "model_alias": model_alias,
-            "relay_hostname": endpoint[0] if endpoint is not None else None,
-            "relay_configuration_sha256": (
-                endpoint[1] if endpoint is not None else None
-            ),
+            "endpoint_configuration_sha256": endpoint,
             "temperature": 0,
             "thinking_configured": thinking["configured"],
             "thinking_mode": thinking["mode"],
@@ -146,6 +144,7 @@ def service_artifact_sha256() -> str | None:
         if not 1 <= len(files) <= _MAX_BUNDLE_FILES:
             return None
         digest = hashlib.sha256()
+        total_size = 0
         for path in files:
             relative = path.relative_to(root).as_posix().encode("utf-8")
             size = path.stat().st_size
@@ -153,6 +152,9 @@ def service_artifact_sha256() -> str | None:
                 return None
             payload = path.read_bytes()
             if len(payload) != size:
+                return None
+            total_size += len(payload)
+            if total_size > _MAX_BUNDLE_TOTAL_BYTES:
                 return None
             digest.update(len(relative).to_bytes(4, "big"))
             digest.update(relative)
@@ -171,7 +173,7 @@ def _embedding_profile_fingerprint(settings: Settings) -> str | None:
     return _fingerprint(profile.profile_id)
 
 
-def _safe_endpoint_identity(value: object) -> tuple[str, str] | None:
+def _safe_endpoint_identity(value: object) -> str | None:
     if not isinstance(value, str) or value != value.strip() or len(value) > 2_048:
         return None
     try:
@@ -195,7 +197,7 @@ def _safe_endpoint_identity(value: object) -> tuple[str, str] | None:
         normalized = urlunsplit((parsed.scheme.lower(), netloc, path, "", ""))
     except (UnicodeError, ValueError):
         return None
-    return ascii_hostname, _fingerprint(normalized)
+    return _fingerprint(normalized)
 
 
 def _safe_label(value: object, *, maximum: int) -> str | None:
