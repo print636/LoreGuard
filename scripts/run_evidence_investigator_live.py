@@ -2323,6 +2323,18 @@ def _qualified_case_is_well_formed(
         )
     ):
         return False
+    provider_decisions = loop["provider_decision_calls"]
+    tool_calls = loop["tool_calls"]
+    recoverable_rejections = loop["recoverable_rejections"]
+    terminal_seeds = loop["completed_seeds"] + loop["abstained_seeds"]
+    if (
+        provider_decisions < 1
+        or tool_calls > provider_decisions
+        or provider_decisions != tool_calls + recoverable_rejections
+        or loop["searches"] + loop["reads"] + terminal_seeds != tool_calls
+        or terminal_seeds != investigator["seed_count"]
+    ):
+        return False
 
     promotion = investigator.get("promotion")
     if type(promotion) is not dict or set(promotion) != _PROMOTION_KEYS:
@@ -2352,8 +2364,9 @@ def _qualified_case_is_well_formed(
                 "charged_tokens",
             }
         )
-        or usage.get("token_count_basis")
-        not in {"investigator_usage_ledger", "legacy_loop_compatibility"}
+        or usage.get("token_count_basis") != "investigator_usage_ledger"
+        or usage["charged_tokens"]
+        < usage["reported_prompt_tokens"] + usage["reported_completion_tokens"]
         or not _safe_counter_dict(
             usage.get("provider_category_counts"), frozenset({"success"})
         )

@@ -1187,6 +1187,52 @@ def test_dev_pair_rejects_usage_ledger_mismatch_and_success_count_mismatch():
     assert "second_case_results_incomplete" in result["reason_codes"]
 
 
+def test_dev_pair_rejects_impossible_completed_loop_accounting():
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+
+    zero_provider_with_tools = json.loads(json.dumps(first))
+    loop = zero_provider_with_tools["cases"][0]["investigator"]["loop"]
+    loop["provider_decision_calls"] = 0
+    zero_provider_with_tools["cases"][0]["investigator"]["usage"][
+        "provider_category_counts"
+    ]["success"] = 0
+    result = compare_dev_artifact_payloads(first, zero_provider_with_tools)
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+
+    rejection_mismatch = json.loads(json.dumps(first))
+    rejection_mismatch["cases"][0]["investigator"]["loop"][
+        "recoverable_rejections"
+    ] = 1
+    result = compare_dev_artifact_payloads(first, rejection_mismatch)
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+
+    action_mismatch = json.loads(json.dumps(first))
+    action_mismatch["cases"][0]["investigator"]["loop"]["searches"] = 0
+    result = compare_dev_artifact_payloads(first, action_mismatch)
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+
+
+def test_dev_pair_rejects_zero_charge_with_reported_usage():
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    tampered = json.loads(json.dumps(first))
+    tampered["cases"][0]["investigator"]["usage"]["charged_tokens"] = 0
+    tampered["cases"][0]["analysis_usage"]["charged_tokens"] = 0
+
+    result = compare_dev_artifact_payloads(first, tampered)
+
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+
+
 @pytest.mark.parametrize("reason_path", [("reason_code",), ("loop", "reason_code")])
 def test_dev_pair_rejects_mystery_completed_reason(reason_path):
     first = _qualified_dev_artifact(
