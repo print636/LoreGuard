@@ -1175,11 +1175,43 @@ class ModelEnhancedExtractor:
             agent_candidate: AgentCandidate, fields: dict[str, Any]
         ) -> ParsedDirective:
             source = candidate_by_index[agent_candidate.index]
-            before_assessed, _ = assess_directive(source.provisional_directive)
+            before_assessed, before_reason = assess_directive(
+                source.provisional_directive
+            )
             before_eligible = bool(
                 before_assessed is not None
                 and eligible_for_deterministic_rules(before_assessed)
             )
+            relation_fields = {
+                "fact": frozenset({"subject", "predicate", "value"}),
+                "uses": frozenset({"item", "user"}),
+            }.get(source.provisional_directive.kind, frozenset())
+            changed_fields = {
+                key
+                for key, value in fields.items()
+                if source.raw_record.get(key) != value
+            }
+            lexical_repair = "lexical_support" in source.error_codes
+            minimal_lexical_repair = bool(
+                lexical_repair
+                and len(fields) == 1
+                and len(changed_fields) == 1
+            )
+            relation_repair = before_reason in {
+                "unbound_fact_relation",
+                "unbound_use_relation",
+            }
+            minimal_relation_repair = bool(
+                relation_repair
+                and minimal_lexical_repair
+                and changed_fields.issubset(relation_fields)
+            )
+            if relation_repair and not minimal_relation_repair:
+                # An unbound tuple is not provisionally eligible.  The only
+                # exception is one minimal lexical correction to one relation
+                # identity field; rewriting a whole tuple would replace the
+                # candidate rather than repair it.
+                raise AgentPatchRejected("semantic_promotion")
             if _stable_raw_hash(source.raw_record) != source.raw_hash:
                 raise ValueError("agent_candidate_mutated")
             patched = deepcopy(source.raw_record)
@@ -1207,7 +1239,16 @@ class ModelEnhancedExtractor:
             if assessed is None:
                 raise ValueError("agent_semantic_quality")
             after_eligible = eligible_for_deterministic_rules(assessed)
-            if not before_eligible and after_eligible:
+            if minimal_relation_repair and not after_eligible:
+                # The corrected field must close the exact evidence-bound
+                # relation; co-occurrence or another tentative reading is not
+                # a successful lexical repair.
+                raise AgentPatchRejected("semantic_promotion")
+            if (
+                not before_eligible
+                and after_eligible
+                and not minimal_relation_repair
+            ):
                 raise AgentPatchRejected("semantic_promotion")
             return assessed
 

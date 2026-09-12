@@ -883,10 +883,21 @@ def _label_closed_normalizer_directive(
     attrs = dict(directive.attrs)
     text = directive.evidence.text
     kind = directive.kind
+    from .semantic_quality import find_bound_use_action_matches
+
+    bound_normalizer_use = bool(
+        kind == "uses"
+        and find_bound_use_action_matches(
+            text,
+            user=attrs.get("user", ""),
+            item=attrs.get("item", ""),
+            actor_aliases=("他", "她", "他们", "她们"),
+        )
+    )
     predicate = attrs.get("predicate", "")
     closed = bool(
         (kind == "item" and re.search(r"保管|持有|掌管|移交|归还|接收", text))
-        or (kind == "uses" and re.search(r"取出|拿出|使用|启用|按下|盖下|插入", text))
+        or bound_normalizer_use
         or (kind == "world_rule" and re.search(r"失效|无法|不能|禁止|不得", text))
         or (kind == "world_assert" and re.search(r"发动|使用|施展|启动|开启", text))
         or (

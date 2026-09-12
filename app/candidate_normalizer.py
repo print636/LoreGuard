@@ -5,13 +5,16 @@ from dataclasses import dataclass, field
 
 from .domain import EvidenceSpan, ParsedDirective
 from .pipeline import DocumentInput
-from .semantic_quality import evidence_presents_unrealized_action
+from .semantic_quality import (
+    FOLLOWUP_USE_ACTION_VERB_PATTERN,
+    evidence_presents_unrealized_action,
+)
 
 
 NAME = r"[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·_-]{0,11}?"
 ACTOR_NAME = r"[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·_-]{1,11}?"
 PRONOUNS = {"他", "她", "他们", "她们"}
-USE_VERBS = r"使用|启用|挥动|按下|盖下|刷过|插入|开启|启动"
+USE_VERBS = FOLLOWUP_USE_ACTION_VERB_PATTERN
 
 
 @dataclass(slots=True)

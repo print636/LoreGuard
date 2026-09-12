@@ -772,7 +772,7 @@ class RealAgentAcceptanceTests(unittest.TestCase):
 
     def test_full_dynamic_gate_uses_three_successful_semantic_paths(self):
         cases = (
-            ("gp-01-core-value-rewrite", None),
+            ("gp-02-item-name-rewrite", None),
             ("gp-04-invented-route-event", "read_then_abstain"),
             ("gp-05-invented-exemption", "direct_abstain"),
         )

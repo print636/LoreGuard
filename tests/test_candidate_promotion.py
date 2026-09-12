@@ -468,6 +468,115 @@ def test_explicit_permission_then_completed_use_remains_a_grounded_action():
 
 
 @pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "2026-01-01 09:00，岚在修复室操作了星钥。",
+        "2026-01-01 09:00，岚取得授权后实际使用了星钥。",
+        "2026-01-01 09:00，星钥被岚启用。",
+        "2026-01-01 09:00，岚对星钥进行了操作。",
+    ],
+)
+def test_bound_actual_use_variants_remain_promotable(candidate_text):
+    result, *_ = _promote(
+        IssueCategory.item_ownership,
+        candidate_text=candidate_text,
+        candidate_fields={
+            "item": "星钥",
+            "user": "岚",
+            "time": "2026-01-01 09:00",
+        },
+    )
+
+    assert result.accepted_candidates == 1
+    assert len(result.added_issues) == 1
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "2026-01-01 09:00，苏岚操作了星钥。",
+        "2026-01-01 09:00，岚操作了星钥匙。",
+        "2026-01-01 09:00，岚操作了星钥外壳。",
+        "2026-01-01 09:00，岚使用星钥启动器后离开。",
+        "2026-01-01 09:00，岚使用星钥打开器时停电。",
+        "2026-01-01 09:00，用户指南：岚使用星钥时应先登记。",
+        "2026-01-01 09:00，系统允许岚操作星钥。",
+        "2026-01-01 09:00，管理员授权岚使用星钥。",
+        "2026-01-01 09:00，计划如下：岚使用星钥。",
+        "2026-01-01 09:00，执行方案如下：岚操作星钥。",
+        "2026-01-01 09:00，核验计划：岚使用星钥。",
+        "2026-01-01 09:00，撤离方案：岚操作星钥。",
+        "2026-01-01 09:00，安全规范：岚使用星钥。",
+        "2026-01-01 09:00，设备使用规范：岚操作星钥。",
+        "2026-01-01 09:00，战斗预案：岚使用星钥。",
+        "2026-01-01 09:00，巡检流程：岚操作星钥。",
+        "2026-01-01 09:00，编辑安排：岚使用星钥。",
+    ],
+)
+def test_unbound_or_instructional_use_cannot_be_promoted(candidate_text):
+    result, *_ = _promote(
+        IssueCategory.item_ownership,
+        candidate_text=candidate_text,
+        candidate_fields={
+            "item": "星钥",
+            "user": "岚",
+            "time": "2026-01-01 09:00",
+        },
+    )
+
+    assert result.accepted_candidates == 0
+    assert dict(result.rejection_counts) == {"candidate_not_grounded": 1}
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "管理员计划将岚的发色设置为黑色。",
+        "管理员要求将岚的发色调整为黑色。",
+        "核验计划：岚的发色设为黑色。",
+        "撤离方案：岚的发色设为黑色。",
+        "安全规范：岚的发色设为黑色。",
+        "设备使用规范：岚的发色设为黑色。",
+        "战斗预案：岚的发色设为黑色。",
+        "巡检流程：岚的发色设为黑色。",
+        "编辑安排：岚的发色设为黑色。",
+        "岚的发色变成黑色长发。",
+        "陆岚的发色是黑色。",
+    ],
+)
+def test_planned_transition_or_value_prefix_cannot_ground_fact(candidate_text):
+    result, *_ = _promote(
+        IssueCategory.fact_conflict,
+        candidate_text=candidate_text,
+        candidate_fields={"subject": "岚", "predicate": "发色", "value": "黑色"},
+    )
+
+    assert result.accepted_candidates == 0
+    assert dict(result.rejection_counts) == {"candidate_not_grounded": 1}
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "管理员最终将岚的发色调整为黑色。",
+        "岚的发色，现已调整为黑色。",
+        "岚的发色不是银色而是黑色。",
+        "岚的发色变成黑色了。",
+        "岚的发色是黑色的。",
+    ],
+)
+def test_completed_fact_transition_variants_remain_promotable(candidate_text):
+    result, *_ = _promote(
+        IssueCategory.fact_conflict,
+        candidate_text=candidate_text,
+        candidate_fields={"subject": "岚", "predicate": "发色", "value": "黑色"},
+    )
+
+    assert result.accepted_candidates == 1
+    assert len(result.added_issues) == 1
+
+
+@pytest.mark.parametrize(
     "speech_act",
     [
         "准许",

@@ -201,12 +201,18 @@ def extract_natural_line(evidence: EvidenceSpan) -> list[ParsedDirective]:
     # duplicate ordinary fact.  Questions and open hypotheses are never fed to
     # the permissive copula pattern.
     if not referenced_rule:
-        negative_fact = re.search(
-            rf"(?:{TIME}[，,\s]+)?(?P<subject>{NAME})的"
-            rf"(?P<predicate>[\u4e00-\u9fffA-Za-z0-9_-]{{1,16}})(?:不是|并非|不为)"
-            rf"(?P<value>[^，。；;]{{1,32}})",
+        double_copular_negation = re.search(
+            r"并非不是|(?:并)?不是不(?:是|为)?|不为不(?:是|为)?",
             text,
         )
+        negative_fact = None
+        if double_copular_negation is None:
+            negative_fact = re.search(
+                rf"(?:{TIME}[，,\s]+)?(?P<subject>{NAME})的"
+                rf"(?P<predicate>[\u4e00-\u9fffA-Za-z0-9_-]{{1,16}})(?:不是|并非|不为)"
+                rf"(?P<value>[^，。；;]{{1,32}})",
+                text,
+            )
         fact = negative_fact or re.search(
             rf"(?:{TIME}[，,\s]+)?(?P<subject>{NAME})的"
             rf"(?P<predicate>[\u4e00-\u9fffA-Za-z0-9_-]{{1,16}})(?:是(?!否)|为)"

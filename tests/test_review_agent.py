@@ -1740,6 +1740,57 @@ class ReviewAgentIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual("semantic_promotion", patch_events[-1]["validator_reason"])
 
+    def test_agent_cannot_replace_an_entire_unbound_fact_tuple(self):
+        provider = ScriptedProvider(
+            [
+                {
+                    "records": [
+                        {
+                            "kind": "fact",
+                            "subject": "苏晚",
+                            "predicate": "职务",
+                            "value": "舰长官",
+                            "source_line_start": 1,
+                            "source_line_end": 1,
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        }
+                    ]
+                },
+                {"actions": [read_action()]},
+                patch_from_read(
+                    fields={
+                        "subject": "林澈",
+                        "predicate": "身份",
+                        "value": "领航员",
+                    }
+                ),
+            ],
+            settings(enable_review_agent=True),
+        )
+        extractor = ModelEnhancedExtractor(provider=provider)
+        extractor.begin_run()
+        parsed = extractor.extract(
+            DocumentInput(
+                id="doc-unbound-tuple-rewrite",
+                name="chapter.md",
+                content="林澈的身份是领航员。",
+                role="chapter",
+                scope="route-a",
+            )
+        )
+
+        status = parsed.model_execution.safe_dict()
+        self.assertEqual(0, status["recovered_invalid_records"])
+        self.assertEqual(1, status["unresolved_invalid_records"])
+        patch_events = [
+            row
+            for row in status["review_agent_runs"][0]["trace"]
+            if row["action"] == "PATCH_RECORDS"
+        ]
+        self.assertEqual("semantic_promotion", patch_events[-1]["validator_reason"])
+
     def test_label_only_candidate_stays_on_fixed_repair_pass(self):
         provider = ScriptedProvider(
             [

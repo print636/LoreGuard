@@ -45,6 +45,17 @@ class CandidateNormalizerTests(unittest.TestCase):
         self.assertEqual("银钥匙", use.attrs["item"])
         self.assertEqual(2, use.evidence.line_start)
 
+    def test_take_item_then_take_another_item_is_not_treated_as_use(self):
+        document = DocumentInput(
+            id="chapter",
+            name="chapter.md",
+            content="顾青进入库房。\n她拿出银钥匙，随后又取出航海图。",
+        )
+
+        result = AnalysisPipeline(extractor=BaselineExtractor()).run([document])
+
+        self.assertFalse(any(row.kind == "uses" for row in result.directives))
+
     def test_performing_disabled_ability_inside_scope_becomes_rule_assertion(self):
         documents = [
             DocumentInput(

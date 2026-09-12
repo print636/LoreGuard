@@ -46,6 +46,7 @@ _RHETORICAL_MARKERS = re.compile(r"难道|岂(?:不|是)|怎么可能|何尝|莫
 _HYPOTHETICAL_MARKERS = re.compile(r"(?:^|[，,；;。])\s*(?:如果|假如|倘若|若(?:是)?|假设|设想|要是)")
 _CONDITION_SCOPE_RESET = re.compile(r"^\s*(?:但|然而|不过|可是|却|只是)")
 _UNCERTAIN_MARKERS = re.compile(
+    r"并非不是|(?:并)?不是不(?:是|为)?|不为不(?:是|为)?|"
     r"(?:并)?不是不可能|并非不可能|绝非不可能|未必不可能|"
     r"没有什么不可能|没什么不可能|不可能不|不无可能|不太可能|"
     r"(?<!不)可能|也许|或许|大概|似乎|看起来|据说|传闻|未必|不一定|或将"
@@ -77,9 +78,10 @@ _UNVERIFIED_SOURCE_MARKERS = re.compile(
     r"(?:伪造|造假|篡改)的(?:记录|日志|报告|档案|时间戳)"
 )
 _QUOTED_SOURCE_MARKERS = re.compile(
-    r"(?:设定(?:稿)?|档案|日志|记录|报告|手册|碑文|旧卷|卷宗|卷册|"
+    r"(?:用户指南|维护规程|操作说明|使用说明)[：:]|"
+    r"(?:设定(?:稿)?|档案|日志|记录|报告|手册|指南|规程|碑文|旧卷|卷宗|卷册|"
     r"书信|信件|札记|手稿|文书|传记|报道|资料)(?:中|称|写道|写明|记载)|"
-    r"(?:设定(?:稿)?|档案|手册|碑文|旧卷|卷宗|卷册|书信|信件|札记|"
+    r"(?:设定(?:稿)?|档案|手册|指南|规程|碑文|旧卷|卷宗|卷册|书信|信件|札记|"
     r"手稿|文书|传记|报道|资料)(?:只|仅)?记载"
 )
 _REPORTED_SOURCE_MARKERS = re.compile(
@@ -96,13 +98,27 @@ _SOURCE_CONTEXT_MARKERS = (
     _VERIFIED_RECORD_MARKERS,
 )
 
+# Shared by semantic closure, candidate normalization, and promotion grounding.
+# Keep this as a syntax fragment (rather than a compiled expression) so every
+# layer recognizes the same concrete item-use verbs.
+FOLLOWUP_USE_ACTION_VERB_PATTERN = (
+    r"使用|启用|发动|操作|操控|挥动|借助|按下|插入|开启|启动|"
+    r"盖下|刷过|(?<!作)用(?!途|处|法|量|时|户|例|品|具|权|意)"
+)
+USE_ACTION_VERB_PATTERN = (
+    rf"{FOLLOWUP_USE_ACTION_VERB_PATTERN}|取出|拿出|掏出|拔出"
+)
+
 # An action mentioned as the content of an order, intention or unfinished
 # attempt is not evidence that the action happened.  These are syntactic
 # frames rather than a bag of keywords: a completed temporal bridge such as
 # “接到命令后，某人在…启动…” starts a new, asserted action clause.
-_ACTION_VERBS = re.compile(r"驱动|启动|开启|发动|施展|执行|使用|启用")
+_ACTION_VERBS = re.compile(
+    rf"驱动|施展|执行|(?:{USE_ACTION_VERB_PATTERN})"
+)
 _UNREALIZED_ACTION_FRAME = re.compile(
     r"命令|下令|责令|要求|吩咐|嘱咐|敦促|通知|建议|提议|"
+    r"准许|准予|容许|批准|答应|授意|允许|授权(?!后)|应当|应该|需要|务必|"
     r"指示(?!灯|器|牌|标|线|针|状态|系统|图)|"
     r"计划|打算|预备|预定|意图|试图|尝试|决定|即将|将要|"
     r"准备(?!室|区|舱|间|站|台|工作|状态|材料|物资)|"
@@ -117,7 +133,19 @@ _COMPLETED_ORDER_BRIDGE = re.compile(
     r"(?:命令|指令|要求|通知)(?:下达|发布|确认|批准)(?:后|之后|以后)|"
     r"(?:下令|吩咐|嘱咐|决定)(?:后|之后|以后)|"
     r"(?:计划|准备|预备|尝试|安排)(?:已经|已)?(?:完成|结束|取消|中止|失败)"
-    r"(?:后|之后|以后)"
+    r"(?:后|之后|以后)|(?:准备好|准备就绪)(?:后|之后|以后)"
+)
+_UNREALIZED_HEADING_FRAME = re.compile(
+    # A heading is recognized by its shape, not by a list of business topics:
+    # it starts a punctuation-delimited segment, has a short punctuation-free
+    # title, and ends in a document/category noun before the colon.  This
+    # covers e.g. “核验计划”, “设备使用规范”, and future domain
+    # headings without teaching the safety gate every possible topic.
+    r"(?:^|[，,。；;！？?!：:\r\n])\s*"
+    r"[^，,。；;！？?!：:\r\n]{0,24}?"
+    r"(?:计划|方案|规范|预案|流程|安排|要求|范围|步骤|指引|说明)"
+    r"(?:如下(?:所示)?|包括以下(?:内容|事项|步骤)?|为以下(?:内容|事项|步骤)?)?"
+    r"\s*[：:]"
 )
 _ACTION_NEGATION = re.compile(
     r"尚未|还未|并未|从未|未曾|不曾|没有|并没有|未能|没能"
@@ -126,6 +154,12 @@ _NEGATION_SCOPE_RESET = re.compile(r"但|却|而是|反而")
 _ACTION_ASSERTION_RESET = re.compile(
     r"但|却|而是|反而|仍然?|实际|确实|最终|随后|随即|终于|成功|当场"
 )
+
+
+def has_unrealized_heading_frame(text: str) -> bool:
+    """Return whether text contains a compositional non-execution heading."""
+
+    return bool(_UNREALIZED_HEADING_FRAME.search(text))
 
 # These expressions describe narrative frames, not isolated keywords.  In
 # particular, a sentence that says an event is *not* a memory or illusion must
@@ -484,7 +518,21 @@ def _support_text(directive: ParsedDirective) -> str:
     best_units = [unit for score, unit in unit_scores if score == best_unit_score and score]
     if not best_units:
         return text
-    unit = best_units[0]
+    unit = _preferred_support(best_units, directive)
+    if directive.kind == "fact" and any(
+        re.search(r"[，,]", match.group(0))
+        for match in find_bound_fact_relation_matches(
+            unit,
+            subject=_clean(directive.attrs.get("subject", "")),
+            predicate=_clean(directive.attrs.get("predicate", "")),
+            value=_clean(directive.attrs.get("value", "")),
+        )
+    ):
+        # A state transition may deliberately put a comma between the
+        # attribute and its transition verb ("属性，现已调整为值").  Once the
+        # complete bound relation is proven, do not discard half of it during
+        # generic comma-localization.
+        return unit
     # Keep the original inter-clause whitespace so the selected support remains
     # an exact slice of ``evidence.text``.  Source attribution is recovered by
     # offset later; normalizing the spaces here could make that lookup fail and
@@ -541,6 +589,22 @@ def _support_text(directive: ParsedDirective) -> str:
     return unit
 
 
+def _preferred_support(
+    candidates: list[str], directive: ParsedDirective
+) -> str:
+    """Prefer the latest authoritative support among equally grounded spans."""
+
+    if not candidates:
+        return ""
+    return max(
+        enumerate(candidates),
+        key=lambda row: (
+            _source_scope(row[1], directive) not in _NON_AUTHORITATIVE_SCOPES,
+            row[0],
+        ),
+    )[1]
+
+
 def _action_signature(directive: ParsedDirective) -> tuple[str, str]:
     """Return the candidate's normalized action label and optional scope."""
 
@@ -557,9 +621,161 @@ def _action_signature(directive: ParsedDirective) -> tuple[str, str]:
     return parts[2], parts[1]
 
 
+_USE_PRE_ACTION_LINK_PATTERN = (
+    r"(?:(?:已经|随后|立即|此时|正|正在|亲自|亲手|独自|实际|确实|最终|"
+    r"随即|终于|成功|擅自|直接|获准后|得到许可后|获得授权后|取得授权后|"
+    r"准备好后|准备完成后|准备就绪后|计划|打算|准备|试图|尝试|即将|将要|"
+    r"尚未|还未|并未|从未|未曾|不曾|没有|并没有|未能|没能)|"
+    r"(?:(?:从|在|于)[^，,。；;！？?!：:]{1,24}?(?:中|内)?))*"
+)
+_USE_PRE_ACTION_LINK = re.compile(_USE_PRE_ACTION_LINK_PATTERN)
+_USE_ITEM_TERMINAL = re.compile(
+    r"^(?:$|[，,。；;！？?!：:\"'“”‘’（）()])"
+)
+_USE_ITEM_POSTPOSITION = re.compile(
+    r"^(?:之后|以后|后|之时|时)(?=$|[，,。；;！？?!：:])"
+)
+_USE_ITEM_CONTINUATION = re.compile(
+    rf"^(?:并|而|但|随后|从而)(?=(?:又|再|随即|立即|随后)?"
+    rf"(?:他|她|它|其)?(?:{FOLLOWUP_USE_ACTION_VERB_PATTERN}))"
+)
+_USE_ITEM_PURPOSE = re.compile(
+    r"^(?:开门|(?:打开|开启|关闭|启动|触发|激活|完成|击退|解锁|进入|离开)"
+    r"(?!器(?=$|[，,。；;！？?!：:]|之后|以后|后|之时|时|并|而|但|随后|从而))"
+    r"[^，,。；;！？?!：:]{1,32})"
+    r"(?=$|[，,。；;！？?!：:])"
+)
+_USE_ACTOR_LEAD = re.compile(
+    r"(?:随后|然后|接着|此后|当时|最终|随即|终于|"
+    r"命令|下令|责令|要求|吩咐|嘱咐|敦促|通知|建议|提议|"
+    r"准许|准予|容许|批准|答应|授意)$"
+)
+
+
+def _use_actor_lead_is_bound(lead: str) -> bool:
+    return not lead or bool(_USE_ACTOR_LEAD.search(lead))
+
+
+def _use_suffix_binds_item(suffix: str, *, item: str, verb: str) -> bool:
+    item_match = re.match(rf"(?:了)?{re.escape(item)}", suffix)
+    if item_match is None:
+        return False
+    remainder = suffix[item_match.end() :]
+    if (
+        _USE_ITEM_TERMINAL.match(remainder)
+        or _USE_ITEM_POSTPOSITION.match(remainder)
+        or _USE_ITEM_CONTINUATION.match(remainder)
+    ):
+        return True
+    # A purpose/result clause may directly follow the object only for verbs
+    # whose grammar permits “使用/用/借助 X 打开 Y”.  Operation verbs such as
+    # “操作 X” require an actual object boundary, so “X启动器/打开器” cannot
+    # be mistaken for X itself.
+    return bool(
+        verb in {"使用", "用", "借助"}
+        and _USE_ITEM_PURPOSE.match(remainder)
+    )
+
+
+def find_bound_use_action_matches(
+    text: str,
+    *,
+    user: str,
+    item: str,
+    actor_aliases: tuple[str, ...] = (),
+) -> list[re.Match[str]]:
+    """Find item-use verbs explicitly bound to ``user`` and ``item``.
+
+    Returned matches point at the action verb itself.  This lets callers apply
+    command, plan, report, and negation scope to the exact relation instead of
+    accepting a keyword elsewhere in the sentence.  Unrealized link tokens are
+    intentionally recognized here; the semantic modality gate rejects them
+    after locating the relation.
+    """
+
+    bound_user = _clean(user)
+    bound_item = _clean(item)
+    if not bound_user or not bound_item:
+        return []
+    actors = tuple(
+        dict.fromkeys(
+            candidate
+            for candidate in (bound_user, *(_clean(row) for row in actor_aliases))
+            if candidate
+        )
+    )
+    item_pattern = re.escape(bound_item)
+    matches: list[re.Match[str]] = []
+    for match in re.finditer(USE_ACTION_VERB_PATTERN, text):
+        clause_start, clause_end = _clause_bounds(text, match.start())
+        prefix = re.sub(r"\s+", "", text[clause_start : match.start()])
+        suffix = re.sub(r"\s+", "", text[match.end() : clause_end])
+        for actor in actors:
+            actor_pattern = re.escape(actor)
+            subject_first = re.search(
+                rf"{actor_pattern}(?P<link>[^，,。；;！？?!：:]{{0,32}})$",
+                prefix,
+            )
+            if subject_first is not None:
+                link = subject_first.group("link")
+                if (
+                    _use_actor_lead_is_bound(prefix[: subject_first.start()])
+                    and
+                    _USE_PRE_ACTION_LINK.fullmatch(link)
+                    and _use_suffix_binds_item(
+                        suffix,
+                        item=bound_item,
+                        verb=match.group(0),
+                    )
+                ):
+                    matches.append(match)
+                    break
+            performed_on = re.search(
+                rf"{actor_pattern}{_USE_PRE_ACTION_LINK_PATTERN}对"
+                rf"{item_pattern}(?:进行|进行了)$",
+                prefix,
+            )
+            if performed_on is not None and _use_actor_lead_is_bound(
+                prefix[: performed_on.start()]
+            ):
+                matches.append(match)
+                break
+            object_first = re.search(
+                rf"{actor_pattern}{_USE_PRE_ACTION_LINK_PATTERN}(?:将|把)"
+                rf"{item_pattern}{_USE_PRE_ACTION_LINK_PATTERN}$",
+                prefix,
+            )
+            if object_first is not None and _use_actor_lead_is_bound(
+                prefix[: object_first.start()]
+            ):
+                matches.append(match)
+                break
+            passive = re.search(
+                rf"{item_pattern}"
+                rf"(?:已经|已|正|正在|随后|最终)?被{actor_pattern}"
+                rf"{_USE_PRE_ACTION_LINK_PATTERN}$",
+                prefix,
+            )
+            if passive is not None and _use_actor_lead_is_bound(
+                prefix[: passive.start()]
+            ):
+                matches.append(match)
+                break
+    return matches
+
+
 def _candidate_action_matches(
     text: str, directive: ParsedDirective
 ) -> list[re.Match[str]]:
+    if directive.kind == "uses":
+        return find_bound_use_action_matches(
+            text,
+            user=directive.attrs.get("user", ""),
+            item=directive.attrs.get("item", ""),
+            actor_aliases=("他", "她", "他们", "她们")
+            if "baseline" in directive.provenance_sources
+            else (),
+        )
     action_label, context = _action_signature(directive)
     compact = _clean(text)
     if context and context not in compact:
@@ -600,7 +816,8 @@ def _negation_governs_action(prefix: str) -> bool:
     return bool(
         re.fullmatch(
             r"(?:真正|实际|成功|亲自|正式|立即|直接|擅自|继续|再次|再)*"
-            r"(?:(?:在|于)[^，,。；;！!？?：:]{0,24}?(?:中|内)?)?",
+            r"(?:(?:在|于)[^，,。；;！!？?：:]{0,24}?(?:中|内)?)?"
+            r"(?:(?:将|把)[^，,。；;！!？?：:]{0,48})?",
             compact,
         )
     )
@@ -608,6 +825,21 @@ def _negation_governs_action(prefix: str) -> bool:
 
 def _action_match_is_unrealized(text: str, match: re.Match[str]) -> bool:
     clause_start, _ = _clause_bounds(text, match.start())
+    # Fact relation matches may include their leading colon while action
+    # matches start after it.  Inspect the nearest colon on either side of
+    # that match boundary so both families inherit the same heading scope.
+    heading_colon = max(
+        text.rfind("：", 0, match.start() + 1),
+        text.rfind(":", 0, match.start() + 1),
+    )
+    if heading_colon >= 0:
+        heading_start = max(
+            (text.rfind(token, 0, heading_colon) for token in "。；;！!？?\n"),
+            default=-1,
+        ) + 1
+        heading = text[heading_start : heading_colon + 1]
+        if has_unrealized_heading_frame(heading):
+            return True
     prefix = text[clause_start : match.start()]
     # Once an instruction/plan is explicitly completed, a following action is
     # narration rather than the still-unrealized content of that instruction.
@@ -633,13 +865,14 @@ def _action_realization(text: str, directive: ParsedDirective) -> bool | None:
 def _realized_action_support(
     directive: ParsedDirective, units: list[str]
 ) -> str | None:
+    candidates: list[str] = []
     for unit in units:
         for match in _candidate_action_matches(unit, directive):
             if _action_match_is_unrealized(unit, match):
                 continue
             start, end = _clause_bounds(unit, match.start())
-            return unit[start:end].strip()
-    return None
+            candidates.append(unit[start:end].strip())
+    return _preferred_support(candidates, directive) if candidates else None
 
 
 def evidence_presents_unrealized_action(directive: ParsedDirective) -> bool:
@@ -719,11 +952,18 @@ def _local_source_context(text: str, directive: ParsedDirective) -> str:
 def _source_scope(text: str, directive: ParsedDirective) -> SourceScope:
     full_evidence = directive.evidence.text
     local_evidence = _local_source_context(text, directive)
-    authority_evidence = (
-        local_evidence
-        if directive.kind in {"world_assert", "uses"}
-        else full_evidence
-    )
+    # Provenance belongs to the supporting semantic unit.  A reported claim in
+    # one sentence must not taint a later, independent narrator confirmation;
+    # `_local_source_context` still reattaches same-unit introductions and
+    # adjacent attributions, preventing semantic laundering.
+    authority_evidence = local_evidence
+    if re.search(
+        r"(?:记录|日志|报告|档案|时间戳|时钟)(?:已?(?:被|遭)|已)?"
+        r"(?:伪造|造假|篡改|改写)|"
+        r"(?:伪造|造假|篡改)的(?:记录|日志|报告|档案|时间戳)",
+        full_evidence,
+    ):
+        return SourceScope.unverified_report
     if _UNVERIFIED_SOURCE_MARKERS.search(authority_evidence) or re.search(
         r"信中声称", authority_evidence
     ):
@@ -782,6 +1022,153 @@ def _closed_conditional_rule(text: str, directive: ParsedDirective) -> bool:
     )
 
 
+_STRUCTURED_FACT_PREDICATES = {
+    "mobility_permission",
+    "mobility_limit",
+    "rule_exception",
+    "authorization",
+}
+_FACT_VALUE_BOUNDARY = (
+    r"(?=$|[，,。；;！？?!：:\"'“”‘’（）()]|"
+    r"而是|而为|却是|却为|"
+    r"(?:了|的)(?=$|[，,。；;！？?!：:\"'“”‘’（）()]))"
+)
+_FACT_SUBJECT_LEAD = (
+    r"(?:^|[，,。；;！？?!：:\"'“”‘’（）()]|随后|然后|接着|此后|当时|最终|"
+    r"随即|终于|确认|显示|表明|指出|记载|修正|更新|宣布|认定|称)"
+)
+
+
+def _fact_predicate_variants(predicate: str) -> tuple[str, ...]:
+    variants = [predicate]
+    # Some model providers include the copula in the predicate label
+    # (``身份是``).  Treat that as the same relation as ``身份`` + ``是``
+    # without broadly trimming ordinary predicates such as ``行为``.
+    if predicate.endswith("是") and len(predicate) > 1:
+        variants.append(predicate[:-1])
+    if predicate in {"身份", "身份是"}:
+        # Identity prose commonly omits the normalized predicate label:
+        # “林澈是领航员” is the closed surface form of 身份=领航员.
+        variants.append("")
+    return tuple(dict.fromkeys(variants))
+
+
+def find_bound_fact_relation_matches(
+    support: str, *, subject: str, predicate: str, value: str
+) -> list[re.Match[str]]:
+    """Return prose spans which explicitly bind one fact triple.
+
+    Co-occurrence is not enough.  In particular, a copula or transition about
+    some other object must not make an otherwise unrelated ``subject``,
+    ``predicate`` and ``value`` eligible for deterministic rules.  The closed
+    forms below cover ordinary attribute copulas, explicit state transitions,
+    and a directly negated verbal relation.
+    """
+
+    if not subject or not predicate or not value:
+        return []
+    compact = re.sub(r"\s+", "", support)
+    bound_subject = re.escape(subject)
+    bound_value = re.escape(value)
+    modifiers = r"(?:当前|现在|现已|已经|已|仍然|仍|最终|后来|随即|就)?"
+    relations: list[re.Pattern[str]] = []
+    for predicate_variant in _fact_predicate_variants(predicate):
+        bound_predicate = re.escape(predicate_variant)
+        attribute = (
+            rf"{_FACT_SUBJECT_LEAD}{bound_subject}(?:的)?{bound_predicate}"
+        )
+        relations.extend(
+            (
+                re.compile(
+                    rf"{attribute}(?:是否)?{modifiers}"
+                    rf"(?:不是|并非|不为|是(?!否)|属于|担任|为)(?:了)?"
+                    rf"{bound_value}{_FACT_VALUE_BOUNDARY}"
+                ),
+                re.compile(
+                    rf"{attribute}(?:[，,])?{modifiers}"
+                    rf"(?:(?:从|由)[^，,。；;！？?!]{{1,32}})?"
+                    rf"(?:被(?![^，,。；;！？?!]{{0,12}}(?:计划|要求|提议|命令))"
+                    rf"[^，,。；;！？?!]{{1,24}})?"
+                    rf"(?:变成|变为|成为|转为|改为|更改为|更新为|调整为|切换为|"
+                    rf"设置为|设置成|设为|设成|定为|定成)"
+                    rf"(?:了)?{bound_value}{_FACT_VALUE_BOUNDARY}"
+                ),
+                re.compile(
+                    rf"{attribute}{modifiers}"
+                    rf"(?:不是|并非(?:是|为)?|不为)"
+                    rf"[^，,。；;！？?!]{{1,32}}?"
+                    rf"(?:而是|而为|却是|却为){bound_value}{_FACT_VALUE_BOUNDARY}"
+                ),
+                re.compile(
+                    rf"{_FACT_SUBJECT_LEAD}"
+                    rf"(?!(?:(?!将|把)[^，,。；;！？?!]){{0,24}}"
+                    rf"(?:计划|要求|提议|命令|打算|准备|尚未|还未|并未|未曾))"
+                    rf"(?:(?!将|把)[^，,。；;！？?!]){{0,24}}?"
+                    rf"(?:最终|随后|随即|已经|已)?(?:将|把)"
+                    rf"{bound_subject}(?:的)?{bound_predicate}{modifiers}"
+                    rf"(?:变成|变为|成为|转为|改为|更改为|更新为|调整为|切换为|"
+                    rf"设置为|设置成|设为|设成|定为|定成)"
+                    rf"(?:了)?{bound_value}{_FACT_VALUE_BOUNDARY}"
+                ),
+                # Some facts use a verbal predicate rather than an attribute
+                # copula, e.g. ``角色甲不可能抵达山门``.  Only an explicit,
+                # immediately governing negation closes that relation.
+                re.compile(
+                    rf"{_FACT_SUBJECT_LEAD}{bound_subject}(?:明确)?"
+                    rf"(?:从未|未曾|并未|没有|不可能|绝不可能|无法|不能)"
+                    rf"(?:真正|实际|成功|及时)?{bound_predicate}(?:了|过)?"
+                    rf"{bound_value}{_FACT_VALUE_BOUNDARY}"
+                ),
+            )
+        )
+    return [match for relation in relations for match in relation.finditer(compact)]
+
+
+def _fact_has_bound_relation(
+    support: str, *, subject: str, predicate: str, value: str
+) -> bool:
+    return bool(
+        find_bound_fact_relation_matches(
+            support,
+            subject=subject,
+            predicate=predicate,
+            value=value,
+        )
+    )
+
+
+def _fact_contrast_affirms_submitted_value(
+    support: str, directive: ParsedDirective
+) -> bool:
+    attrs = directive.attrs
+    return any(
+        re.search(r"而是|而为|却是|却为", match.group(0))
+        for match in find_bound_fact_relation_matches(
+            support,
+            subject=_clean(attrs.get("subject", "")),
+            predicate=_clean(attrs.get("predicate", "")),
+            value=_clean(attrs.get("value", "")),
+        )
+    )
+
+
+def _fact_relation_is_unrealized(
+    support: str, directive: ParsedDirective
+) -> bool:
+    if directive.kind != "fact":
+        return False
+    attrs = directive.attrs
+    compact = re.sub(r"\s+", "", support)
+    matches = find_bound_fact_relation_matches(
+        compact,
+        subject=_clean(attrs.get("subject", "")),
+        predicate=_clean(attrs.get("predicate", "")),
+        value=_clean(attrs.get("value", "")),
+    )
+    states = [not _action_match_is_unrealized(compact, match) for match in matches]
+    return bool(states) and not any(states)
+
+
 def _closed_baseline_semantics(
     support: str, directive: ParsedDirective
 ) -> tuple[SemanticModality, SourceScope, CertaintyLevel] | None:
@@ -801,26 +1188,27 @@ def _closed_baseline_semantics(
     if kind == "fact":
         subject = _clean(attrs.get("subject", ""))
         value = _clean(attrs.get("value", ""))
-        predicate = attrs.get("predicate", "")
-        closed = bool(
-            subject
-            and value
-            and (subject in compact or subject == "*")
-            and (
-                value in compact
-                or predicate in {
-                    "mobility_permission",
-                    "mobility_limit",
-                    "rule_exception",
-                    "authorization",
-                }
+        predicate = _clean(attrs.get("predicate", ""))
+        if predicate in _STRUCTURED_FACT_PREDICATES:
+            # These normalized state records intentionally use server-owned
+            # predicate/value labels which need not occur verbatim in prose.
+            # Their extractors have separate relation-specific grammars.
+            closed = bool(
+                subject
+                and (subject in compact or subject == "*")
+                and re.search(
+                    r"(?:获得|获准|允许|许可|持有|拥有|没有|并未|未曾|"
+                    r"不可能|无法|不能|禁止|不得|至少需要)",
+                    support,
+                )
             )
-            and re.search(
-                r"(?:不是|并非|不为|是(?!否)|为|属于|担任|获得|获准|允许|许可|"
-                r"没有|并未|未曾|不可能|无法|不能)",
+        else:
+            closed = _fact_has_bound_relation(
                 support,
+                subject=subject,
+                predicate=predicate,
+                value=value,
             )
-        )
     elif kind == "event":
         closed = bool(
             re.search(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}", support)
@@ -836,7 +1224,7 @@ def _closed_baseline_semantics(
     elif kind == "item":
         closed = bool(re.search(r"获得|持有|保管|掌管|交给|移交|归还|接收", support))
     elif kind == "uses":
-        closed = bool(re.search(r"使用(?!权)|用(?!权)|取出|拿出|按下|插入|启用", support))
+        closed = bool(_candidate_action_matches(support, directive))
     elif kind == "world_rule":
         closed = bool(_DETERMINISTIC_RULE_MARKERS.search(support))
     elif kind == "world_assert":
@@ -849,10 +1237,16 @@ def _closed_baseline_semantics(
             SourceScope.character_dialogue,
             CertaintyLevel.certain,
         )
+    contrast_affirmed = (
+        kind == "fact" and _fact_contrast_affirms_submitted_value(support, directive)
+    )
     modality = (
         SemanticModality.negated
-        if _NEGATION_MARKERS.search(support)
-        or _DEFINITE_IMPOSSIBILITY_MARKERS.search(support)
+        if not contrast_affirmed
+        and (
+            _NEGATION_MARKERS.search(support)
+            or _DEFINITE_IMPOSSIBILITY_MARKERS.search(support)
+        )
         else SemanticModality.conditional_rule
         if _closed_conditional_rule(support, directive)
         else SemanticModality.asserted
@@ -1044,6 +1438,37 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
             "noncanonical_frame",
         )
 
+    if _fact_relation_is_unrealized(support, directive):
+        relation_scope = _source_scope(support, directive)
+        return (
+            _to_noncanonical(
+                directive,
+                kind=(
+                    "character_claim"
+                    if relation_scope
+                    in {
+                        SourceScope.character_dialogue,
+                        SourceScope.quoted_material,
+                        SourceScope.unverified_report,
+                    }
+                    else "tentative_fact"
+                ),
+                modality=(
+                    SemanticModality.reported
+                    if relation_scope
+                    in {
+                        SourceScope.character_dialogue,
+                        SourceScope.quoted_material,
+                        SourceScope.unverified_report,
+                    }
+                    else SemanticModality.uncertain
+                ),
+                source_scope=relation_scope,
+                certainty=CertaintyLevel.unknown,
+            ),
+            "unrealized_fact_relation",
+        )
+
     if evidence_presents_unrealized_action(directive):
         action_scope = _source_scope(support, directive)
         if action_scope in {
@@ -1217,10 +1642,62 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
             "uncertain_certainty",
         )
 
+    # Relation closure is the final canonicality check, after modality and
+    # source authority have had priority.  Keeping this ordering lets the
+    # bounded repair Agent distinguish a lexical mismatch from an attempt to
+    # promote hypothetical, reported, or otherwise non-authoritative evidence.
+    if (
+        directive.kind == "fact"
+        and attrs.get("input_form") != "directive"
+        and not attrs.get("predicate", "").startswith("body_state:")
+        and _clean(attrs.get("predicate", "")) not in _STRUCTURED_FACT_PREDICATES
+        and not _fact_has_bound_relation(
+            support,
+            subject=_clean(attrs.get("subject", "")),
+            predicate=_clean(attrs.get("predicate", "")),
+            value=_clean(attrs.get("value", "")),
+        )
+    ):
+        return (
+            _to_noncanonical(
+                directive,
+                kind="tentative_fact",
+                modality=SemanticModality.uncertain,
+                source_scope=scope,
+                certainty=CertaintyLevel.unknown,
+            ),
+            "unbound_fact_relation",
+        )
+
+    if (
+        directive.kind == "uses"
+        and attrs.get("input_form") != "directive"
+        and not _candidate_action_matches(support, directive)
+    ):
+        return (
+            _to_noncanonical(
+                directive,
+                kind="tentative_fact",
+                modality=SemanticModality.uncertain,
+                source_scope=scope,
+                certainty=CertaintyLevel.unknown,
+            ),
+            "unbound_use_relation",
+        )
+
     negated = bool(
         _NEGATION_MARKERS.search(support)
         or _DEFINITE_IMPOSSIBILITY_MARKERS.search(support)
     )
+    contrast_affirmed = bool(
+        directive.kind == "fact"
+        and _fact_contrast_affirms_submitted_value(support, directive)
+    )
+    if contrast_affirmed:
+        # In "不是 A 而是 B", negation scopes over A; the submitted B value
+        # is explicitly affirmed.
+        negated = False
+        declared_modality = SemanticModality.asserted
     if negated and directive.kind not in {"fact", "world_rule"}:
         return (
             _to_noncanonical(

@@ -496,6 +496,262 @@ class BaselineSemanticQualityTests(unittest.TestCase):
                 self.assertEqual("negative", assessed.attrs["polarity"])
                 self.assertTrue(eligible_for_deterministic_rules(assessed))
 
+    def test_double_copular_negation_is_not_parsed_as_a_canonical_negative_fact(self):
+        parsed = parse_document(
+            "double-copular-negation",
+            "chapter.md",
+            "洛棠的档案访问级别并非不是临时观察员。",
+        )
+
+        canonical_facts = [
+            row
+            for row in parsed.directives
+            if row.kind == "fact" and eligible_for_deterministic_rules(row)
+        ]
+        self.assertEqual([], canonical_facts)
+
+    def test_closed_fact_semantics_recognize_bound_state_transition(self):
+        row = ParsedDirective(
+            kind="fact",
+            attrs={
+                "subject": "洛棠",
+                "predicate": "档案访问级别",
+                "value": "临时观察员",
+            },
+            evidence=evidence(
+                "交接终端通过双人校验后亮起绿灯：洛棠的档案访问级别变成临时观察员；"
+                "该条目属于终端强制结果，因而拒绝显示沉墨卷宗。"
+            ),
+        )
+
+        assessed, reason = assess_directive(row)
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("fact", assessed.kind)
+        self.assertEqual("asserted", assessed.attrs["modality"])
+        self.assertEqual("affirmative", assessed.attrs["polarity"])
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_fact_relation_binds_complete_subject_and_passive_transition(self):
+        attrs = {
+            "subject": "洛棠",
+            "predicate": "档案访问级别",
+            "value": "临时观察员",
+            "modality": "asserted",
+            "source_scope": "narrator",
+            "certainty": "certain",
+        }
+        passive, passive_reason = assess_directive(
+            ParsedDirective(
+                kind="fact",
+                attrs=attrs,
+                evidence=evidence(
+                    "洛棠的档案访问级别已被管理员调整为临时观察员。"
+                ),
+                provenance_sources=frozenset({"model"}),
+            )
+        )
+        substring, substring_reason = assess_directive(
+            ParsedDirective(
+                kind="fact",
+                attrs=attrs,
+                evidence=evidence(
+                    "陆洛棠的档案访问级别已被管理员调整为临时观察员。",
+                    line=2,
+                ),
+                provenance_sources=frozenset({"model"}),
+            )
+        )
+
+        self.assertIsNone(passive_reason)
+        self.assertIsNotNone(passive)
+        self.assertTrue(eligible_for_deterministic_rules(passive))
+        self.assertEqual("unbound_fact_relation", substring_reason)
+        self.assertIsNotNone(substring)
+        self.assertFalse(eligible_for_deterministic_rules(substring))
+
+    def test_common_completed_fact_transition_forms_are_canonical(self):
+        cases = (
+            (
+                {"subject": "洛棠", "predicate": "档案访问级别", "value": "临时观察员"},
+                "管理员最终将洛棠的档案访问级别调整为临时观察员。",
+            ),
+            (
+                {"subject": "洛棠", "predicate": "档案访问级别", "value": "临时观察员"},
+                "洛棠的档案访问级别，现已调整为临时观察员。",
+            ),
+            (
+                {"subject": "洛棠", "predicate": "档案访问级别", "value": "正式观察员"},
+                "洛棠的档案访问级别不是临时观察员而是正式观察员。",
+            ),
+            (
+                {"subject": "洛棠", "predicate": "档案访问级别", "value": "临时观察员"},
+                "洛棠的档案访问级别变成临时观察员了。",
+            ),
+            (
+                {"subject": "洛棠", "predicate": "档案访问级别", "value": "临时观察员"},
+                "洛棠的档案访问级别是临时观察员的。",
+            ),
+        )
+        for line, (fields, source) in enumerate(cases, start=1):
+            with self.subTest(source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="fact",
+                        attrs={
+                            **fields,
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        },
+                        evidence=evidence(source, line=line),
+                        provenance_sources=frozenset({"model"}),
+                    )
+                )
+
+                self.assertIsNone(reason)
+                self.assertIsNotNone(assessed)
+                self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_contrast_sentence_also_binds_the_explicitly_negated_first_value(self):
+        assessed, reason = assess_directive(
+            ParsedDirective(
+                kind="fact",
+                attrs={
+                    "subject": "洛棠",
+                    "predicate": "档案访问级别",
+                    "value": "临时观察员",
+                    "modality": "asserted",
+                    "source_scope": "narrator",
+                    "certainty": "certain",
+                },
+                evidence=evidence(
+                    "洛棠的档案访问级别不是临时观察员而是正式观察员。"
+                ),
+                provenance_sources=frozenset({"model"}),
+            )
+        )
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("negative", assessed.attrs["polarity"])
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_planned_or_unexecuted_fact_transition_is_never_canonical(self):
+        sources = (
+            "管理员计划将洛棠的档案访问级别调整为临时观察员。",
+            "管理员计划把洛棠的档案访问级别设置为临时观察员。",
+            "管理员要求将洛棠的档案访问级别设置成临时观察员。",
+            "管理员并未将洛棠的档案访问级别调整为临时观察员。",
+        )
+        for line, source in enumerate(sources, start=1):
+            with self.subTest(source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="fact",
+                        attrs={
+                            "subject": "洛棠",
+                            "predicate": "档案访问级别",
+                            "value": "临时观察员",
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        },
+                        evidence=evidence(source, line=line),
+                        provenance_sources=frozenset({"model"}),
+                    )
+                )
+
+                self.assertIn(reason, {"unrealized_fact_relation", "unbound_fact_relation"})
+                self.assertIsNotNone(assessed)
+                self.assertEqual("tentative_fact", assessed.kind)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_fact_transition_requires_the_complete_submitted_value(self):
+        assessed, reason = assess_directive(
+            ParsedDirective(
+                kind="fact",
+                attrs={
+                    "subject": "洛棠",
+                    "predicate": "档案访问级别",
+                    "value": "临时观察员",
+                    "modality": "asserted",
+                    "source_scope": "narrator",
+                    "certainty": "certain",
+                },
+                evidence=evidence("洛棠的档案访问级别变成临时观察员助理。"),
+                provenance_sources=frozenset({"model"}),
+            )
+        )
+
+        self.assertEqual("unbound_fact_relation", reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("tentative_fact", assessed.kind)
+        self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_latest_authoritative_fact_support_wins_over_report_or_old_value(self):
+        attrs = {
+            "subject": "洛棠",
+            "predicate": "档案访问级别",
+            "value": "临时观察员",
+        }
+        confirmed, confirmed_reason = assess_directive(
+            ParsedDirective(
+                kind="fact",
+                attrs=attrs,
+                evidence=evidence(
+                    "值班员转述：洛棠的档案访问级别是临时观察员。"
+                    "随后，系统日志确认洛棠的档案访问级别是临时观察员。"
+                ),
+            )
+        )
+        corrected, corrected_reason = assess_directive(
+            ParsedDirective(
+                kind="fact",
+                attrs=attrs,
+                evidence=evidence(
+                    "系统日志确认洛棠的档案访问级别是临时观察员。"
+                    "随后系统日志修正：洛棠的档案访问级别不是临时观察员。"
+                ),
+            )
+        )
+
+        self.assertIsNone(confirmed_reason)
+        self.assertIsNotNone(confirmed)
+        self.assertEqual("asserted", confirmed.attrs["modality"])
+        self.assertTrue(eligible_for_deterministic_rules(confirmed))
+        self.assertIsNone(corrected_reason)
+        self.assertIsNotNone(corrected)
+        self.assertEqual("negated", corrected.attrs["modality"])
+        self.assertEqual("negative", corrected.attrs["polarity"])
+
+    def test_unrelated_copula_or_transition_does_not_close_fact_semantics(self):
+        attrs = {
+            "subject": "洛棠",
+            "predicate": "档案访问级别",
+            "value": "临时观察员",
+        }
+        sources = (
+            "洛棠与临时观察员核对档案访问级别且该条目属于终端记录。",
+            "洛棠与临时观察员核对档案访问级别时指示灯变成绿色。",
+        )
+
+        for line, source in enumerate(sources, start=1):
+            with self.subTest(source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="fact",
+                        attrs=attrs,
+                        evidence=evidence(source, line=line),
+                    )
+                )
+
+                self.assertEqual("missing_semantic_labels", reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("tentative_fact", assessed.kind)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
     def test_dialogue_and_reported_document_have_different_source_scope(self):
         spoken = ParsedDirective(
             kind="fact",
@@ -646,6 +902,257 @@ class BaselineSemanticQualityTests(unittest.TestCase):
         assessed, reason = assess_directive(directive)
         self.assertIsNone(reason)
         self.assertEqual("world_assert", assessed.kind)
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_closed_use_semantics_recognize_bound_actual_operations(self):
+        rows = (
+            (
+                "尹夙",
+                "回声纺锤",
+                "2027-03-09 09:15，尹夙亲自操作了回声纺锤。",
+            ),
+            ("尹夙", "回声纺锤", "尹夙操控回声纺锤。"),
+            ("尹夙", "回声纺锤", "尹夙按下回声纺锤。"),
+            ("尹夙", "回声纺锤", "尹夙将回声纺锤插入基座。"),
+            ("尹夙", "回声纺锤", "尹夙在修复室操作了回声纺锤。"),
+            ("尹夙", "回声纺锤", "尹夙取得授权后实际使用了回声纺锤。"),
+            ("尹夙", "回声纺锤", "回声纺锤被尹夙启用。"),
+            ("尹夙", "回声纺锤", "回声纺锤已被尹夙启用。"),
+            ("尹夙", "回声纺锤", "回声纺锤已被尹夙亲手启用。"),
+            ("尹夙", "回声纺锤", "尹夙对回声纺锤进行了操作。"),
+        )
+        for line, (user, item, source) in enumerate(rows, start=1):
+            with self.subTest(source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="uses",
+                        attrs={"user": user, "item": item},
+                        evidence=evidence(source, line=line),
+                    )
+                )
+
+                self.assertIsNone(reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("uses", assessed.kind)
+                self.assertEqual("asserted", assessed.attrs["modality"])
+                self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_use_semantics_reject_non_actions_and_unrealized_or_reported_uses(self):
+        rows = (
+            (
+                "尹夙阅读回声纺锤的操作说明。",
+                "tentative_fact",
+                "missing_semantic_labels",
+            ),
+            (
+                "尹夙拥有操作回声纺锤的权限。",
+                "tentative_fact",
+                "missing_semantic_labels",
+            ),
+            ("总站长命令尹夙操作回声纺锤。", "tentative_fact", "unrealized_action"),
+            ("尹夙计划操作回声纺锤。", "tentative_fact", "unrealized_action"),
+            ("尹夙尚未操作回声纺锤。", "tentative_fact", "unrealized_action"),
+            ("尹夙并未将回声纺锤启动。", "tentative_fact", "unrealized_action"),
+            ("尹夙尚未把回声纺锤拿出。", "tentative_fact", "unrealized_action"),
+            (
+                "值班纪要转述：尹夙操作了回声纺锤。",
+                "character_claim",
+                "non_authoritative_source",
+            ),
+        )
+        for line, (source, expected_kind, expected_reason) in enumerate(rows, start=1):
+            with self.subTest(source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="uses",
+                        attrs={"user": "尹夙", "item": "回声纺锤"},
+                        evidence=evidence(source, line=line),
+                    )
+                )
+
+                self.assertEqual(expected_reason, reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual(expected_kind, assessed.kind)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_declared_model_labels_cannot_upgrade_an_unbound_use_relation(self):
+        for line, source in enumerate(
+            (
+                "尹夙阅读回声纺锤的操作说明。",
+                "尹夙拥有操作回声纺锤的权限。",
+                "陆尹夙亲自操作了回声纺锤。",
+                "尹夙亲自操作了回声纺锤模型。",
+                "尹夙亲自操作了回声纺锤外壳。",
+                "尹夙亲自操作了回声纺锤启动器。",
+                "尹夙亲自操作了回声纺锤打开器。",
+                "尹夙亲自使用了回声纺锤后盖。",
+                "尹夙亲自使用了回声纺锤时钟。",
+                "尹夙亲自使用了回声纺锤的功能模块。",
+                "尹夙亲自使用了回声纺锤并联器。",
+                "尹夙亲自使用了回声纺锤启动器后离开。",
+                "尹夙亲自使用了回声纺锤打开器时停电。",
+            ),
+            start=1,
+        ):
+            with self.subTest(source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="uses",
+                        attrs={
+                            "user": "尹夙",
+                            "item": "回声纺锤",
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        },
+                        evidence=evidence(source, line=line),
+                        provenance_sources=frozenset({"model"}),
+                    )
+                )
+
+                self.assertEqual("unbound_use_relation", reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("tentative_fact", assessed.kind)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_colon_framed_plan_permission_and_rehearsal_are_not_execution(self):
+        for line, source in enumerate(
+            (
+                "操作计划：尹夙使用回声纺锤。",
+                "核验计划：尹夙使用回声纺锤。",
+                "撤离方案：尹夙操作回声纺锤。",
+                "安全规范：尹夙使用回声纺锤。",
+                "设备使用规范：尹夙操作回声纺锤。",
+                "战斗预案：尹夙使用回声纺锤。",
+                "巡检流程：尹夙操作回声纺锤。",
+                "编辑安排：尹夙使用回声纺锤。",
+                "舰内设备核验要求：尹夙操作回声纺锤。",
+                "计划如下：尹夙使用回声纺锤。",
+                "长线演练执行方案如下所示：尹夙操作回声纺锤。",
+            ),
+            start=1,
+        ):
+            with self.subTest(source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="uses",
+                        attrs={
+                            "user": "尹夙",
+                            "item": "回声纺锤",
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        },
+                        evidence=evidence(source, line=line),
+                        provenance_sources=frozenset({"model"}),
+                    )
+                )
+
+                self.assertEqual("unrealized_action", reason)
+                self.assertIsNotNone(assessed)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_generic_colon_headings_do_not_assert_fact_relations(self):
+        headings = (
+            "核验计划",
+            "撤离方案",
+            "安全规范",
+            "设备使用规范",
+            "战斗预案",
+            "巡检流程",
+            "编辑安排",
+        )
+        for line, heading in enumerate(headings, start=1):
+            with self.subTest(heading=heading):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="fact",
+                        attrs={
+                            "subject": "洛棠",
+                            "predicate": "档案访问级别",
+                            "value": "临时观察员",
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        },
+                        evidence=evidence(
+                            f"{heading}：洛棠的档案访问级别设为临时观察员。",
+                            line=line,
+                        ),
+                        provenance_sources=frozenset({"model"}),
+                    )
+                )
+
+                self.assertEqual("unrealized_fact_relation", reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("tentative_fact", assessed.kind)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_completed_plan_bridge_still_allows_later_actual_use(self):
+        assessed, reason = assess_directive(
+            ParsedDirective(
+                kind="uses",
+                attrs={
+                    "user": "尹夙",
+                    "item": "回声纺锤",
+                    "modality": "asserted",
+                    "source_scope": "narrator",
+                    "certainty": "certain",
+                },
+                evidence=evidence(
+                    "计划完成后，尹夙实际使用了回声纺锤。"
+                ),
+                provenance_sources=frozenset({"model"}),
+            )
+        )
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(assessed)
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_instructional_or_permission_use_is_not_promoted(self):
+        sources = (
+            "用户指南：尹夙使用回声纺锤时应先断电。",
+            "维护规程：尹夙操作回声纺锤时需要双人监护。",
+            "系统允许尹夙操作回声纺锤。",
+            "管理员授权尹夙使用回声纺锤。",
+        )
+        for line, source in enumerate(sources, start=1):
+            with self.subTest(source=source):
+                assessed, _ = assess_directive(
+                    ParsedDirective(
+                        kind="uses",
+                        attrs={
+                            "user": "尹夙",
+                            "item": "回声纺锤",
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        },
+                        evidence=evidence(source, line=line),
+                        provenance_sources=frozenset({"model"}),
+                    )
+                )
+
+                self.assertIsNotNone(assessed)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_latest_authoritative_use_support_wins_over_prior_report(self):
+        assessed, reason = assess_directive(
+            ParsedDirective(
+                kind="uses",
+                attrs={"user": "尹夙", "item": "回声纺锤"},
+                evidence=evidence(
+                    "值班员转述：尹夙操作了回声纺锤。"
+                    "随后，尹夙亲自操作了回声纺锤。"
+                ),
+            )
+        )
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("uses", assessed.kind)
+        self.assertEqual("narrator", assessed.attrs["source_scope"])
         self.assertTrue(eligible_for_deterministic_rules(assessed))
 
     def test_semantic_gate_localizes_action_modality_and_source(self):

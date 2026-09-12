@@ -41,6 +41,9 @@ from .semantic_quality import (
     apply_semantic_quality_gate,
     document_context_has_noncanonical_frame,
     eligible_for_deterministic_rules,
+    find_bound_fact_relation_matches,
+    find_bound_use_action_matches,
+    has_unrealized_heading_frame,
 )
 
 
@@ -1477,7 +1480,12 @@ def _fact_relation_grounded(attrs: Mapping[str, str], text: str) -> bool:
     subject = re.escape(_compact(attrs["subject"]))
     predicate = attrs["predicate"]
     value = attrs["value"]
-    for clause in _grounding_clauses(text):
+    # Keep colons inside a sentence.  They are both a genuine relation
+    # boundary ("终端亮灯：洛棠的…变成…") and part of modal headings such
+    # as "操作计划："; stripping them can concatenate the heading with an
+    # entity name and defeat exact subject binding.
+    clauses = _relation_grounding_clauses(text)
+    for clause in clauses:
         if _reported_or_hypothetical(clause):
             continue
         if predicate.startswith("body_state:"):
@@ -1500,26 +1508,13 @@ def _fact_relation_grounded(attrs: Mapping[str, str], text: str) -> bool:
             ):
                 return True
             continue
-        affirmative_relation = re.compile(
-            rf"{subject}(?:的)?{re.escape(_compact(predicate))}"
-            rf"(?:是否)?(?:是|为|变成|变为|呈现为|保持为|仍是|依旧是)"
-            rf"{re.escape(_compact(value))}"
-        )
-        # Facts carry polarity as server-derived semantic metadata rather than
-        # a model-authored field.  Accept only a narrow, explicit copular
-        # negation of the submitted value.  The boundary prevents unrelated
-        # mentions ("不是黑色，银色是制服颜色") and double
-        # negations ("并非不是银色") from grounding the candidate.
-        negative_relation = re.compile(
-            rf"{subject}(?:的)?{re.escape(_compact(predicate))}"
-            rf"(?:不是|并非(?:是|为)?|不为){re.escape(_compact(value))}"
-            rf"(?=$|而(?:是|非|为)|却(?:是|为))"
-        )
-        for relation in (affirmative_relation, negative_relation):
-            match = relation.search(clause)
-            if match is not None and not _externally_modalized(
-                clause, match.start()
-            ):
+        for match in find_bound_fact_relation_matches(
+            clause,
+            subject=_compact(attrs["subject"]),
+            predicate=_compact(predicate),
+            value=_compact(value),
+        ):
+            if not _externally_modalized(clause, match.start()):
                 return True
     return False
 
@@ -1589,25 +1584,15 @@ def _item_relation_grounded(attrs: Mapping[str, str], text: str) -> bool:
 
 
 def _use_relation_grounded(attrs: Mapping[str, str], text: str) -> bool:
-    user = re.escape(_compact(attrs["user"]))
-    item = re.escape(_compact(attrs["item"]))
-    patterns = (
-        re.compile(
-            rf"{user}(?:已经|随后|立即|此时|正|正在|亲自)?"
-            rf"(?:使用|启用|发动|操作|挥动|借助|用)(?:了)?{item}"
-        ),
-        re.compile(
-            rf"{user}(?:(?:获准|得到许可|获得授权)后)"
-            rf"(?:已经|随后|立即|此时|正|正在|亲自)?"
-            rf"(?:使用|启用|发动|操作|挥动|借助|用)(?:了)?{item}"
-        ),
-    )
-    for clause in _grounding_clauses(text):
+    for clause in _relation_grounding_clauses(text):
         if _non_actual_action(clause):
             continue
-        for pattern in patterns:
-            match = pattern.search(clause)
-            if match is not None and not _externally_modalized(clause, match.start()):
+        for match in find_bound_use_action_matches(
+            clause,
+            user=attrs["user"],
+            item=attrs["item"],
+        ):
+            if not _externally_modalized(clause, match.start()):
                 return True
     return False
 
@@ -1697,11 +1682,27 @@ def _grounding_clauses(text: str) -> tuple[str, ...]:
     )
 
 
+def _relation_grounding_clauses(text: str) -> tuple[str, ...]:
+    """Preserve comma/colon syntax used by bound relation grammars."""
+
+    return tuple(
+        compact
+        for row in re.split(r"[\r\n。！？!?；;]+", text)
+        if (
+            compact := re.sub(
+                r"\s+", "", unicodedata.normalize("NFKC", row).casefold()
+            )
+        )
+    )
+
+
 def _reported_or_hypothetical(clause: str) -> bool:
     return bool(
-        re.search(
+        has_unrealized_heading_frame(clause)
+        or re.search(
             r"据说|听说|传闻|声称|表示|认为|猜测|可能|或许|似乎|"
-            r"假如|如果|若是|说|提问|询问",
+            r"假如|如果|若是|说|提问|询问|用户指南|维护规程|操作说明|"
+            r"使用说明|应当|应该|务必",
             clause,
         )
     )
@@ -1726,7 +1727,8 @@ def _externally_modalized(clause: str, relation_start: int) -> bool:
     return bool(
         re.search(
             r"(?:允许|准许|准予|容许|获准|许可|授权|同意|批准|答应|"
-            r"授意|命令|指示|吩咐|要求|请求|建议|催促|嘱咐|告诉|提醒|让|叫)"
+            r"授意|命令|指示|吩咐|要求|请求|建议|提议|催促|嘱咐|告诉|提醒|"
+            r"让|叫|计划|打算|准备|试图|尝试|即将|将要|尚未|还未|并未|未曾|未能)"
             r"[^后]{0,20}$",
             prefix,
         )
