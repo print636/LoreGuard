@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATASET_ROOT = ROOT / "data" / "evaluation" / "evidence_investigator_live"
 DEFAULT_ARTIFACT_ROOT = ROOT / "artifacts" / "evidence-investigator-live"
 
-ARTIFACT_SCHEMA = "evidence-investigator-live-http-v1"
+ARTIFACT_SCHEMA = "evidence-investigator-live-http-v2"
 DATASET_ID = "evidence-investigator-live-v1"
 PINNED_MANIFEST_SHA256 = "73869e264b6b13f8d6b0543514fe001a24404ae5af8c1979d4b487a5276cca04"
 PINNED_FREEZE_SHA256 = "d7987f0bb5356e633e13761b23d132296e4b8f13298f86678520eb1877948996"
@@ -136,10 +136,23 @@ PROVIDER_FAILURE_REASONS = frozenset(
         "provider_contract_invalid",
         "provider_unavailable",
         "usage_unavailable",
+    }
+)
+AGENT_PROTOCOL_FAILURE_REASONS = frozenset(
+    {
         "no_tool_call",
         "multiple_tool_calls",
         "unknown_tool",
         "invalid_tool_arguments",
+        "cross_seed",
+        "unknown_seed",
+        "unknown_result_ref",
+        "unknown_span_ref",
+        "candidate_kind_forbidden",
+        "repeated_action",
+        "repeated_query",
+        "no_progress",
+        "unprocessed_seed",
     }
 )
 SAFE_FAILURE_CODES = frozenset(
@@ -357,6 +370,20 @@ def _safe_int(value: Any) -> int | None:
 def _safe_identifier(value: Any) -> str | None:
     if type(value) is str and _SAFE_ID.fullmatch(value):
         return value
+    return None
+
+
+def _safe_bool(value: Any) -> bool | None:
+    return value if type(value) is bool else None
+
+
+def _safe_object_list_count(value: Any, *, maximum: int = 64) -> int | None:
+    if (
+        type(value) is list
+        and len(value) <= maximum
+        and all(type(row) is dict for row in value)
+    ):
+        return len(value)
     return None
 
 
@@ -673,10 +700,96 @@ def _safe_diagnostics(value: Any) -> dict[str, Any]:
     for row in calls[:64] if type(calls) is list else ():
         if type(row) is dict and row.get("category") in SAFE_PROVIDER_CATEGORIES:
             provider_categories[row["category"]] += 1
-    provider_calls = _safe_int(loop_source.get("provider_calls"))
-    exact_tool_calls = (
-        provider_calls if loop_outcome == "completed" and provider_calls is not None else None
+    usage_token_keys = (
+        "reported_prompt_tokens",
+        "reported_completion_tokens",
+        "charged_tokens",
     )
+    if any(key in usage_source for key in usage_token_keys):
+        reported_prompt_tokens = _safe_int(
+            usage_source.get("reported_prompt_tokens")
+        )
+        reported_completion_tokens = _safe_int(
+            usage_source.get("reported_completion_tokens")
+        )
+        charged_tokens = _safe_int(usage_source.get("charged_tokens"))
+        usage_token_basis = (
+            "investigator_usage_ledger"
+            if None
+            not in {
+                reported_prompt_tokens,
+                reported_completion_tokens,
+                charged_tokens,
+            }
+            else "investigator_usage_ledger_invalid"
+        )
+    else:
+        # Compatibility for diagnostics emitted before the runtime-level usage
+        # accumulator became the authoritative ledger. Never mix fields from
+        # the two sources: a partial modern ledger must fail closed.
+        reported_prompt_tokens = _safe_int(
+            loop_source.get("reported_prompt_tokens")
+        )
+        reported_completion_tokens = _safe_int(
+            loop_source.get("reported_completion_tokens")
+        )
+        charged_tokens = _safe_int(loop_source.get("charged_tokens"))
+        usage_token_basis = (
+            "legacy_loop_compatibility"
+            if None
+            not in {
+                reported_prompt_tokens,
+                reported_completion_tokens,
+                charged_tokens,
+            }
+            else "unavailable"
+        )
+    provider_calls = _safe_int(loop_source.get("provider_calls"))
+    reported_tool_calls = _safe_int(loop_source.get("executed_tool_calls"))
+    if (
+        reported_tool_calls is not None
+        and provider_calls is not None
+        and reported_tool_calls <= provider_calls
+    ):
+        exact_tool_calls = reported_tool_calls
+        tool_call_count_basis = "server_reported_executed_tools"
+    elif loop_outcome == "completed" and provider_calls is not None:
+        # Backward-compatible fallback for artifacts produced before degraded
+        # loop diagnostics exposed an explicit execution counter.
+        exact_tool_calls = provider_calls
+        tool_call_count_basis = "completed_loop_protocol_invariant"
+    else:
+        exact_tool_calls = None
+        tool_call_count_basis = "unavailable"
+    budget_source = (
+        source.get("budget_preflight")
+        if type(source.get("budget_preflight")) is dict
+        else {}
+    )
+    budget_preflight = {
+        "seed_count": _safe_int(budget_source.get("seed_count")),
+        "minimum_path_admissible": _safe_bool(
+            budget_source.get("minimum_path_admissible")
+        ),
+        "minimum_required_rounds": _safe_int(
+            budget_source.get("minimum_required_rounds")
+        ),
+        "minimum_initial_reservation": _safe_int(
+            budget_source.get("minimum_initial_reservation")
+        ),
+        "maximum_local_round_reservation": _safe_int(
+            budget_source.get("maximum_local_round_reservation")
+        ),
+        "maximum_local_run_reservation": _safe_int(
+            budget_source.get("maximum_local_run_reservation")
+        ),
+        "max_charged_tokens": _safe_int(
+            budget_source.get("max_charged_tokens")
+        ),
+        "oversized_initial_prompts": _safe_int(
+            budget_source.get("oversized_initial_prompts")
+        ),
+    }
     profile_fingerprint = index_source.get("profile_fingerprint")
     chunker_fingerprint = index_source.get("chunker_fingerprint")
     return {
@@ -690,8 +803,11 @@ def _safe_diagnostics(value: Any) -> dict[str, Any]:
             "reason_code": loop_reason,
             "provider_decision_calls": provider_calls,
             "tool_calls": exact_tool_calls,
-            "tool_call_count_basis": (
-                "exact_for_completed_loop" if exact_tool_calls is not None else "unavailable"
+            "tool_call_count_basis": tool_call_count_basis,
+            "searches": _safe_int(loop_source.get("executed_searches")),
+            "reads": _safe_int(loop_source.get("executed_reads")),
+            "recoverable_rejections": _safe_int(
+                loop_source.get("recoverable_rejections")
             ),
             "completed_seeds": _safe_int(loop_source.get("completed_seeds")),
             "abstained_seeds": _safe_int(loop_source.get("abstained_seeds")),
@@ -705,14 +821,16 @@ def _safe_diagnostics(value: Any) -> dict[str, Any]:
             "rejection_counts": dict(sorted(rejections.items())),
         },
         "usage": {
-            "reported_prompt_tokens": _safe_int(
-                loop_source.get("reported_prompt_tokens")
-            ),
-            "reported_completion_tokens": _safe_int(
-                loop_source.get("reported_completion_tokens")
-            ),
-            "charged_tokens": _safe_int(loop_source.get("charged_tokens")),
+            "reported_prompt_tokens": reported_prompt_tokens,
+            "reported_completion_tokens": reported_completion_tokens,
+            "charged_tokens": charged_tokens,
+            "token_count_basis": usage_token_basis,
             "provider_category_counts": dict(sorted(provider_categories.items())),
+        },
+        "budget_preflight": budget_preflight,
+        "effective_limits": {
+            "max_charged_tokens": budget_preflight["max_charged_tokens"],
+            "source": "service_budget_preflight",
         },
         "rag": {
             "index_outcome": _safe_identifier(index_source.get("outcome")),
@@ -736,6 +854,138 @@ def _safe_diagnostics(value: Any) -> dict[str, Any]:
             "strategies": sorted(strategies),
             "total_retrievals": _safe_int(rag_source.get("total_retrievals")),
         },
+    }
+
+
+def _safe_capability_isolation(
+    value: Any,
+    *,
+    status_payload: Any,
+    investigator: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a content-free, fail-closed proof that only Investigator used chat.
+
+    ``model`` is always emitted by the production analysis pipeline. By
+    contrast, ``ai_evidence_review`` is added only when that optional service
+    branch is enabled, so absence is the switch-off proof for that stage.
+    Aggregate chat accounting must also equal the Investigator ledger; this
+    catches a future chat-backed stage that is not yet known to this runner.
+    """
+
+    root = value if type(value) is dict else {}
+    status = status_payload if type(status_payload) is dict else {}
+    model_source = root.get("model") if type(root.get("model")) is dict else None
+    if model_source is None:
+        main = {
+            "diagnostics_present": False,
+            "enabled": None,
+            "configured": None,
+            "used": None,
+            "logical_calls": None,
+            "provider_calls": None,
+        }
+    else:
+        main = {
+            "diagnostics_present": True,
+            "enabled": _safe_bool(model_source.get("enabled")),
+            "configured": _safe_bool(model_source.get("configured")),
+            "used": _safe_bool(model_source.get("used")),
+            "logical_calls": _safe_int(model_source.get("logical_call_count")),
+            "provider_calls": _safe_object_list_count(
+                model_source.get("provider_calls")
+            ),
+        }
+
+    review_source = (
+        root.get("ai_evidence_review")
+        if type(root.get("ai_evidence_review")) is dict
+        else None
+    )
+    if review_source is None:
+        review = {
+            "diagnostics_present": False,
+            "enabled": False,
+            "logical_calls": 0,
+            "provider_calls": 0,
+            "switch_proof": "stage_diagnostics_absent",
+        }
+    else:
+        review_usage = (
+            review_source.get("usage_accounting")
+            if type(review_source.get("usage_accounting")) is dict
+            else {}
+        )
+        review_calls = _safe_object_list_count(review_source.get("provider_calls"))
+        logical_calls = _safe_int(review_usage.get("logical_calls"))
+        if logical_calls is None and review_calls is not None:
+            logical_calls = review_calls
+        review = {
+            "diagnostics_present": True,
+            "enabled": _safe_bool(review_source.get("enabled")),
+            "logical_calls": logical_calls,
+            "provider_calls": review_calls,
+            "switch_proof": "explicit_stage_diagnostics",
+        }
+
+    investigator_usage = (
+        investigator.get("usage")
+        if type(investigator.get("usage")) is dict
+        else {}
+    )
+    run_prompt = _safe_int(status.get("prompt_tokens"))
+    run_completion = _safe_int(status.get("completion_tokens"))
+    usage_accounting = (
+        status.get("usage_accounting")
+        if type(status.get("usage_accounting")) is dict
+        else {}
+    )
+    run_charged = _safe_int(usage_accounting.get("charged_tokens"))
+    investigator_prompt = _safe_int(
+        investigator_usage.get("reported_prompt_tokens")
+    )
+    investigator_completion = _safe_int(
+        investigator_usage.get("reported_completion_tokens")
+    )
+    investigator_charged = _safe_int(investigator_usage.get("charged_tokens"))
+    usage_matches = (
+        None
+        not in {
+            run_prompt,
+            run_completion,
+            run_charged,
+            investigator_prompt,
+            investigator_completion,
+            investigator_charged,
+        }
+        and run_prompt == investigator_prompt
+        and run_completion == investigator_completion
+        and run_charged == investigator_charged
+    )
+
+    reasons: list[str] = []
+    if not main["diagnostics_present"]:
+        reasons.append("main_extraction_diagnostics_missing")
+    if main["enabled"] is not False:
+        reasons.append("main_extraction_not_disabled")
+    if main["configured"] is not False:
+        reasons.append("main_extraction_configured_or_unknown")
+    if main["used"] is not False:
+        reasons.append("main_extraction_used_or_unknown")
+    if main["logical_calls"] != 0 or main["provider_calls"] != 0:
+        reasons.append("main_extraction_calls_nonzero_or_unknown")
+    if review["enabled"] is not False:
+        reasons.append("issue_evidence_review_not_disabled")
+    if review["logical_calls"] != 0 or review["provider_calls"] != 0:
+        reasons.append("issue_evidence_review_calls_nonzero_or_unknown")
+    if not usage_matches:
+        reasons.append("aggregate_chat_usage_mismatch_or_unknown")
+
+    return {
+        "verified": not reasons,
+        "main_extraction": main,
+        "issue_evidence_review": review,
+        "aggregate_chat_usage_matches_investigator": usage_matches,
+        "reason_codes": reasons,
     }
 
 
@@ -795,7 +1045,10 @@ def _target_evidence_match(
 
 
 def _reason_from_diagnostics(diagnostics: dict[str, Any]) -> str | None:
-    return diagnostics.get("loop", {}).get("reason_code") or diagnostics.get("reason_code")
+    loop = diagnostics.get("loop", {})
+    if loop.get("outcome") != "completed":
+        return loop.get("reason_code") or diagnostics.get("reason_code")
+    return diagnostics.get("reason_code") or loop.get("reason_code")
 
 
 def _classify(
@@ -806,6 +1059,7 @@ def _classify(
     ground_truth: GroundTruth,
     target_evidence_match: bool,
     citation_scope_authorized: bool,
+    capability_isolation: dict[str, Any],
 ) -> tuple[str, bool]:
     reason = _reason_from_diagnostics(diagnostics)
     loop = diagnostics.get("loop", {})
@@ -818,8 +1072,12 @@ def _classify(
         and (promotion.get("accepted_candidates") or 0) >= 1
         and promotion.get("added_issues") == ground_truth.added_issue_count
     )
-    if reason in TIME_OR_BUDGET_REASONS:
+    if capability_isolation.get("verified") is not True:
+        classification = "isolation_failure"
+    elif reason in TIME_OR_BUDGET_REASONS:
         classification = "timeout_or_budget"
+    elif reason in AGENT_PROTOCOL_FAILURE_REASONS:
+        classification = "agent_protocol_failure"
     elif run_status != "completed" or reason in PROVIDER_FAILURE_REASONS:
         classification = "provider_failure"
     elif diagnostics.get("outcome") == "degraded":
@@ -936,6 +1194,11 @@ def _run_one_case(
             sleep=sleep,
         )
         diagnostics = _safe_diagnostics(diagnostics_payload)
+        capability_isolation = _safe_capability_isolation(
+            diagnostics_payload,
+            status_payload=status_payload,
+            investigator=diagnostics,
+        )
         issue_payload: Any = []
         if status == "completed":
             issue_payload = _request_with_rate_limit(
@@ -961,6 +1224,7 @@ def _run_one_case(
             ground_truth=plan.ground_truth,
             target_evidence_match=evidence_match,
             citation_scope_authorized=authorized,
+            capability_isolation=capability_isolation,
         )
         usage_accounting = (
             status_payload.get("usage_accounting")
@@ -976,7 +1240,9 @@ def _run_one_case(
             "run_status": status,
             "project_ref_hash": _sha256_bytes(project_id.encode("utf-8")),
             "run_ref_hash": _sha256_bytes(run_id.encode("utf-8")),
-            "latency_ms": max(0, round((monotonic() - started) * 1000)),
+            "case_wall_latency_ms": max(
+                0, round((monotonic() - started) * 1000)
+            ),
             "issue_category_counts": dict(sorted(categories.items())),
             "citation_scope_authorized": authorized,
             "target_evidence_match": evidence_match,
@@ -988,6 +1254,7 @@ def _run_one_case(
                 "charged_tokens": _safe_int(usage_accounting.get("charged_tokens")),
             },
             "investigator": diagnostics,
+            "capability_isolation": capability_isolation,
             "failure_code": None,
         }
     except LiveEvaluationError as exc:
@@ -1007,7 +1274,9 @@ def _run_one_case(
                 _sha256_bytes(project_id.encode("utf-8")) if project_id else None
             ),
             "run_ref_hash": _sha256_bytes(run_id.encode("utf-8")) if run_id else None,
-            "latency_ms": max(0, round((monotonic() - started) * 1000)),
+            "case_wall_latency_ms": max(
+                0, round((monotonic() - started) * 1000)
+            ),
             "issue_category_counts": {},
             "citation_scope_authorized": None,
             "target_evidence_match": None,
@@ -1017,6 +1286,7 @@ def _run_one_case(
                 "charged_tokens": None,
             },
             "investigator": None,
+            "capability_isolation": None,
             "failure_code": exc.code,
         }
     except Exception:
@@ -1029,7 +1299,9 @@ def _run_one_case(
             "run_status": None,
             "project_ref_hash": None,
             "run_ref_hash": None,
-            "latency_ms": max(0, round((monotonic() - started) * 1000)),
+            "case_wall_latency_ms": max(
+                0, round((monotonic() - started) * 1000)
+            ),
             "issue_category_counts": {},
             "citation_scope_authorized": None,
             "target_evidence_match": None,
@@ -1039,6 +1311,7 @@ def _run_one_case(
                 "charged_tokens": None,
             },
             "investigator": None,
+            "capability_isolation": None,
             "failure_code": "internal_runner_error",
         }
 
@@ -1087,6 +1360,37 @@ def _safe_health(value: Any) -> dict[str, Any]:
         "model_configured": model.get("configured") is True,
         "thinking_configured": thinking.get("configured") is True,
         "thinking_mode": mode if mode in {"enabled", "disabled"} else None,
+    }
+
+
+def _service_reported_effective_limits(
+    results: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    snapshots: list[dict[str, Any]] = []
+    for row in results:
+        investigator = row.get("investigator")
+        limits = (
+            investigator.get("effective_limits")
+            if type(investigator) is dict
+            and type(investigator.get("effective_limits")) is dict
+            else None
+        )
+        if (
+            limits is not None
+            and _safe_int(limits.get("max_charged_tokens")) is not None
+            and limits.get("source") == "service_budget_preflight"
+        ):
+            snapshots.append(limits)
+    unique = {
+        _canonical_json_bytes(snapshot): snapshot
+        for snapshot in snapshots
+    }
+    consistent = len(snapshots) == len(results) and len(unique) == 1
+    return {
+        "observed_cases": len(snapshots),
+        "consistent_across_cases": consistent,
+        "values": next(iter(unique.values())) if consistent else None,
+        "distinct_snapshot_count": len(unique),
     }
 
 
@@ -1171,6 +1475,7 @@ def run_live_evaluation(
         )
         for plan in plans
     ]
+    effective_limits = _service_reported_effective_limits(results)
     safe_config = {
         "artifact_schema": ARTIFACT_SCHEMA,
         "dataset_id": DATASET_ID,
@@ -1181,11 +1486,17 @@ def run_live_evaluation(
         "request_timeout_seconds": options.request_timeout_seconds,
         "poll_interval_seconds": options.poll_interval_seconds,
         "service_observation": health,
+        "service_reported_effective_limits": effective_limits,
     }
     config_fingerprint = _sha256_bytes(_canonical_json_bytes(safe_config))
     classifications = Counter(result["classification"] for result in results)
-    latencies = [result["latency_ms"] for result in results]
+    case_wall_latencies = [result["case_wall_latency_ms"] for result in results]
     passed = sum(result["passed"] is True for result in results)
+    isolation_verified = sum(
+        type(result.get("capability_isolation")) is dict
+        and result["capability_isolation"].get("verified") is True
+        for result in results
+    )
     artifact = {
         "schema_version": ARTIFACT_SCHEMA,
         "dataset_id": DATASET_ID,
@@ -1204,9 +1515,14 @@ def run_live_evaluation(
             "case_count": len(results),
             "passed": passed,
             "failed": len(results) - passed,
+            "capability_isolation_verified": isolation_verified,
             "classification_counts": dict(sorted(classifications.items())),
-            "latency_ms_p50": _percentile(latencies, 0.50),
-            "latency_ms_p95": _percentile(latencies, 0.95),
+            "case_wall_latency_ms_p50": _percentile(
+                case_wall_latencies, 0.50
+            ),
+            "case_wall_latency_ms_p95": _percentile(
+                case_wall_latencies, 0.95
+            ),
         },
         "cases": results,
         "privacy_boundary": {
@@ -1216,10 +1532,11 @@ def run_live_evaluation(
             "service_address_persisted": False,
         },
         "diagnostic_boundary": (
-            "Exact tool-call count is available only for a completed native-tool loop, "
-            "where each provider decision executed one tool. Failed/degraded loops report "
-            "it as unavailable. The public API intentionally does not expose effective "
-            "provider identity or secret configuration."
+            "The service reports an exact count of successfully executed tools even when "
+            "the bounded loop later degrades; provider decision calls and retryable "
+            "rejections remain separate counters. Older completed-loop diagnostics may "
+            "use the one-decision/one-tool protocol invariant. The public API intentionally "
+            "does not expose effective provider identity or secret configuration."
         ),
     }
     artifact_hash = write_artifact_exclusive(options.artifact_path, artifact)

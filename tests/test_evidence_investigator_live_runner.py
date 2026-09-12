@@ -3,16 +3,22 @@ from __future__ import annotations
 import json
 import shutil
 import urllib.error
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
 from scripts.run_evidence_investigator_live import (
     DATASET_ROOT,
+    GroundTruth,
     HttpApiError,
     LiveEvaluationError,
     RunnerOptions,
     UrllibJsonApi,
+    _classify,
+    _safe_capability_isolation,
+    _safe_diagnostics,
+    _service_reported_effective_limits,
     build_parser,
     load_case_plans,
     main,
@@ -92,9 +98,9 @@ class FixtureHttpApi:
                 return {
                     "id": run_id,
                     "status": "completed",
-                    "prompt_tokens": 31,
-                    "completion_tokens": 7,
-                    "usage_accounting": {"charged_tokens": 123},
+                    "prompt_tokens": 29,
+                    "completion_tokens": 5,
+                    "usage_accounting": {"charged_tokens": 91},
                 }
             if parts[5] == "issues":
                 if plan.ground_truth.decision == "abstain":
@@ -123,6 +129,13 @@ class FixtureHttpApi:
                 positive = plan.ground_truth.decision == "added_issue"
                 provider_calls = 3 if positive else 1
                 return {
+                    "model": {
+                        "enabled": False,
+                        "configured": False,
+                        "used": False,
+                        "logical_call_count": 0,
+                        "provider_calls": [],
+                    },
                     "evidence_investigator": {
                         "enabled": True,
                         "outcome": "completed",
@@ -132,9 +145,10 @@ class FixtureHttpApi:
                             "outcome": "completed",
                             "reason_code": "completed",
                             "provider_calls": provider_calls,
-                            "reported_prompt_tokens": 29,
-                            "reported_completion_tokens": 5,
-                            "charged_tokens": 91,
+                            "executed_tool_calls": provider_calls,
+                            "executed_searches": 1 if positive else 0,
+                            "executed_reads": 1 if positive else 0,
+                            "recoverable_rejections": 0,
                             "completed_seeds": 1 if positive else 0,
                             "abstained_seeds": 0 if positive else 1,
                             "submitted_envelopes": 1 if positive else 0,
@@ -146,7 +160,20 @@ class FixtureHttpApi:
                             "added_issues": 1 if positive else 0,
                             "rejection_counts": {},
                         },
+                        "budget_preflight": {
+                            "seed_count": 1,
+                            "minimum_path_admissible": True,
+                            "minimum_required_rounds": 1,
+                            "minimum_initial_reservation": 100,
+                            "maximum_local_round_reservation": 200,
+                            "maximum_local_run_reservation": 1200,
+                            "max_charged_tokens": 16000,
+                            "oversized_initial_prompts": 0,
+                        },
                         "usage": {
+                            "reported_prompt_tokens": 29,
+                            "reported_completion_tokens": 5,
+                            "charged_tokens": 91,
                             "provider_calls": [
                                 {"category": "success"} for _ in range(provider_calls)
                             ]
@@ -205,10 +232,28 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(tmp_path):
         "active_abstain": 3,
         "positive_added_issue": 5,
     }
+    assert artifact["summary"]["capability_isolation_verified"] == 8
+    assert artifact["safe_configuration"][
+        "service_reported_effective_limits"
+    ] == {
+        "observed_cases": 8,
+        "consistent_across_cases": True,
+        "values": {
+            "max_charged_tokens": 16000,
+            "source": "service_budget_preflight",
+        },
+        "distinct_snapshot_count": 1,
+    }
     assert all(row["passed"] for row in artifact["cases"])
     assert all(
+        row["capability_isolation"]["verified"] is True
+        for row in artifact["cases"]
+    )
+    assert all("case_wall_latency_ms" in row for row in artifact["cases"])
+    assert all("latency_ms" not in row for row in artifact["cases"])
+    assert all(
         row["investigator"]["loop"]["tool_call_count_basis"]
-        == "exact_for_completed_loop"
+        == "server_reported_executed_tools"
         for row in artifact["cases"]
     )
     upload_payloads = [
@@ -228,6 +273,324 @@ def test_mock_http_runner_scores_dev_without_oracle_or_secret_leak(tmp_path):
     assert "CANARY source body" not in persisted
     assert "sk-" not in persisted
     assert all(document.content not in persisted for plan in plans for document in plan.documents)
+
+
+def _investigator_diagnostics(*, reason="completed", outcome="completed"):
+    return {
+        "available": True,
+        "enabled": True,
+        "outcome": outcome,
+        "reason_code": reason,
+        "seed_count": 1,
+        "loop": {
+            "outcome": outcome,
+            "reason_code": reason,
+            "provider_decision_calls": 1,
+            "tool_calls": 1,
+            "tool_call_count_basis": "server_reported_executed_tools",
+            "completed_seeds": 1 if outcome == "completed" else 0,
+            "abstained_seeds": 0,
+            "submitted_envelopes": 1 if outcome == "completed" else 0,
+            "authorized_candidates": 1 if outcome == "completed" else 0,
+        },
+        "promotion": {
+            "submitted_candidates": 1 if outcome == "completed" else None,
+            "accepted_candidates": 1 if outcome == "completed" else None,
+            "added_issues": 1 if outcome == "completed" else None,
+            "rejection_counts": {},
+        },
+        "usage": {
+            "reported_prompt_tokens": 10,
+            "reported_completion_tokens": 2,
+            "charged_tokens": 20,
+            "provider_category_counts": {"success": 1},
+        },
+    }
+
+
+def _isolation(*, verified=True):
+    return {"verified": verified}
+
+
+@pytest.mark.parametrize(
+    "protocol_reason",
+    ["repeated_action", "invalid_tool_arguments", "multiple_tool_calls"],
+)
+def test_classification_separates_agent_protocol_and_isolation_failures(
+    protocol_reason,
+):
+    ground_truth = GroundTruth(
+        decision="added_issue",
+        issue_category="fact_conflict",
+        added_issue_count=1,
+        allowed_evidence=(("canon", 1, 1), ("chapter", 2, 2)),
+    )
+    protocol = _investigator_diagnostics(
+        reason=protocol_reason, outcome="degraded"
+    )
+
+    classification, passed = _classify(
+        run_status="completed",
+        categories=Counter(),
+        diagnostics=protocol,
+        ground_truth=ground_truth,
+        target_evidence_match=False,
+        citation_scope_authorized=True,
+        capability_isolation=_isolation(),
+    )
+    assert (classification, passed) == ("agent_protocol_failure", False)
+
+    classification, passed = _classify(
+        run_status="completed",
+        categories=Counter({"fact_conflict": 1}),
+        diagnostics=_investigator_diagnostics(),
+        ground_truth=ground_truth,
+        target_evidence_match=True,
+        citation_scope_authorized=True,
+        capability_isolation=_isolation(verified=False),
+    )
+    assert (classification, passed) == ("isolation_failure", False)
+
+
+def test_capability_isolation_requires_both_switches_off_and_matching_usage():
+    investigator = _investigator_diagnostics()
+    status = {
+        "prompt_tokens": 10,
+        "completion_tokens": 2,
+        "usage_accounting": {"charged_tokens": 20},
+    }
+    diagnostics = {
+        "model": {
+            "enabled": False,
+            "configured": False,
+            "used": False,
+            "logical_call_count": 0,
+            "provider_calls": [],
+        }
+    }
+
+    isolated = _safe_capability_isolation(
+        diagnostics, status_payload=status, investigator=investigator
+    )
+    assert isolated["verified"] is True
+    assert isolated["issue_evidence_review"] == {
+        "diagnostics_present": False,
+        "enabled": False,
+        "logical_calls": 0,
+        "provider_calls": 0,
+        "switch_proof": "stage_diagnostics_absent",
+    }
+
+    diagnostics["ai_evidence_review"] = {
+        "enabled": True,
+        "provider_calls": [],
+    }
+    contaminated = _safe_capability_isolation(
+        diagnostics, status_payload=status, investigator=investigator
+    )
+    assert contaminated["verified"] is False
+    assert "issue_evidence_review_not_disabled" in contaminated["reason_codes"]
+
+    diagnostics.pop("ai_evidence_review")
+    diagnostics["model"]["provider_calls"] = [{"purpose": "extract"}]
+    diagnostics["model"]["logical_call_count"] = 1
+    contaminated = _safe_capability_isolation(
+        diagnostics, status_payload=status, investigator=investigator
+    )
+    assert contaminated["verified"] is False
+    assert "main_extraction_calls_nonzero_or_unknown" in contaminated["reason_codes"]
+
+    diagnostics["model"]["provider_calls"] = []
+    diagnostics["model"]["logical_call_count"] = 0
+    mismatched_status = dict(status, prompt_tokens=11)
+    contaminated = _safe_capability_isolation(
+        diagnostics,
+        status_payload=mismatched_status,
+        investigator=investigator,
+    )
+    assert contaminated["verified"] is False
+    assert "aggregate_chat_usage_mismatch_or_unknown" in contaminated["reason_codes"]
+
+
+def test_safe_diagnostics_keeps_only_safe_budget_and_execution_counters():
+    sanitized = _safe_diagnostics(
+        {
+            "evidence_investigator": {
+                "enabled": True,
+                "outcome": "degraded",
+                "reason_code": "repeated_action",
+                "seed_count": 1,
+                "loop": {
+                    "outcome": "degraded",
+                    "reason_code": "repeated_action",
+                    "provider_calls": 3,
+                    "executed_tool_calls": 2,
+                    "executed_searches": 1,
+                    "executed_reads": 1,
+                    "recoverable_rejections": 1,
+                    "reported_prompt_tokens": 10,
+                    "reported_completion_tokens": 2,
+                    "charged_tokens": 20,
+                },
+                "budget_preflight": {
+                    "seed_count": 1,
+                    "minimum_path_admissible": True,
+                    "minimum_required_rounds": 1,
+                    "minimum_initial_reservation": 100,
+                    "maximum_local_round_reservation": 200,
+                    "maximum_local_run_reservation": 1200,
+                    "max_charged_tokens": 16000,
+                    "oversized_initial_prompts": 0,
+                    "secret": "must-not-survive",
+                },
+            }
+        }
+    )
+
+    assert sanitized["loop"]["tool_calls"] == 2
+    assert sanitized["loop"]["tool_call_count_basis"] == (
+        "server_reported_executed_tools"
+    )
+    assert sanitized["loop"]["searches"] == 1
+    assert sanitized["loop"]["reads"] == 1
+    assert sanitized["loop"]["recoverable_rejections"] == 1
+    assert sanitized["usage"] == {
+        "reported_prompt_tokens": 10,
+        "reported_completion_tokens": 2,
+        "charged_tokens": 20,
+        "token_count_basis": "legacy_loop_compatibility",
+        "provider_category_counts": {},
+    }
+    assert sanitized["effective_limits"] == {
+        "max_charged_tokens": 16000,
+        "source": "service_budget_preflight",
+    }
+    assert sanitized["budget_preflight"]["seed_count"] == 1
+    assert "secret" not in sanitized["budget_preflight"]
+
+
+def test_top_level_usage_survives_missing_loop_and_preserves_failure_reason():
+    raw_diagnostics = {
+        "model": {
+            "enabled": False,
+            "configured": False,
+            "used": False,
+            "logical_call_count": 0,
+            "provider_calls": [],
+        },
+        "evidence_investigator": {
+            "enabled": True,
+            "outcome": "degraded",
+            "reason_code": "deadline",
+            "seed_count": 1,
+            "loop": None,
+            "usage": {
+                "reported_prompt_tokens": 10,
+                "reported_completion_tokens": 2,
+                "charged_tokens": 20,
+                "provider_calls": [{"category": "read_timeout"}],
+            },
+        },
+    }
+    investigator = _safe_diagnostics(raw_diagnostics)
+    assert investigator["loop"]["outcome"] is None
+    assert investigator["reason_code"] == "deadline"
+    assert investigator["usage"] == {
+        "reported_prompt_tokens": 10,
+        "reported_completion_tokens": 2,
+        "charged_tokens": 20,
+        "token_count_basis": "investigator_usage_ledger",
+        "provider_category_counts": {"read_timeout": 1},
+    }
+
+    isolation = _safe_capability_isolation(
+        raw_diagnostics,
+        status_payload={
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "usage_accounting": {"charged_tokens": 20},
+        },
+        investigator=investigator,
+    )
+    assert isolation["verified"] is True
+
+    classification, passed = _classify(
+        run_status="completed",
+        categories=Counter(),
+        diagnostics=investigator,
+        ground_truth=GroundTruth(
+            decision="abstain",
+            issue_category="fact_conflict",
+            added_issue_count=0,
+            allowed_evidence=(),
+        ),
+        target_evidence_match=False,
+        citation_scope_authorized=True,
+        capability_isolation=isolation,
+    )
+    assert (classification, passed) == ("timeout_or_budget", False)
+
+
+def test_top_level_deadline_wins_after_completed_loop():
+    diagnostics = _investigator_diagnostics(
+        reason="deadline", outcome="degraded"
+    )
+    diagnostics["loop"].update(
+        {"outcome": "completed", "reason_code": "completed"}
+    )
+
+    classification, passed = _classify(
+        run_status="completed",
+        categories=Counter(),
+        diagnostics=diagnostics,
+        ground_truth=GroundTruth(
+            decision="abstain",
+            issue_category="fact_conflict",
+            added_issue_count=0,
+            allowed_evidence=(),
+        ),
+        target_evidence_match=False,
+        citation_scope_authorized=True,
+        capability_isolation=_isolation(),
+    )
+    assert (classification, passed) == ("timeout_or_budget", False)
+
+
+def test_common_effective_limit_requires_every_case_and_exact_agreement():
+    first = {
+        "investigator": {
+            "effective_limits": {
+                "max_charged_tokens": 16000,
+                "source": "service_budget_preflight",
+            }
+        }
+    }
+    second = json.loads(json.dumps(first))
+
+    assert _service_reported_effective_limits([first, second]) == {
+        "observed_cases": 2,
+        "consistent_across_cases": True,
+        "values": {
+            "max_charged_tokens": 16000,
+            "source": "service_budget_preflight",
+        },
+        "distinct_snapshot_count": 1,
+    }
+
+    second["investigator"]["effective_limits"]["max_charged_tokens"] = 8000
+    assert _service_reported_effective_limits([first, second]) == {
+        "observed_cases": 2,
+        "consistent_across_cases": False,
+        "values": None,
+        "distinct_snapshot_count": 2,
+    }
+
+    assert _service_reported_effective_limits([first, {"investigator": None}]) == {
+        "observed_cases": 1,
+        "consistent_across_cases": False,
+        "values": None,
+        "distinct_snapshot_count": 1,
+    }
 
 
 def test_confirmation_gate_precedes_fixture_and_http(tmp_path):
