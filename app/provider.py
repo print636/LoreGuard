@@ -226,6 +226,14 @@ class OpenAICompatibleProvider:
         return capability_enabled and bool(self.settings.openai_api_key.strip())
 
     @property
+    def model_extraction_configured(self) -> bool:
+        """Report extraction readiness without borrowing another capability."""
+
+        return self.settings.enable_model_extraction and bool(
+            self.settings.openai_api_key.strip()
+        )
+
+    @property
     def evidence_investigator_configured(self) -> bool:
         """Report this capability without borrowing another feature's switch."""
 
@@ -396,6 +404,8 @@ class OpenAICompatibleProvider:
             "tools": tool_payloads,
             "tool_choice": choice_payload,
         }
+        if checked_limits.max_calls == 1:
+            payload["parallel_tool_calls"] = False
         if self.settings.provider_max_completion_tokens is not None:
             payload["max_tokens"] = self.settings.provider_max_completion_tokens
         if self.settings.provider_thinking_mode is not None:

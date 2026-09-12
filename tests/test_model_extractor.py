@@ -6,7 +6,7 @@ import httpx
 
 from app.config import Settings
 from app.model_extractor import ModelEnhancedExtractor
-from app.pipeline import AnalysisPipeline, DocumentInput
+from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
 from app.provider import (
     OpenAICompatibleProvider,
     ProviderError,
@@ -68,6 +68,28 @@ def semantic_payload(payload: dict) -> dict:
     return labelled
 
 
+def baseline_observable_bytes(parsed) -> bytes:
+    """Serialize caller-visible extraction content, excluding diagnostics."""
+
+    return json.dumps(
+        {
+            "document_id": parsed.document_id,
+            "document_name": parsed.document_name,
+            "directives": [
+                directive.model_dump(mode="json")
+                for directive in parsed.directives
+            ],
+            "warnings": parsed.warnings,
+            "prompt_tokens": parsed.prompt_tokens,
+            "completion_tokens": parsed.completion_tokens,
+            "model_used": parsed.model_used,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def test_provider_can_be_configured_for_evidence_review_without_model_extraction():
     review_only = OpenAICompatibleProvider(
         settings(enable_model_extraction=False, enable_issue_evidence_review=True)
@@ -76,7 +98,9 @@ def test_provider_can_be_configured_for_evidence_review_without_model_extraction
         settings(enable_model_extraction=False, enable_issue_evidence_review=False)
     )
     assert review_only.configured is True
+    assert review_only.model_extraction_configured is False
     assert disabled.configured is False
+    assert disabled.model_extraction_configured is False
 
 
 class ProviderTests(unittest.TestCase):
@@ -159,6 +183,117 @@ class ModelExtractorTests(unittest.TestCase):
         return OpenAICompatibleProvider(
             settings(), transport=httpx.MockTransport(lambda _: completion(content))
         )
+
+    def test_other_model_capabilities_cannot_activate_main_extraction(self):
+        capability_settings = {
+            "investigator_only": {
+                "enable_evidence_investigator": True,
+                "enable_embeddings": True,
+                "embedding_base_url": "https://embedding.invalid/v1",
+                "embedding_model": "mock-embedding",
+                "embedding_model_revision": "test-revision",
+                "embedding_deployment_fingerprint": "test-deployment",
+                "embedding_dimensions": 2,
+            },
+            "evidence_reviewer_only": {
+                "enable_issue_evidence_review": True,
+            },
+            "review_agent_but_no_extraction": {
+                "enable_issue_evidence_review": True,
+                "enable_review_agent": True,
+            },
+        }
+        documents = [
+            DocumentInput("a", "a.md", "林澈的身份是领航员。"),
+            DocumentInput("b", "b.md", "苏弦的身份是档案官。"),
+        ]
+
+        for capability, overrides in capability_settings.items():
+            with self.subTest(capability=capability):
+                calls = []
+
+                def handler(request: httpx.Request) -> httpx.Response:
+                    calls.append(request)
+                    return completion('{"records":[]}')
+
+                provider = OpenAICompatibleProvider(
+                    settings(enable_model_extraction=False, **overrides),
+                    transport=httpx.MockTransport(handler),
+                )
+                self.assertTrue(provider.configured)
+                self.assertFalse(provider.model_extraction_configured)
+                extractor = ModelEnhancedExtractor(provider)
+                extractor.begin_run()
+
+                # Batch declines without a call; the normal fan-out path must
+                # then remain exactly the deterministic baseline as well.
+                self.assertIsNone(extractor.extract_batch(documents))
+                with self.assertRaisesRegex(
+                    ValueError, "model_extraction_disabled"
+                ):
+                    extractor._bounded_repair_provider()
+                actual = [extractor.extract(document) for document in documents]
+
+                self.assertEqual([], calls)
+                self.assertEqual(
+                    0,
+                    extractor.review_agent_safe_accounting()["logical_calls"],
+                )
+                for document, parsed in zip(documents, actual, strict=True):
+                    expected = BaselineExtractor().extract(document)
+                    self.assertEqual(
+                        baseline_observable_bytes(expected),
+                        baseline_observable_bytes(parsed),
+                    )
+                    self.assertFalse(parsed.model_execution.enabled)
+                    self.assertFalse(parsed.model_execution.configured)
+                    self.assertEqual(0, parsed.model_execution.attempted_chunks)
+                    self.assertFalse(parsed.model_execution.repair_attempted)
+                    self.assertFalse(
+                        parsed.model_execution.review_agent_attempted
+                    )
+                    self.assertEqual(
+                        parsed.model_execution.total_chunks,
+                        parsed.model_execution.skipped_chunks,
+                    )
+                    self.assertEqual(
+                        ["disabled"], parsed.model_execution.reason_codes
+                    )
+
+    def test_extraction_switch_still_activates_single_document_model_call(self):
+        calls = []
+        payload = semantic_payload(
+            {
+                "records": [
+                    {
+                        "kind": "fact",
+                        "subject": "林澈",
+                        "predicate": "身份",
+                        "value": "领航员",
+                        "source_line_start": 1,
+                        "source_line_end": 1,
+                    }
+                ]
+            }
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return completion(json.dumps(payload, ensure_ascii=False))
+
+        provider = OpenAICompatibleProvider(
+            settings(enable_model_extraction=True),
+            transport=httpx.MockTransport(handler),
+        )
+        result = ModelEnhancedExtractor(provider).extract(
+            DocumentInput("doc", "chapter.md", "林澈的身份是领航员。")
+        )
+
+        self.assertTrue(provider.model_extraction_configured)
+        self.assertEqual(1, len(calls))
+        self.assertTrue(result.model_execution.enabled)
+        self.assertTrue(result.model_execution.configured)
+        self.assertTrue(result.model_used)
 
     def test_pipeline_opens_circuit_after_one_fully_failed_document(self):
         calls = 0

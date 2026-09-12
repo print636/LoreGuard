@@ -712,7 +712,30 @@ class ModelEnhancedExtractor:
         value = self._run_tokens_used
         return value if type(value) is int and value >= 0 else 0
 
+    def _model_extraction_configured(self) -> bool:
+        """Return readiness for this capability, not generic chat readiness.
+
+        ``provider.configured`` intentionally covers every chat-backed
+        capability.  Combining it with the extraction switch (or using the
+        provider's dedicated property) prevents an enabled Investigator or
+        evidence reviewer from activating the main extraction path.  The
+        fallback keeps existing test/provider adapters compatible while still
+        requiring the extraction-owned switch.
+        """
+
+        settings = getattr(self.provider, "settings", None)
+        if not bool(getattr(settings, "enable_model_extraction", False)):
+            return False
+        if not bool(getattr(self.provider, "configured", False)):
+            return False
+        dedicated = getattr(self.provider, "model_extraction_configured", None)
+        if type(dedicated) is bool:
+            return dedicated
+        return True
+
     def _bounded_repair_provider(self) -> Any:
+        if not self._model_extraction_configured():
+            raise ValueError("model_extraction_disabled")
         settings = self.provider.settings
         configured_caps = [
             cap
@@ -807,7 +830,8 @@ class ModelEnhancedExtractor:
             candidate = self._to_directive(document, chunk, record)
         except ValueError as exc:
             if not (
-                self.provider.settings.enable_review_agent
+                self._model_extraction_configured()
+                and self.provider.settings.enable_review_agent
                 and str(exc) == "模型记录缺少原文词面支持"
             ):
                 raise
@@ -1114,6 +1138,20 @@ class ModelEnhancedExtractor:
         for execution in executions:
             execution.review_agent_attempted = True
             execution.note("review_agent_attempted")
+        if (
+            not self._model_extraction_configured()
+            or not self.provider.settings.enable_review_agent
+        ):
+            for candidate in candidates:
+                execution = execution_by_id.get(candidate.document.id)
+                if execution is not None:
+                    _add_execution_counter(
+                        execution, "unresolved_invalid_records"
+                    )
+            for execution in executions:
+                execution.review_agent_abstained = True
+                execution.note("review_agent_unavailable")
+            return {}
 
         agent_candidates = [
             AgentCandidate(
@@ -1293,7 +1331,8 @@ class ModelEnhancedExtractor:
         enhanced documents and never asks the caller to fan out model calls.
         """
         settings = self.provider.settings
-        if len(documents) < 2 or not self.provider.configured:
+        extraction_configured = self._model_extraction_configured()
+        if len(documents) < 2 or not extraction_configured:
             return None
         plans = [
             chunk_document(
@@ -1349,7 +1388,7 @@ class ModelEnhancedExtractor:
             execution = ModelExecutionDiagnostics.from_legacy(parsed.model_execution)
             _begin_invalid_disposition_contract(execution)
             execution.enabled = settings.enable_model_extraction
-            execution.configured = self.provider.configured
+            execution.configured = extraction_configured
             execution.total_chunks = 1
             execution.batch_used = True
             execution.batch_document_count = len(documents)
@@ -1660,18 +1699,19 @@ class ModelEnhancedExtractor:
             for directive in parsed.directives
         ]
         settings = self.provider.settings
+        extraction_configured = self._model_extraction_configured()
         execution = ModelExecutionDiagnostics.from_legacy(parsed.model_execution)
         _begin_invalid_disposition_contract(execution)
         parsed.model_execution = execution
         execution.enabled = settings.enable_model_extraction
-        execution.configured = self.provider.configured
+        execution.configured = extraction_configured
         chunks = chunk_document(
             document,
             max_chars=settings.model_chunk_max_chars,
             overlap_lines=settings.model_chunk_overlap_lines,
         )
         execution.total_chunks = len(chunks)
-        if not self.provider.configured:
+        if not extraction_configured:
             execution.skipped_chunks = len(chunks)
             execution.note("not_configured" if execution.enabled else "disabled")
             return parsed
