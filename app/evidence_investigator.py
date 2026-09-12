@@ -38,6 +38,7 @@ class CandidateFieldContract:
 
     required: tuple[str, ...]
     optional: tuple[str, ...] = ()
+    semantic_guidance: str = ""
 
     def __post_init__(self) -> None:
         fields = self.required + self.optional
@@ -45,19 +46,57 @@ class CandidateFieldContract:
             not self.required
             or len(fields) != len(set(fields))
             or any(_FIELD_PATTERN.fullmatch(value) is None for value in fields)
+            or type(self.semantic_guidance) is not str
+            or not self.semantic_guidance.strip()
+            or len(self.semantic_guidance) > 512
         ):
             raise ValueError("candidate field contract is invalid")
 
 
 _CANDIDATE_FIELD_CONTRACTS: dict[str, CandidateFieldContract] = {
-    "fact": CandidateFieldContract(("subject", "predicate", "value"), ("time",)),
-    "event": CandidateFieldContract(("time", "location", "participants")),
-    "knows": CandidateFieldContract(("character", "fact", "time")),
-    "claims_knows": CandidateFieldContract(("character", "fact", "time")),
-    "item": CandidateFieldContract(("item", "owner"), ("time",)),
-    "uses": CandidateFieldContract(("item", "user"), ("time",)),
-    "world_rule": CandidateFieldContract(("key", "value")),
-    "world_assert": CandidateFieldContract(("key", "value"), ("actor", "time")),
+    "fact": CandidateFieldContract(
+        ("subject", "predicate", "value"),
+        ("time",),
+        (
+            "候选必须与 anchor 的 subject、predicate 相同；冲突须为两条肯定事实的 value 不同，"
+            "或同一 value 的一肯定一明确否定。"
+        ),
+    ),
+    "event": CandidateFieldContract(
+        ("time", "location", "participants"),
+        semantic_guidance=(
+            "候选必须与 anchor 共享参与者、精确 time 相同且 location 不同。"
+        ),
+    ),
+    "knows": CandidateFieldContract(
+        ("character", "fact", "time"),
+        semantic_guidance="仅表示角色已经实际获得该知识。",
+    ),
+    "claims_knows": CandidateFieldContract(
+        ("character", "fact", "time"),
+        semantic_guidance="仅表示角色声称知道，不等同于实际获得知识。",
+    ),
+    "item": CandidateFieldContract(
+        ("item", "owner"),
+        ("time",),
+        "仅表示物品的所有或保管关系。",
+    ),
+    "uses": CandidateFieldContract(
+        ("item", "user"),
+        ("time",),
+        "仅表示角色已经实际使用该物品。",
+    ),
+    "world_rule": CandidateFieldContract(
+        ("key", "value"),
+        semantic_guidance="仅表示文本明确建立的世界规则。",
+    ),
+    "world_assert": CandidateFieldContract(
+        ("key", "value"),
+        ("actor", "time"),
+        (
+            "value=performed 仅表示动作真实完成；命令、计划、转述或缺少执行结果时必须 ABSTAIN。"
+        ),
+    ),
 }
 if set(_CANDIDATE_FIELD_CONTRACTS) != set(get_args(CandidateKind)):
     raise RuntimeError("candidate field contracts do not cover candidate kinds")
@@ -75,6 +114,35 @@ def candidate_kinds() -> tuple[str, ...]:
     """Return every supported kind without exposing the mutable registry."""
 
     return tuple(_CANDIDATE_FIELD_CONTRACTS)
+
+
+_FAMILY_SEMANTIC_GUIDANCE: dict[IssueCategory, str] = {
+    IssueCategory.fact_conflict: (
+        "只调查同一主体同一属性的冲突：肯定取值互异，或同一取值一肯定一明确否定。"
+    ),
+    IssueCategory.location_collision: (
+        "只调查同一参与者在同一精确时间出现在不同地点的冲突。"
+    ),
+    IssueCategory.knowledge_without_acquisition: (
+        "区分实际获得知识与仅声称知道；没有获得证据时不得把声称当作已知。"
+    ),
+    IssueCategory.item_ownership: (
+        "区分物品的所有或保管关系与已经发生的实际使用。"
+    ),
+    IssueCategory.world_rule_conflict: (
+        "区分世界规则与已经完成的规则相关行为；未完成行为不能作为已执行事实。"
+    ),
+}
+if set(_FAMILY_SEMANTIC_GUIDANCE) != set(IssueCategory):
+    raise RuntimeError("family semantic guidance does not cover issue categories")
+
+
+def get_family_semantic_guidance(family: IssueCategory) -> str:
+    """Return fixed model guidance for a server-selected issue family."""
+
+    if not isinstance(family, IssueCategory):
+        raise ValueError("issue family is invalid")
+    return _FAMILY_SEMANTIC_GUIDANCE[family]
 
 
 ToolName: TypeAlias = Literal[
@@ -132,6 +200,7 @@ SAFE_REASON_CODES = frozenset(
         "unknown_span_ref",
         "candidate_kind_forbidden",
         "repeated_action",
+        "anchor_evidence_reused",
         "repeated_query",
         "no_progress",
         "round_budget",

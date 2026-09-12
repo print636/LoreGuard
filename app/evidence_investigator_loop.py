@@ -29,6 +29,7 @@ from .evidence_investigator import (
     ToolArguments,
     clone_investigation_seed,
     get_candidate_field_contract,
+    get_family_semantic_guidance,
     parse_tool_arguments,
 )
 from .evidence_investigator_state import (
@@ -168,9 +169,9 @@ class InvestigatorLoopPolicy:
     max_tool_argument_bytes: int = 32 * 1024
     max_prompt_bytes: int = 128 * 1024
     completion_token_reserve: int = 768
-    # A native-tool model can make one ordinary schema/action mistake and then
-    # repair it after receiving a content-free rejection.  Keeping this hard
-    # capped at one prevents malformed outputs from turning into an unbounded
+    # A native-tool model can repair one schema, action, or evidence-selection
+    # mistake after receiving a content-free rejection.  Keeping this hard
+    # capped at one prevents invalid outputs from turning into an unbounded
     # retry loop or consuming the tool-execution budget.
     max_recoverable_rejections_per_seed: int = 1
 
@@ -787,6 +788,7 @@ class EvidenceInvestigatorToolLoop:
                     reason_code not in {
                         "invalid_tool_arguments",
                         "repeated_action",
+                        "anchor_evidence_reused",
                     }
                     or seed_recoverable_rejections
                     >= self._policy.max_recoverable_rejections_per_seed
@@ -1023,6 +1025,24 @@ class EvidenceInvestigatorToolLoop:
                     return degraded(exc.reason_code)
                 if arguments.seed_ref != internal_seed.seed_ref:
                     return degraded("cross_seed")
+
+                # A search chunk may contain both the baseline anchor and a
+                # useful neighbouring passage.  Reject only the requested
+                # line range that intersects the anchor, before entering the
+                # authority state machine, so no span is read or minted.  The
+                # model may spend its single content-free correction on a
+                # non-overlapping subrange of the same chunk.
+                if (
+                    type(arguments) is ReadSpanArgs
+                    and _read_reuses_anchor_evidence(
+                        internal_seed,
+                        arguments,
+                        result_chunks,
+                    )
+                ):
+                    if recover_rejection("anchor_evidence_reused", budget_charge):
+                        continue
+                    return degraded("anchor_evidence_reused")
 
                 try:
                     action_signature = _loop_action_signature(call.name, arguments)
@@ -1416,8 +1436,10 @@ def _system_prompt() -> str:
         "current_phase、allowed_next_actions 与 remaining_limits 由服务器生成且具有约束力；只能从允许动作中选择。"
         "先检索，再使用返回的 result_ref 读取证据；只有引用已读取的 span_ref 才能提交候选。"
         "检索结果的 rank 越小越相关；若可选，优先读取 overlaps_anchor=false 的结果，"
-        "但该标记只是行范围提示，不能替代读取和证据判断。"
+        "但该标记只是行范围提示，不能替代读取和证据判断。READ_SPAN 的行范围不得与 anchor 证据行重叠；"
+        "同一结果中与 anchor 完全不重叠的子范围仍可读取。"
         "提交时只能使用 current_seed 给出的候选类型和字段合同，所有字段值必须是原文可支持的非空字符串。"
+        "候选 source_line_start/source_line_end 必须是支持全部字段的最小充分原文范围。"
         "若 observations 出现 retryable_tool_rejection，只修正工具参数或改选工具，不要重复同一动作。"
         "证据不足时调用 ABSTAIN。SUBMIT_VERDICT 仅提交未受信候选，不创建问题。"
     )
@@ -1456,6 +1478,7 @@ def _user_prompt(
         "current_seed": {
             "seed_ref": seed.seed_ref,
             "family": seed.family.value,
+            "family_semantic_guidance": get_family_semantic_guidance(seed.family),
             "allowed_candidate_kinds": sorted(seed.allowed_candidate_kinds),
             "candidate_field_contracts": {
                 kind: _candidate_field_contract(kind)
@@ -1468,6 +1491,9 @@ def _user_prompt(
                 "source_line_end": evidence.line_end,
                 "source_text": evidence.text,
             },
+            "source_line_guidance": (
+                "选择支持候选全部字段的最小充分行范围；不得覆盖 anchor 证据行。"
+            ),
         },
         "observations": list(observations),
     }
@@ -1487,6 +1513,7 @@ def _candidate_field_contract(kind: str) -> dict[str, Any]:
     return {
         "required_fields": list(contract.required),
         "optional_fields": list(contract.optional),
+        "semantic_guidance": contract.semantic_guidance,
     }
 
 
@@ -1495,7 +1522,12 @@ def _recoverable_rejection_observation(reason_code: str) -> dict[str, Any]:
 
     safe_reason = (
         reason_code
-        if reason_code in {"invalid_tool_arguments", "repeated_action"}
+        if reason_code
+        in {
+            "invalid_tool_arguments",
+            "repeated_action",
+            "anchor_evidence_reused",
+        }
         else "invalid_tool_arguments"
     )
     return {
@@ -1503,6 +1535,30 @@ def _recoverable_rejection_observation(reason_code: str) -> dict[str, Any]:
         "reason_code": safe_reason,
         "remaining_corrections": 0,
     }
+
+
+def _read_reuses_anchor_evidence(
+    seed: InvestigationSeed,
+    arguments: ReadSpanArgs,
+    result_chunks: dict[str, EvidenceChunk],
+) -> bool:
+    """Check a server-bound read range without materializing its text."""
+
+    chunk = result_chunks.get(arguments.result_ref)
+    if chunk is None:
+        return False
+    evidence = seed.anchor.evidence
+    return (
+        # Do not turn an out-of-grant range into a document-identity oracle.
+        # Only a range already contained by this opaque result capability may
+        # receive the anchor-specific correction reason; all other ranges go
+        # through the ordinary authority checks and fail content-free.
+        chunk.line_start <= arguments.line_start
+        and arguments.line_end <= chunk.line_end
+        and chunk.snapshot.document_id == evidence.document_id
+        and arguments.line_start <= evidence.line_end
+        and arguments.line_end >= evidence.line_start
+    )
 
 
 def _loop_action_signature(name: str, arguments: ToolArguments) -> str:

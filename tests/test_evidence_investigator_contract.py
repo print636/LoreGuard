@@ -22,6 +22,9 @@ from app.evidence_investigator import (
     SearchEvidenceArgs,
     SubmitVerdictArgs,
     build_investigation_seeds,
+    candidate_kinds,
+    get_candidate_field_contract,
+    get_family_semantic_guidance,
     parse_tool_arguments,
 )
 from app.evidence_investigator_state import (
@@ -79,6 +82,54 @@ def five_directives():
             line=5,
         ),
     ]
+
+
+def test_shared_candidate_and_family_guidance_covers_every_supported_shape():
+    expected_kind_terms = {
+        "fact": (
+            "subject",
+            "predicate",
+            "两条肯定事实",
+            "value 不同",
+            "同一 value",
+            "一肯定一明确否定",
+        ),
+        "event": ("参与者", "time", "location"),
+        "knows": ("实际获得",),
+        "claims_knows": ("声称知道", "不等同"),
+        "item": ("所有", "保管"),
+        "uses": ("实际使用",),
+        "world_rule": ("世界规则",),
+        "world_assert": ("performed", "命令", "计划", "转述", "执行结果", "ABSTAIN"),
+    }
+
+    assert set(candidate_kinds()) == set(expected_kind_terms)
+    for kind, expected_terms in expected_kind_terms.items():
+        guidance = get_candidate_field_contract(kind).semantic_guidance
+        assert guidance == guidance.strip()
+        assert all(term in guidance for term in expected_terms)
+
+    expected_family_terms = {
+        IssueCategory.fact_conflict: (
+            "同一主体",
+            "同一属性",
+            "肯定取值互异",
+            "同一取值一肯定一明确否定",
+        ),
+        IssueCategory.location_collision: ("同一参与者", "同一精确时间", "不同地点"),
+        IssueCategory.knowledge_without_acquisition: ("实际获得", "声称知道"),
+        IssueCategory.item_ownership: ("所有", "保管", "实际使用"),
+        IssueCategory.world_rule_conflict: ("世界规则", "已经完成", "未完成"),
+    }
+    for family, expected_terms in expected_family_terms.items():
+        guidance = get_family_semantic_guidance(family)
+        assert guidance == guidance.strip()
+        assert all(term in guidance for term in expected_terms)
+
+    with pytest.raises(ValueError, match="candidate kind"):
+        get_candidate_field_contract("unsupported")
+    with pytest.raises(ValueError, match="issue family"):
+        get_family_semantic_guidance("fact_conflict")  # type: ignore[arg-type]
 
 
 def scope_for(content="证据1\n证据2\n证据3\n证据4\n证据5", *, run_id="run-a"):

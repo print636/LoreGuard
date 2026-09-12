@@ -195,7 +195,7 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
             {
                 "seed_ref": seed_ref,
                 "result_ref": "result_tok0000000000001",
-                "line_start": 1,
+                "line_start": 2,
                 "line_end": 2,
             },
             prompt_tokens=13,
@@ -283,8 +283,18 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
         "fact": {
             "required_fields": ["subject", "predicate", "value"],
             "optional_fields": ["time"],
+            "semantic_guidance": (
+                "候选必须与 anchor 的 subject、predicate 相同；冲突须为两条肯定事实的 value 不同，"
+                "或同一 value 的一肯定一明确否定。"
+            ),
         }
     }
+    assert prompts[0]["current_seed"]["family_semantic_guidance"] == (
+        "只调查同一主体同一属性的冲突：肯定取值互异，或同一取值一肯定一明确否定。"
+    )
+    assert prompts[0]["current_seed"]["source_line_guidance"] == (
+        "选择支持候选全部字段的最小充分行范围；不得覆盖 anchor 证据行。"
+    )
     assert [row["remaining_limits"]["round_no"] for row in prompts] == [1, 2, 3]
     assert prompts[1]["observations"] == [
         {
@@ -440,8 +450,212 @@ def test_search_observation_marks_non_anchor_chunk_without_leaking_document_id()
     assert "doc-2" not in json.dumps(visible)
 
 
+def test_anchor_read_is_content_free_recoverable_then_non_anchor_subrange_succeeds():
+    scope, seeds, chunk = context()
+    seed_ref = seeds[0].seed_ref
+    tokens = Tokens()
+    provider = ScriptedProvider(
+        result(
+            "SEARCH_EVIDENCE",
+            search_args(seed_ref),
+            prompt_tokens=7,
+            completion_tokens=2,
+        ),
+        result(
+            "READ_SPAN",
+            {
+                "seed_ref": seed_ref,
+                "result_ref": "result_tok0000000000001",
+                "line_start": 1,
+                "line_end": 1,
+            },
+            prompt_tokens=8,
+            completion_tokens=2,
+        ),
+        result(
+            "READ_SPAN",
+            {
+                "seed_ref": seed_ref,
+                "result_ref": "result_tok0000000000001",
+                "line_start": 2,
+                "line_end": 2,
+            },
+            prompt_tokens=9,
+            completion_tokens=2,
+        ),
+        result(
+            "SUBMIT_VERDICT",
+            {
+                "seed_ref": seed_ref,
+                "verdict": "candidate_conflict",
+                "candidates": [
+                    {
+                        "kind": "fact",
+                        "span_ref": "span_tok0000000000002",
+                        "source_line_start": 2,
+                        "source_line_end": 2,
+                        "fields": {
+                            "subject": "岚",
+                            "predicate": "发色",
+                            "value": "黑色",
+                        },
+                    }
+                ],
+            },
+            prompt_tokens=10,
+            completion_tokens=3,
+        ),
+    )
+    retriever = FakeRetriever((chunk,))
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=retriever,
+        scope=scope,
+        seeds=seeds,
+        token_factory=tokens,
+        limits=InvestigatorLimits(
+            max_decision_rounds=4,
+            max_tool_calls=4,
+            max_charged_tokens=20_000,
+        ),
+    ).run()
+
+    assert outcome.outcome == "completed"
+    assert outcome.provider_calls == 4
+    assert outcome.executed_tool_calls == 3
+    assert outcome.executed_searches == 1
+    assert outcome.executed_reads == 1
+    assert outcome.recoverable_rejections == 1
+    assert outcome.charged_tokens == sum(
+        estimated_request_charge(request) for request in provider.requests
+    )
+    assert len(retriever.requests) == 1
+    # One result grant and one successful span grant were minted.  The rejected
+    # anchor read never reached the authority read path.
+    assert tokens.value == 2
+    assert outcome.authorized_candidates[0].line_start == 2
+
+    correction = json.loads(provider.requests[2]["user"])
+    assert correction["current_phase"] == "read"
+    assert correction["allowed_next_actions"] == ["READ_SPAN", "ABSTAIN"]
+    assert correction["observations"][-1] == {
+        "kind": "retryable_tool_rejection",
+        "reason_code": "anchor_evidence_reused",
+        "remaining_corrections": 0,
+    }
+    assert correction["remaining_limits"]["reads"] == 12
+    assert correction["remaining_limits"]["corrections"] == 0
+    rejection_payload = json.dumps(
+        correction["observations"][-1], ensure_ascii=False, sort_keys=True
+    )
+    for rejected_detail in (
+        "result_tok0000000000001",
+        '"line_start"',
+        '"line_end"',
+        CONTENT.splitlines()[0],
+    ):
+        assert rejected_detail not in rejection_payload
+    safe = json.dumps(outcome.safe_dict(), ensure_ascii=False)
+    assert CONTENT not in safe
+    assert "result_tok0000000000001" not in safe
+
+
+def test_anchor_read_without_recovery_degrades_before_span_is_minted():
+    scope, seeds, chunk = context()
+    seed_ref = seeds[0].seed_ref
+    tokens = Tokens()
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", search_args(seed_ref)),
+        result(
+            "READ_SPAN",
+            {
+                "seed_ref": seed_ref,
+                "result_ref": "result_tok0000000000001",
+                "line_start": 1,
+                "line_end": 1,
+            },
+        ),
+    )
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever((chunk,)),
+        scope=scope,
+        seeds=seeds,
+        token_factory=tokens,
+        policy=InvestigatorLoopPolicy(max_recoverable_rejections_per_seed=0),
+        limits=InvestigatorLimits(max_charged_tokens=16_000),
+    ).run()
+
+    assert (outcome.outcome, outcome.reason_code) == (
+        "degraded",
+        "anchor_evidence_reused",
+    )
+    assert outcome.provider_calls == 2
+    assert outcome.executed_tool_calls == 1
+    assert outcome.executed_reads == 0
+    assert outcome.recoverable_rejections == 0
+    assert tokens.value == 1
+
+
+def test_out_of_grant_anchor_probe_does_not_reveal_document_linkage():
+    scope, seeds, _ = context()
+    seed_ref = seeds[0].seed_ref
+    snapshot = scope.documents[0].snapshot
+    chunks = EvidenceChunker(
+        target_chars=12,
+        min_chars=1,
+        max_chars=18,
+        overlap_chars=0,
+    ).chunk(
+        project_id=snapshot.project_id,
+        document_id=snapshot.document_id,
+        document_version=snapshot.document_version,
+        content=CONTENT,
+        content_sha256=snapshot.content_sha256,
+    )
+    non_anchor_chunk = next(
+        chunk
+        for chunk in chunks
+        if chunk.line_start == 2 and chunk.line_end == 2
+    )
+    tokens = Tokens()
+    provider = ScriptedProvider(
+        result("SEARCH_EVIDENCE", search_args(seed_ref)),
+        result(
+            "READ_SPAN",
+            {
+                "seed_ref": seed_ref,
+                "result_ref": "result_tok0000000000001",
+                "line_start": 1,
+                "line_end": 1,
+            },
+        ),
+    )
+
+    outcome = EvidenceInvestigatorToolLoop(
+        provider=provider,
+        retriever=FakeRetriever((non_anchor_chunk,)),
+        scope=scope,
+        seeds=seeds,
+        token_factory=tokens,
+        limits=InvestigatorLimits(max_charged_tokens=16_000),
+    ).run()
+
+    assert (outcome.outcome, outcome.reason_code) == (
+        "degraded",
+        "evidence_range",
+    )
+    assert outcome.provider_calls == 2
+    assert outcome.executed_tool_calls == 1
+    assert outcome.executed_reads == 0
+    assert outcome.recoverable_rejections == 0
+    assert tokens.value == 1
+
+
 def test_partial_line_read_preserves_unambiguous_server_character_offsets():
-    content = "岚的发色是银色。远处的钟连续响了三次。岚的发色突然变成黑色。"
+    content = "岚的发色是银色。\n远处的钟连续响了三次。岚的发色突然变成黑色。"
     snapshot = SnapshotDocumentKey(
         project_id="project-a",
         document_id="doc-1",
@@ -455,7 +669,7 @@ def test_partial_line_read_preserves_unambiguous_server_character_offsets():
     )
     seeds = build_investigation_seeds(
         "run-a",
-        [directive(line=1, text=content)],
+        [directive(line=1, text=content.splitlines()[0])],
         limit=1,
     )
     chunks = EvidenceChunker(
@@ -480,8 +694,8 @@ def test_partial_line_read_preserves_unambiguous_server_character_offsets():
             {
                 "seed_ref": seed_ref,
                 "result_ref": "result_tok0000000000001",
-                "line_start": 1,
-                "line_end": 1,
+                "line_start": 2,
+                "line_end": 2,
             },
         ),
         result(
@@ -493,8 +707,8 @@ def test_partial_line_read_preserves_unambiguous_server_character_offsets():
                     {
                         "kind": "fact",
                         "span_ref": "span_tok0000000000002",
-                        "source_line_start": 1,
-                        "source_line_end": 1,
+                        "source_line_start": 2,
+                        "source_line_end": 2,
                         "fields": {
                             "subject": "岚",
                             "predicate": "发色",
@@ -1589,7 +1803,7 @@ def test_retriever_chunk_alias_cannot_rebind_authorized_candidate_snapshot():
             {
                 "seed_ref": seed_ref,
                 "result_ref": "result_tok0000000000001",
-                "line_start": 1,
+                "line_start": 2,
                 "line_end": 2,
             },
         ),
@@ -1638,6 +1852,7 @@ def test_a_later_seed_failure_discards_earlier_authorized_candidates():
         ]
     )
     first = seeds[0].seed_ref
+    non_anchor_line = 2 if seeds[0].anchor.evidence.line_start == 1 else 1
     provider = ScriptedProvider(
         result("SEARCH_EVIDENCE", search_args(first)),
         result(
@@ -1645,8 +1860,8 @@ def test_a_later_seed_failure_discards_earlier_authorized_candidates():
             {
                 "seed_ref": first,
                 "result_ref": "result_tok0000000000001",
-                "line_start": 1,
-                "line_end": 2,
+                "line_start": non_anchor_line,
+                "line_end": non_anchor_line,
             },
         ),
         result(
@@ -1658,8 +1873,8 @@ def test_a_later_seed_failure_discards_earlier_authorized_candidates():
                     {
                         "kind": "fact",
                         "span_ref": "span_tok0000000000002",
-                        "source_line_start": 2,
-                        "source_line_end": 2,
+                        "source_line_start": non_anchor_line,
+                        "source_line_end": non_anchor_line,
                         "fields": {
                             "subject": "洛",
                             "predicate": "发色",
