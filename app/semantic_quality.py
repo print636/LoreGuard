@@ -44,6 +44,7 @@ _QUESTION_MARKERS = re.compile(
 )
 _RHETORICAL_MARKERS = re.compile(r"难道|岂(?:不|是)|怎么可能|何尝|莫非")
 _HYPOTHETICAL_MARKERS = re.compile(r"(?:^|[，,；;。])\s*(?:如果|假如|倘若|若(?:是)?|假设|设想|要是)")
+_CONDITION_SCOPE_RESET = re.compile(r"^\s*(?:但|然而|不过|可是|却|只是)")
 _UNCERTAIN_MARKERS = re.compile(
     r"(?:并)?不是不可能|并非不可能|绝非不可能|未必不可能|"
     r"没有什么不可能|没什么不可能|不可能不|不无可能|不太可能|"
@@ -85,6 +86,14 @@ _REPORTED_SOURCE_MARKERS = re.compile(
     r"据[^，。；\n]{0,20}(?:所述|说法|声称|转述|口述)|"
     r"(?:转述|口述|传话)(?:中|称|提到|表示)|"
     r"(?:纪要|记录|日志|报告|录音|口供|旁白)?(?:的)?(?:转述|口述|传话)[：:]"
+)
+_SOURCE_CONTEXT_MARKERS = (
+    _UNVERIFIED_SOURCE_MARKERS,
+    _DIALOGUE_MARKERS,
+    _REPORTED_SOURCE_MARKERS,
+    _ACTUAL_QUOTE_MARKERS,
+    _QUOTED_SOURCE_MARKERS,
+    _VERIFIED_RECORD_MARKERS,
 )
 
 # An action mentioned as the content of an order, intention or unfinished
@@ -371,7 +380,14 @@ def _clean(value: str) -> str:
 
 def _semantic_units(text: str) -> list[str]:
     """Split prose while retaining punctuation that carries modality."""
-    units = [part.strip() for part in re.findall(r"[^。！？?!；;]+[。！？?!；;]?", text)]
+    # A line/paragraph boundary is also a semantic boundary.  Model evidence
+    # can span several source lines without terminal punctuation; merging those
+    # lines would let a later negation, attribution, or condition alter an
+    # earlier proposition.
+    units = [
+        part.strip()
+        for part in re.findall(r"[^。！？?!；;\r\n]+[。！？?!；;]?", text)
+    ]
     return [part for part in units if part]
 
 
@@ -469,7 +485,11 @@ def _support_text(directive: ParsedDirective) -> str:
     if not best_units:
         return text
     unit = best_units[0]
-    clauses = [part.strip() for part in re.split(r"(?<=[，,])", unit) if part.strip()]
+    # Keep the original inter-clause whitespace so the selected support remains
+    # an exact slice of ``evidence.text``.  Source attribution is recovered by
+    # offset later; normalizing the spaces here could make that lookup fail and
+    # accidentally promote a reported condition to world truth.
+    clauses = [part for part in re.split(r"(?<=[，,])", unit) if part.strip()]
     scored = [
         (sum(anchor in _clean(clause) for anchor in anchors), index, clause)
         for index, clause in enumerate(clauses)
@@ -478,9 +498,46 @@ def _support_text(directive: ParsedDirective) -> str:
     if best_score:
         selected = [index for score, index, _ in scored if score == best_score]
         first, last = min(selected), max(selected)
-        if first and _HYPOTHETICAL_MARKERS.search(clauses[first - 1]):
-            first -= 1
-        return "".join(clauses[first : last + 1])
+        if first:
+            # A condition can span more than one comma-delimited clause, for
+            # example ``如果 A，且 B，则 C``.  Keep the nearest governing
+            # condition, but do not cross a contrast that starts a new claim.
+            for index in range(first - 1, -1, -1):
+                if not _HYPOTHETICAL_MARKERS.search(clauses[index]):
+                    continue
+                if not any(
+                    _CONDITION_SCOPE_RESET.search(clause)
+                    for clause in clauses[index + 1 : first + 1]
+                ):
+                    first = index
+                break
+            if (
+                first
+                and directive.kind == "event"
+                and re.search(
+                    r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}", clauses[first - 1]
+                )
+            ):
+                first -= 1
+        # Chinese prose may place a condition after its consequence (for
+        # example ``航线必须停运，如果风暴发生``).  Retain only an immediately
+        # adjacent post-condition in this semantic unit.  A sentence/paragraph
+        # boundary has already been removed by ``_semantic_units``; a contrast
+        # starts a new claim and closes the condition scope.
+        if last + 1 < len(clauses) and _HYPOTHETICAL_MARKERS.search(
+            clauses[last + 1]
+        ):
+            last += 1
+            while (
+                last + 1 < len(clauses)
+                and not _CONDITION_SCOPE_RESET.search(clauses[last + 1])
+                and not any(
+                    marker.search(clauses[last + 1])
+                    for marker in _SOURCE_CONTEXT_MARKERS
+                )
+            ):
+                last += 1
+        return "".join(clauses[first : last + 1]).strip()
     return unit
 
 
@@ -626,7 +683,13 @@ def _local_source_context(text: str, directive: ParsedDirective) -> str:
         default=-1,
     )
     direct_intro = prefix[boundary + 1 :]
-    if re.search(r"[：:]\s*$", direct_intro):
+    if re.search(r"[：:]\s*$", direct_intro) or any(
+        marker.search(direct_intro) for marker in _SOURCE_CONTEXT_MARKERS
+    ):
+        # Source attribution is a separate axis from proposition polarity.
+        # Reattach only an attribution in the same semantic unit; keep it out
+        # of ``_support_text`` so an unrelated "没有" in that prefix cannot
+        # negate an otherwise affirmative proposition.
         context = direct_intro + context
     # Attribution can immediately follow a closing quote in the next semantic
     # unit (for example “……”值班员说道).  Preserve only that adjacent suffix;
@@ -635,6 +698,20 @@ def _local_source_context(text: str, directive: ParsedDirective) -> str:
         suffix = full[end:]
         adjacent = re.match(r'^[”"]?(?:，|,)?[^。！？?!；;]{0,32}[。！？?!；;]?', suffix)
         if adjacent:
+            context += adjacent.group(0)
+    # An attribution can also follow an unquoted proposition in the same
+    # sentence (``……，据某人所述``).  Keep that provenance for the source
+    # axis, but never add it to ``_support_text``: words such as ``没有`` in
+    # the attribution must not flip the proposition's polarity.  Do not cross
+    # a terminal punctuation or newline; the following sentence may describe
+    # an unrelated source.
+    if support.rstrip() and support.rstrip()[-1] not in "。！？?!；;\n":
+        suffix = full[end:]
+        adjacent = re.match(r"^[ \t]*[^。！？?!；;\n]{1,64}[。！？?!；;]?", suffix)
+        if adjacent and any(
+            marker.search(adjacent.group(0))
+            for marker in _SOURCE_CONTEXT_MARKERS
+        ):
             context += adjacent.group(0)
     return context
 
@@ -893,7 +970,13 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
                 certainty=CertaintyLevel.unknown.value,
             )
             return directive.model_copy(update={"attrs": attrs}), "missing_semantic_labels"
-        if _HYPOTHETICAL_MARKERS.search(support):
+        if _closed_conditional_rule(support, directive):
+            inferred = (
+                SemanticModality.conditional_rule,
+                SourceScope.world_rule,
+                CertaintyLevel.certain,
+            )
+        elif _HYPOTHETICAL_MARKERS.search(support):
             inferred = (
                 SemanticModality.hypothetical,
                 SourceScope.unknown,
@@ -912,9 +995,7 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
                 CertaintyLevel.unknown,
             )
         else:
-            inferred = _closed_baseline_semantics(
-                directive.evidence.text, directive
-            )
+            inferred = _closed_baseline_semantics(support, directive)
         if inferred is None:
             attrs.update(
                 original_kind=directive.kind,

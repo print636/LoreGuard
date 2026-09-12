@@ -205,6 +205,240 @@ class BaselineSemanticQualityTests(unittest.TestCase):
         self.assertEqual(1, len(questions))
         self.assertNotIn("发色是银色", questions[0].attrs["question"])
 
+    def test_missing_labels_use_local_support_for_multiline_fact_polarity(self):
+        row = ParsedDirective(
+            kind="fact",
+            attrs={"subject": "林澈", "predicate": "身份", "value": "领航员"},
+            evidence=EvidenceSpan(
+                document_id="multiline-positive",
+                document_name="chapter.md",
+                line_start=1,
+                line_end=2,
+                text="林澈的身份是领航员。\n巡查员没有发现其他异常。",
+            ),
+        )
+
+        assessed, reason = assess_directive(row)
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("fact", assessed.kind)
+        self.assertEqual("asserted", assessed.attrs["modality"])
+        self.assertEqual("affirmative", assessed.attrs["polarity"])
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_unpunctuated_newline_is_a_local_support_boundary(self):
+        row = ParsedDirective(
+            kind="fact",
+            attrs={"subject": "林澈", "predicate": "身份", "value": "领航员"},
+            evidence=EvidenceSpan(
+                document_id="multiline-unpunctuated",
+                document_name="chapter.md",
+                line_start=1,
+                line_end=2,
+                text="林澈的身份是领航员\n巡查员没有发现其他异常",
+            ),
+        )
+
+        assessed, reason = assess_directive(row)
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("fact", assessed.kind)
+        self.assertEqual("asserted", assessed.attrs["modality"])
+        self.assertEqual("affirmative", assessed.attrs["polarity"])
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_missing_labels_keep_true_negation_in_local_support_sentence(self):
+        row = ParsedDirective(
+            kind="fact",
+            attrs={"subject": "林澈", "predicate": "身份", "value": "领航员"},
+            evidence=EvidenceSpan(
+                document_id="multiline-negative",
+                document_name="chapter.md",
+                line_start=1,
+                line_end=2,
+                text="林澈的身份不是领航员。\n巡查员已完成复核。",
+            ),
+        )
+
+        assessed, reason = assess_directive(row)
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("fact", assessed.kind)
+        self.assertEqual("negated", assessed.attrs["modality"])
+        self.assertEqual("negative", assessed.attrs["polarity"])
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_missing_labels_keep_multiclause_report_attribution(self):
+        row = ParsedDirective(
+            kind="fact",
+            attrs={"subject": "林澈", "predicate": "身份", "value": "领航员"},
+            evidence=evidence("据苏弦所述，经过三轮复核，林澈的身份是领航员。"),
+        )
+
+        assessed, reason = assess_directive(row)
+
+        self.assertEqual("non_authoritative_source", reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("character_claim", assessed.kind)
+        self.assertEqual("reported", assessed.attrs["modality"])
+        self.assertEqual("character_dialogue", assessed.attrs["source_scope"])
+        self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_missing_event_labels_keep_report_attribution_before_timestamp(self):
+        row = ParsedDirective(
+            kind="event",
+            attrs={
+                "time": "1026-06-01 09:00",
+                "location": "东港",
+                "participants": "林澈",
+            },
+            evidence=evidence(
+                "据苏弦所述，1026-06-01 09:00，林澈在东港。"
+            ),
+        )
+
+        assessed, reason = assess_directive(row)
+
+        self.assertEqual("non_authoritative_source", reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("character_claim", assessed.kind)
+        self.assertEqual("reported", assessed.attrs["modality"])
+        self.assertEqual("character_dialogue", assessed.attrs["source_scope"])
+        self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_missing_labels_keep_multiclause_closed_condition(self):
+        row = ParsedDirective(
+            kind="world_rule",
+            attrs={
+                "key": "航线",
+                "value": "停运",
+                "condition": "风暴发生且防护罩关闭",
+                "consequence": "航线必须停运",
+            },
+            evidence=evidence("如果风暴发生，且防护罩关闭，航线必须停运。"),
+        )
+
+        assessed, reason = assess_directive(row)
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("world_rule", assessed.kind)
+        self.assertEqual("conditional_rule", assessed.attrs["modality"])
+        self.assertEqual("world_rule", assessed.attrs["source_scope"])
+        self.assertEqual("certain", assessed.attrs["certainty"])
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_missing_labels_keep_postposed_closed_condition(self):
+        row = ParsedDirective(
+            kind="world_rule",
+            attrs={
+                "key": "航线",
+                "value": "停运",
+                "condition": "风暴发生且防护罩关闭",
+                "consequence": "航线必须停运",
+            },
+            evidence=evidence("航线必须停运，如果风暴发生，且防护罩关闭。"),
+        )
+
+        assessed, reason = assess_directive(row)
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("world_rule", assessed.kind)
+        self.assertEqual("conditional_rule", assessed.attrs["modality"])
+        self.assertEqual("world_rule", assessed.attrs["source_scope"])
+        self.assertEqual("certain", assessed.attrs["certainty"])
+        self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_missing_labels_keep_postposed_report_attribution(self):
+        row = ParsedDirective(
+            kind="fact",
+            attrs={"subject": "林澈", "predicate": "身份", "value": "领航员"},
+            evidence=evidence(
+                "林澈的身份是领航员，巡查员没有提出异议，据苏弦所述。"
+            ),
+        )
+
+        assessed, reason = assess_directive(row)
+
+        self.assertEqual("non_authoritative_source", reason)
+        self.assertIsNotNone(assessed)
+        self.assertEqual("character_claim", assessed.kind)
+        self.assertEqual("reported", assessed.attrs["modality"])
+        self.assertEqual("character_dialogue", assessed.attrs["source_scope"])
+        self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_source_attribution_survives_spaced_multiclause_support(self):
+        attrs = {
+            "key": "航线",
+            "value": "停运",
+            "condition": "风暴发生且防护罩关闭",
+            "consequence": "航线必须停运",
+        }
+        rows = (
+            ParsedDirective(
+                kind="world_rule",
+                attrs=attrs,
+                evidence=evidence(
+                    "据苏弦所述， 如果风暴发生， 且防护罩关闭， 航线必须停运。"
+                ),
+            ),
+            ParsedDirective(
+                kind="world_rule",
+                attrs=attrs,
+                evidence=evidence(
+                    "航线必须停运， 如果风暴发生， 且防护罩关闭， 据苏弦所述。"
+                ),
+            ),
+        )
+
+        for row in rows:
+            with self.subTest(text=row.evidence.text):
+                assessed, reason = assess_directive(row)
+
+                self.assertIsNotNone(reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("tentative_fact", assessed.kind)
+                self.assertEqual("character_dialogue", assessed.attrs["source_scope"])
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_local_support_does_not_cross_sentence_for_trailing_context(self):
+        fact = ParsedDirective(
+            kind="fact",
+            attrs={"subject": "林澈", "predicate": "身份", "value": "领航员"},
+            evidence=evidence(
+                "林澈的身份是领航员。据苏弦所述，顾青的身份仍待核验。"
+            ),
+        )
+        rule = ParsedDirective(
+            kind="world_rule",
+            attrs={
+                "key": "航线",
+                "value": "停运",
+                "consequence": "航线必须停运",
+            },
+            evidence=evidence("航线必须停运。如果风暴发生，守卫将发布通知。"),
+        )
+
+        assessed_fact, fact_reason = assess_directive(fact)
+        assessed_rule, rule_reason = assess_directive(rule)
+
+        self.assertIsNone(fact_reason)
+        self.assertIsNotNone(assessed_fact)
+        self.assertEqual("fact", assessed_fact.kind)
+        self.assertEqual("asserted", assessed_fact.attrs["modality"])
+        self.assertEqual("affirmative", assessed_fact.attrs["polarity"])
+        self.assertEqual("narrator", assessed_fact.attrs["source_scope"])
+        self.assertTrue(eligible_for_deterministic_rules(assessed_fact))
+        self.assertIsNone(rule_reason)
+        self.assertIsNotNone(assessed_rule)
+        self.assertEqual("world_rule", assessed_rule.kind)
+        self.assertEqual("asserted", assessed_rule.attrs["modality"])
+        self.assertTrue(eligible_for_deterministic_rules(assessed_rule))
+
     def test_closed_conditional_rule_is_not_treated_as_open_hypothesis(self):
         closed = parse_document(
             "closed", "world.md", "如果进入静默海域，潮汐术会失效。"
