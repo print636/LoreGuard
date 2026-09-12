@@ -125,15 +125,34 @@ def test_evidence_investigator_hard_upper_bounds(field, invalid):
 def test_evidence_investigator_maximum_seed_setting_has_a_valid_configuration():
     configured = settings(
         evidence_investigator_max_seeds=8,
-        evidence_investigator_max_decision_rounds=24,
-        evidence_investigator_max_tool_calls=24,
+        evidence_investigator_max_decision_rounds=32,
+        evidence_investigator_max_tool_calls=32,
         evidence_investigator_max_searches=8,
         evidence_investigator_max_reads=8,
         evidence_investigator_max_results=48,
         evidence_investigator_token_budget=20_000,
+        evidence_investigator_max_completion_tokens=625,
     )
 
     assert configured.evidence_investigator_max_seeds == 8
+
+
+def test_each_seed_reserves_one_recoverable_provider_decision():
+    with pytest.raises(ValidationError, match="cannot cover seeds"):
+        settings(
+            evidence_investigator_max_seeds=2,
+            evidence_investigator_max_decision_rounds=6,
+            evidence_investigator_max_tool_calls=6,
+        )
+
+    configured = settings(
+        evidence_investigator_max_seeds=2,
+        evidence_investigator_max_decision_rounds=8,
+        evidence_investigator_max_tool_calls=8,
+        evidence_investigator_max_searches=2,
+        evidence_investigator_max_reads=2,
+    )
+    assert configured.evidence_investigator_max_decision_rounds == 8
 
 
 @pytest.mark.parametrize(

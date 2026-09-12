@@ -193,7 +193,12 @@ class Settings(BaseSettings):
     def validate_evidence_investigator_limits(self):
         """Reject internally inconsistent Investigator safety ceilings."""
 
-        minimum_rounds = self.evidence_investigator_max_seeds * 3
+        # SEARCH -> READ -> SUBMIT/ABSTAIN is the normal three-tool path.  The
+        # loop additionally permits one content-free correction per seed, so
+        # a valid configured run must reserve four provider decisions for each
+        # selected seed.  Rejected calls do not consume the tool counter, but
+        # retaining tool >= decision is an intentionally conservative ceiling.
+        minimum_rounds = self.evidence_investigator_max_seeds * 4
         if (
             self.evidence_investigator_max_decision_rounds < minimum_rounds
             or self.evidence_investigator_max_tool_calls < minimum_rounds

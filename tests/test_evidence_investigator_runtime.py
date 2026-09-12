@@ -398,13 +398,13 @@ def test_native_tool_turns_share_one_absolute_runtime_deadline():
     scripted = SuccessfulProvider()
 
     class BoundedTurn:
-        def __init__(self, remaining):
-            self.remaining = remaining
+        def __init__(self, effective_timeout):
+            self.effective_timeout = effective_timeout
 
         def complete_with_tools(self, *args, **kwargs):
-            intended_duration = 20.0
-            if self.remaining <= intended_duration:
-                clock.advance(self.remaining)
+            intended_duration = 25.0
+            if self.effective_timeout <= intended_duration:
+                clock.advance(self.effective_timeout)
                 raise ProviderRetryExhausted(
                     "bounded transport timeout", category="read_timeout"
                 )
@@ -414,10 +414,13 @@ def test_native_tool_turns_share_one_absolute_runtime_deadline():
     class RecordingProvider(OpenAICompatibleProvider):
         def __init__(self):
             self.remaining_deadlines = []
+            self.effective_timeouts = []
 
         def fork_for_evidence_investigator(self, *, remaining_deadline_seconds=None):
             self.remaining_deadlines.append(remaining_deadline_seconds)
-            return BoundedTurn(remaining_deadline_seconds)
+            effective_timeout = min(30.0, remaining_deadline_seconds)
+            self.effective_timeouts.append(effective_timeout)
+            return BoundedTurn(effective_timeout)
 
     provider = RecordingProvider()
     outcome = EvidenceInvestigatorRuntime(
@@ -436,7 +439,8 @@ def test_native_tool_turns_share_one_absolute_runtime_deadline():
     )
 
     assert (outcome.outcome, outcome.reason_code) == ("degraded", "deadline")
-    assert provider.remaining_deadlines == pytest.approx([60.0, 40.0, 20.0])
+    assert provider.remaining_deadlines == pytest.approx([60.0, 35.0, 10.0])
+    assert provider.effective_timeouts == pytest.approx([30.0, 30.0, 10.0])
     assert clock.value == pytest.approx(60.0)
     assert scripted.calls == 2
     assert outcome.promotion is None
