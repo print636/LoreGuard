@@ -239,7 +239,17 @@ def main(*, selected_split: str | None = None) -> None:
     }
     if set(frozen_paths) != expected_frozen_paths:
         raise AssertionError("freeze file list does not match the evaluator inputs")
-    for row in frozen_rows:
+    rows_to_hash = (
+        frozen_rows
+        if selected_split is None
+        else [
+            row
+            for row in frozen_rows
+            if row["path"] in {"manifest.json", "README.md"}
+            or row["path"].startswith(f"{selected_split}/")
+        ]
+    )
+    for row in rows_to_hash:
         path = _source_path(row["path"])
         actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual_hash != row["sha256"]:

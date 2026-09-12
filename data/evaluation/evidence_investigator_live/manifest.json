@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "dataset_id": "evidence-investigator-live-v1",
+  "dataset_id": "evidence-investigator-live-v2",
   "language": "zh-CN",
   "status": "ready_unscored",
   "license": "MIT",
@@ -9,7 +9,7 @@
   "live_model_status": {
     "state": "not_run",
     "metrics": null,
-    "note": "Populate metrics only from preserved real-model run artifacts after configuration freeze."
+    "note": "v2 is unscored. A preserved v1 dev-only run exposed a deterministic perfective-aspect normalization defect; no holdout run or outcome was used for this revision. Populate v2 metrics only from preserved real-model artifacts after configuration freeze."
   },
   "answer_isolation": {
     "model_visible": ["source document content", "production seed summary", "production tool schemas and observations"],

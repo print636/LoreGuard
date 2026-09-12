@@ -968,7 +968,7 @@ def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
     )
     safe_configuration = {
         "artifact_schema": "evidence-investigator-live-http-v4",
-        "dataset_id": "evidence-investigator-live-v1",
+        "dataset_id": "evidence-investigator-live-v2",
         "split": "dev",
         "manifest_sha256": live_runner.PINNED_MANIFEST_SHA256,
         "freeze_sha256": live_runner.PINNED_FREEZE_SHA256,
@@ -995,7 +995,7 @@ def _qualified_dev_artifact(*, started_at, completed_at, model="fixture-model"):
     )
     return {
         "schema_version": "evidence-investigator-live-http-v4",
-        "dataset_id": "evidence-investigator-live-v1",
+        "dataset_id": "evidence-investigator-live-v2",
         "split": "dev",
         "execution_source": "live_http_service",
         "started_at": started_at,
@@ -1053,7 +1053,7 @@ def test_dev_pair_requires_v4_qualified_identical_nonoverlapping_runs():
 def test_dev_pair_treats_old_schemas_and_missing_fields_as_historical_only():
     historical = {
         "schema_version": "evidence-investigator-live-http-v2",
-        "dataset_id": "evidence-investigator-live-v1",
+        "dataset_id": "evidence-investigator-live-v2",
         "split": "dev",
     }
     current = _qualified_dev_artifact(
@@ -1474,7 +1474,7 @@ def test_cli_refuses_without_explicit_live_confirmation(tmp_path, capsys):
 
 def test_frozen_dev_fixture_is_valid_without_running_a_model():
     verified = verify_frozen_dataset(split="dev")
-    assert verified.manifest["dataset_id"] == "evidence-investigator-live-v1"
+    assert verified.manifest["dataset_id"] == "evidence-investigator-live-v2"
     assert len(verified.manifest_sha256) == 64
     assert len(verified.freeze_sha256) == 64
     assert verified.source_payloads

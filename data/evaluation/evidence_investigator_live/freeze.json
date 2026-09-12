@@ -1,9 +1,9 @@
 {
   "schema_version": "1.0",
-  "dataset_id": "evidence-investigator-live-v1",
-  "frozen_at": "2026-09-12",
-  "freeze_policy": "Changing manifest.json, README.md, or any listed source requires a new dataset version. Holdout outcomes must never be used to rewrite this v1 freeze.",
-  "generation_policy": "The fixture and expected answers were frozen before any LoreGuard live-provider run. Structural validation did not call an external provider.",
+  "dataset_id": "evidence-investigator-live-v2",
+  "frozen_at": "2026-09-13",
+  "freeze_policy": "Changing manifest.json, README.md, or any listed source requires a new dataset version. v2 changes only developer-visible EIL-D-05 and shared metadata after a v1 dev-only run exposed a deterministic perfective-aspect normalization defect; holdout source content, labels, and expected values remain unchanged, and no holdout outcome was run or used.",
+  "generation_policy": "v2 preserves the original evaluator answers except for the unchanged-field DEV EIL-D-05 wording update needed to retain Investigator attribution after the production normalizer fix. Structural validation does not call an external provider.",
   "counts": {
     "cases": 18,
     "dev_cases": 8,
@@ -22,7 +22,7 @@
     {"path":"dev/EIL-D-04/canon.md","sha256":"5cce4ebd9066698edaaf7f3bf84cc2feec6e21927b83ea02f5275f1b0eb2a80f"},
     {"path":"dev/EIL-D-04/chapter.md","sha256":"3d40579999abf2d12651341ebb0d3adf5ab609d7fc20a275b49080b7de88a14f"},
     {"path":"dev/EIL-D-05/canon.md","sha256":"2f9423933c093f6b94110eeae6c4c866beb85455ffe4178a0de96c964755578a"},
-    {"path":"dev/EIL-D-05/chapter.md","sha256":"84119236e3a9b5dc0ee8acebc4a37af77509feacd81473da9ce453b97b15a3e8"},
+    {"path":"dev/EIL-D-05/chapter.md","sha256":"351814dd34852dbd89ad4ab9ce66cdd9e0a33c41b59772a36b618d37d4662620"},
     {"path":"dev/EIL-D-06/canon.md","sha256":"8e2ce12c310239774f327e3a48ff1fae94ee67b1a2a206310148fc29b3a4f755"},
     {"path":"dev/EIL-D-06/chapter.md","sha256":"a642086f257e9bc7e4d85d541ae23cee289dca82e3482e48cbc6e66302e448f4"},
     {"path":"dev/EIL-D-07/canon.md","sha256":"a09e05418268ff94469d0b47c0bc20c1f6269e1385213463f6a2ba0450184164"},
@@ -49,7 +49,7 @@
     {"path":"holdout/EIL-H-09/chapter.md","sha256":"494b4c15211e9f9981fd361163e74f9fb0662348afb1059717cd343b65ac3b22"},
     {"path":"holdout/EIL-H-10/canon.md","sha256":"fabc19b5c456b76c7dbbb5a8927136f664ae4ab584bc2f3024e7b8c79cd674f3"},
     {"path":"holdout/EIL-H-10/chapter.md","sha256":"42b6a871deafb885bc42e24774ba59a744b178f63660718bb12681486b56c8c2"},
-    {"path":"manifest.json","sha256":"73869e264b6b13f8d6b0543514fe001a24404ae5af8c1979d4b487a5276cca04"},
-    {"path":"README.md","sha256":"379db2cdbb7eb00bcc0d11f45713a7c886ce1d003035bbee7abed3533cce6bfc"}
+    {"path":"manifest.json","sha256":"64ded0988cb70ea591548facfc26f4867e39818d1b868a17dbadde402fc6d316"},
+    {"path":"README.md","sha256":"dbae6e6e29f4db6b39db618ea7adad8950a1268ab00abb87b5dfe17dc640667d"}
   ]
 }

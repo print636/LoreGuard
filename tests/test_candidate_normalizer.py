@@ -76,6 +76,46 @@ class CandidateNormalizerTests(unittest.TestCase):
         issue = next(row for row in result.issues if row.category.value == "world_rule_conflict")
         self.assertEqual({"world.md", "chapter.md"}, {span.document_name for span in issue.evidence})
 
+    def test_completed_world_actions_do_not_capture_aspect_particle_in_key(self):
+        for index, (verb, action) in enumerate(
+            (
+                ("发动了", "声波术"),
+                ("使用了", "静默罗盘"),
+                ("启动了", "余光信标"),
+            )
+        ):
+            with self.subTest(verb=verb):
+                result = AnalysisPipeline(extractor=BaselineExtractor()).run(
+                    [
+                        DocumentInput(
+                            id=f"world-perfective-{index}",
+                            name="world.md",
+                            content=f"在寂灯环廊中，{action}会失效。",
+                        ),
+                        DocumentInput(
+                            id=f"chapter-perfective-{index}",
+                            name="chapter.md",
+                            content=(
+                                f"砚霜在寂灯环廊中{verb}{action}，"
+                                "控制台确认动作已经完成。"
+                            ),
+                        ),
+                    ]
+                )
+
+                assertion = next(
+                    row for row in result.directives if row.kind == "world_assert"
+                )
+                self.assertEqual(
+                    f"scope_action:寂灯环廊:{action}", assertion.attrs["key"]
+                )
+                self.assertTrue(
+                    any(
+                        row.category.value == "world_rule_conflict"
+                        for row in result.issues
+                    )
+                )
+
     def test_orders_plans_and_unfinished_actions_are_not_performed_assertions(self):
         rule = "在寂灯环廊中，余光信标会失效。"
         non_actions = [
@@ -84,6 +124,7 @@ class CandidateNormalizerTests(unittest.TestCase):
             "砚霜将在寂灯环廊中启动余光信标。",
             "砚霜未能成功在寂灯环廊中启动余光信标。",
             "砚霜并没有实际在寂灯环廊中启动余光信标。",
+            "砚霜并未在寂灯环廊中启动余光信标。",
             (
                 "值班纪要转述：总站长命令砚霜在寂灯环廊中启动余光信标；"
                 "后续记录停在命令下达处，缺少任何执行结果。"
