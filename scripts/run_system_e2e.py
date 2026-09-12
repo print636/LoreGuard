@@ -82,8 +82,11 @@ def main() -> int:
             }
         )
         completed = subprocess.run(
-            [pnpm, "--dir", "frontend", "run", "test:system"],
-            cwd=ROOT,
+            [pnpm, "run", "test:system"],
+            # Corepack selects the package-manager version before pnpm handles
+            # --dir. Starting in the frontend directory makes that selection
+            # honor frontend/package.json in clean CI workspaces as well.
+            cwd=ROOT / "frontend",
             env=environment,
             check=False,
         )
