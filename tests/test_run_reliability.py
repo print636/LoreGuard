@@ -31,6 +31,8 @@ from app.db import (
     RunEventRow,
 )
 from app.service import (
+    CORRUPT_SNAPSHOT_ERROR,
+    INTERNAL_ANALYSIS_ERROR,
     MISSING_SNAPSHOT_ERROR,
     ExecutionLeaseHeartbeat,
     WorkerLeaseBusy,
@@ -44,6 +46,8 @@ from app.service import (
     emit,
     execute_analysis,
     run_input_metadata,
+    safe_analysis_error,
+    safe_persisted_analysis_error,
 )
 
 
@@ -522,8 +526,42 @@ class RunReliabilityTests(unittest.TestCase):
                     run = db.get(AnalysisRunRow, run_id)
                     execution = db.get(AnalysisRunExecutionRow, run_id)
                     self.assertEqual(terminal_status, run.status)
+                    self.assertEqual(
+                        INTERNAL_ANALYSIS_ERROR if terminal_status == "failed" else None,
+                        run.error,
+                    )
                     self.assertIsNone(execution.worker_token)
                     self.assertIsNone(execution.lease_expires_at)
+
+    def test_failure_persists_only_allowlisted_public_error(self):
+        _, _, run_id = self.create_snapshotted_run()
+        secret = "sk-secret https://private.invalid C:\\private\\story.txt"
+
+        class LeakingPipeline:
+            def run(_, documents, on_stage, checkpoint):
+                raise RuntimeError(secret)
+
+        with patch("app.service.AnalysisPipeline", LeakingPipeline):
+            execute_analysis(run_id)
+
+        with self.Session() as db:
+            run = db.get(AnalysisRunRow, run_id)
+            self.assertEqual("failed", run.status)
+            self.assertEqual(INTERNAL_ANALYSIS_ERROR, run.error)
+            self.assertNotIn(secret, run.error)
+
+        self.assertEqual(
+            MISSING_SNAPSHOT_ERROR,
+            safe_analysis_error(RuntimeError(MISSING_SNAPSHOT_ERROR)),
+        )
+        self.assertEqual(
+            CORRUPT_SNAPSHOT_ERROR,
+            safe_analysis_error(RuntimeError("RUN_INPUT_SNAPSHOT_CORRUPT: document private-id hash mismatch")),
+        )
+        self.assertEqual(
+            INTERNAL_ANALYSIS_ERROR,
+            safe_persisted_analysis_error("legacy private provider detail"),
+        )
 
     def test_cancel_persists_agent_usage_as_safe_lower_bound_once(self):
         _, _, run_id = self.create_snapshotted_run()
@@ -768,6 +806,10 @@ class RunReliabilityTests(unittest.TestCase):
                     finalize_failure=False,
                     worker_token="attempt-one",
                 )
+        with self.Session() as db:
+            waiting = db.get(AnalysisRunRow, run_id)
+            self.assertEqual("queued", waiting.status)
+            self.assertEqual(INTERNAL_ANALYSIS_ERROR, waiting.error)
         captured = []
 
         class SuccessfulPipeline:
@@ -814,6 +856,27 @@ class RunReliabilityTests(unittest.TestCase):
             run = db.get(AnalysisRunRow, run_id)
             self.assertEqual("failed", run.status)
             self.assertEqual(MISSING_SNAPSHOT_ERROR, run.error)
+
+    def test_corrupt_snapshot_failure_never_persists_document_identifier(self):
+        _, document_id, run_id = self.create_snapshotted_run("原始冻结内容")
+        with self.Session() as db:
+            snapshot = db.scalar(
+                select(AnalysisRunInputRow).where(
+                    AnalysisRunInputRow.run_id == run_id
+                )
+            )
+            snapshot.content = "数据库中被篡改的冻结内容"
+            db.commit()
+
+        with patch("app.service.AnalysisPipeline") as pipeline:
+            execute_analysis(run_id)
+        pipeline.assert_not_called()
+
+        with self.Session() as db:
+            run = db.get(AnalysisRunRow, run_id)
+            self.assertEqual("failed", run.status)
+            self.assertEqual(CORRUPT_SNAPSHOT_ERROR, run.error)
+            self.assertNotIn(document_id, run.error)
 
 
 if __name__ == "__main__":

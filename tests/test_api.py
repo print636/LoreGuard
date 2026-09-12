@@ -799,7 +799,11 @@ class ApiFlowTests(unittest.TestCase):
                 document = DocumentRow(project_id=project["id"], name="chapter.md", content="重试输入")
                 queued = AnalysisRunRow(project_id=project["id"], status="queued")
                 completed = AnalysisRunRow(project_id=project["id"], status="completed")
-                failed = AnalysisRunRow(project_id=project["id"], status="failed", error="模拟失败")
+                failed = AnalysisRunRow(
+                    project_id=project["id"],
+                    status="failed",
+                    error="sk-private legacy provider detail https://private.invalid",
+                )
                 db.add_all([document, queued, completed, failed]); db.flush()
                 capture_run_inputs(db, failed, [document])
                 failed_event = RunEventRow(run_id=failed.id, stage="failed", progress=100, message="失败")
@@ -828,6 +832,15 @@ class ApiFlowTests(unittest.TestCase):
             self.assertEqual(202, retry.status_code)
             history = client.get(f"/api/v1/projects/{project['id']}/analysis-runs").json()
             self.assertGreaterEqual(len(history), 4)
+            public_failed = client.get(
+                f"/api/v1/analysis-runs/{failed_id}"
+            ).json()
+            self.assertEqual(
+                "ANALYSIS_EXECUTION_FAILED: 分析执行失败，内部错误详情已隐藏；请重试任务",
+                public_failed["error"],
+            )
+            self.assertNotIn("sk-private", str(history))
+            self.assertNotIn("private.invalid", str(history))
 
             stream = client.get(
                 f"/api/v1/analysis-runs/{failed_id}/events",
@@ -836,7 +849,9 @@ class ApiFlowTests(unittest.TestCase):
             self.assertNotIn("event: progress", stream)
             self.assertIn("event: terminal", stream)
             self.assertIn('"status": "failed"', stream)
-            self.assertIn("模拟失败", stream)
+            self.assertIn("ANALYSIS_EXECUTION_FAILED", stream)
+            self.assertNotIn("sk-private", stream)
+            self.assertNotIn("private.invalid", stream)
 
     def test_one_click_natural_text_demo(self):
         with TestClient(app) as client:

@@ -29,7 +29,7 @@ from .provider import (
     sanitize_request_id,
 )
 from .rate_limit import SlidingWindowLimiter, WriteRateLimitMiddleware
-from .service import DEFAULT_DOCUMENT_ROLE, DEFAULT_STORY_SCOPE, MISSING_SNAPSHOT_ERROR, capture_run_inputs, copy_run_inputs, execute_analysis, run_input_metadata
+from .service import DEFAULT_DOCUMENT_ROLE, DEFAULT_STORY_SCOPE, MISSING_SNAPSHOT_ERROR, capture_run_inputs, copy_run_inputs, execute_analysis, run_input_metadata, safe_persisted_analysis_error
 from .time_utils import utc_now_naive
 
 RUNS = Counter("loreguard_analysis_runs_total", "Analysis runs", ["status"])
@@ -96,6 +96,7 @@ class SemanticReviewItemOut(BaseModel):
 
 def serialize_run(row: AnalysisRunRow, db=None) -> dict:
     payload = {key: getattr(row, key) for key in ("id", "project_id", "status", "created_at", "started_at", "completed_at", "input_chars", "prompt_tokens", "completion_tokens", "error")}
+    payload["error"] = safe_persisted_analysis_error(row.error)
     prices_configured = settings.model_input_price_per_million is not None and settings.model_output_price_per_million is not None
     payload["estimated_cost_usd"] = row.estimated_cost_usd if prices_configured else None
     if db is not None:
@@ -978,7 +979,10 @@ async def stream_events(
                     cursor = row.id
                     yield f"id: {row.id}\nevent: progress\ndata: {json.dumps({'stage': row.stage, 'progress': row.progress, 'message': row.message}, ensure_ascii=False)}\n\n"
                 terminal = run.status in {"completed", "failed", "cancelled"}
-                terminal_payload = {"status": run.status, "error": run.error}
+                terminal_payload = {
+                    "status": run.status,
+                    "error": safe_persisted_analysis_error(run.error),
+                }
             if terminal:
                 yield f"event: terminal\ndata: {json.dumps(terminal_payload, ensure_ascii=False)}\n\n"
                 return

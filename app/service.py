@@ -46,6 +46,12 @@ MISSING_SNAPSHOT_ERROR = (
     "RUN_INPUT_SNAPSHOT_MISSING: 此旧任务创建时未冻结输入，不能读取当前文档冒充原输入；"
     "请从项目重新发起分析以使用当前活动版本"
 )
+CORRUPT_SNAPSHOT_ERROR = (
+    "RUN_INPUT_SNAPSHOT_CORRUPT: 分析输入快照校验失败；请从项目重新发起分析"
+)
+INTERNAL_ANALYSIS_ERROR = (
+    "ANALYSIS_EXECUTION_FAILED: 分析执行失败，内部错误详情已隐藏；请重试任务"
+)
 
 _SAFE_INTERRUPTED_PROVIDER_CATEGORIES = {
     "success",
@@ -81,6 +87,37 @@ class WorkerLeaseBusy(RuntimeError):
 
 class WorkerLeaseHeartbeatError(WorkerLeaseLost):
     """The background renewal loop could not verify continued ownership."""
+
+
+def safe_persisted_analysis_error(value: object) -> str | None:
+    """Return only an allowlisted analysis error suitable for REST or SSE."""
+    if value is None:
+        return None
+    message = value if isinstance(value, str) else ""
+    if message == MISSING_SNAPSHOT_ERROR:
+        return MISSING_SNAPSHOT_ERROR
+    if message == CORRUPT_SNAPSHOT_ERROR or message.startswith(
+        "RUN_INPUT_SNAPSHOT_CORRUPT:"
+    ):
+        return CORRUPT_SNAPSHOT_ERROR
+    if message == INTERNAL_ANALYSIS_ERROR:
+        return INTERNAL_ANALYSIS_ERROR
+    return INTERNAL_ANALYSIS_ERROR
+
+
+def safe_analysis_error(exc: BaseException) -> str:
+    """Map internal exceptions to the small set of messages exposed to clients.
+
+    Worker and provider exceptions can contain URLs, filesystem paths, response
+    fragments, or credentials supplied by a deployment.  AnalysisRun.error is
+    returned by both the REST API and the SSE terminal event, so arbitrary
+    exception text must never be persisted there.
+    """
+    try:
+        message = str(exc)
+    except Exception:
+        return INTERNAL_ANALYSIS_ERROR
+    return safe_persisted_analysis_error(message) or INTERNAL_ANALYSIS_ERROR
 
 
 def _lease_seconds() -> float:
@@ -891,7 +928,7 @@ def _finalize_terminal(
             conditions.append(AnalysisRunRow.cancel_requested.is_(False))
         values = {
             "status": status,
-            "error": error,
+            "error": safe_persisted_analysis_error(error),
             "completed_at": utc_now_naive(),
         }
         if status in {"cancelled", "failed"} and cumulative_usage is not None:
@@ -947,6 +984,7 @@ def _release_failed_attempt(
     interrupted_usage: dict | None = None,
 ) -> None:
     """Release a retriable attempt without creating a terminal SSE event."""
+    public_error = safe_persisted_analysis_error(error) or INTERNAL_ANALYSIS_ERROR
     with SessionLocal() as db:
         changed = db.execute(
             update(AnalysisRunRow)
@@ -955,7 +993,7 @@ def _release_failed_attempt(
                 AnalysisRunRow.status == "running",
                 _owned_run_clause(run_id, worker_token),
             )
-            .values(status="queued", error=error, completed_at=None)
+            .values(status="queued", error=public_error, completed_at=None)
         ).rowcount
         if changed != 1:
             db.rollback()
@@ -1378,6 +1416,7 @@ def execute_analysis(
             return
         except WorkerLeaseLost:
             return
+        public_error = safe_analysis_error(exc)
         if finalize_failure:
             interrupted_usage = _combined_interrupted_usage(
                 pipeline,
@@ -1388,7 +1427,7 @@ def execute_analysis(
                 run_id,
                 token,
                 "failed",
-                error=str(exc),
+                error=public_error,
                 message="分析失败，可调用重试接口恢复",
                 interrupted_usage=interrupted_usage,
             )
@@ -1401,7 +1440,7 @@ def execute_analysis(
             _release_failed_attempt(
                 run_id,
                 token,
-                str(exc),
+                public_error,
                 interrupted_usage=interrupted_usage,
             )
         if raise_on_failure:
