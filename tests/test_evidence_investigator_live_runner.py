@@ -1148,6 +1148,63 @@ def test_dev_pair_cannot_disguise_execution_failure_with_old_gate(
     assert "second_development_gate_not_reproducible" in result["reason_codes"]
 
 
+@pytest.mark.parametrize("hidden_category", ["read_timeout", "rate_limit", "upstream_5xx"])
+def test_dev_pair_rejects_failure_category_hidden_behind_completed_reason(
+    hidden_category,
+):
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    tampered = json.loads(json.dumps(first))
+    tampered["cases"][0]["investigator"]["usage"][
+        "provider_category_counts"
+    ][hidden_category] = 1
+
+    result = compare_dev_artifact_payloads(first, tampered)
+
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+
+
+def test_dev_pair_rejects_usage_ledger_mismatch_and_success_count_mismatch():
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    charged_mismatch = json.loads(json.dumps(first))
+    charged_mismatch["cases"][0]["analysis_usage"]["charged_tokens"] += 1
+    result = compare_dev_artifact_payloads(first, charged_mismatch)
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+
+    success_mismatch = json.loads(json.dumps(first))
+    success_mismatch["cases"][0]["investigator"]["usage"][
+        "provider_category_counts"
+    ]["success"] += 1
+    result = compare_dev_artifact_payloads(first, success_mismatch)
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+
+
+@pytest.mark.parametrize("reason_path", [("reason_code",), ("loop", "reason_code")])
+def test_dev_pair_rejects_mystery_completed_reason(reason_path):
+    first = _qualified_dev_artifact(
+        started_at="2026-09-12T10:00:00+00:00",
+        completed_at="2026-09-12T10:05:00+00:00",
+    )
+    tampered = json.loads(json.dumps(first))
+    target = tampered["cases"][0]["investigator"]
+    for key in reason_path[:-1]:
+        target = target[key]
+    target[reason_path[-1]] = "mystery_reason"
+
+    result = compare_dev_artifact_payloads(first, tampered)
+
+    assert result["passed"] is False
+    assert "second_case_results_incomplete" in result["reason_codes"]
+
+
 def test_top_level_usage_survives_missing_loop_and_preserves_failure_reason():
     raw_diagnostics = {
         "model": {

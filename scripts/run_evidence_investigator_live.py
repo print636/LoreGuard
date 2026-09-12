@@ -2300,10 +2300,7 @@ def _qualified_case_is_well_formed(
         investigator.get("available") is not True
         or investigator.get("enabled") is not True
         or investigator.get("outcome") != "completed"
-        or (
-            investigator.get("reason_code") is not None
-            and _safe_identifier(investigator.get("reason_code")) is None
-        )
+        or investigator.get("reason_code") not in {None, "completed"}
         or _safe_int(investigator.get("seed_count")) is None
     ):
         return False
@@ -2313,10 +2310,7 @@ def _qualified_case_is_well_formed(
         return False
     if (
         loop.get("outcome") != "completed"
-        or (
-            loop.get("reason_code") is not None
-            and _safe_identifier(loop.get("reason_code")) is None
-        )
+        or loop.get("reason_code") not in {None, "completed"}
         or loop.get("tool_call_count_basis")
         not in {
             "server_reported_executed_tools",
@@ -2361,8 +2355,16 @@ def _qualified_case_is_well_formed(
         or usage.get("token_count_basis")
         not in {"investigator_usage_ledger", "legacy_loop_compatibility"}
         or not _safe_counter_dict(
-            usage.get("provider_category_counts"), SAFE_PROVIDER_CATEGORIES
+            usage.get("provider_category_counts"), frozenset({"success"})
         )
+        or usage["provider_category_counts"].get("success", 0)
+        != loop["provider_decision_calls"]
+        or analysis_usage
+        != {
+            "reported_prompt_tokens": usage["reported_prompt_tokens"],
+            "reported_completion_tokens": usage["reported_completion_tokens"],
+            "charged_tokens": usage["charged_tokens"],
+        }
     ):
         return False
 
