@@ -45,7 +45,7 @@ KNOWLEDGE_ACQUISITION_VERB_PATTERN = (
 KNOWLEDGE_CLAIM_VERB_PATTERN = (
     r"说出|说了|提到|引用|念出|喊出|回答出|透露|宣称|声称"
 )
-_KNOWLEDGE_RELATION_BOUNDARY = r"[，,。；;！？?!：:\"'“”‘’（）()【】\[\]]"
+_KNOWLEDGE_RELATION_BOUNDARY = r"[\r\n，,。；;！？?!：:\"'“”‘’（）()【】\[\]]"
 _KNOWLEDGE_CHARACTER_LEAD = (
     rf"(?:^|{_KNOWLEDGE_RELATION_BOUNDARY})"
     r"(?:随后|然后|接着|此后|当时|最终|随即|终于)?"
@@ -57,6 +57,16 @@ _PRECISE_KNOWLEDGE_TIME = re.compile(
 )
 _EVIDENCE_PRECISE_TIME = re.compile(
     r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?"
+)
+_DATE_LIKE_KNOWLEDGE_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_NATURAL_KNOWLEDGE_TIME_MAX_CHARS = 24
+_NATURAL_KNOWLEDGE_TIME = re.compile(
+    r"(?:清晨|黎明|早晨|上午|中午|午后|下午|傍晚|黄昏|夜晚|深夜|凌晨|"
+    r"此前|之前|当时|此时|随后|之后|后来|片刻后|不久后|"
+    r"(?:今日|今天|当日|当天|同日|次日|翌日)"
+    r"(?:清晨|早晨|上午|中午|午后|下午|傍晚|黄昏|夜晚|深夜|凌晨)?|"
+    r"第[一二三四五六七八九十百零〇两0-9]{1,8}(?:日|天|夜)"
+    r"(?:清晨|早晨|上午|中午|午后|下午|傍晚|黄昏|夜晚|深夜|凌晨)?)"
 )
 
 _QUESTION_MARKERS = re.compile(
@@ -1179,7 +1189,7 @@ def find_bound_knowledge_relation_matches(
         verbs = KNOWLEDGE_CLAIM_VERB_PATTERN
     else:
         return []
-    compact = re.sub(r"\s+", "", support)
+    compact = re.sub(r"[ \t\f\v]+", "", support)
     bound_character = re.escape(compact_character)
     fact_surfaces = [re.escape(compact_fact)]
     if compact_fact.endswith("位置"):
@@ -1214,19 +1224,19 @@ def find_bound_knowledge_relation_matches(
         # a wildcard so an unrelated first clause cannot donate a subject.
         source = (
             r"(?:"
-            r"从[^，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24}?"
+            r"从[^\r\n，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24}?"
             r"(?:处|那里|手中|口中|中)"
             r"|阅读(?:了)?(?:来信|信件|密函)后"
             r"|通过(?:加密)?(?:来信|信件|密函)"
             r"|亲眼目击(?:并)?"
             r"|(?:查阅|阅读)(?:了)?"
-            r"[^，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24}[，,]"
+            r"[^\r\n，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24}[，,]"
             r")?"
         )
     else:
         source = (
-            r"(?:对[^，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24})?"
-            r"(?:在[^，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24}(?:中|内))?"
+            r"(?:对[^\r\n，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24})?"
+            r"(?:在[^\r\n，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24}(?:中|内))?"
             r"(?:准确|清楚|完整)?"
         )
     forward = re.compile(
@@ -1242,29 +1252,87 @@ def find_bound_knowledge_relation_matches(
         # both sides prevent either submitted field from matching a prefix.
         told = re.compile(
             rf"{_KNOWLEDGE_CHARACTER_LEAD}"
-            r"[^，,。；;！？?!：:\"'“”‘’（）()【】\[\]把]{0,16}"
+            r"[^\r\n，,。；;！？?!：:\"'“”‘’（）()【】\[\]把]{0,16}"
             r"(?:第一次)?把"
             rf"{bound_fact}告诉{bound_character}{_KNOWLEDGE_CHARACTER_END}"
         )
         relations.extend(told.finditer(compact))
-    return relations
+    return [
+        match
+        for match in relations
+        if _knowledge_relation_match_is_actual(compact, match, kind=kind)
+    ]
 
 
-def _precise_knowledge_time_visible(value: str, support: str) -> bool:
-    candidate = str(value).strip()
-    if _PRECISE_KNOWLEDGE_TIME.fullmatch(candidate) is None:
-        return False
-    normalized = candidate.replace("T", " ")
-    time_format = (
-        "%Y-%m-%d %H:%M:%S" if len(normalized) == 19 else "%Y-%m-%d %H:%M"
+def _knowledge_relation_match_is_actual(
+    support: str, match: re.Match[str], *, kind: str
+) -> bool:
+    unit_start = max(
+        (support.rfind(token, 0, match.start()) for token in "\r\n。；;！？?!"),
+        default=-1,
     )
-    try:
-        datetime.strptime(normalized, time_format)
-    except ValueError:
+    ends = [
+        index
+        for token in "\r\n。；;！？?!"
+        if (index := support.find(token, match.end())) >= 0
+    ]
+    unit_end = min(ends, default=len(support))
+    unit = support[unit_start + 1 : unit_end]
+    if has_unrealized_heading_frame(unit):
         return False
-    return any(
-        observed.replace("T", " ") == normalized
-        for observed in _EVIDENCE_PRECISE_TIME.findall(support)
+
+    surface = match.group(0)
+    if kind == "knows" and "把" in surface and "告诉" in surface:
+        operator_start = surface.find("把")
+    else:
+        verbs = (
+            KNOWLEDGE_ACQUISITION_VERB_PATTERN
+            if kind == "knows"
+            else KNOWLEDGE_CLAIM_VERB_PATTERN
+        )
+        operator = re.search(verbs, surface)
+        if operator is None:
+            return False
+        operator_start = operator.start()
+    prefix = surface[:operator_start]
+    return not (
+        _UNREALIZED_ACTION_FRAME.search(prefix)
+        or _ACTION_NEGATION.search(prefix)
+        or re.search(r"拒绝|否认|阻止", prefix)
+    )
+
+
+def _knowledge_time_grounded(value: str, support: str) -> bool:
+    candidate = str(value).strip()
+    if not candidate or len(candidate) > _NATURAL_KNOWLEDGE_TIME_MAX_CHARS:
+        return False
+    if re.search(r"[\x00-\x1f\x7f]", candidate):
+        return False
+    if _PRECISE_KNOWLEDGE_TIME.fullmatch(candidate):
+        normalized = candidate.replace("T", " ")
+        time_format = (
+            "%Y-%m-%d %H:%M:%S"
+            if len(normalized) == 19
+            else "%Y-%m-%d %H:%M"
+        )
+        try:
+            datetime.strptime(normalized, time_format)
+        except ValueError:
+            return False
+        return any(
+            observed.replace("T", " ") == normalized
+            for observed in _EVIDENCE_PRECISE_TIME.findall(support)
+        )
+    # A malformed ISO-like value is not a natural-language time label. A
+    # natural label must use the closed time vocabulary and must be copied
+    # exactly from the same evidence span; substrings such as "午" in "午后"
+    # cannot become a fabricated timestamp.
+    if _DATE_LIKE_KNOWLEDGE_TIME.match(candidate):
+        return False
+    return bool(
+        len(candidate) >= 2
+        and _NATURAL_KNOWLEDGE_TIME.fullmatch(candidate)
+        and candidate in support
     )
 
 
@@ -1826,7 +1894,7 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
                 ),
                 "unbound_knowledge_relation",
             )
-        if not _precise_knowledge_time_visible(
+        if not _knowledge_time_grounded(
             attrs.get("time", ""), directive.evidence.text
         ):
             return (

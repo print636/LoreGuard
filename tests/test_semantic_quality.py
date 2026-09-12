@@ -1000,6 +1000,54 @@ class BaselineSemanticQualityTests(unittest.TestCase):
                 self.assertEqual(kind, assessed.kind)
                 self.assertTrue(eligible_for_deterministic_rules(assessed))
 
+    def test_visible_natural_knowledge_time_is_canonical(self):
+        for kind, source, time_value in (
+            ("knows", "午后，岚得知潮门口令。", "午后"),
+            ("claims_knows", "清晨，岚说出了潮门口令。", "清晨"),
+        ):
+            with self.subTest(kind=kind, time=time_value):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind=kind,
+                        attrs={
+                            "character": "岚",
+                            "fact": "潮门口令",
+                            "time": time_value,
+                        },
+                        evidence=evidence(source),
+                        provenance_sources=frozenset({"model"}),
+                    )
+                )
+
+                self.assertIsNone(reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual(kind, assessed.kind)
+                self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_unseen_or_partial_natural_knowledge_time_is_not_canonical(self):
+        for time_value in ("清晨", "午"):
+            with self.subTest(time=time_value):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="knows",
+                        attrs={
+                            "character": "岚",
+                            "fact": "潮门口令",
+                            "time": time_value,
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        },
+                        evidence=evidence("午后，岚得知潮门口令。"),
+                        provenance_sources=frozenset({"model"}),
+                    )
+                )
+
+                self.assertEqual("knowledge_time_not_visible", reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("tentative_fact", assessed.kind)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
     def test_bound_knowledge_sources_do_not_bypass_modality_guards(self):
         sources = (
             "如果岚从苏弦处得知潮门口令，他会立即离开。",

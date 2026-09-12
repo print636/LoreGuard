@@ -377,6 +377,36 @@ class CandidateNormalizerTests(unittest.TestCase):
         ])
         self.assertTrue(any(row.category.value == "knowledge_without_acquisition" for row in late.issues))
 
+    def test_unrealized_telling_does_not_create_knowledge_acquisition(self):
+        claim = "1027-04-01 09:00，叶峤准确说出了避风航线位置。"
+        later_acquisition = "1027-04-01 10:00，叶峤阅读来信后获知避风航线位置。"
+        unrealized = (
+            "1027-04-01 08:00，值守官尚未把避风航线位置告诉叶峤。",
+            "1027-04-01 08:00，值守官计划把避风航线位置告诉叶峤。",
+            "1027-04-01 08:00，队长要求值守官把避风航线位置告诉叶峤。",
+            "1027-04-01 08:00，值守官拒绝把避风航线位置告诉叶峤。",
+            "1027-04-01 08:00，传达计划：值守官把避风航线位置告诉叶峤。",
+        )
+        for index, source in enumerate(unrealized):
+            with self.subTest(source=source):
+                result = AnalysisPipeline(extractor=BaselineExtractor()).run([
+                    DocumentInput(
+                        id=f"unrealized-telling-{index}",
+                        name="chapter.md",
+                        content=source + "\n" + claim + "\n" + later_acquisition,
+                    )
+                ])
+
+                acquisitions = [
+                    row for row in result.directives if row.kind == "knows"
+                ]
+                self.assertEqual(1, len(acquisitions))
+                self.assertEqual("1027-04-01 10:00", acquisitions[0].attrs["time"])
+                self.assertTrue(any(
+                    row.category.value == "knowledge_without_acquisition"
+                    for row in result.issues
+                ))
+
     def test_prose_normalizer_cannot_replace_explicit_knowledge_directive(self):
         result = AnalysisPipeline(extractor=BaselineExtractor()).run(
             [

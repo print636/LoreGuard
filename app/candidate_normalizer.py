@@ -8,6 +8,7 @@ from .pipeline import DocumentInput
 from .semantic_quality import (
     FOLLOWUP_USE_ACTION_VERB_PATTERN,
     evidence_presents_unrealized_action,
+    find_bound_knowledge_relation_matches,
 )
 
 
@@ -440,19 +441,20 @@ def _knowledge_candidates(
         text,
     )
     if told:
-        rows.append(
-            _directive(
-                "knows",
-                {
-                    "character": told.group("recipient"),
-                    "fact": _canonical_knowledge_fact(told.group("fact"), text),
-                    "time": time_value,
-                },
-                document,
-                line_no,
-                text,
+        character = told.group("recipient")
+        fact = _canonical_knowledge_fact(told.group("fact"), text)
+        if find_bound_knowledge_relation_matches(
+            text, kind="knows", character=character, fact=fact
+        ):
+            rows.append(
+                _directive(
+                    "knows",
+                    {"character": character, "fact": fact, "time": time_value},
+                    document,
+                    line_no,
+                    text,
+                )
             )
-        )
 
     shown = re.search(
         rf"第一次向(?P<recipient>他们|她们|他|她|{ACTOR_NAME})[^，,。；;]{{0,36}}"
@@ -501,20 +503,25 @@ def _knowledge_candidates(
         source = re.search(pattern, text)
         if not source:
             continue
-        rows.append(
-            _directive(
-                "knows",
-                {
-                    "character": source.group("character"),
-                    "fact": _canonical_knowledge_fact(source.group("fact"), text),
-                    "time": time_value,
-                    "source_type": source_type,
-                },
-                document,
-                line_no,
-                text,
+        character = source.group("character")
+        fact = _canonical_knowledge_fact(source.group("fact"), text)
+        if source_type != "told" or find_bound_knowledge_relation_matches(
+            text, kind="knows", character=character, fact=fact
+        ):
+            rows.append(
+                _directive(
+                    "knows",
+                    {
+                        "character": character,
+                        "fact": fact,
+                        "time": time_value,
+                        "source_type": source_type,
+                    },
+                    document,
+                    line_no,
+                    text,
+                )
             )
-        )
         break
     return rows
 
