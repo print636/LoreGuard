@@ -59,9 +59,10 @@ _CANDIDATE_FIELD_CONTRACTS: dict[str, CandidateFieldContract] = {
         ("time",),
         (
             "候选必须与 anchor 的 subject、predicate 相同；冲突须为两条肯定事实的 value 不同，"
-            "或同一 value 的一肯定一明确否定。若双方都提供精确 time 且时间不同，"
-            "这是阶段演进而非同时冲突，必须 ABSTAIN；不得把变更、恢复、更新或替代后的"
-            "状态与旧记录直接判为冲突。"
+            "或同一 value 的一肯定一明确否定。只有双方都提供合法、精确且可排序的 time，"
+            "并且 time 不同时，才把变更、恢复、更新或替代后的状态视为阶段演进并必须 "
+            "ABSTAIN。任一方没有合法精确 time 或 time 相同，仍须按上述真实冲突规则判断，"
+            "不得仅因出现状态转变措辞而放弃。"
         ),
     ),
     "event": CandidateFieldContract(
@@ -138,8 +139,9 @@ def candidate_kinds() -> tuple[str, ...]:
 _FAMILY_SEMANTIC_GUIDANCE: dict[IssueCategory, str] = {
     IssueCategory.fact_conflict: (
         "只调查同一主体同一属性的同时冲突：肯定取值互异，或同一取值一肯定一明确否定。"
-        "若两条记录都有精确 time 且时间不同，应视为可能的阶段演进并 ABSTAIN；"
-        "明确的状态变更、恢复、更新或替代不是前后矛盾。"
+        "只有两条记录都有合法、精确且可排序的 time，并且 time 不同，才把明确的状态"
+        "变更、恢复、更新或替代视为阶段演进并 ABSTAIN。任一方没有合法精确 time 或 "
+        "time 相同，仍按真实冲突规则判断，不得仅因状态转变措辞而放弃。"
     ),
     IssueCategory.location_collision: (
         "只调查同一参与者在同一精确时间出现在不同地点的冲突。"

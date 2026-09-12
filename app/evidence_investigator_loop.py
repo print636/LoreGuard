@@ -1519,9 +1519,14 @@ def _user_prompt(
                 "不得代替判断或用于试探。"
             ),
             "field_copy_rule": (
-                "逐字段核对：除合同明确要求的固定枚举或规范化值外，每个自由文本字段值"
-                "必须从所引 absolute_lines 的最小充分连续范围按原文精确复制，不得同义"
-                "改写、概括或补全；source_line_start/source_line_end 必须使用其中的绝对行号。"
+                "逐字段核对：用于与 anchor 建立关联的 identity/join 字段或字段分量，必须"
+                "复用 current_seed.anchor.fields 中相应的服务规范值，不得从证据同义改写；"
+                "合同或服务规范定义的固定枚举及规范化语义值按合同填写。上述服务规范值只须"
+                "得到证据的直接语义支持，不要求在 absolute_lines 中逐字出现，包括 "
+                "scope_action key、performed 和 body_state 规范值。除此以外的普通自由文本"
+                "字段才必须从所引 absolute_lines 的最小充分连续范围按原文精确复制，不得"
+                "同义改写、概括或补全；source_line_start/source_line_end 必须使用其中的"
+                "绝对行号。"
             ),
             "rule_preconditions": (
                 "关系已经实际发生、time 与 anchor 兼容且 family 的全部规则前提均须由"

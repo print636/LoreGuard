@@ -269,6 +269,9 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
     assert binding.snapshot.document_id == "doc-1"
     assert binding.line_start == 2
     assert binding.text == CONTENT.splitlines()[1]
+    # The existing promotable case is an untimed, completed transition.  The
+    # decision contract must not turn transition wording alone into abstention.
+    assert "time" not in binding.candidate.fields
 
     offered = [[tool.name for tool in row["tools"]] for row in provider.requests]
     assert offered == [
@@ -290,20 +293,23 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
             "optional_fields": ["time"],
             "semantic_guidance": (
                 "候选必须与 anchor 的 subject、predicate 相同；冲突须为两条肯定事实的 value 不同，"
-                "或同一 value 的一肯定一明确否定。若双方都提供精确 time 且时间不同，"
-                "这是阶段演进而非同时冲突，必须 ABSTAIN；不得把变更、恢复、更新或替代后的"
-                "状态与旧记录直接判为冲突。"
+                "或同一 value 的一肯定一明确否定。只有双方都提供合法、精确且可排序的 time，"
+                "并且 time 不同时，才把变更、恢复、更新或替代后的状态视为阶段演进并必须 "
+                "ABSTAIN。任一方没有合法精确 time 或 time 相同，仍须按上述真实冲突规则判断，"
+                "不得仅因出现状态转变措辞而放弃。"
             ),
         }
     }
     assert prompts[0]["current_seed"]["family_semantic_guidance"] == (
         "只调查同一主体同一属性的同时冲突：肯定取值互异，或同一取值一肯定一明确否定。"
-        "若两条记录都有精确 time 且时间不同，应视为可能的阶段演进并 ABSTAIN；"
-        "明确的状态变更、恢复、更新或替代不是前后矛盾。"
+        "只有两条记录都有合法、精确且可排序的 time，并且 time 不同，才把明确的状态"
+        "变更、恢复、更新或替代视为阶段演进并 ABSTAIN。任一方没有合法精确 time 或 "
+        "time 相同，仍按真实冲突规则判断，不得仅因状态转变措辞而放弃。"
     )
     assert prompts[0]["current_seed"]["source_line_guidance"] == (
         "选择支持候选全部字段的最小充分行范围；不得覆盖 anchor 证据行。"
     )
+    assert "time" not in prompts[0]["current_seed"]["anchor"]["fields"]
     assert [row["remaining_limits"]["round_no"] for row in prompts] == [1, 2, 3]
     assert prompts[1]["observations"] == [
         {
@@ -339,7 +345,14 @@ def test_search_read_submit_uses_contextual_native_tools_and_server_bindings():
     assert "最终冲突判断" in checklist["submission_boundary"]
     assert "安全兜底" in checklist["submission_boundary"]
     assert "逐字段核对" in checklist["field_copy_rule"]
+    assert "identity/join 字段或字段分量" in checklist["field_copy_rule"]
+    assert "current_seed.anchor.fields" in checklist["field_copy_rule"]
+    assert "合同或服务规范定义" in checklist["field_copy_rule"]
     assert "absolute_lines" in checklist["field_copy_rule"]
+    assert "不要求在 absolute_lines 中逐字出现" in checklist["field_copy_rule"]
+    for normalized_value in ("scope_action key", "performed", "body_state"):
+        assert normalized_value in checklist["field_copy_rule"]
+    assert "除此以外的普通自由文本字段才必须" in checklist["field_copy_rule"]
     assert "绝对行号" in checklist["field_copy_rule"]
     assert "time 与 anchor 兼容" in checklist["rule_preconditions"]
     assert "ABSTAIN 是正确终局" in checklist["uncertainty_policy"]
@@ -472,10 +485,12 @@ def test_knowledge_evidence_guidance_is_present_in_model_visible_prompt():
         (
             "fact",
             (
-                "双方都提供精确 time",
-                "时间不同",
-                "阶段演进",
-                "必须 ABSTAIN",
+                "双方都提供合法、精确且可排序的 time",
+                "time 不同",
+                "视为阶段演进并必须 ABSTAIN",
+                "任一方没有合法精确 time 或 time 相同",
+                "仍须按上述真实冲突规则判断",
+                "不得仅因出现状态转变措辞而放弃",
             ),
         ),
         (
@@ -507,9 +522,12 @@ def test_family_guidance_keeps_fact_and_item_decisions_conservative():
     fact = get_family_semantic_guidance(IssueCategory.fact_conflict)
     item = get_family_semantic_guidance(IssueCategory.item_ownership)
 
-    assert "两条记录都有精确 time 且时间不同" in fact
+    assert "两条记录都有合法、精确且可排序的 time" in fact
+    assert "time 不同" in fact
     assert "阶段演进并 ABSTAIN" in fact
-    assert "状态变更、恢复、更新或替代不是前后矛盾" in fact
+    assert "任一方没有合法精确 time 或 time 相同" in fact
+    assert "仍按真实冲突规则判断" in fact
+    assert "不得仅因状态转变措辞而放弃" in fact
     assert "许可、授权、计划、准备或演示安排" in item
     assert "不证明交接已经发生" in item
     assert "不证明物品已经被使用" in item
