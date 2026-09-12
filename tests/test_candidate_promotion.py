@@ -356,6 +356,40 @@ def test_explicit_perception_of_specific_knowledge_is_grounded(perception):
 @pytest.mark.parametrize(
     "candidate_text",
     [
+        "2026-01-01 12:00，岚从苏弦处得知潮门口令。",
+        "2026-01-01 12:00，岚查阅档案，才得知潮门口令。",
+    ],
+)
+def test_explicit_source_or_reading_bridge_grounds_knowledge(candidate_text):
+    result, *_ = _promote(
+        IssueCategory.knowledge_without_acquisition,
+        candidate_text=candidate_text,
+    )
+
+    assert result.accepted_candidates == 1
+    assert len(result.added_issues) == 1
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "2026-01-01 12:00，小岚得知潮门口令。",
+        "2026-01-01 12:00，岚得知潮门口令失效。",
+    ],
+)
+def test_character_or_fact_prefix_does_not_ground_knowledge(candidate_text):
+    result, *_ = _promote(
+        IssueCategory.knowledge_without_acquisition,
+        candidate_text=candidate_text,
+    )
+
+    assert result.accepted_candidates == 0
+    assert dict(result.rejection_counts) == {"candidate_not_grounded": 1}
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
         "2026-01-01 12:00，岚只接触了写有潮门口令的铜片。",
         "2026-01-01 12:00，岚与苏弦站在潮门口令旁；她拆封了信息载体。",
         "2026-01-01 12:00，岚站在潮门口令旁；她得知了潮门口令。",

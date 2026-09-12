@@ -50,9 +50,15 @@ def _directive(
     line_no: int,
     text: str,
 ) -> ParsedDirective:
+    normalized_attrs = {key: _clean(value) for key, value in attrs.items()}
+    if kind in {"knows", "claims_knows"} and "time" in attrs:
+        # Preserve the required date/time separator. `_clean` is appropriate
+        # for semantic labels but would turn a knowledge timestamp into the
+        # invalid `YYYY-MM-DDHH:MM` form rejected by its final safety gate.
+        normalized_attrs["time"] = attrs["time"].strip()
     return ParsedDirective(
         kind=kind,
-        attrs={key: _clean(value) for key, value in attrs.items()},
+        attrs=normalized_attrs,
         evidence=_evidence(document, line_no, text),
     )
 

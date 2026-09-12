@@ -1540,7 +1540,7 @@ def _event_relation_grounded(attrs: Mapping[str, str], text: str) -> bool:
 def _knowledge_relation_grounded(
     kind: str, attrs: Mapping[str, str], text: str
 ) -> bool:
-    for clause in _grounding_clauses(text):
+    for clause in _relation_grounding_clauses(text):
         for match in find_bound_knowledge_relation_matches(
             clause,
             kind=kind,

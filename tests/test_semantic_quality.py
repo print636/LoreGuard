@@ -890,6 +890,141 @@ class BaselineSemanticQualityTests(unittest.TestCase):
                 self.assertEqual("knows", assessed.kind)
                 self.assertTrue(eligible_for_deterministic_rules(assessed))
 
+    def test_knowledge_boundaries_reject_character_and_fact_prefixes(self):
+        cases = (
+            (
+                "2026-01-01 12:00，小岚得知潮门口令。",
+                {"character": "岚", "fact": "潮门口令"},
+            ),
+            (
+                "2026-01-01 12:00，岚得知潮门口令失效。",
+                {"character": "岚", "fact": "潮门口令"},
+            ),
+        )
+        for source, fields in cases:
+            with self.subTest(source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="knows",
+                        attrs={
+                            **fields,
+                            "time": "2026-01-01 12:00",
+                            "modality": "asserted",
+                            "source_scope": "narrator",
+                            "certainty": "certain",
+                        },
+                        evidence=evidence(source),
+                        provenance_sources=frozenset({"model"}),
+                    )
+                )
+
+                self.assertEqual("unbound_knowledge_relation", reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("tentative_fact", assessed.kind)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_complete_labels_cannot_bypass_knowledge_relation_or_time(self):
+        cases = (
+            (
+                "knows",
+                "2026-01-01 12:00，苏弦得知潮门口令。",
+                "2026-01-01 12:00",
+                "unbound_knowledge_relation",
+            ),
+            (
+                "knows",
+                "2026-01-01 12:00，岚得知潮门口令。",
+                "2026-01-01 12:01",
+                "knowledge_time_not_visible",
+            ),
+            (
+                "claims_knows",
+                "2026-01-01 12:00，苏弦说出潮门口令。",
+                "2026-01-01 12:00",
+                "unbound_knowledge_relation",
+            ),
+        )
+        for kind, source, time_value, expected_reason in cases:
+            with self.subTest(kind=kind, expected_reason=expected_reason):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind=kind,
+                        attrs={
+                            "character": "岚",
+                            "fact": "潮门口令",
+                            "time": time_value,
+                            "modality": (
+                                "reported" if kind == "claims_knows" else "asserted"
+                            ),
+                            "source_scope": (
+                                "character_dialogue"
+                                if kind == "claims_knows"
+                                else "narrator"
+                            ),
+                            "certainty": "certain",
+                        },
+                        evidence=evidence(source),
+                        provenance_sources=frozenset({"model"}),
+                    )
+                )
+
+                self.assertEqual(expected_reason, reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual("tentative_fact", assessed.kind)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
+    def test_bound_knowledge_source_forms_are_canonical(self):
+        cases = (
+            ("knows", "2026-01-01 12:00，岚从苏弦处得知潮门口令。"),
+            ("knows", "2026-01-01 12:00，岚查阅档案，才得知潮门口令。"),
+            ("knows", "2026-01-01 12:00，岚阅读来信后获知潮门口令。"),
+            ("knows", "2026-01-01 12:00，值守官把潮门口令告诉岚。"),
+            ("claims_knows", "2026-01-01 12:00，岚准确说出了潮门口令。"),
+        )
+        for kind, source in cases:
+            with self.subTest(kind=kind, source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind=kind,
+                        attrs={
+                            "character": "岚",
+                            "fact": "潮门口令",
+                            "time": "2026-01-01 12:00",
+                        },
+                        evidence=evidence(source),
+                    )
+                )
+
+                self.assertIsNone(reason)
+                self.assertIsNotNone(assessed)
+                self.assertEqual(kind, assessed.kind)
+                self.assertTrue(eligible_for_deterministic_rules(assessed))
+
+    def test_bound_knowledge_sources_do_not_bypass_modality_guards(self):
+        sources = (
+            "如果岚从苏弦处得知潮门口令，他会立即离开。",
+            "据说，2026-01-01 12:00，岚从苏弦处得知潮门口令。",
+            "2026-01-01 12:00，岚没有从苏弦处得知潮门口令。",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                assessed, reason = assess_directive(
+                    ParsedDirective(
+                        kind="knows",
+                        attrs={
+                            "character": "岚",
+                            "fact": "潮门口令",
+                            "time": "2026-01-01 12:00",
+                        },
+                        evidence=evidence(source),
+                    )
+                )
+
+                self.assertIsNotNone(reason)
+                self.assertIsNotNone(assessed)
+                self.assertNotEqual("knows", assessed.kind)
+                self.assertFalse(eligible_for_deterministic_rules(assessed))
+
     def test_semantic_gate_downgrades_command_plan_and_missing_execution(self):
         candidates = (
             (

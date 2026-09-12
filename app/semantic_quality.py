@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 import re
 from typing import TYPE_CHECKING
 
@@ -43,6 +44,19 @@ KNOWLEDGE_ACQUISITION_VERB_PATTERN = (
 )
 KNOWLEDGE_CLAIM_VERB_PATTERN = (
     r"说出|说了|提到|引用|念出|喊出|回答出|透露|宣称|声称"
+)
+_KNOWLEDGE_RELATION_BOUNDARY = r"[，,。；;！？?!：:\"'“”‘’（）()【】\[\]]"
+_KNOWLEDGE_CHARACTER_LEAD = (
+    rf"(?:^|{_KNOWLEDGE_RELATION_BOUNDARY})"
+    r"(?:随后|然后|接着|此后|当时|最终|随即|终于)?"
+)
+_KNOWLEDGE_FACT_END = rf"(?=$|{_KNOWLEDGE_RELATION_BOUNDARY})"
+_KNOWLEDGE_CHARACTER_END = rf"(?=$|{_KNOWLEDGE_RELATION_BOUNDARY})"
+_PRECISE_KNOWLEDGE_TIME = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?$"
+)
+_EVIDENCE_PRECISE_TIME = re.compile(
+    r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?"
 )
 
 _QUESTION_MARKERS = re.compile(
@@ -1166,13 +1180,92 @@ def find_bound_knowledge_relation_matches(
     else:
         return []
     compact = re.sub(r"\s+", "", support)
-    pattern = re.compile(
-        rf"{re.escape(compact_character)}"
-        rf"(?:才|已|已经|终于|随后|此时|后来)?"
-        rf"(?:{verbs})(?:了)?(?:关于)?"
-        rf"{re.escape(compact_fact)}"
+    bound_character = re.escape(compact_character)
+    fact_surfaces = [re.escape(compact_fact)]
+    if compact_fact.endswith("位置"):
+        fact_surfaces.append(
+            rf"{re.escape(compact_fact[:-2])}(?:的)?(?:位置|坐标|经纬坐标)"
+        )
+    quoted_topics = re.findall(r"[“\"]([^”\"\r\n]{2,24})[”\"]", support)
+    if quoted_topics:
+        # Match the normalizer's one narrow contextual canonicalization:
+        # the last quoted topic may qualify a local "入口…" surface. Other
+        # shortened facts remain unbound rather than borrowing remote context.
+        topic = _clean(quoted_topics[-1]).replace("真实", "").replace("的", "")
+        contextual_surface = (
+            compact_fact[len(topic) :]
+            if topic and compact_fact.startswith(topic)
+            else ""
+        )
+    else:
+        contextual_surface = ""
+    if contextual_surface.startswith("入口"):
+        fact_surfaces.append(re.escape(contextual_surface))
+        if contextual_surface.endswith("位置"):
+            fact_surfaces.append(
+                rf"{re.escape(contextual_surface[:-2])}"
+                r"(?:的)?(?:位置|坐标|经纬坐标)"
+            )
+    bound_fact = rf"(?:{'|'.join(dict.fromkeys(fact_surfaces))})"
+    adverb = r"(?:才|已|已经|终于|随后|此时|后来)?"
+    if kind == "knows":
+        # These are the bounded source forms emitted by the deterministic
+        # normalizer. The comma-carrying reading form is explicit rather than
+        # a wildcard so an unrelated first clause cannot donate a subject.
+        source = (
+            r"(?:"
+            r"从[^，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24}?"
+            r"(?:处|那里|手中|口中|中)"
+            r"|阅读(?:了)?(?:来信|信件|密函)后"
+            r"|通过(?:加密)?(?:来信|信件|密函)"
+            r"|亲眼目击(?:并)?"
+            r"|(?:查阅|阅读)(?:了)?"
+            r"[^，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24}[，,]"
+            r")?"
+        )
+    else:
+        source = (
+            r"(?:对[^，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24})?"
+            r"(?:在[^，,。；;！？?!：:\"'“”‘’（）()【】\[\]]{1,24}(?:中|内))?"
+            r"(?:准确|清楚|完整)?"
+        )
+    forward = re.compile(
+        rf"{_KNOWLEDGE_CHARACTER_LEAD}{bound_character}"
+        rf"{adverb}{source}{adverb}"
+        rf"(?:{verbs})(?:了)?(?:关于)?{bound_fact}"
+        rf"{_KNOWLEDGE_FACT_END}"
     )
-    return list(pattern.finditer(compact))
+    relations = list(forward.finditer(compact))
+    if kind == "knows":
+        # The normalizer also recognizes the inverse but still fully bound
+        # "source 把 fact 告诉 character" form. Exact adjacent literals on
+        # both sides prevent either submitted field from matching a prefix.
+        told = re.compile(
+            rf"{_KNOWLEDGE_CHARACTER_LEAD}"
+            r"[^，,。；;！？?!：:\"'“”‘’（）()【】\[\]把]{0,16}"
+            r"(?:第一次)?把"
+            rf"{bound_fact}告诉{bound_character}{_KNOWLEDGE_CHARACTER_END}"
+        )
+        relations.extend(told.finditer(compact))
+    return relations
+
+
+def _precise_knowledge_time_visible(value: str, support: str) -> bool:
+    candidate = str(value).strip()
+    if _PRECISE_KNOWLEDGE_TIME.fullmatch(candidate) is None:
+        return False
+    normalized = candidate.replace("T", " ")
+    time_format = (
+        "%Y-%m-%d %H:%M:%S" if len(normalized) == 19 else "%Y-%m-%d %H:%M"
+    )
+    try:
+        datetime.strptime(normalized, time_format)
+    except ValueError:
+        return False
+    return any(
+        observed.replace("T", " ") == normalized
+        for observed in _EVIDENCE_PRECISE_TIME.findall(support)
+    )
 
 
 def _fact_contrast_affirms_submitted_value(
@@ -1260,7 +1353,7 @@ def _closed_baseline_semantics(
     elif kind in {"knows", "claims_knows"}:
         closed = bool(
             find_bound_knowledge_relation_matches(
-                support,
+                directive.evidence.text,
                 kind=kind,
                 character=attrs.get("character", ""),
                 fact=attrs.get("fact", ""),
@@ -1713,6 +1806,39 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
             ),
             "unbound_fact_relation",
         )
+
+    if directive.kind in {"knows", "claims_knows"} and attrs.get(
+        "input_form"
+    ) != "directive":
+        if not find_bound_knowledge_relation_matches(
+            directive.evidence.text,
+            kind=directive.kind,
+            character=attrs.get("character", ""),
+            fact=attrs.get("fact", ""),
+        ):
+            return (
+                _to_noncanonical(
+                    directive,
+                    kind="tentative_fact",
+                    modality=SemanticModality.uncertain,
+                    source_scope=scope,
+                    certainty=CertaintyLevel.unknown,
+                ),
+                "unbound_knowledge_relation",
+            )
+        if not _precise_knowledge_time_visible(
+            attrs.get("time", ""), directive.evidence.text
+        ):
+            return (
+                _to_noncanonical(
+                    directive,
+                    kind="tentative_fact",
+                    modality=SemanticModality.uncertain,
+                    source_scope=scope,
+                    certainty=CertaintyLevel.unknown,
+                ),
+                "knowledge_time_not_visible",
+            )
 
     if (
         directive.kind == "uses"
