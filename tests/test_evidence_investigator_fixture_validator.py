@@ -24,15 +24,30 @@ def _load_validator():
     return module
 
 
-def test_dev_fixture_validation_never_opens_holdout_source_bytes(monkeypatch):
+def test_dev_fixture_validation_never_opens_holdout_sources(monkeypatch):
     validator = _load_validator()
     original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+    original_open = Path.open
+
+    def reject_holdout(path, operation):
+        if "holdout" in path.parts:
+            raise AssertionError(f"dev validation {operation} a holdout source")
 
     def guarded_read_bytes(path):
-        if "holdout" in path.parts:
-            raise AssertionError("dev validation opened holdout source bytes")
+        reject_holdout(path, "read")
         return original_read_bytes(path)
 
+    def guarded_read_text(path, *args, **kwargs):
+        reject_holdout(path, "read")
+        return original_read_text(path, *args, **kwargs)
+
+    def guarded_open(path, *args, **kwargs):
+        reject_holdout(path, "opened")
+        return original_open(path, *args, **kwargs)
+
     monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    monkeypatch.setattr(Path, "open", guarded_open)
 
     validator.main(selected_split="dev")

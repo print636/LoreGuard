@@ -22,7 +22,7 @@
 
 每个案例是独立项目切片，默认只加载该案例目录下的两个文档，防止跨案例同名实体或时间记录互相污染。`manifest.json` 是唯一机器可读标注源；模型运行时只应收到其中 `sources` 指向的文档内容及生产代码正常提供的 seed/tool schema，不应收到 `expected`、`candidate`、`lure_candidate`、`difficulty` 等字段。
 
-`freeze.json` 固定了 manifest、说明和全部 36 份模型输入文档的 SHA-256。修改其中任一文件时必须升级数据集版本并重新冻结，不能在查看 holdout 运行结果后原地改写 v1。`validate_fixture.py` 是只读验证器：它不调用模型，检查文件完整性、单 seed 隔离、无模型基线零问题，以及候选经过完整授权与 promotion 链路后的预期结果。
+`freeze.json` 固定了 manifest、说明和全部 36 份模型输入文档的 SHA-256。修改其中任一文件时必须升级数据集版本并重新冻结，不能在查看 holdout 运行结果后原地改写任一已冻结版本。`validate_fixture.py` 是只读验证器：它不调用模型，检查文件完整性、单 seed 隔离、无模型基线零问题，以及候选经过完整授权与 promotion 链路后的预期结果。
 
 ## 覆盖范围
 

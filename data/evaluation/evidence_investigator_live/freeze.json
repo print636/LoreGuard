@@ -50,6 +50,6 @@
     {"path":"holdout/EIL-H-10/canon.md","sha256":"fabc19b5c456b76c7dbbb5a8927136f664ae4ab584bc2f3024e7b8c79cd674f3"},
     {"path":"holdout/EIL-H-10/chapter.md","sha256":"42b6a871deafb885bc42e24774ba59a744b178f63660718bb12681486b56c8c2"},
     {"path":"manifest.json","sha256":"64ded0988cb70ea591548facfc26f4867e39818d1b868a17dbadde402fc6d316"},
-    {"path":"README.md","sha256":"dbae6e6e29f4db6b39db618ea7adad8950a1268ab00abb87b5dfe17dc640667d"}
+    {"path":"README.md","sha256":"1575528947a3ba7017048a5393bf062b807ac85278dc6d1dd18f5c1aee70e042"}
   ]
 }
