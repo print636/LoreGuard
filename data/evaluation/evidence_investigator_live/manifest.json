@@ -1,0 +1,299 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "evidence-investigator-live-v1",
+  "language": "zh-CN",
+  "status": "ready_unscored",
+  "license": "MIT",
+  "provenance": "All settings, characters, places, devices, prose, labels, and annotations in this fixture were created specifically for LoreGuard. No commercial IP or company-internal material is included.",
+  "evaluation_boundary": "Small developer-authored live-model E2E fixture for the bounded Evidence Investigator path. It is not a blind public benchmark and carries no measured model-performance claim.",
+  "live_model_status": {
+    "state": "not_run",
+    "metrics": null,
+    "note": "Populate metrics only from preserved real-model run artifacts after configuration freeze."
+  },
+  "answer_isolation": {
+    "model_visible": ["source document content", "production seed summary", "production tool schemas and observations"],
+    "evaluator_only": ["case labels", "candidate fields", "lure candidates", "expected decision", "allowed evidence lines", "difficulty notes"],
+    "prompt_examples_allowed": false,
+    "rule": "No fixture sentence, candidate, label, or rationale from either split may be copied or paraphrased into prompts, few-shot examples, retrieval-query templates, or model-facing metadata."
+  },
+  "splits": {
+    "dev": {
+      "case_count": 8,
+      "usage": "E2E wiring and generic failure analysis only; case content still may not become a prompt example."
+    },
+    "holdout": {
+      "case_count": 10,
+      "usage": "Run only after model, prompt, retrieval, budgets, and thresholds are frozen; never tune on outcomes."
+    }
+  },
+  "issue_families": [
+    "fact_conflict",
+    "location_collision",
+    "knowledge_without_acquisition",
+    "item_ownership",
+    "world_rule_conflict"
+  ],
+  "global_invariants": {
+    "isolated_project_per_case": true,
+    "chapter_directives_forbidden": true,
+    "expected_baseline_added_issues_per_case": 0,
+    "positive_candidate_must_reproduce_deterministic_rule": true,
+    "negative_runtime_failure_does_not_count_as_abstain": true
+  },
+  "cases": [
+    {
+      "case_id": "EIL-D-01",
+      "split": "dev",
+      "labels": ["positive", "fact_conflict", "access_control", "cross_document"],
+      "sources": [
+        {"document_id": "canon", "path": "dev/EIL-D-01/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "dev/EIL-D-01/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "fact", "fields": {"subject": "洛棠", "predicate": "档案访问级别", "value": "封存审计员"}},
+      "candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "fact", "fields": {"subject": "洛棠", "predicate": "档案访问级别", "value": "临时观察员"}},
+      "expected": {"decision": "added_issue", "issue_category": "fact_conflict", "added_issue_count": 1, "allowed_evidence": [{"document_id": "canon", "lines": [3, 3]}, {"document_id": "chapter", "lines": [5, 5]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "accept_after_rule_reproduction"},
+      "difficulty": "The disagreement changes access authority and downstream behavior; the target uses a transition construction that the deterministic natural extractor does not map to a fact record.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-D-02",
+      "split": "dev",
+      "labels": ["positive", "location_collision", "precise_time", "cross_document"],
+      "sources": [
+        {"document_id": "canon", "path": "dev/EIL-D-02/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "dev/EIL-D-02/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "event", "fields": {"time": "2027-04-18 22:14", "location": "潮汐塔", "participants": "闻晦"}},
+      "candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "event", "fields": {"time": "2027-04-18 22:14", "location": "雾桥枢纽", "participants": "闻晦"}},
+      "expected": {"decision": "added_issue", "issue_category": "location_collision", "added_issue_count": 1, "allowed_evidence": [{"document_id": "canon", "lines": [3, 3]}, {"document_id": "chapter", "lines": [5, 5]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "accept_after_rule_reproduction"},
+      "difficulty": "The exact timestamp is embedded in an action sentence using arrival rather than the baseline extractor's simple presence form.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-D-03",
+      "split": "dev",
+      "labels": ["positive", "knowledge_without_acquisition", "temporal_order", "restricted_information"],
+      "sources": [
+        {"document_id": "canon", "path": "dev/EIL-D-03/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "dev/EIL-D-03/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "claims_knows", "fields": {"character": "季纱", "fact": "无昼门的逆序开启码", "time": "2027-06-02 08:10"}},
+      "candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "knows", "fields": {"character": "季纱", "fact": "无昼门的逆序开启码", "time": "2027-06-02 11:45"}},
+      "expected": {"decision": "added_issue", "issue_category": "knowledge_without_acquisition", "added_issue_count": 1, "allowed_evidence": [{"document_id": "canon", "lines": [3, 3]}, {"document_id": "chapter", "lines": [5, 5]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "accept_after_rule_reproduction"},
+      "difficulty": "The model must align an early use of restricted knowledge with a later first acquisition whose adverbial form falls outside the deterministic extraction template.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-D-04",
+      "split": "dev",
+      "labels": ["positive", "item_ownership", "custody_chain", "cross_document"],
+      "sources": [
+        {"document_id": "canon", "path": "dev/EIL-D-04/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "dev/EIL-D-04/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "item", "fields": {"item": "回声纺锤", "owner": "鹤寻", "time": "2027-03-09 08:00"}},
+      "candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "uses", "fields": {"item": "回声纺锤", "user": "尹夙", "time": "2027-03-09 09:15"}},
+      "expected": {"decision": "added_issue", "issue_category": "item_ownership", "added_issue_count": 1, "allowed_evidence": [{"document_id": "canon", "lines": [3, 3]}, {"document_id": "chapter", "lines": [5, 5]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "accept_after_rule_reproduction"},
+      "difficulty": "The target describes consequential operation and absence of transfer rather than using the baseline extractor's direct 'use' wording.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-D-05",
+      "split": "dev",
+      "labels": ["positive", "world_rule_conflict", "physical_constraint", "cross_document"],
+      "sources": [
+        {"document_id": "canon", "path": "dev/EIL-D-05/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "dev/EIL-D-05/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "world_rule", "fields": {"key": "scope_action:静默穹顶:星脉折跃", "value": "disabled"}},
+      "candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "world_assert", "fields": {"key": "scope_action:静默穹顶:星脉折跃", "value": "performed", "actor": "芮冬", "time": "2027-05-21 17:30"}},
+      "expected": {"decision": "added_issue", "issue_category": "world_rule_conflict", "added_issue_count": 1, "allowed_evidence": [{"document_id": "canon", "lines": [3, 3]}, {"document_id": "chapter", "lines": [5, 5]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "accept_after_rule_reproduction"},
+      "difficulty": "The action succeeds inside a physically disabling region and is surrounded by alternative-cause evidence, requiring scope-action key reconstruction.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-D-06",
+      "split": "dev",
+      "labels": ["negative", "item_ownership", "permission_not_execution", "hard_negative"],
+      "sources": [
+        {"document_id": "canon", "path": "dev/EIL-D-06/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "dev/EIL-D-06/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "item", "fields": {"item": "潮压钥", "owner": "白栎", "time": "2027-08-12 13:00"}},
+      "lure_candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "uses", "fields": {"item": "潮压钥", "user": "岑照", "time": "2027-08-12 13:40"}},
+      "expected": {"decision": "abstain", "issue_category": "item_ownership", "added_issue_count": 0, "accepted_abstain_reasons": ["insufficient_evidence", "no_rule_validated_conflict"], "allowed_evidence": [{"document_id": "canon", "lines": [3, 5]}, {"document_id": "chapter", "lines": [3, 7]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "candidate_not_grounded_if_submitted"},
+      "difficulty": "A third party grants permission, but the prose explicitly withholds whether operation occurred and preserves the original custody record.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-D-07",
+      "split": "dev",
+      "labels": ["negative", "world_rule_conflict", "command", "reported_speech", "hard_negative"],
+      "sources": [
+        {"document_id": "canon", "path": "dev/EIL-D-07/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "dev/EIL-D-07/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "world_rule", "fields": {"key": "scope_action:寂灯环廊:余光信标", "value": "disabled"}},
+      "lure_candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "world_assert", "fields": {"key": "scope_action:寂灯环廊:余光信标", "value": "performed", "actor": "砚霜"}},
+      "expected": {"decision": "abstain", "issue_category": "world_rule_conflict", "added_issue_count": 0, "accepted_abstain_reasons": ["insufficient_evidence", "ambiguous_source", "no_rule_validated_conflict"], "allowed_evidence": [{"document_id": "canon", "lines": [3, 5]}, {"document_id": "chapter", "lines": [3, 7]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "candidate_not_grounded_if_submitted"},
+      "difficulty": "The action appears only inside a second-hand command transcript; physical state evidence points to non-execution.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-D-08",
+      "split": "dev",
+      "labels": ["negative", "fact_conflict", "temporal_change", "hard_negative"],
+      "sources": [
+        {"document_id": "canon", "path": "dev/EIL-D-08/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "dev/EIL-D-08/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "fact", "fields": {"subject": "桑祈", "predicate": "航行许可状态", "value": "暂停", "time": "2027-07-01 09:00"}},
+      "lure_candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "fact", "fields": {"subject": "桑祈", "predicate": "航行许可状态", "value": "有效", "time": "2027-07-08 09:00"}},
+      "expected": {"decision": "abstain", "issue_category": "fact_conflict", "added_issue_count": 0, "accepted_abstain_reasons": ["contextual_exception", "no_rule_validated_conflict"], "allowed_evidence": [{"document_id": "canon", "lines": [3, 5]}, {"document_id": "chapter", "lines": [3, 7]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "candidate_no_rule_conflict_if_submitted"},
+      "difficulty": "Both states are true at different precise timestamps and the prose explains that the later review supersedes the older audit record.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-H-01",
+      "split": "holdout",
+      "labels": ["positive", "fact_conflict", "system_policy", "cross_document"],
+      "sources": [
+        {"document_id": "canon", "path": "holdout/EIL-H-01/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "holdout/EIL-H-01/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "fact", "fields": {"subject": "暮湾站", "predicate": "供氧调度模式", "value": "分区轮换"}},
+      "candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "fact", "fields": {"subject": "暮湾站", "predicate": "供氧调度模式", "value": "全舱同步"}},
+      "expected": {"decision": "added_issue", "issue_category": "fact_conflict", "added_issue_count": 1, "allowed_evidence": [{"document_id": "canon", "lines": [3, 3]}, {"document_id": "chapter", "lines": [5, 5]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "accept_after_rule_reproduction"},
+      "difficulty": "The conflicting mode is inferred from an execution summary and simultaneous valve behavior, not a trivial visual character trait.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-H-02",
+      "split": "holdout",
+      "labels": ["positive", "location_collision", "precise_time", "cross_document"],
+      "sources": [
+        {"document_id": "canon", "path": "holdout/EIL-H-02/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "holdout/EIL-H-02/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "event", "fields": {"time": "2027-09-14 06:32", "location": "石鲸台", "participants": "澄槐"}},
+      "candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "event", "fields": {"time": "2027-09-14 06:32", "location": "赤砂译码室", "participants": "澄槐"}},
+      "expected": {"decision": "added_issue", "issue_category": "location_collision", "added_issue_count": 1, "allowed_evidence": [{"document_id": "canon", "lines": [3, 3]}, {"document_id": "chapter", "lines": [5, 5]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "accept_after_rule_reproduction"},
+      "difficulty": "The second location is expressed through arrival plus a concrete follow-up action, while access evidence rules out easy delivery explanations.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-H-03",
+      "split": "holdout",
+      "labels": ["positive", "knowledge_without_acquisition", "temporal_order", "split_secret"],
+      "sources": [
+        {"document_id": "canon", "path": "holdout/EIL-H-03/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "holdout/EIL-H-03/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "claims_knows", "fields": {"character": "弥鹿", "fact": "藻庭排水阵列的停机序列", "time": "2027-10-07 12:05"}},
+      "candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "knows", "fields": {"character": "弥鹿", "fact": "藻庭排水阵列的停机序列", "time": "2027-10-07 15:20"}},
+      "expected": {"decision": "added_issue", "issue_category": "knowledge_without_acquisition", "added_issue_count": 1, "allowed_evidence": [{"document_id": "canon", "lines": [3, 3]}, {"document_id": "chapter", "lines": [5, 5]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "accept_after_rule_reproduction"},
+      "difficulty": "The complete secret is assembled from three custodians and the later acquisition uses an adverbial form outside the baseline parser's narrow templates.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-H-04",
+      "split": "holdout",
+      "labels": ["positive", "item_ownership", "custody_chain", "consequential_action"],
+      "sources": [
+        {"document_id": "canon", "path": "holdout/EIL-H-04/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "holdout/EIL-H-04/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "item", "fields": {"item": "折潮罗盘", "owner": "陆衍", "time": "2027-12-01 18:00"}},
+      "candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "uses", "fields": {"item": "折潮罗盘", "user": "霁禾", "time": "2027-12-01 18:35"}},
+      "expected": {"decision": "added_issue", "issue_category": "item_ownership", "added_issue_count": 1, "allowed_evidence": [{"document_id": "canon", "lines": [3, 3]}, {"document_id": "chapter", "lines": [5, 5]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "accept_after_rule_reproduction"},
+      "difficulty": "Use is conveyed through the instrument's effect on navigation, with an independently suspicious but non-authoritative seal clue.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-H-05",
+      "split": "holdout",
+      "labels": ["positive", "world_rule_conflict", "physical_constraint", "cross_document"],
+      "sources": [
+        {"document_id": "canon", "path": "holdout/EIL-H-05/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "holdout/EIL-H-05/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "world_rule", "fields": {"key": "scope_action:冻声庭:共鸣塑形", "value": "disabled"}},
+      "candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "world_assert", "fields": {"key": "scope_action:冻声庭:共鸣塑形", "value": "performed", "actor": "徊音", "time": "2028-01-16 00:12"}},
+      "expected": {"decision": "added_issue", "issue_category": "world_rule_conflict", "added_issue_count": 1, "allowed_evidence": [{"document_id": "canon", "lines": [3, 3]}, {"document_id": "chapter", "lines": [5, 5]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "accept_after_rule_reproduction"},
+      "difficulty": "The story provides physical aftermath and explicitly excludes an external source, so the model must distinguish evidence strength from rule compatibility.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-H-06",
+      "split": "holdout",
+      "labels": ["negative", "location_collision", "dream", "non_actual_frame", "hard_negative"],
+      "sources": [
+        {"document_id": "canon", "path": "holdout/EIL-H-06/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "holdout/EIL-H-06/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "event", "fields": {"time": "2028-02-04 23:20", "location": "栖光码头", "participants": "绫湛"}},
+      "lure_candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "event", "fields": {"time": "2028-02-04 23:20", "location": "裂星观测站", "participants": "绫湛"}},
+      "expected": {"decision": "abstain", "issue_category": "location_collision", "added_issue_count": 0, "accepted_abstain_reasons": ["contextual_exception", "ambiguous_source"], "allowed_evidence": [{"document_id": "canon", "lines": [3, 5]}, {"document_id": "chapter", "lines": [3, 7]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "candidate_semantics_rejected_if_submitted"},
+      "difficulty": "All event slots and the exact timestamp appear inside a dream. The Agent must preserve narrative modality; current lexical promotion alone may not recognize the dream frame.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-H-07",
+      "split": "holdout",
+      "labels": ["negative", "world_rule_conflict", "hypothesis", "non_actual_frame", "hard_negative"],
+      "sources": [
+        {"document_id": "canon", "path": "holdout/EIL-H-07/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "holdout/EIL-H-07/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "world_rule", "fields": {"key": "scope_action:灰镜室:记忆回放", "value": "disabled"}},
+      "lure_candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "world_assert", "fields": {"key": "scope_action:灰镜室:记忆回放", "value": "performed", "actor": "栖迟"}},
+      "expected": {"decision": "abstain", "issue_category": "world_rule_conflict", "added_issue_count": 0, "accepted_abstain_reasons": ["contextual_exception", "no_rule_validated_conflict"], "allowed_evidence": [{"document_id": "canon", "lines": [3, 5]}, {"document_id": "chapter", "lines": [3, 7]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "candidate_not_grounded_if_submitted"},
+      "difficulty": "The apparent violation is a conditional proposal in a planning document; no execution occurs.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-H-08",
+      "split": "holdout",
+      "labels": ["negative", "world_rule_conflict", "active_rule_exception", "hard_negative"],
+      "sources": [
+        {"document_id": "canon", "path": "holdout/EIL-H-08/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "holdout/EIL-H-08/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "world_rule", "fields": {"key": "scope_action:沉钟厅:脉冲折叠", "value": "disabled"}},
+      "supporting_anchor": {"document_id": "canon", "lines": [5, 5], "kind": "fact", "fields": {"subject": "芙苒", "predicate": "rule_exception", "value": "granted", "key": "scope_action:沉钟厅:脉冲折叠", "status": "active", "current": "true", "valid_from": "2028-03-11 00:00", "valid_until": "2028-03-11 23:59"}},
+      "lure_candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "world_assert", "fields": {"key": "scope_action:沉钟厅:脉冲折叠", "value": "performed", "actor": "芙苒", "time": "2028-03-11 14:20"}},
+      "expected": {"decision": "abstain", "issue_category": "world_rule_conflict", "added_issue_count": 0, "accepted_abstain_reasons": ["contextual_exception", "no_rule_validated_conflict"], "allowed_evidence": [{"document_id": "canon", "lines": [3, 5]}, {"document_id": "chapter", "lines": [3, 7]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "candidate_no_rule_conflict_if_submitted"},
+      "difficulty": "The action is real, but an actor-, key-, and time-bounded canonical exception is active at the exact action time.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-H-09",
+      "split": "holdout",
+      "labels": ["negative", "fact_conflict", "branch_scope", "hard_negative"],
+      "sources": [
+        {"document_id": "canon", "path": "holdout/EIL-H-09/canon.md", "role": "canon", "story_scope": "route-amber"},
+        {"document_id": "chapter", "path": "holdout/EIL-H-09/chapter.md", "role": "chapter", "story_scope": "route-cobalt"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "fact", "fields": {"subject": "朝弦", "predicate": "护航身份", "value": "领航员"}},
+      "lure_candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "fact", "fields": {"subject": "朝弦", "predicate": "护航身份", "value": "岸站记录员"}},
+      "expected": {"decision": "abstain", "issue_category": "fact_conflict", "added_issue_count": 0, "accepted_abstain_reasons": ["contextual_exception", "no_rule_validated_conflict"], "allowed_evidence": [{"document_id": "canon", "lines": [1, 5]}, {"document_id": "chapter", "lines": [1, 7]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "candidate_no_rule_conflict_if_submitted"},
+      "difficulty": "The same character has different roles in mutually exclusive narrative branches; document story_scope metadata is decisive.",
+      "prompt_example_allowed": false
+    },
+    {
+      "case_id": "EIL-H-10",
+      "split": "holdout",
+      "labels": ["negative", "location_collision", "location_hierarchy", "hard_negative"],
+      "sources": [
+        {"document_id": "canon", "path": "holdout/EIL-H-10/canon.md", "role": "canon", "story_scope": "main"},
+        {"document_id": "chapter", "path": "holdout/EIL-H-10/chapter.md", "role": "chapter", "story_scope": "main"}
+      ],
+      "anchor": {"document_id": "canon", "lines": [3, 3], "kind": "event", "fields": {"time": "2028-04-22 10:05", "location": "云棱港", "participants": "弥阙"}},
+      "lure_candidate": {"document_id": "chapter", "lines": [5, 5], "kind": "event", "fields": {"time": "2028-04-22 10:05", "location": "云棱港北检修舱", "participants": "弥阙"}},
+      "expected": {"decision": "abstain", "issue_category": "location_collision", "added_issue_count": 0, "accepted_abstain_reasons": ["contextual_exception", "no_rule_validated_conflict"], "allowed_evidence": [{"document_id": "canon", "lines": [3, 5]}, {"document_id": "chapter", "lines": [3, 7]}], "baseline_issue_count": 0, "baseline_target_join_absent": true, "promotion": "candidate_no_rule_conflict_if_submitted"},
+      "difficulty": "The second place is an explicitly documented sub-area of the first place at the same timestamp, not a remote location.",
+      "prompt_example_allowed": false
+    }
+  ]
+}
