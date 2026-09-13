@@ -46,7 +46,7 @@
 | M5 Celery、SSE 与可靠性 | 未学 |  |  |  |  |  |
 | M6 Evidence RAG | 未学 |  |  |  |  |  |
 | M7 Evidence Reviewer | 未学 |  |  |  |  |  |
-| M8 受限 Agent 原型 | 未学 |  |  |  |  |  |
+| M8 Evidence Investigator 与 Agent 边界 | 未学 |  |  |  |  |  |
 | M9 评测、观测与安全 | 未学 |  |  |  |  |  |
 | M10 独立维护验收 | 未学 |  |  |  |  |  |
 
@@ -86,13 +86,13 @@
 - 我说的是 `已实现`、`实验原型/默认关闭`，还是 `未来计划`？
 - 我引用的数字是否同时带上数据集范围和失败门槛？
 - 我是否把 Mock、合成注入或开发者可见回归误说成真实用户效果？
-- 我是否误称已经实现多智能体、原生 function calling、生产高并发或长篇商业剧情能力？
+- 我是否准确说明只有 Evidence Investigator 使用 Provider 原生 function tool calls，并避免把旧 LangGraph 修复 Agent 说成原生调用，或把整个项目说成多智能体、生产高并发或已验证商业长篇能力？
 
 ## 最终验收证据
 
 - 独立演示录像或操作记录：
 - 主数据流手绘图：
-- 三条 AI 路径对比图：
+- 四条 AI 路径对比图：
 - 一次 Provider 故障演练：
 - 一次 worker/SSE 故障演练：
 - 一份指标与失败边界说明：

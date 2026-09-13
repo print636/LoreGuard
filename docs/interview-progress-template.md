@@ -23,7 +23,8 @@
 | 规则与模型分工 |  |  |  |  |  |  |
 | Evidence RAG |  |  |  |  |  |  |
 | Reviewer |  |  |  |  |  |  |
-| 受限 Agent |  |  |  |  |  |  |
+| Evidence Investigator（原生工具调用） |  |  |  |  |  |  |
+| 旧 LangGraph 受限修复 Agent |  |  |  |  |  |  |
 | Celery / SSE / 恢复 |  |  |  |  |  |  |
 | 评测与失败分析 |  |  |  |  |  |  |
 | 高并发设计 |  |  |  |  |  |  |
@@ -76,8 +77,10 @@
 每次综合模拟后逐项确认：
 
 - [ ] 没有把本地主路字符 n-gram 说成真实 embedding RAG。
-- [ ] 没有把 Reviewer、固定 repair 和受限 Agent 混为一谈。
-- [ ] 没有声称原生 tool calls 或多智能体。
+- [ ] 没有把 Reviewer、固定 semantic-label repair、旧 LangGraph 修复 Agent 和 Evidence Investigator 混为一谈。
+- [ ] 准确说明 Evidence Investigator 使用 Provider 原生 function tool calls，且模型提出调用不等于服务端已经执行。
+- [ ] 准确说明旧 LangGraph 修复 Agent 使用应用层 JSON 动作，不是 Provider 原生工具调用。
+- [ ] 没有把整个项目说成多智能体系统。
 - [ ] 提到 RAG 指标时同步说明未通过的 gate。
 - [ ] 提到并发时没有把队列烟测包装成压力测试或 SLA。
 - [ ] 提到长篇时明确区分扩展设计与已验证能力。
@@ -90,7 +93,8 @@
 | --- | --- | --- | --- | --- |
 | LoreGuard 多格式与版本 |  |  |  |  |
 | LoreGuard 规则与 RAG |  |  |  |  |
-| LoreGuard 异步与 Agent |  |  |  |  |
+| LoreGuard 异步与 Evidence Investigator |  |  |  |  |
+| LoreGuard 旧 LangGraph 修复 Agent 边界 |  |  |  |  |
 | 华为 JSON-RPC/LSP 能力 |  |  |  |  |
 | 华为 UTF-16/增量同步 |  |  |  |  |
 | easyMeeting 房间与心跳 |  |  |  |  |

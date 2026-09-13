@@ -1,6 +1,6 @@
 # LoreGuard 知识学习路线
 
-更新：2026-09-09。
+更新：2026-09-13。
 
 ## 这份路线解决什么问题
 
@@ -77,7 +77,7 @@ M0 产品闭环与证据
           │  └─M5 Celery、SSE 与可靠性
           └─M6 Evidence RAG
              └─M7 Evidence Reviewer
-M3 ───────────└─M8 受限 Agent 原型
+M2+M3+M4+M6 ──M8 Evidence Investigator 与 Agent 边界
 M2+M5+M6+M7+M8 ──M9 评测、可观测性与安全边界
 M0–M9 ───────────M10 独立维护验收
 ```
@@ -395,43 +395,100 @@ parse_document
 - 能准确说明真实结果是 local-context 4/12、rag-evidence 7/12，但 absolute gate 失败且 `insufficient_evidence` 为 0/4。
 - 不把 Reviewer 说成 Agent，也不把注释说成最终裁决。
 
-## 模块 M8：受限修复 Agent 原型
+## 模块 M8：Evidence Investigator 与 Agent 边界
 
 **目标**
 
-- 理解本项目何处存在多步模型循环，以及为什么它被严格限制并默认关闭。
-- 分清应用层 JSON 动作、Provider 原生 function calling 和多智能体。
-- 能根据 trace 重放一次 `READ_SPAN → PATCH_RECORDS` 或 `ABSTAIN` 路径。
+- 用白话解释 Provider 原生 function tool calls，分清“模型请求调用”和“服务端实际执行”。
+- 跟踪 `SEARCH_EVIDENCE → READ_SPAN → SUBMIT_VERDICT / ABSTAIN` 的受控循环。
+- 理解冻结快照、确定性 promotion 与安全 trace 怎样把模型建议限制在可验证边界内。
+- 准确区分 Evidence Investigator、旧 LangGraph 修复 Agent、Issue Evidence Reviewer 和固定 repair。
 
 **术语先说人话**
 
-- Agent：模型不只回答一次，而是在受控循环中根据中间结果选择下一步动作。
-- 工具调用：模型请求程序执行某个有明确参数和权限边界的动作；这里使用自定义 JSON 动作，不是 Provider 原生 `tool_calls`。
-- LangGraph `StateGraph`：把“当前状态、执行节点和下一步条件”写成可检查的图式编排。
-- 最小权限：只开放完成任务必需的文档窗口、字段、轮次和额度。
+- Agent：模型不是一次性给最终答案，而是根据程序返回的中间结果选择下一步；选择权受状态机、工具权限和预算限制。
+- 原生 function tool calls：程序先把“可调用的函数名、用途和参数格式”随请求交给模型，模型在响应的 `tool_calls` 字段中提出调用请求。它没有直接运行 Python、SQL、网络或文件操作；服务端还要校验名称、参数、阶段、范围和额度，校验通过才执行。
+- 冻结快照：本次运行只允许读取任务开始时锁定的文档版本和内容哈希。项目后来上传的新版本不会改变正在调查的证据。
+- promotion（确定性晋级）：模型提交的只是不可信候选；服务端重新绑定原文证据、检查字段语义和关联关系，并用现有规则重放。只有能确定性复现出新问题的候选才会进入最终结果。
+- 安全 trace：只记录已通过校验并实际执行的动作顺序、整体 trace 是否完整、运行内文档伪名哈希（不是内容哈希）与行号、候选字段形状等有限元数据；未执行的非法请求只进入受限失败类别或计数。它不保存 Prompt、故事正文、模型原始响应、Key 或服务地址。
 
-**项目证据**
+**一条正例是怎样走完的**
 
-- `app/review_agent.py`：`READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN` 合同，窗口、字段和预算限制。
-- `app/model_extractor.py`：只有词面支持失败候选进入 Agent；固定语义标签 repair 是另一条路径。
-- `tests/test_review_agent.py`。
-- [受限 Agent 第一阶段](review-agent-phase1.md)与[v2 完整 checkpoint](review-agent-v2-full-checkpoint-20260906.md)。
+```text
+确定性主链路产生一条可调查的记录锚点
+→ 服务端从冻结快照建立 seed 与授权范围
+→ 模型请求 SEARCH_EVIDENCE
+→ 服务端在授权快照内执行混合检索，只返回临时 result_ref
+→ 模型请求 READ_SPAN
+→ 服务端校验 result_ref 和行号后返回有限原文，并签发 span_ref
+→ 模型请求 SUBMIT_VERDICT（严格只含一个候选）
+→ 服务端用 span_ref 重建证据并执行确定性 promotion
+→ 只有现有规则能复现冲突时才追加问题
+```
 
-**动手任务**
+如果查到的内容不足、存在冲突解释或不满足对应规则的必要条件，模型应请求 `ABSTAIN`。`ABSTAIN` 是一次有原因码的受控结束，不等于 Provider 超时、协议失败或系统偷偷吞掉错误。
 
-1. 用白纸模拟一轮 Agent：候选缺少词面支持 → 读一个允许窗口 → 只修补允许字段 → 重新校验。
-2. 分别预测越权跨文档读取、重复工具动作、Token 超限和禁改语义字段的终态。
-3. 运行一个成功路径与一个越权路径：
+**四条机制不要混称**
 
-   ```powershell
-   .venv\Scripts\python.exe -m pytest tests/test_review_agent.py::ReviewAgentUnitTests::test_model_dynamically_reads_then_patches_successfully tests/test_review_agent.py::ReviewAgentUnitTests::test_cross_document_read_abstains_before_tool_execution -q
-   ```
+| 机制 | 何时进入 | 模型怎样行动 | 允许产生的结果 | 关键边界 |
+| --- | --- | --- | --- | --- |
+| Evidence Investigator | 确定性主链路后，从已有结构化记录建立调查 seed | Provider 原生 `tool_calls` 选择搜索、读取、提交或弃答 | 候选通过 promotion 后可以新增问题 | 默认关闭；模型候选不能直接落库 |
+| 旧 LangGraph 修复 Agent | 模型抽取候选缺少可验证词面支持时 | LangGraph 编排应用层 JSON 动作 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN` | 只尝试修补允许字段，再重新走记录校验 | 不是原生 function calling；旧质量 gate 失败 |
+| Issue Evidence Reviewer | 规则已经产生 issue 之后 | 读取获授权 RAG 证据并给复核意见 | 只追加 `ai_evidence_review` 注释 | 不能删除、替换或新增规则 issue |
+| 固定 semantic-label repair pass | 模型记录只缺失或写错少数语义标签时 | 另做一次受限的结构化模型调用，不提供工具选择 | 只补正 `modality/source_scope/certainty` 三个标签 | 是固定单轮补救路径，不是 Agent；修复后仍须校验 |
+
+这些都是一个应用中的不同受限路径，不应包装成多智能体系统。
+
+**代码入口**
+
+- `app/provider.py`：`OpenAICompatibleProvider.complete_with_tools` 构造并严格解析原生 `assistant.tool_calls`；参数在这里仍只是不可信 JSON。
+- `app/evidence_investigator.py`：调查 seed、候选种类和每类字段合同。
+- `app/evidence_authority.py`、`app/evidence_investigator_state.py`：冻结快照授权、阶段状态和临时引用能力。
+- `app/evidence_investigator_rag.py`：只在授权 snapshot 范围内执行 Investigator 检索。
+- `app/evidence_investigator_loop.py`：四种工具、阶段转换、预算、一次纠错和安全 trace。
+- `app/candidate_promotion.py`：从 span 重建证据，执行语义门和五类规则的确定性重放。
+- `app/evidence_investigator_runtime.py`、`app/service.py`：运行编排、用量、失败降级以及结果的原子追加。
+- [Evidence Investigator 真实 Provider 评测](evidence-investigator-live-evaluation.md)。
+
+**最小测试入口**
+
+先只运行完整正例链路；读懂后再进入 promotion，不要第一次就跑整套测试：
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/test_evidence_investigator_loop.py::test_search_read_submit_uses_contextual_native_tools_and_server_bindings -q
+```
+
+下一轮单独验证“模型候选不等于最终问题”：
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/test_evidence_investigator_runtime.py::test_runtime_real_loop_promotes_only_deterministically_reproduced_issue -q
+```
+
+需要核对传输合同和 trace 时，再分别运行：
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/test_provider_tool_calls.py::ProviderNativeToolCallingTests::test_success_sends_native_contract_and_returns_only_safe_structures -q
+.venv\Scripts\python.exe -m pytest tests/test_evidence_investigator_loop.py::test_tampered_decision_trace_is_suppressed_without_touching_foreign_objects -q
+```
+
+**教学顺序：每项占一个独立教学回合**
+
+教练每轮只执行下面当前一项，只问该项最后的一个问题；学习者回答并留下证据后，下一轮才进入下一项。
+
+1. 先看 `complete_with_tools` 的请求与返回。唯一问题：“模型请求调用工具”和“程序已经执行工具”有什么区别？
+2. 运行第一条最小测试并画正例流程。唯一问题：“哪一步开始，模型给出的内容才有机会影响最终问题？”
+3. 读 `ABSTAIN` 成功测试或 trace。唯一问题：“主动弃答与 Provider 失败在产品含义上有什么不同？”
+4. 追踪冻结 snapshot 与 `result_ref/span_ref`。唯一问题：“为什么不能让模型直接提交 document_id 和任意行号？”
+5. 运行 promotion 测试。唯一问题：“即使原文包含候选字段，为什么还要重新执行规则？”
+6. 最后填写四机制对比表，不看上文复述。唯一问题：“给定一个输入和输出，你怎样判断它属于哪条路径？”
 
 **掌握门槛**
 
-- 能解释为何“有 LangGraph”不等于“多智能体”，以及为何该实现不是原生 function calling。
-- 能说明完整 gate 失败、严格正确 59/90、候选由冻结 manifest 合成注入，所以不能声称端到端 Agent 质量收益。
-- 能指出 Agent、固定标签 repair 和 Evidence Reviewer 三条路径的输入、输出和权限差异。
+- 能闭卷画出四动作状态流，并指出每一步由模型决定什么、由服务端决定什么。
+- 能从 `app/service.py` 找到冻结 bundle、Investigator runtime、promotion 和原子追加的位置，并独立运行上面前两条测试。
+- 能解释安全 trace 为什么足够定位动作/校验问题，同时不会泄露正文和模型原始响应。
+- 能准确区分四条机制，不把旧 LangGraph 原型说成原生 function calling，也不把 Reviewer、固定 repair 或 Investigator 合称为多智能体。
+- 能守住评测边界：首次小型冻结 holdout 为 8/10（TP 4、FN 1、TN 4、FP 1，precision/recall 均 80%，10/10 正常终止）；promotion 没有接受错误 Agent 候选，但系统确定性主链路仍有 1 个误报。该结果不能外推到开放故事或生产质量，holdout 也不再用于调参。
 
 ## 模块 M9：评测、可观测性与安全边界
 
@@ -452,7 +509,7 @@ parse_document
 
 - `app/domain.py` 的执行诊断与安全 allowlist；`app/service.py` 的状态和用量持久化；`app/main.py` 的 `/metrics` 与诊断接口。
 - `tests/`、`scripts/run_*evaluation.py`、`data/`、`artifacts/`。
-- [简历就绪结论](resume-readiness.md)、[项目事实清单](project-facts.md)。
+- [简历就绪结论](resume-readiness.md)、[项目事实清单](project-facts.md)、[Evidence Investigator 真实 Provider 评测](evidence-investigator-live-evaluation.md)。
 
 **动手任务**
 
@@ -463,6 +520,7 @@ parse_document
 **掌握门槛**
 
 - 能指出所有公开成绩都来自原创、开发者可见小型冻结集，不能外推到开放长篇或生产准确率。
+- 能用 TP 4、FN 1、TN 4、FP 1 手算 Investigator 首次 holdout 的 80% precision/recall，并同时指出该 10 例结果不可外推且不再用于调参。
 - 能解释 API Key、endpoint、Prompt、正文和模型原始响应为何不进入公开诊断。
 - 能根据症状在“抽取、语义门、规则、检索、Reviewer、任务执行”中定位首查层。
 
@@ -490,7 +548,7 @@ parse_document
 **最终掌握门槛**
 
 - 可以从页面动作一路定位到具体后端函数和数据库记录。
-- 可以在白板上画出规则主路、可选 RAG Reviewer 支路和受限 Agent 原型，并讲清三者不会互相冒充。
+- 可以在白板上画出规则主路、可选 RAG Reviewer、Evidence Investigator 和旧受限修复 Agent，并讲清各自输入、输出与权限。
 - 可以解释至少两次失败设计：Provider 故障如何降级、worker 失去租约如何阻止错误提交。
 - 可以独立完成上述小改动、测试和文档更新。
 - 在第 1、3、7 天的间隔复习中，核心概念均达到“能解释”，其中至少一个模块达到“能操作”。
@@ -503,7 +561,7 @@ parse_document
 | --- | --- | --- |
 | 第 0 阶段：定位起点 | D0–D6 | 知识边界和跳过/补课决定 |
 | 第 1 阶段：先能用 | M0–M2 | 完整体验、五类规则图、一个误报/漏报解释 |
-| 第 2 阶段：理解 AI | M3、M6、M7、M8 | 三条 AI 路径对比图、一次失败降级演练 |
+| 第 2 阶段：理解 AI | M3、M6、M7、M8 | 四条受限路径对比图、一次失败降级演练 |
 | 第 3 阶段：理解后端 | M4–M5 | 数据表关系、任务状态机、SSE 断线演练 |
 | 第 4 阶段：会验证 | M9 | 一页指标与边界说明、一个新实验设计 |
 | 第 5 阶段：会维护 | M10 | 一个小改动、相关测试和文档 |
@@ -548,6 +606,9 @@ parse_document
 # RAG 与 Reviewer 逻辑测试
 .venv\Scripts\python.exe -m pytest tests/test_evidence_rag.py tests/test_issue_evidence_review.py -q
 
+# Investigator 最小原生工具链测试
+.venv\Scripts\python.exe -m pytest tests/test_evidence_investigator_loop.py::test_search_read_submit_uses_contextual_native_tools_and_server_bindings -q
+
 # 任务可靠性测试
 .venv\Scripts\python.exe -m pytest tests/test_run_reliability.py tests/test_tasks.py -q
 ```
@@ -563,7 +624,8 @@ parse_document
 - [ ] 我能区别本地 n-gram 候选轨迹、真实 Evidence RAG 和规则裁决。
 - [ ] 我能解释 snapshot/profile 隔离、pgvector 精确检索和 RRF。
 - [ ] 我能解释租约/心跳/围栏和持久化 SSE 续传。
-- [ ] 我能说明 Reviewer、修复 Agent、固定 repair 三者的边界。
+- [ ] 我能说明 Evidence Investigator 的原生工具流、冻结快照、promotion 和安全 trace。
+- [ ] 我能区分 Evidence Investigator、旧 LangGraph 修复 Agent、Reviewer 与固定 repair。
 - [ ] 我能主动讲清 retrieval 与 Reviewer 未通过的 gate，而不粉饰。
 - [ ] 我完成过一个小改动，并有测试和文档证据。
 

@@ -1,6 +1,6 @@
 # LoreGuard
 
-LoreGuard is an evidence-first narrative consistency review platform for game writers and narrative designers. It extracts versioned facts and events from authorized story material, detects deterministic continuity conflicts, and optionally augments its baseline extractor with a validated OpenAI-compatible provider. Provider failures fall back to the baseline; model and baseline records are deduplicated and bound to source lines.
+LoreGuard is an evidence-first narrative consistency review platform for game writers and narrative designers. It extracts versioned facts and events from authorized story material, detects deterministic continuity conflicts, and optionally augments its baseline extractor with a validated OpenAI-compatible provider. Provider failures fall back to the baseline; model and baseline records are deduplicated and bound to source lines. A separate default-off Evidence Investigator uses provider-native function calls to search and read authorized snapshots before submitting one untrusted candidate or abstaining; deterministic promotion remains the only path from that candidate to an issue.
 
 See [README.zh-CN.md](README.zh-CN.md) for the full guide. Credentials are read only from server-side environment variables and must never be committed.
 
@@ -26,6 +26,18 @@ start the overlay with `--env-file .env`. Completed issue cards then show the AI
 verdict, hybrid retrieval marker, and authorized citations without replacing the
 deterministic issue.
 
+Every remote model path is independently opt-in. `ENABLE_MODEL_EXTRACTION`
+enables chat-based record extraction; `ENABLE_REVIEW_AGENT` additionally enables
+the older LangGraph repair stage inside that extraction path and does not work as
+a standalone caller; `ENABLE_ISSUE_EVIDENCE_REVIEW` enables the post-rule chat
+annotation; and `ENABLE_EVIDENCE_INVESTIGATOR` enables the separate
+provider-native function-calling loop. `ENABLE_EMBEDDINGS` enables only the
+embedding client and does not enable chat by itself. The Reviewer and Investigator
+also require their documented embedding/PostgreSQL configuration, and all five
+switches default to false. The UI connection test is a separate explicit user
+action that makes one minimal chat request; merely loading the page never calls a
+model.
+
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a
 persistent named model cache. It exposes no host port and requires no external
@@ -50,7 +62,7 @@ Evaluation also includes an 80-case directive regression, a 100-case synthetic n
 
 An experimental first-stage bounded evidence-repair Agent is wired behind a feature flag that defaults to off. It uses LangGraph 1.2.11 `StateGraph` and an application-level JSON tool protocol—not native provider `tool_calls`—for `READ_SPAN`, `PATCH_RECORDS`, and `ABSTAIN`. Its safety boundaries have automated and Mock coverage. A three-task real-provider development pilot exposed benchmark-label errors, and all three tasks are permanently classified as tuned. The corrected v2 `full × 3` evaluation used the real Provider only for the Agent stage; the main-extraction candidate was synthetically injected from the frozen manifest, so this was not an end-to-end real-model extraction evaluation. It recorded all 90 required executions, including 81 holdout executions, but only 59/90 were strictly correct and the full gate failed: holdout runtime success was 74/81 with seven `read_timeout` failures, recovery was 26/51, and semantic abstention was 24/30. Twelve patches accepted by production validation were wrong against the evaluation oracle; no accepted safety violation was observed. No successful direct-`ABSTAIN` path was observed, so the required three-path coverage gate also failed. These results are failure diagnostics, not an Agent quality, product-benefit, extraction-quality, or resume-readiness claim. There is no multi-agent implementation. The newer Evidence Reviewer is a separate bounded RAG consumer and must not be described as this repair Agent or as multi-agent orchestration. See the [first-stage boundary](docs/review-agent-phase1.md), [pilot record](docs/review-agent-pilot-20260906.md), [sanitized v2 full checkpoint](docs/review-agent-v2-full-checkpoint-20260906.md), [v2 frozen manifest](data/agent-acceptance-v2/manifest.json), and [offline runner](scripts/run_agent_acceptance.py).
 
-A separate default-off Evidence Investigator uses provider-native function tool calls to search and read authorized frozen snapshots before submitting one candidate or abstaining; deterministic promotion remains the only path from an untrusted candidate to an issue. At commit `618ca991`, two consecutive DEV runs scored 8/8 with the same reproducibility fingerprint. The first frozen 10-case holdout scored 8/10 (TP 4, FN 1, TN 4, FP 1; 80% precision and recall), with all cases terminating normally. Promotion accepted no wrong Agent candidate, while the deterministic main path still produced one false positive. This small fixture is sealed against further tuning and is not an open-text, production-quality, or multi-agent claim. See the [sanitized evaluation summary](docs/evidence-investigator-live-evaluation.md).
+A separate default-off Evidence Investigator uses provider-native function calls to search and read authorized frozen snapshots before submitting one candidate or abstaining; deterministic promotion remains the only path from an untrusted candidate to an issue. At commit `618ca991`, two consecutive DEV runs scored 8/8 with the same reproducibility fingerprint. The first frozen 10-case holdout scored 8/10 (TP 4, FN 1, TN 4, FP 1; 80% precision and recall), with all cases terminating normally. Promotion accepted no wrong Agent candidate, while the deterministic main path still produced one false positive. This small fixture is sealed against further tuning and is not an open-text, production-quality, or multi-agent claim. Entry points are the [frozen fixture and protocol](data/evaluation/evidence_investigator_live/README.md), [read-only fixture validator](data/evaluation/evidence_investigator_live/validate_fixture.py), [live HTTP runner](scripts/run_evidence_investigator_live.py), [two-run DEV checker](scripts/check_evidence_investigator_dev_pair.py), and [sanitized evaluation summary](docs/evidence-investigator-live-evaluation.md). Local run artifacts remain Git-ignored; the repository does not commit credentials, service addresses, prompts, provider payloads, or story bodies.
 
 Both JSON-text and multipart document APIs accept an explicit `document_role`
 (`canon`, `character_profile`, `chapter`, or `reference`) and a constrained

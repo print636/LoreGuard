@@ -11,6 +11,7 @@
 - 无 API Key 抽取明确中文句式，并展示抽取记录与未抽取提示
 - 配置 OpenAI-compatible 模型后，从普通中文故事中结构化抽取 8 类叙事记录；模型失败自动保留基线结果
 - 实验性的受限证据修复 Agent 已接入但默认关闭；已完成主抽取候选冻结合成注入、仅 Agent 阶段调用真实 Provider 的验收，但质量 gate 未通过，当前只证明实现与安全边界
+- 另一条默认关闭的 Evidence Investigator 使用 Provider 原生 function calls 主动搜索、读取授权快照，再提交一个不受信候选或弃答；候选只有通过确定性 promotion 才能形成问题，冻结真实评测及失败边界均已公开
 - 模型输入按全局行号分块，支持行重叠、超长单行和逐块失败隔离；全文基线不分块
 - 仅依据明确“又名/简称/化名/代号”声明做项目级实体别名归一化，保留映射轨迹与歧义警告
 - 本地 keyword + 稳定 SHA-256 字符 n-gram + canonical entity graph 三路候选排序并留下分数轨迹；当前 `consumed` 只表示候选类型与检查器兼容，最终仍由规则引擎检查全量记录，不能证明候选排序影响了裁决
@@ -81,19 +82,29 @@ set PER_RUN_TOKEN_BUDGET=20000
 set DAILY_TOKEN_BUDGET=100000
 ```
 
-模型 Key 只从服务端环境变量或本地未提交的 `.env` 读取。只有显式启用 `ENABLE_MODEL_EXTRACTION=true` 或 `ENABLE_ISSUE_EVIDENCE_REVIEW=true` 的能力才会调用聊天模型，避免开发和测试意外产生费用。请勿把 Key 写入源码、前端、README 或提交记录。`PROVIDER_THINKING_MODE` 默认不配置，因此通用 OpenAI-compatible 请求不会携带 `thinking`；只有显式设置为 `disabled` 或 `enabled` 时才发送顶层 `thinking={"type": ...}`。Compose 会把该配置同时传入 API 与 worker，空白值统一归一为 `None`。模型抽取支持 `fact`、`event`、`knows`、`claims_knows`、`item`、`uses`、`world_rule` 与 `world_assert`。超时、429、5xx、空响应、非法 JSON、字段校验失败或证据行号越界时，系统会记录非敏感警告并降级到 `BaselineExtractor`；基线与模型结果会去重合并。默认单次请求最多尝试 2 次、每次 30 秒；某分块终态失败后停止当前文档剩余模型分块，一个文档出现终态失败后开启本次运行熔断，后续文档直接走全文基线，避免兼容服务异常时串行等待数分钟。运行事件和诊断会明确区分“完整模型增强”“模型增强（部分分块已降级）”“确定性基线（模型未参与或已降级）”与主动关闭模型的“确定性基线”，结果正确时也不会掩盖模型失败。
+模型 Key 只从服务端环境变量或本地未提交的 `.env` 读取。各条远程模型路径都须显式启用，全部开关默认均为 `false`：
+
+| 能力 | 开关与调用边界 |
+|---|---|
+| 主模型抽取 | `ENABLE_MODEL_EXTRACTION=true` 后调用聊天模型抽取记录；失败时保留确定性基线。 |
+| 旧受限修复 Agent | `ENABLE_REVIEW_AGENT=true` 只在主模型抽取路径内追加 LangGraph 修复阶段，因此还需启用 `ENABLE_MODEL_EXTRACTION`；它使用应用层 JSON 动作，不是原生 function calls。 |
+| Evidence Investigator | `ENABLE_EVIDENCE_INVESTIGATOR=true` 后使用 Provider 原生 function calls；还需完整配置 chat Provider、embedding、PostgreSQL/pgvector 与 RAG，默认要求 hybrid 检索。 |
+| Issue Evidence Reviewer | `ENABLE_ISSUE_EVIDENCE_REVIEW=true` 后调用聊天模型生成规则问题的独立证据注释；还需 embedding、PostgreSQL 与对应 RAG 配置。 |
+| Embedding | `ENABLE_EMBEDDINGS=true` 只开放独立 embedding 客户端，不会单独启用任何聊天模型路径。 |
+
+首页“模型连接”卡只是被动读取配置状态，不会自动请求模型；只有用户点击“测试模型连接”时，才会额外发起一次可能消耗少量 Token 的最小聊天请求。请勿把 Key 写入源码、前端、README 或提交记录。`PROVIDER_THINKING_MODE` 默认不配置，因此通用 OpenAI-compatible 请求不会携带 `thinking`；只有显式设置为 `disabled` 或 `enabled` 时才发送顶层 `thinking={"type": ...}`。Compose 会把该配置同时传入 API 与 worker，空白值统一归一为 `None`。主模型抽取支持 `fact`、`event`、`knows`、`claims_knows`、`item`、`uses`、`world_rule` 与 `world_assert`。超时、429、5xx、空响应、非法 JSON、字段校验失败或证据行号越界时，系统会记录非敏感警告并降级到 `BaselineExtractor`；基线与模型结果会去重合并。默认单次请求最多尝试 2 次、每次 30 秒；某分块终态失败后停止当前文档剩余模型分块，一个文档出现终态失败后开启本次运行熔断，后续文档直接走全文基线，避免兼容服务异常时串行等待数分钟。运行事件和诊断会明确区分“完整模型增强”“模型增强（部分分块已降级）”“确定性基线（模型未参与或已降级）”与主动关闭模型的“确定性基线”，结果正确时也不会掩盖模型失败。
 
 模型逐分块调用前会用保守 Token 估算与本次已用额度执行门控；兼容 Provider 不返回 usage 时也按保守估算扣减内部预算。超出单次额度后停止后续模型分块，但全文基线仍会继续。每日额度在创建或重试分析时检查，当前是本地单数据库的非原子配额；多实例生产环境仍需 Redis 或事务式配额服务。写接口另有单进程滑动窗口限流，429 响应包含 `Retry-After`。
 
 模型模式以持久化的结构化执行记录判定，不依赖警告文字。页面会显示逻辑调用成功、失败、跳过和拒绝记录数；任何分块被跳过或记录被拒绝都不能算完整成功。旧运行缺少这些计数时显示“覆盖情况未知”。`python scripts/check_provider.py` 可经生产调用路径测试当前配置，只输出安全状态、耗时与 Token，不输出密钥或上游响应正文。
 
-首页“模型连接”卡会被动读取服务端是否已配置，但不会自动请求模型。只有用户点击“测试模型连接”时才会发起一次可能消耗少量 Token 的最小 JSON 检查；页面仅显示配置状态、JSON 合同、错误分类、延迟、Token 和固定建议，不显示 endpoint、Key、Prompt 或模型原始响应。浏览器不提供 Key 输入框，也不使用浏览器存储保存凭据：请只在本地未提交的 `.env` 中配置 `ENABLE_MODEL_EXTRACTION`、`ENABLE_ISSUE_EVIDENCE_REVIEW`、`OPENAI_BASE_URL`、`OPENAI_API_KEY` 与 `OPENAI_MODEL`，修改后同时重启 API 和 Celery worker。
+“测试模型连接”的页面结果仅显示配置状态、JSON 合同、错误分类、延迟、Token 和固定建议，不显示 endpoint、Key、Prompt 或模型原始响应。浏览器不提供 Key 输入框，也不使用浏览器存储保存凭据：请只在本地未提交的 `.env` 中配置上述能力开关以及 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL` 和独立的 embedding 配置，修改后同时重启 API 和 Celery worker。
 
 受限 Agent 第一阶段使用 LangGraph 1.2.11 `StateGraph` 编排，仅在显式设置 `ENABLE_REVIEW_AGENT=true` 时启用，默认关闭。模型每轮返回应用层 JSON 动作 `READ_SPAN`、`PATCH_RECORDS` 或 `ABSTAIN`；这不是、也未冒充 Provider 原生 `tool_calls` / function calling。服务端绑定冻结文档和证据范围、校验 span 与补丁，并只持久化不含 Prompt、原始响应、证据正文、Key 或 endpoint 的安全 trace。固定的 modality/source_scope/certainty 标签 repair pass 是另一条非 Agent 路径，不能混称为 Agent。
 
 冻结 Agent 验收集有 30 个开发者可见任务，每个重复 3 次。Mock oracle/scorer 的 90 次结果只验证工程边界；commit `bcbfab8` 的 v2 `full × 3` 只在 Agent 阶段调用真实 Provider，主抽取候选由 runner 按冻结 manifest 合成注入，并非端到端真实模型抽取评测。该运行记录全部 90 次要求执行，严格正确 59/90，其中 holdout 81 次运行成功 74 次、7 次 `read_timeout`，恢复 26/51、主动弃答 24/30。共有 12 次补丁通过生产校验但不符合评测 oracle；服务端接受的安全违规为 0。运行成功轨迹中没有直接 `ABSTAIN` 路径，要求的三路径覆盖 gate 也失败，完整结果为 `passed=false`，所以不能声称 Agent、主抽取或产品质量收益。当前没有多智能体。Evidence Reviewer 是另一条已经接通真实 RAG 的受限复核消费者，不等同于这个修复 Agent。详细边界见 [`docs/review-agent-phase1.md`](docs/review-agent-phase1.md)，脱敏结果见 [`docs/review-agent-v2-full-checkpoint-20260906.md`](docs/review-agent-v2-full-checkpoint-20260906.md)，冻结任务见 [`data/agent-acceptance-v2/manifest.json`](data/agent-acceptance-v2/manifest.json)，离线 runner 见 [`scripts/run_agent_acceptance.py`](scripts/run_agent_acceptance.py)。
 
-另一条默认关闭的 Evidence Investigator 使用 Provider 原生 function tool calls，在冻结快照内执行 `SEARCH_EVIDENCE`、`READ_SPAN`、`SUBMIT_VERDICT` 或 `ABSTAIN`，候选仍须经过确定性 promotion。commit `618ca991` 上两次 DEV 均为 8/8；首次 10 例冻结 holdout 为 8/10（TP 4、FN 1、TN 4、FP 1，precision/recall 均 80%，10/10 正常终止）。Agent promotion 没有接受错误候选，但系统确定性主链路仍产生 1 个误报。该小样本已封存且不再用于调参，不能外推为开放文本、生产质量或多智能体成绩；详见 [`docs/evidence-investigator-live-evaluation.md`](docs/evidence-investigator-live-evaluation.md)。
+另一条默认关闭的 Evidence Investigator 使用 Provider 原生 function calls，在冻结快照内执行 `SEARCH_EVIDENCE`、`READ_SPAN`、`SUBMIT_VERDICT` 或 `ABSTAIN`，候选仍须经过确定性 promotion。commit `618ca991` 上两次 DEV 均为 8/8；首次 10 例冻结 holdout 为 8/10（TP 4、FN 1、TN 4、FP 1，precision/recall 均 80%，10/10 正常终止）。Agent promotion 没有接受错误候选，但系统确定性主链路仍产生 1 个误报。该小样本已封存且不再用于调参，不能外推为开放文本、生产质量或多智能体成绩。入口包括[冻结 fixture 与协议](data/evaluation/evidence_investigator_live/README.md)、[只读 fixture 验证器](data/evaluation/evidence_investigator_live/validate_fixture.py)、[真实 HTTP runner](scripts/run_evidence_investigator_live.py)、[双次 DEV 对照检查器](scripts/check_evidence_investigator_dev_pair.py)和[脱敏评测总结](docs/evidence-investigator-live-evaluation.md)。本地运行 artifact 默认由 Git 忽略；仓库不提交凭据、服务地址、Prompt、Provider payload 或故事正文。
 
 Evidence RAG 已实现独立显式配置的 OpenAI-compatible embedding client、中文行号感知分块、版本化 embedding profile、精确 snapshot schema、Alembic、真实 BGE embedding、PostgreSQL/pgvector 精确余弦检索与 keyword+dense RRF。首次冻结 holdout 的混合 Recall@5 为 81.82%、All-evidence@5 为 71.43%、低词面 Recall@5 为 79.31%；最后一项差 1 条证据未过预设门槛，因此整体 gate 为 `false`，也不声称混合检索优于两种基线。`IssueEvidenceReviewer` 默认关闭；只有显式设置 `ENABLE_ISSUE_EVIDENCE_REVIEW=true` 并同时配置模型、embedding 与 PostgreSQL 才会执行。它只写入 `ai_evidence_review` 注释，不修改规则 issue。真实 A/B 结果见 [`docs/issue-review-v1-result-20260907.md`](docs/issue-review-v1-result-20260907.md)。
 
@@ -188,6 +199,7 @@ python scripts/run_agent_acceptance.py --mock-oracle --require-gates
 - `artifacts/complex-v3-evaluation.json`：14 例原创、多文档复杂验收场景，共 10 个固定预期问题；五类问题均有正例与困难反例。当前无模型固定基线 TP 10、FP 0、FN 0，证据对精确命中率 1.0。该数据由开发者编写且可见，只能作为可审计回归，不能估计开放故事或生产准确率。
 - `data/agent-acceptance-v1/`：30 个开发者可见冻结任务，3 类 persona 各 10 个，每任务重复 3 次。`--mock-oracle` 生成的 90 次 execution 仅用于验证离线 scorer、三类动态路径和安全约束；runner 当前不会调用生产 Agent，这些数字不得写成真实 Agent 评测或能力成绩。
 - `data/agent-acceptance-v2/`：修正 pilot 暴露的语义标签问题后冻结的 Agent 评测套件。Agent 阶段真实 Provider `full × 3` 已完成但 `passed=false`；主抽取候选为冻结合成注入，仓库只公开[脱敏聚合结论](docs/review-agent-v2-full-checkpoint-20260906.md)，不提交 Prompt、响应正文、凭据或故事运行产物。
+- `data/evaluation/evidence_investigator_live/`：原生 function-calling Investigator 的冻结 DEV/holdout fixture；[fixture 协议](data/evaluation/evidence_investigator_live/README.md)、[只读验证器](data/evaluation/evidence_investigator_live/validate_fixture.py)、[真实 HTTP runner](scripts/run_evidence_investigator_live.py)、[双次 DEV 检查器](scripts/check_evidence_investigator_dev_pair.py)与[脱敏报告](docs/evidence-investigator-live-evaluation.md)分别承担数据冻结、接线运行、重复性校验和公开总结，模型原始交互与本地运行 artifact 不提交。
 - `data/evidence-retrieval-v1/`：44 个原创中文检索问题，其中首次冻结 holdout 为 28 问、55 条期望证据。混合 Recall@5 81.82%、All-evidence@5 71.43%、低词面 Recall@5 79.31%；低词面少 1 条未过门槛，完整结论见 [`docs/evidence-retrieval-v1-holdout.md`](docs/evidence-retrieval-v1-holdout.md)。
 - `data/issue-review-v1/`：12 例原创、开发者可见的证据复核 A/B，每例真实调用 3 次。local-context 为 4/12，rag-evidence 为 7/12；绝对 gate 仍为 `false`。只公开脱敏聚合结果，见 [`docs/issue-review-v1-result-20260907.md`](docs/issue-review-v1-result-20260907.md)。
 
@@ -195,7 +207,7 @@ python scripts/run_agent_acceptance.py --mock-oracle --require-gates
 
 challenge-v2 位于 `data/evaluation-challenge-v2/`，schema、固定 seed、生成器和 SHA-256 均落盘可审计。详细口径见 [`docs/state-modeling-v2-evaluation.md`](docs/state-modeling-v2-evaluation.md)。
 
-复杂验收集位于 `data/evaluation-complex-v3/`，其原创声明、固定证据行、数据哈希与限制见 [`docs/complex-v3-evaluation.md`](docs/complex-v3-evaluation.md)。旧中转/模型的真实重复运行记录见 [`docs/complex-v3-model-evaluation.md`](docs/complex-v3-model-evaluation.md)；2026-09-06 当前新中转/模型的冻结 Phase 1 结果见 [`docs/provider-phase1-checkpoint-20260906.md`](docs/provider-phase1-checkpoint-20260906.md)。简历采用哪些事实则受 [`docs/resume-readiness.md`](docs/resume-readiness.md) 的保守门槛约束。
+复杂验收集位于 `data/evaluation-complex-v3/`，其原创声明、固定证据行、数据哈希与限制见 [`docs/complex-v3-evaluation.md`](docs/complex-v3-evaluation.md)。旧中转/模型的真实重复运行记录见 [`docs/complex-v3-model-evaluation.md`](docs/complex-v3-model-evaluation.md)；2026-09-06 当时固定的 Provider/模型配置之冻结 Phase 1 结果见 [`docs/provider-phase1-checkpoint-20260906.md`](docs/provider-phase1-checkpoint-20260906.md)。简历采用哪些事实则受 [`docs/resume-readiness.md`](docs/resume-readiness.md) 的保守门槛约束。
 
 `run_model_stability.py` 会真实调用已配置的 Provider，记录逐次类别/证据、首进度、P50/P95、Token 与预算停止状态；预期答案只用于运行后评分，不进入 Prompt。报告不保存 Key 或原始响应正文。总预算是运行间停止阈值，单次 Provider 实际 usage 可能让最后一次发生少量越界，报告会单独记录 `budget_overshoot_tokens`。
 
@@ -203,7 +215,7 @@ challenge-v2 位于 `data/evaluation-challenge-v2/`，schema、固定 seed、生
 
 上述历史模型轮次使用 2026-09-02 的旧覆盖判定。2026-09-04 起完整模型统计必须有结构化执行计数，并排除部分无效记录；旧报告缺少计数时仅保留带“历史未验证”标记的原统计，不能据此声称通过了新协议，也不能移用为新 Provider/模型的成绩。
 
-2026-09-06 新中转/模型在 `thinking=disabled` 下通过最小 JSON preflight，但冻结 Phase 1 `full × 1` 严格 gate 为 0/3。三次正式调用均 HTTP 200 且无空响应，仍因内容校验、未解决无效记录和 batch 协议失败而不具备完整覆盖；HTTP 成功不能解释为产品可用。首次运行曾因旧计数包装器缺少 repair 依赖转发而中断，额外调用不可计量；随后 Phase 1/complex runner 已共用修复后的安全计数包装，派生 repair 调用也纳入统计并通过 Mock 回归。默认报告保存在 Git 忽略的 `artifacts/`，不含 key、endpoint、Prompt 或原始响应。旧模型/中转的历史成绩不得沿用到本轮。
+2026-09-06 冻结时使用的 Provider/模型配置在 `thinking=disabled` 下通过最小 JSON preflight，但当日 Phase 1 `full × 1` 严格 gate 为 0/3。三次正式调用均 HTTP 200 且无空响应，仍因内容校验、未解决无效记录和 batch 协议失败而不具备完整覆盖；HTTP 成功不能解释为产品可用。这是固定在 2026-09-06 的历史配置与结果，不描述当前 Provider 的可用性或能力。首次运行曾因旧计数包装器缺少 repair 依赖转发而中断，额外调用不可计量；随后 Phase 1/complex runner 已共用修复后的安全计数包装，派生 repair 调用也纳入统计并通过 Mock 回归。默认报告保存在 Git 忽略的 `artifacts/`，不含 key、endpoint、Prompt 或原始响应。旧模型/中转的历史成绩不得沿用到本轮。
 
 历史固定 2000 字单文档真实模型延迟测试 5 次的首进度 P95 为 5.9 ms，端到端 P50 / P95 为 6.30 / 7.94 秒，总计 11,799 Token。该样本没有准确率标注，使用的是旧中转/模型，只保留为当时的短文本延迟记录。
 
@@ -257,10 +269,10 @@ python scripts/run_long_text_smoke.py
 - MVP 侧重“发现并解释矛盾”，不自动覆写作者原文。
 - 大模型输出不是事实来源；所有问题必须绑定输入文档中的证据。
 - 在线 Demo 应启用访客限额、文件大小限制和每日 Token 预算。
-- 当前已验证模型抽取协议、降级机制、工程安全边界和一次冻结真实 Phase 1 运行；但当前新中转/模型的严格 gate 为 0/3，且尚未完成真实长篇人工标注评测，不能宣称开放文本准确率或当前模型能力达标。
+- 当前已验证模型抽取协议、降级机制、工程安全边界和一次冻结真实 Phase 1 运行；但 2026-09-06 固定配置的 Phase 1 严格 gate 为 0/3，且尚未完成真实长篇人工标注评测，不能宣称开放文本准确率，也不能把该历史结果当作当前模型能力。
 - `document_context` 与运行输入上下文采用附加关联表兼容旧 SQLite；旧文档读取为安全默认 `chapter/global` 并标记上下文并非显式保存。数据库升级现由 Alembic 管理，覆盖空库、旧 `create_all` 库和此前 WIP schema 的保守升级；残缺或约束不完整的同名表会拒绝采用，不再以 `create_all` 充当正式升级路径。
 - 版本差异只在当前项目和同名文档边界内运行，不调用模型。默认每个版本最多处理前 20,000 行/2,000,000 字符并最多返回 4,000 行差异，超限会在响应和页面显式提示。
-- LangGraph 1.2.11 `StateGraph` 的受限修复循环已作为默认关闭的第一阶段代码接入；v2 Agent 阶段真实 Provider full 已执行但完整 gate 失败，且主抽取候选为冻结合成注入，不能列作已证明收益或端到端抽取成绩。它不是原生 `tool_calls`，也没有多智能体。真实 embedding、pgvector、RRF 和后置 Evidence Reviewer 已完成工程闭环与冻结 A/B；两套 gate 的失败项必须同时公开。项目已达到当前简历工程展示的停止线，后续优先进入本人体验、学习、讲解和投递，不再以扩功能推迟投递。
+- LangGraph 1.2.11 `StateGraph` 的旧受限修复循环已作为默认关闭的第一阶段代码接入；v2 Agent 阶段真实 Provider full 已执行但完整 gate 失败，且主抽取候选为冻结合成注入，不能列作已证明收益或端到端抽取成绩。该旧循环使用应用层 JSON 动作，不是原生 `tool_calls`；与它分离的新 Evidence Investigator 已实现 Provider 原生 function calls。当前没有多智能体。真实 embedding、pgvector、RRF 和后置 Evidence Reviewer 已完成工程闭环与冻结 A/B；两套 gate 的失败项必须同时公开。项目已达到当前简历工程展示的停止线，后续优先进入本人体验、学习、讲解和投递，不再以扩功能推迟投递。
 - 详细完成度见 [`docs/completion-status.md`](docs/completion-status.md)，学习顺序见 [`docs/learning-guide.md`](docs/learning-guide.md)。
 - 长篇容量的当前硬限制、实用范围和百万字扩展路线见 [`docs/scalability-roadmap.md`](docs/scalability-roadmap.md)。
 

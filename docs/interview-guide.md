@@ -1,6 +1,6 @@
 # LoreGuard 与 AI 应用后端面试指南
 
-更新：2026-09-09。
+更新：2026-09-13。
 
 这份文档只负责**面试表达、项目答辩和真实性校验**，不承担系统知识教学。知识原理、代码阅读和动手练习见 [学习指南](learning-guide.md)；项目可说与不可说的最终边界以 [项目事实清单](project-facts.md) 为准。
 
@@ -61,7 +61,8 @@ LoreGuard 的主要证据入口：
 | DOCX 与版本处理 | [`app/docx_import.py`](../app/docx_import.py)、[`app/document_diff.py`](../app/document_diff.py) | [`tests/test_docx_import.py`](../tests/test_docx_import.py)、[`tests/test_document_diff.py`](../tests/test_document_diff.py) |
 | Evidence RAG | [`app/evidence_rag.py`](../app/evidence_rag.py)、[`app/evidence_store.py`](../app/evidence_store.py) | [`tests/test_evidence_rag.py`](../tests/test_evidence_rag.py)、[`tests/test_pgvector_integration.py`](../tests/test_pgvector_integration.py) |
 | 后置证据复核 | [`app/issue_evidence_review.py`](../app/issue_evidence_review.py) | [`tests/test_issue_evidence_review.py`](../tests/test_issue_evidence_review.py)、[真实 A/B 结果](issue-review-v1-result-20260907.md) |
-| 受限修复 Agent | [`app/review_agent.py`](../app/review_agent.py) | [`tests/test_review_agent.py`](../tests/test_review_agent.py)、[完整检查点](review-agent-v2-full-checkpoint-20260906.md) |
+| Evidence Investigator（当前 Agent 主讲路径） | [`app/provider.py`](../app/provider.py)、[`app/evidence_investigator_loop.py`](../app/evidence_investigator_loop.py)、[`app/evidence_investigator_runtime.py`](../app/evidence_investigator_runtime.py)、[`app/candidate_promotion.py`](../app/candidate_promotion.py) | [`tests/test_provider_tool_calls.py`](../tests/test_provider_tool_calls.py)、[`tests/test_evidence_investigator_loop.py`](../tests/test_evidence_investigator_loop.py)、[`tests/test_candidate_promotion.py`](../tests/test_candidate_promotion.py)、[真实 E2E 评测](evidence-investigator-live-evaluation.md) |
+| 旧受限记录修复 Agent | [`app/review_agent.py`](../app/review_agent.py) | [`tests/test_review_agent.py`](../tests/test_review_agent.py)、[旧完整检查点](review-agent-v2-full-checkpoint-20260906.md) |
 | 异步任务与恢复 | [`app/tasks.py`](../app/tasks.py)、[`app/service.py`](../app/service.py)、[`app/main.py`](../app/main.py) | [`tests/test_tasks.py`](../tests/test_tasks.py)、[`tests/test_run_reliability.py`](../tests/test_run_reliability.py)、[`tests/test_api.py`](../tests/test_api.py) |
 | 图、时间线与反馈 | [`app/projections.py`](../app/projections.py)、[`app/main.py`](../app/main.py) | [`tests/test_visualization.py`](../tests/test_visualization.py)、[`tests/test_api.py`](../tests/test_api.py) |
 | 总体真实性边界 | [项目事实清单](project-facts.md) | [简历就绪结论](resume-readiness.md) |
@@ -73,7 +74,8 @@ LoreGuard 的主要证据入口：
 | AI 能力落地 | 将普通叙事文本转成状态记录，输出带原文证据的问题报告 | 开放长篇与真实用户质量尚未验证 |
 | 后端工程 | FastAPI、PostgreSQL/pgvector、Redis/Celery、版本快照、取消/重试、SSE、Docker/CI | 不是生产流量下的高可用服务 |
 | RAG | 固定 BGE、真实向量列、精确余弦检索、keyword+dense RRF、隔离与复用 | 混合检索没有显著领先两种基线，低词面门槛未通过 |
-| Agent | LangGraph 受限修复循环，模型可在读取、修复、弃答之间选择 | 默认关闭、非原生 function calling、质量 gate 失败、无多智能体 |
+| Agent | Evidence Investigator 使用 Provider 原生 function tool calls（下文简称“原生工具调用”），在冻结快照内选择搜索、读取、提交候选或弃答，候选再经确定性 promotion | 默认关闭；首次 holdout 只有 10 例、8/10，不能外推为生产质量；无多智能体 |
+| 旧 Agent 实验 | LangGraph 编排受限记录修复，模型在应用层 JSON 的读取、补丁、弃答间选择 | 不是原生工具调用，旧质量 gate 失败，只在追问历史实现时说明 |
 | 稳定性 | 超时/429/5xx/非法 JSON 降级，输入冻结、幂等认领、lease/heartbeat、持久化 SSE | 没有 exactly-once 模型计费保证，也没有生产 SLA |
 | Agent 周边工具 | 结构化合同、证据白名单、安全 trace、评测 runner 与故障分类 | 是项目内工具链，不是通用 Agent SDK |
 | AI 辅助开发 | 使用 Codex、Claude Code、Cursor 做需求拆解、代码阅读、实现与测试辅助 | 必须能亲自解释、运行和校验最终设计，不能把工具产出冒充手写 |
@@ -83,25 +85,25 @@ LoreGuard 的主要证据入口：
 
 这个问题的合格结论是：**当前没有多智能体，这是经过范围控制后的未实现项，不是换名包装。**
 
-受限记录修复是一个边界明确的任务，单个模型配合三个受控动作已经足以验证“模型决策—服务端执行—结果校验”的闭环。贸然拆成规划、检索、修复、裁决多个 Agent，会增加共享状态一致性、错误传播、Token 成本、超时链路和评测归因难度。未来只有在单 Agent 的失败样本证明角色拆分能带来可测收益时，才值得用新冻结集验证。岗位的加分项不是要求把所有名词都实现一遍；能解释为何暂缓以及如何验证，反而更能体现工程判断。
+Evidence Investigator 已用一个模型和四个受控工具验证“模型选择—服务端执行—确定性复核”的闭环；旧记录修复实验也只是另一条单模型路径。贸然拆成规划、检索、修复、裁决多个 Agent，会增加共享状态一致性、错误传播、Token 成本、超时链路和评测归因难度。未来只有在单 Agent 的失败样本证明角色拆分能带来可测收益时，才值得用新冻结集验证。岗位的加分项不是要求把所有名词都实现一遍；能解释为何暂缓以及如何验证，反而更能体现工程判断。
 
 ## 四、三种长度的项目表达
 
 ### 1 分钟版本
 
-> LoreGuard 是我独立推进的故事剧情一致性审查平台，面向编剧、小说作者和叙事设计人员。它把 DOCX 或普通文本中的人物事实、事件、知识获得、物品状态和世界规则抽取为带原文位置的结构化记录，再用确定性规则检查五类冲突。我的核心取舍是让规则负责最终问题、让模型负责语义抽取和证据复核，这样模型失败时仍能降级，问题也能回到原文。工程上我用 FastAPI、PostgreSQL/pgvector、Redis 和 Celery 实现版本快照、异步分析、SSE 进度、取消重试与故障恢复；可选 RAG 使用真实 BGE 向量和关键词融合检索。项目还有一个默认关闭的 LangGraph 受限修复 Agent，但质量门槛没有通过，所以我只把它作为 Agent 协议和安全边界的实践，不宣称已经达到生产质量。
+> LoreGuard 是我独立推进的故事剧情一致性审查平台，面向编剧、小说作者和叙事设计人员。它把 DOCX 或普通文本抽取成带原文位置的结构化记录，再用确定性规则检查事实、地点、知识、物品和世界规则冲突。为补足单轮抽取的遗漏，我实现了默认关闭的 Evidence Investigator：模型通过 Provider 原生工具调用，在冻结文档快照内选择检索、读取、提交一个候选或主动弃答；候选只有经服务端重新绑定证据并由既有规则确定性复现后，才会新增问题。工程上我用 FastAPI、PostgreSQL/pgvector、Redis/Celery 实现异步分析、SSE、取消重试和失败降级。两次 DEV 均为 8/8，首次 10 例冻结 holdout 为 8/10，但样本很小且系统主链路仍有一个误报，所以我不把它说成开放文本或生产质量结论。
 
-控制在 55–75 秒。面试官没有追问时，不主动背诵全部指标。
+控制在 55–75 秒。面试官没有追问时，不主动展开旧 LangGraph 修复 Agent，也不背诵全部指标。
 
 ### 5 分钟版本
 
 按以下五段讲，每段只承担一个目的：
 
 1. **问题与用户**：长篇故事的信息分散，单次聊天审稿难以保留角色认知、时间和物品状态；用户需要可回到原文的审查结果。
-2. **主数据流**：冻结当前文档版本 → 基线与可选模型抽取 → 语义质量门与归一化 → 五类确定性检查 → 可选 Evidence RAG 复核 → 持久化问题、事件和反馈。
-3. **AI 与规则分工**：模型擅长把自然语言映射为结构化记录，但不稳定；确定性规则对同一结构化输入可复现，因此最终 issue 不由模型静默改写。
+2. **主数据流**：冻结当前文档版本 → 基线与可选模型抽取 → 语义质量门与归一化 → 五类确定性检查 → 可选 Evidence Investigator → 可选 Evidence Reviewer → 持久化问题、事件和反馈。
+3. **AI 与规则分工**：模型擅长把自然语言映射为结构化记录，并在 Investigator 中决定查什么、读什么；模型提交的仍是不可信候选，只有确定性 promotion 能把它变成新增 issue。Reviewer 则只追加证据意见。
 4. **工程可靠性**：异步队列、任务认领与租约心跳、取消检查点、有限重试、熔断降级、Token 门控、持久化 SSE；说明这些是已经实现的机制，而不是生产 SLA。
-5. **验证与反思**：用一个通过点和一个失败点收尾。例如 RAG 引用全部经过 allowlist；同时 Reviewer 总体质量 gate 未通过，信息不足类尤其薄弱，下一版应先修查询/证据覆盖和判别合同，再用新的冻结集复测。
+5. **验证与反思**：用一个通过点和一个失败点收尾。例如 Investigator 两次 DEV pair 都是 8/8，首次 holdout 是 8/10 且 10/10 正常终止；同时这只是 10 例小样本，系统确定性主链路仍有一个误报，该 holdout 也不能再拿来调参。
 
 ### 15 分钟版本
 
@@ -112,12 +114,12 @@ LoreGuard 的主要证据入口：
 5. 本地主路候选信号与真实 Evidence RAG 的区别。
 6. BGE embedding profile、chunk、snapshot、pgvector 与 RRF 数据流。
 7. IssueEvidenceReviewer 为什么只能追加注释，不能覆盖规则结果。
-8. LangGraph 受限修复 Agent 的三个动作、服务端限制和真实失败分布。
+8. Evidence Investigator 的原生工具状态机、冻结授权、确定性 promotion 与安全 trace。
 9. Celery、Redis、任务认领、lease/heartbeat、取消/重试与 SSE 续传。
-10. 评测集如何冻结，指标说明了什么、没有说明什么。
+10. DEV pair 与首次 holdout 分别说明什么、没有说明什么。
 11. 面向长篇和生产部署的下一步，但不把路线图说成已完成。
 
-15 分钟讲解中每个术语都必须能被打断追问。无法脱离文档解释的部分应回到学习阶段，而不是继续扩展讲稿。
+旧 LangGraph 记录修复 Agent 不放进默认 1 分钟主线；只有面试官追问简历中的 LangGraph、历史 Agent 路径或失败实验时，再单独说明。15 分钟讲解中每个术语都必须能被打断追问。无法脱离文档解释的部分应回到学习阶段，而不是继续扩展讲稿。
 
 ## 五、LoreGuard 简历逐条追问树
 
@@ -174,32 +176,63 @@ LoreGuard 的主要证据入口：
 
 证据边界：真实 BGE、pgvector 与 RRF 已运行；但首次 holdout 的低词面 Recall@5 为 79.31%，差一条未过预设门槛，混合 Recall 与 dense 相同，不能说“混合显著优于所有基线”。Reviewer 的真实 A/B 是 4/12 到 7/12，但 absolute gate 失败，信息不足类为 0/4，不能说质量达标。
 
-### 5.3 异步后端、失败恢复与受限 Agent
+### 5.3 Evidence Investigator：当前 Agent 主讲路径
 
-简历表述：使用 FastAPI、Celery、Redis、PostgreSQL/pgvector 构建异步后端；实现模型超时重试、限流降级；使用 LangGraph 编排受控 Agent，支持 SSE 进度与容器化部署。
-
-首问：**这里的 Agent 到底有什么自主决策，它和普通单轮模型调用有什么区别？**
+首问：**这里的 Agent 到底自主决定什么，哪些决定仍掌握在服务端？**
 
 回答骨架：
 
-- 它只处理抽取后的无效记录修复，不负责整条分析或最终裁决。
-- LangGraph `StateGraph` 维护循环状态，模型每轮可选择 `READ_SPAN`、`PATCH_RECORDS` 或 `ABSTAIN`。
-- 服务端执行动作并控制冻结文档窗口、可改字段、轮次、Token、deadline 和响应大小。
-- 这形成了多步“观察—动作—校验”循环，但动作是应用层 JSON，不是 Provider 原生 tool calls。
-- 功能默认关闭；真实验收的质量 gate 失败，因此只证明协议、安全约束和可观测失败路径。
+- 确定性主链路先从已有结构化记录建立一个调查 seed；模型不能自行扩大本次任务或选择任意数据库记录。
+- 服务端通过 Provider 原生工具调用暴露四种动作。模型按阶段请求 `SEARCH_EVIDENCE`，从结果中选择 `READ_SPAN`，然后只能 `SUBMIT_VERDICT` 一个候选或 `ABSTAIN`。
+- 模型只提出工具请求；服务端校验工具名、参数 schema、当前阶段、seed、次数、Token、deadline 与快照授权后才执行。临时 `result_ref` 和 `span_ref` 防止模型伪造文档身份或任意行号。
+- `SUBMIT_VERDICT` 的候选仍不可信。服务端按冻结原文重建证据，重新检查字段关系、语义门和对应规则；只有确定性复现了新冲突，promotion 才原子追加 issue。
+- 任一模型、检索、协议或 promotion 故障只让该可选阶段跳过或降级，原确定性记录、问题、ID、顺序和 provenance 保持不变。
+
+白板状态机只画这一条：
+
+```text
+seed
+  → SEARCH_EVIDENCE
+  → READ_SPAN
+  → SUBMIT_VERDICT → deterministic promotion → add issue / reject
+                   ↘ ABSTAIN（search/read/verdict 阶段均可受控结束）
+```
+
+安全 trace 只保存已校验并实际执行的动作顺序、运行内文档伪名哈希（不是内容哈希）、读取行号、候选字段形状和完整性标记；非法但未执行的请求只留下受限失败类别或计数。它不保存 Prompt、正文、模型原始响应、Key 或服务地址。
+
+实现与验证入口：
+
+- 原生调用合同：[`app/provider.py`](../app/provider.py) 的 `complete_with_tools`，以及 [`tests/test_provider_tool_calls.py`](../tests/test_provider_tool_calls.py)。
+- seed、授权与状态机：[`app/evidence_investigator.py`](../app/evidence_investigator.py)、[`app/evidence_authority.py`](../app/evidence_authority.py)、[`app/evidence_investigator_state.py`](../app/evidence_investigator_state.py)、[`app/evidence_investigator_loop.py`](../app/evidence_investigator_loop.py)。
+- RAG 与 promotion：[`app/evidence_investigator_rag.py`](../app/evidence_investigator_rag.py)、[`app/candidate_promotion.py`](../app/candidate_promotion.py)。
+- 生产接线：[`app/evidence_investigator_runtime.py`](../app/evidence_investigator_runtime.py)、[`app/service.py`](../app/service.py)。
+- E2E runner：[`scripts/run_evidence_investigator_live.py`](../scripts/run_evidence_investigator_live.py) 经公开 HTTP API 建项、上传冻结文档、启动 Celery 分析并在终态后本地判分；[`scripts/check_evidence_investigator_dev_pair.py`](../scripts/check_evidence_investigator_dev_pair.py) 从逐案例结果复算两次 DEV 是否可晋级。完整口径见[真实 E2E 评测](evidence-investigator-live-evaluation.md)。
+
+评测首答：commit `618ca991`、运行时模型别名 `deepseek-v4-pro` 下，两次连续 DEV 都是 8/8，pair checker v3 以相同复现指纹通过；首次冻结 holdout 为 8/10，即 TP 4、FN 1、TN 4、FP 1，precision/recall 都是 80%，10/10 正常终止。Agent 共提交 8 个候选，promotion 接受 4 个目标正例、拒绝 4 个，没有错误 Agent 候选被接受；系统最终仍有 1 个 FP，它来自确定性主链路。必须同时说明：这只有 10 例，模型名只是请求别名，不能证明上游权重；holdout 已封存且不再用于调参，指标不能外推到开放故事或生产质量。
+
+### 5.4 旧 LangGraph 受限记录修复 Agent：只在追问中讲
+
+如果面试官指着简历中的 LangGraph 表述，先主动区分：**这是旧的记录修复实验路径，不是上面的 Evidence Investigator。**
+
+- 它只接收模型抽取后因 `lexical_support` 失败而隔离的候选，不从确定性记录出发寻找新冲突。
+- LangGraph `StateGraph` 编排 `READ_SPAN`、`PATCH_RECORDS`、`ABSTAIN`；动作由模型返回应用层 JSON，不是 Provider 原生工具调用。
+- 它只能在授权窗口内修补允许字段，之后候选仍要重新校验。固定 semantic-label repair 是另一条受限单轮结构化模型调用，只补正 `modality/source_scope/certainty` 标签，不让模型选择工具。
+- 旧真实 Provider 验收的主抽取候选来自冻结 manifest 合成注入，严格正确 59/90、完整 gate 失败，因此只能证明实现、边界和失败诊断，不能声称端到端质量收益。
+
+### 5.5 异步后端与失败恢复
 
 继续追问可能落在：
 
-- Agent 与 IssueEvidenceReviewer、固定语义 repair 有何区别？
-- 为什么 Agent 不允许自己选择任意文档或修改 issue？
+- Investigator、旧修复 Agent、IssueEvidenceReviewer 和固定 semantic-label repair 的输入输出分别是什么？
+- 为什么模型不能直接指定真实 document ID、任意行号或最终 issue？
 - 任务重复投递时怎样避免两个 worker 同时执行？
 - lease/heartbeat 解决什么，为什么仍不等于 exactly-once？
 - 取消如何穿过 API 与 worker 进程？
-- Provider 超时、429、5xx、非法 JSON 分别如何处理？
+- Provider 超时、429、5xx、非法 JSON 或压缩响应异常分别如何处理？
 - 每日 Token 预算和写接口限流为什么还不是多实例原子配额？
 - 如果真正面向高并发 C 端，下一步如何做背压、原子配额、容量测试与 SSE 扇出？
 
-证据边界：可以说已实现输入冻结、幂等认领、lease/heartbeat 和队列烟测；不能说生产高可用、高并发 SLA、多智能体、原生 function calling 或 Agent 质量收益。
+证据边界：可以说已实现原生工具调用的 Investigator、输入冻结、确定性 promotion、安全 trace、幂等认领、lease/heartbeat 和队列烟测；不能说生产高可用、高并发 SLA、多智能体、所有 Agent 路径都用原生调用，或小型 holdout 已证明生产质量。
 
 ## 六、华为实习逐条追问树
 
@@ -274,7 +307,7 @@ easyMeeting 的代码证据在独立仓库，面试前需逐项核对当前分�
 - 自己负责需求边界、验收条件和最终技术决策，把任务拆成可验证的小块。
 - 使用 Codex、Claude Code 或 Cursor 辅助检索代码、提出实现、补测试和解释失败。
 - 通过读 diff、运行测试、构造异常输入、核对文档与真实评测来验收；不能解释的代码不作为已掌握能力。
-- 保留失败结果和声明边界，例如 Agent 与 Reviewer 的 gate 失败没有被包装成成功指标。
+- 保留失败结果和声明边界，例如旧修复 Agent 与 Reviewer 的 gate 失败没有被包装成成功指标，Investigator 的 8/10 也没有外推。
 - AI 提高迭代速度，但项目所有权体现在问题定义、取舍、验证和最终责任，而不是声称每行都手写。
 
 禁止回答：
@@ -375,9 +408,19 @@ LoreGuard 当前能支撑的例子是运行快照、条件更新认领、向量 
 - 情境例外从 1/4 到 3/4，黄金证据覆盖从 0/12 到 8/12，106/106 引用均在 allowlist。
 - absolute gate 失败，`insufficient_evidence` 为 0/4；结论只能是“真实闭环已运行并暴露清晰失败”，不是“质量可上线”。
 
-### Agent 验收
+### Evidence Investigator 首次真实 E2E
 
-- 真实 Provider 只用于 Agent 阶段，主抽取候选是冻结 manifest 合成注入。
+- 被评代码为 commit `618ca991`，运行时报告模型别名 `deepseek-v4-pro`；别名不是上游权重身份证明。
+- 为隔离归因，运行时关闭通用模型抽取、IssueEvidenceReviewer 与旧修复 Agent，只保留确定性主链路、Evidence Investigator 和真实 embedding/RAG；DEV 与 holdout 的 capability isolation 均为全案例通过。
+- 两次连续 DEV 都是 8/8：正例 5/5、负例主动弃答 3/3、正常终止 8/8、错误新增 0。pair checker v3 验证两次运行配置指纹相同且时间不重叠；这只是进入 holdout 的开发门槛，不是开放质量成绩。
+- DEV 1 的全案例编排墙钟 P50/P95 为 9.250/10.485 秒，DEV 2 为 10.344/12.312 秒；它包括建项、上传、异步分析、诊断和取问题，不是模型接口延迟或生产 SLA。
+- 首次 10 例冻结 holdout 为 8/10：TP 4、FN 1、TN 4、FP 1，precision/recall 均为 80%，10/10 正常终止且无执行类失败。
+- Agent 提交 8 个候选，promotion 接受 4 个目标正例、拒绝 4 个，没有错误候选通过 promotion；但系统确定性主链路产生 1 个 FP，因此不能说“系统零误报”。
+- holdout 已封存且不再用于 Prompt、规则、阈值或 promotion 调参。10 例原创小样本不能外推到开放故事、商业剧情、生产质量或安全性。
+
+### 旧 LangGraph 修复 Agent 验收
+
+- 真实 Provider 只用于旧 Agent 阶段，主抽取候选是冻结 manifest 合成注入。
 - 严格正确 59/90，完整 gate 失败；holdout 有超时、过度弃答和证据覆盖失败。
 - 服务端接受的安全违规为 0 只能说明该套件中边界未被突破，不能说明输出质量或安全性全面达标。
 
@@ -388,7 +431,7 @@ STAR 指情境、任务、行动、结果。结果既可以是成功指标，也
 准备以下五类素材，每次模拟只问其中一题：
 
 1. **在需求不确定时推进**：LoreGuard 从“聊天式判断”收敛为证据化规则主路，说明如何定义验收标准。
-2. **处理失败实验**：Reviewer 或 Agent gate 失败，说明如何分类错误、保留原始结果、决定暂停扩功能。
+2. **处理失败实验**：Reviewer/旧修复 Agent gate 失败，或 Investigator 首次 holdout 出现漏报与系统误报；说明如何分类错误、保留结果并避免复用 holdout 调参。
 3. **质量与交付冲突**：在简历停止线选择先投递学习，而不是继续堆叠多智能体。
 4. **跨角色理解需求**：从编剧/小说作者体验反馈反推 DOCX、直接正文、按需图和错误抽取治理。只说真实发生的用户反馈，不虚构公司协作。
 5. **AI 辅助开发**：说明如何拆任务、让工具辅助、自己审 diff 与测试，并对最终结果负责。
@@ -401,7 +444,8 @@ STAR 指情境、任务、行动、结果。结果既可以是成功指标，也
 
 - 真实 embedding、pgvector 精确余弦检索、keyword+dense RRF 已接入 Evidence RAG。
 - Reviewer 消费获授权 RAG 证据，但只追加注释。
-- LangGraph 受限修复循环已实现，动作与权限由服务端控制。
+- Evidence Investigator 已实现 Provider 原生工具调用、冻结范围内搜索/读取、单候选提交/弃答、确定性 promotion 和安全 trace。
+- 旧 LangGraph 受限修复循环也已实现，但它使用应用层 JSON 动作且真实质量 gate 失败。
 - 输入冻结、幂等认领、lease/heartbeat、取消检查点和持久化 SSE 已实现。
 - 测试与评测包含失败样本，项目达到了简历展示停止线。
 
@@ -409,7 +453,8 @@ STAR 指情境、任务、行动、结果。结果既可以是成功指标，也
 
 - RAG 指标：同时说低词面门槛未过和未显著领先 dense。
 - Reviewer 改善：同时说 absolute gate 失败与信息不足类失败。
-- Agent：同时说默认关闭、非原生 tool calls、无多智能体、质量未过 gate。
+- Evidence Investigator：同时说默认关闭、首次 holdout 仅 10 例且为 8/10、系统确定性主链路仍有 1 个 FP、无生产质量结论。
+- 旧修复 Agent：同时说使用应用层 JSON 而非原生工具调用、候选为合成注入、完整 gate 失败；不要与 Investigator 合并报成绩。
 - 并发：只能说 2 worker/20 任务队列烟测，不称高并发压测。
 - AI 独立项目：独立负责目标、决策和验收，同时坦诚使用 AI 编程工具辅助。
 
@@ -417,8 +462,8 @@ STAR 指情境、任务、行动、结果。结果既可以是成功指标，也
 
 - 公网 Demo、真实用户上线、商业游戏语料验证或长篇容量结论。
 - 生产高并发、生产 SLA、完整高可用或 exactly-once 模型计费。
-- 多智能体、原生 function calling、HNSW、图数据库、Kubernetes 或生产级 OpenTelemetry。
-- RAG、Reviewer 或 Agent 的质量门槛已经全部通过。
+- 多智能体、旧修复 Agent 使用原生工具调用、所有 AI 路径都由 Agent 自主执行、HNSW、图数据库、Kubernetes 或生产级 OpenTelemetry。
+- RAG、Reviewer、旧 Agent 或 Investigator 已经达到开放文本或生产质量。
 - 任何 API Key、模型服务地址、私密 Prompt、原始响应或内部文本。
 
 ## 十三、开始模拟面试的顺序
@@ -428,13 +473,16 @@ STAR 指情境、任务、行动、结果。结果既可以是成功指标，也
 1. 60 秒介绍 LoreGuard。
 2. 解释一次分析的数据流。
 3. 解释模型和规则的分工。
-4. 解释 Evidence RAG 的真实实现。
-5. 解释受限 Agent 与普通模型调用的区别。
-6. 解释 Celery/SSE 和失败恢复。
-7. 主动说明一个失败指标及下一步。
-8. 回答一题华为实习深挖。
-9. 回答一题 easyMeeting 深挖。
-10. 回答一题行为面。
+4. 解释原生工具调用为什么只是请求，不等于工具已执行。
+5. 画出 Investigator 的搜索、读取、提交/弃答状态机。
+6. 解释冻结引用、确定性 promotion 与安全 trace。
+7. 解释 Evidence RAG 与 Reviewer 的真实实现及差异。
+8. 用首次 DEV pair 和 holdout 说明“测到了什么、没证明什么”。
+9. 解释 Celery/SSE 和失败恢复。
+10. 只有在简历 LangGraph 表述或面试官追问时，解释旧修复 Agent 与 Investigator 的区别。
+11. 回答一题华为实习深挖。
+12. 回答一题 easyMeeting 深挖。
+13. 回答一题行为面。
 
 教练一次只能发送当前序号的一题。每题通过条件记录在 [面试进度模板](interview-progress-template.md)。如果出现知识缺口，就暂停该题并跳转到学习指南的对应模块；知识验证通过后再回到原题重新作答。
 
@@ -444,9 +492,11 @@ STAR 指情境、任务、行动、结果。结果既可以是成功指标，也
 
 - 60 秒项目介绍不看稿，结论与边界完整。
 - 能画出主流水线并解释每一层为何存在。
-- 能用自己的话区别本地主路候选、Evidence RAG、Reviewer、固定 repair 和受限 Agent。
-- 能定位至少六个关键代码入口，并说出各自一项测试证据。
-- 能主动解释 retrieval、Reviewer 和 Agent 三项失败结果，且不粉饰。
+- 能闭卷画出 Investigator 的四动作状态机，并说明模型请求、服务端执行和确定性 promotion 的权限边界。
+- 能用自己的话区别本地主路候选、Evidence RAG、Reviewer、固定 semantic-label repair、旧 LangGraph 修复 Agent 和 Evidence Investigator。
+- 能定位 Provider 原生调用、Investigator 状态机、RAG、promotion、service 接线和 E2E runner，并为其中至少四处指出测试入口。
+- 能解释安全 trace 保存什么、明确不保存什么。
+- 能主动解释 retrieval、Reviewer、旧 Agent 的失败结果，以及 Investigator 的 DEV pair 与首次 8/10 holdout；不能把小样本或正常终止率偷换成开放质量。
 - 能针对高并发、长篇和多智能体问题清楚区分“当前实现”与“未来设计”。
 - 华为与 easyMeeting 的每条简历描述都能提供代码或测试依据。
 - 准备两个真实 STAR 故事：一个成功交付，一个失败或取舍。

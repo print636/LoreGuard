@@ -1,6 +1,6 @@
 # LoreGuard 个人学习进度
 
-更新：2026-09-09。
+更新：2026-09-13。
 
 本文件由主对话维护，记录实际学习状态；教学规则见[知识学习路线](learning-guide.md)，面试表达另见[面试指南](interview-guide.md)。“看过”和“简历写过”都不自动视为掌握。
 
@@ -13,6 +13,7 @@
 - 当前状态：未验证
 - 主线返回点：D0 的首次独立回答
 - 下一问题：不看文档，你认为 LoreGuard 最重要解决的一个用户问题是什么？
+- 断点说明：当前仍在等待首次独立诊断回答；“简历已经写过”或“代码已经实现”都不等于本人已经掌握。
 
 ## 已确认的学习偏好
 
@@ -35,7 +36,7 @@
 | M5 Celery、SSE 与可靠性 | 未学 |  |  |  |
 | M6 Evidence RAG | 未学 |  |  |  |
 | M7 Evidence Reviewer | 未学 |  |  |  |
-| M8 受限 Agent 原型 | 未学 |  |  |  |
+| M8 Evidence Investigator 与 Agent 边界 | 未学 |  |  |  |
 | M9 评测、观测与安全 | 未学 |  |  |  |
 | M10 独立维护 | 未学 |  |  |  |
 
@@ -46,7 +47,8 @@
 
 ## 事实边界提醒
 
-- 当前不是多智能体系统，受限 Agent 默认关闭且质量门槛未通过。
+- 当前不是多智能体系统。旧受限修复 Agent 默认关闭且质量门槛未通过；Evidence Investigator 是另一条默认关闭、使用原生 function tool calls 的路径。
+- Evidence Investigator 首次小型冻结 holdout 为 8/10（TP 4、FN 1、TN 4、FP 1，precision/recall 均 80%，10/10 正常终止）。promotion 没有接受错误 Agent 候选，但系统确定性主链路仍有 1 个误报；该结果不能外推，holdout 也不再用于调参。
 - Evidence RAG 已接入真实 embedding 与 pgvector，但首次冻结评测总门槛未通过。
 - 本地队列烟测不等于生产高并发或 SLA。
 - 长篇与商业游戏规模是扩展方向，目前没有可宣称的容量结论。
