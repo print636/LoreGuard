@@ -80,6 +80,9 @@ class ComposeSmokeTests(unittest.TestCase):
         self.assertEqual(command[:4], ["docker", "compose", "exec", "-T"])
         self.assertIn("BEGIN;", PGVECTOR_SMOKE_SQL)
         self.assertIn("ROLLBACK;", PGVECTOR_SMOKE_SQL)
+        self.assertIn("0006_run_idempotency", PGVECTOR_SMOKE_SQL)
+        self.assertIn("INSERT INTO workspaces", PGVECTOR_SMOKE_SQL)
+        self.assertIn("workspace_id, name", PGVECTOR_SMOKE_SQL)
         self.assertIn("<=>", PGVECTOR_SMOKE_SQL)
         self.assertIn("document_version = 1", PGVECTOR_SMOKE_SQL)
         self.assertIn("content_sha256", PGVECTOR_SMOKE_SQL)
@@ -155,6 +158,8 @@ class ComposeSmokeTests(unittest.TestCase):
         self.assertNotIn("embedding_api", PGVECTOR_SMOKE_SQL.lower())
 
         execute.return_value.returncode = 1
+        execute.return_value.stderr = ""
+        execute.return_value.stdout = ""
         with self.assertRaisesRegex(RuntimeError, "pgvector"):
             verify_pgvector_compose()
 

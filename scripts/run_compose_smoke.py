@@ -26,7 +26,7 @@ DECLARE
     vector_column_count integer;
 BEGIN
     SELECT version_num INTO current_revision FROM alembic_version;
-    IF current_revision <> '0003_embedding_identity' THEN
+    IF current_revision <> '0006_run_idempotency' THEN
         RAISE EXCEPTION 'unexpected Alembic revision';
     END IF;
     SELECT count(*) INTO vector_extension_count FROM pg_extension WHERE extname = 'vector';
@@ -44,10 +44,12 @@ BEGIN
     END IF;
 END $$;
 
-INSERT INTO projects (id, name, description, created_at)
+INSERT INTO workspaces (id, name, kind, created_at)
+VALUES ('ci-rag-workspace', 'CI RAG workspace', 'personal', now());
+INSERT INTO projects (id, workspace_id, name, description, created_at)
 VALUES
-    ('ci-rag-project', 'CI RAG smoke', '', now()),
-    ('ci-rag-other', 'CI RAG other', '', now());
+    ('ci-rag-project', 'ci-rag-workspace', 'CI RAG smoke', '', now()),
+    ('ci-rag-other', 'ci-rag-workspace', 'CI RAG other', '', now());
 INSERT INTO documents (id, project_id, name, content, version, active, created_at)
 VALUES
     ('ci-rag-document', 'ci-rag-project', 'ci.md', 'test', 2, true, now()),
@@ -280,6 +282,12 @@ def verify_pgvector_compose() -> None:
         check=False,
     )
     if completed.returncode != 0:
+        diagnostic = (completed.stderr or completed.stdout or "").strip()
+        if diagnostic:
+            diagnostic = diagnostic[-2000:]
+            raise RuntimeError(
+                "PostgreSQL/pgvector Compose verification failed: " + diagnostic
+            )
         raise RuntimeError("PostgreSQL/pgvector Compose verification failed")
 
 
