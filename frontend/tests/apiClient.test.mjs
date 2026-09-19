@@ -5,6 +5,7 @@ import {
   ApiError,
   SESSION_EXPIRED_EVENT,
   apiJson,
+  apiJsonIdempotent,
   apiUrl,
   createBoundedSessionProbe,
   probeCurrentSession,
@@ -182,4 +183,85 @@ test("bounded session probe collapses parallel EventSource error checks", async 
   assert.equal(calls, 1);
   resolveProbe("active");
   assert.equal(await first, "active");
+});
+
+test("idempotent mutations reuse one key across a bounded network retry", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  const keys = [];
+  let calls = 0;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+    globalThis.document = originalDocument;
+  });
+  globalThis.document = { cookie: "loreguard_csrf=retry-token" };
+  globalThis.fetch = async (_url, init) => {
+    calls += 1;
+    keys.push(new Headers(init.headers).get("Idempotency-Key"));
+    if (calls === 1) throw new TypeError("network interrupted");
+    return new Response(JSON.stringify({ id: "run-1" }), { status: 202 });
+  };
+
+  assert.deepEqual(
+    await apiJsonIdempotent("/api/v1/projects/p-1/analysis-runs", {
+      method: "POST",
+    }),
+    { id: "run-1" },
+  );
+  assert.equal(calls, 2);
+  assert.equal(typeof keys[0], "string");
+  assert.ok(keys[0].length > 8);
+  assert.equal(keys[0], keys[1]);
+});
+
+test("idempotent mutations do not retry an HTTP response", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  let calls = 0;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+    globalThis.document = originalDocument;
+  });
+  globalThis.document = { cookie: "loreguard_csrf=retry-token" };
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ detail: "too many requests" }), {
+      status: 429,
+    });
+  };
+
+  await assert.rejects(
+    apiJsonIdempotent("/api/v1/projects/p-1/analysis-runs", { method: "POST" }),
+    (error) => error instanceof ApiError && error.status === 429,
+  );
+  assert.equal(calls, 1);
+});
+
+test("structured recoverable errors expose their safe user message", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+    globalThis.document = originalDocument;
+  });
+  globalThis.document = { cookie: "loreguard_csrf=retry-token" };
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        detail: {
+          code: "analysis_dispatch_failed",
+          message: "任务暂未进入执行队列，请稍后重试",
+          run_id: "run-safe",
+          retryable: true,
+        },
+      }),
+      { status: 503, statusText: "Service Unavailable" },
+    );
+
+  await assert.rejects(
+    apiJson("/api/v1/projects/p-1/analysis-runs", { method: "POST" }),
+    (error) =>
+      error instanceof ApiError &&
+      error.message === "任务暂未进入执行队列，请稍后重试",
+  );
 });

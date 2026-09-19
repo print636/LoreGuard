@@ -7,6 +7,7 @@ import {
 } from "../src/app/importPlan.ts";
 import {
   backendTimestamp,
+  projectNextAction,
   relativeProjectDate,
 } from "../src/app/projectPresentation.ts";
 
@@ -32,4 +33,30 @@ test("multi-file import defaults safely to chapter and preserves per-file roles"
   const updated = updateImportFileRole(initial, 0, "canon");
   assert.deepEqual(updated.map((entry) => entry.documentRole), ["canon", "chapter"]);
   assert.deepEqual(initial.map((entry) => entry.documentRole), ["chapter", "chapter"]);
+});
+
+test("project center actions lead to the precise next view", () => {
+  assert.deepEqual(
+    projectNextAction({ id: "p-1", active_document_count: 0, latest_run: null }),
+    { label: "导入第一份文稿", path: "/app/projects/p-1/documents" },
+  );
+  assert.deepEqual(
+    projectNextAction({
+      id: "p-1",
+      active_document_count: 2,
+      latest_run: { id: "r-1", status: "completed" },
+    }),
+    {
+      label: "查看最近报告",
+      path: "/app/projects/p-1/runs/r-1/report?category=all&status=all",
+    },
+  );
+  assert.deepEqual(
+    projectNextAction({
+      id: "p-1",
+      active_document_count: 2,
+      latest_run: { id: "r-2", status: "running" },
+    }),
+    { label: "查看校验进度", path: "/app/projects/p-1/runs/r-2" },
+  );
 });

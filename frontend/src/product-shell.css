@@ -426,7 +426,7 @@ body.loreguard-workspace { overflow: hidden; }
 
 .projectList { margin: 0; padding: 0; list-style: none; }
 .projectList li + li { border-top: 1px solid var(--color-border); }
-.productPage .projectRow { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(70px, .28fr) minmax(110px, .4fr) minmax(110px, .4fr) 28px; align-items: center; gap: var(--space-4); width: 100%; min-height: 82px; padding: var(--space-3) var(--space-2); text-align: left; border: 0; border-radius: 0; background: transparent; }
+.productPage .projectRow { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(70px, .25fr) minmax(100px, .34fr) minmax(100px, .34fr) minmax(130px, .46fr) 28px; align-items: center; gap: var(--space-4); width: 100%; min-height: 82px; padding: var(--space-3) var(--space-2); color: inherit; text-align: left; text-decoration: none; border: 0; border-radius: 0; background: transparent; }
 .projectRowIdentity { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: center; gap: var(--space-3); min-width: 0; }
 .projectRowIdentity > svg { width: 28px; height: 28px; color: var(--color-lavender); }
 .projectRowIdentity > span { min-width: 0; display: grid; gap: 2px; }
@@ -437,6 +437,7 @@ body.loreguard-workspace { overflow: hidden; }
 .projectRow > span > small { color: var(--color-text-muted); }
 .projectRow > span:not(.projectRowIdentity) { display: grid; gap: var(--space-1); }
 .projectRow > span > b { color: var(--color-text-secondary); font-size: 14px; }
+.projectRow .projectRowAction b { color: var(--color-cyan); }
 .rowChevron { color: var(--color-text-muted); }
 
 .projectEmpty,
@@ -481,8 +482,9 @@ body.loreguard-workspace { overflow: hidden; }
   .productPage .projectEntryActions button + button { border-left: 0; border-top: 1px solid var(--color-border); }
   .quickEntry form { grid-template-columns: 1fr; }
   .quickEntry form > * { grid-column: 1; }
-  .productPage .projectRow { grid-template-columns: minmax(220px, 1fr) minmax(90px, .3fr) minmax(90px, .4fr) 28px; }
-  .projectRow > span:nth-of-type(2) { display: none; }
+  .productPage .projectRow { grid-template-columns: minmax(220px, 1fr) minmax(90px, .3fr) minmax(130px, .45fr) 28px; }
+  .projectRow > span:nth-of-type(2),
+  .projectRow > span:nth-of-type(4) { display: none; }
 }
 
 @media (max-width: 767px) {
@@ -526,6 +528,8 @@ body.loreguard-workspace { overflow: hidden; }
   .searchField input { width: 100%; }
   .productPage .projectRow { grid-template-columns: minmax(0, 1fr) 26px; gap: var(--space-2); padding-block: var(--space-4); }
   .projectRow > span:not(.projectRowIdentity) { display: none; }
+  .projectRow > .projectRowAction { display: grid; grid-column: 1 / -1; padding-left: 48px; }
+  .projectRow .rowChevron { grid-column: 2; grid-row: 1; }
   .projectRowIdentity small { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .inlineError { align-items: stretch; flex-direction: column; }
   .accountSettingsMain { padding: 28px 16px 56px; }

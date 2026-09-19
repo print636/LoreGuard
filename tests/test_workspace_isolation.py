@@ -238,6 +238,16 @@ class WorkspaceIsolationTests(unittest.TestCase):
                 )
             self.assertEqual(202, started.status_code, started.text)
             dispatch.assert_called_once_with(started.json()["id"])
+            exact_run = owner.get(
+                f"/api/v1/analysis-runs/{started.json()['id']}"
+            )
+            self.assertEqual(project_ids[0], exact_run.json()["project_id"])
+            self.assertEqual(
+                404,
+                other.get(
+                    f"/api/v1/analysis-runs/{started.json()['id']}"
+                ).status_code,
+            )
             with SessionLocal() as db:
                 projects = db.scalars(
                     select(ProjectRow).where(ProjectRow.id.in_(project_ids))

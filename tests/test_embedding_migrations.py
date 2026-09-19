@@ -10,6 +10,8 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import MetaData, create_engine, inspect
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.schema import CreateIndex
 
 from app.db import Base
 from app import db as app_db
@@ -17,10 +19,31 @@ from app import db as app_db
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0005_workspace_isolation"
+HEAD_REVISION = "0006_run_idempotency"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
+    def test_run_idempotency_indexes_compile_for_sqlite_and_postgresql(self):
+        table = Base.metadata.tables["analysis_runs"]
+        indexes = {
+            item.name: item
+            for item in table.indexes
+            if item.name
+            in {
+                "uq_analysis_runs_project_id_idempotency_key",
+                "ix_analysis_runs_project_created_id",
+            }
+        }
+        self.assertEqual(2, len(indexes))
+        for dialect in (sqlite.dialect(), postgresql.dialect()):
+            for index in indexes.values():
+                sql = str(CreateIndex(index).compile(dialect=dialect))
+                self.assertIn("analysis_runs", sql)
+                self.assertIn(index.name, sql)
+        self.assertTrue(
+            indexes["uq_analysis_runs_project_id_idempotency_key"].unique
+        )
+
     def test_revision_identifiers_fit_default_alembic_version_column(self):
         config = Config(str(ROOT / "alembic.ini"))
         config.set_main_option("script_location", str(ROOT / "migrations"))
@@ -278,6 +301,66 @@ class EmbeddingMigrationTests(unittest.TestCase):
                         "SELECT version_num FROM alembic_version"
                     ).scalar_one(),
                 )
+            engine.dispose()
+
+    def test_run_idempotency_migration_adds_nullable_column_and_indexes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run-idempotency.db"
+            url = f"sqlite:///{path.as_posix()}"
+            self.upgrade_to(url, "0005_workspace_isolation")
+            engine = create_engine(url)
+            inspector = inspect(engine)
+            self.assertNotIn(
+                "idempotency_key",
+                {item["name"] for item in inspector.get_columns("analysis_runs")},
+            )
+            engine.dispose()
+
+            self.upgrade(url)
+            engine = create_engine(url)
+            inspector = inspect(engine)
+            columns = {
+                item["name"]: item
+                for item in inspector.get_columns("analysis_runs")
+            }
+            self.assertIn("idempotency_key", columns)
+            self.assertTrue(columns["idempotency_key"]["nullable"])
+            indexes = {
+                item["name"]: item
+                for item in inspector.get_indexes("analysis_runs")
+            }
+            self.assertEqual(
+                ["project_id", "idempotency_key"],
+                indexes["uq_analysis_runs_project_id_idempotency_key"][
+                    "column_names"
+                ],
+            )
+            self.assertTrue(
+                indexes["uq_analysis_runs_project_id_idempotency_key"]["unique"]
+            )
+            self.assertEqual(
+                ["project_id", "created_at", "id"],
+                indexes["ix_analysis_runs_project_created_id"]["column_names"],
+            )
+            engine.dispose()
+
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            config.attributes["database_url"] = url
+            command.downgrade(config, "0005_workspace_isolation")
+            engine = create_engine(url)
+            inspector = inspect(engine)
+            self.assertNotIn(
+                "idempotency_key",
+                {item["name"] for item in inspector.get_columns("analysis_runs")},
+            )
+            index_names = {
+                item["name"] for item in inspector.get_indexes("analysis_runs")
+            }
+            self.assertNotIn(
+                "uq_analysis_runs_project_id_idempotency_key", index_names
+            )
+            self.assertNotIn("ix_analysis_runs_project_created_id", index_names)
             engine.dispose()
 
     def test_incomplete_legacy_table_stops_before_head_stamp(self):

@@ -1,3 +1,42 @@
+import { reportSearch, workspacePath } from "../routing.ts";
+
+type ProjectEntrySummary = {
+  id: string;
+  active_document_count: number;
+  latest_run: { id: string; status: string } | null;
+};
+
+export function projectNextAction(
+  project: ProjectEntrySummary,
+): { label: string; path: string } {
+  const run = project.latest_run;
+  if (!run) {
+    return project.active_document_count > 0
+      ? { label: "准备首次校验", path: workspacePath("check", project.id) }
+      : { label: "导入第一份文稿", path: workspacePath("projects", project.id) };
+  }
+  if (run.status === "completed") {
+    return {
+      label: "查看最近报告",
+      path: `${workspacePath("report", project.id, run.id)}${reportSearch({
+        category: "all",
+        status: "all",
+        issueId: null,
+      })}`,
+    };
+  }
+  if (["queued", "running"].includes(run.status)) {
+    return {
+      label: "查看校验进度",
+      path: workspacePath("audit", project.id, run.id),
+    };
+  }
+  return {
+    label: run.status === "failed" ? "查看失败详情" : "查看取消详情",
+    path: workspacePath("audit", project.id, run.id),
+  };
+}
+
 export function backendTimestamp(value: string): number {
   const trimmed = value.trim();
   if (!trimmed) return Number.NaN;

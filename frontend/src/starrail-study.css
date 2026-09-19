@@ -186,8 +186,6 @@ button, .issues button {
 button:hover:not(:disabled), .issues button:hover:not(:disabled) { color: var(--text); border-color: rgba(139,233,240,.48); background: rgba(78,59,123,.56); transform: translateY(-1px); }
 button:active:not(:disabled) { transform: translateY(0); }
 button:disabled { opacity: .43; cursor: not-allowed; filter: saturate(.5); }
-.primary,
-.projectControls .primary,
 .startValidation {
   position: relative;
   color: #100b24 !important;
@@ -197,10 +195,10 @@ button:disabled { opacity: .43; cursor: not-allowed; filter: saturate(.5); }
   box-shadow: 0 8px 26px rgba(164,104,255,.25), 0 0 18px rgba(105,232,242,.14), inset 0 1px rgba(255,255,255,.42);
   text-shadow: 0 1px rgba(255,255,255,.32);
 }
-.primary:hover:not(:disabled), .startValidation:hover:not(:disabled) { color: #100b24 !important; filter: brightness(1.09); box-shadow: 0 11px 30px rgba(164,104,255,.32), 0 0 22px rgba(105,232,242,.19); }
-.primary span, .startValidation span { margin-right: 6px; }
+.startValidation:hover:not(:disabled) { color: #100b24 !important; filter: brightness(1.09); box-shadow: 0 11px 30px rgba(164,104,255,.32), 0 0 22px rgba(105,232,242,.19); }
+.startValidation span { margin-right: 6px; }
 .startValidation { min-height: 46px; padding-inline: 22px; }
-.projectControls .primary, .startValidation { width: auto; margin-top: 0; }
+.startValidation { width: auto; margin-top: 0; }
 
 .providerConnection, .projectPanel, .workspace, .runSnapshot, .records details, .visualization, .clarifications, .issues {
   border-color: var(--line);
@@ -246,7 +244,7 @@ select option { color: var(--text); background: #17112f; }
 .editors label { overflow: hidden; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--field); box-shadow: inset 0 1px rgba(255,255,255,.035); }
 .editors span { color: var(--lavender); border-bottom-color: var(--line); background: rgba(183,162,255,.04); }
 .editors textarea { color: var(--text); min-height: 270px; line-height: 1.8; caret-color: var(--cyan); }
-.quickMode button.active, .visualTabs button.active { color: #120d28; border-color: var(--lavender); background: linear-gradient(110deg, var(--lavender), var(--cyan)); }
+.quickMode button.active, .visualTabs button.active { color: var(--text); border-color: var(--lavender); background: rgba(183, 162, 255, .18); box-shadow: inset 3px 0 var(--cyan); }
 
 .tables > div { overflow: auto; border-color: var(--line); border-radius: 14px; background: rgba(13,10,30,.46); }
 .tables h3 { color: var(--lavender); border-bottom-color: var(--line); }

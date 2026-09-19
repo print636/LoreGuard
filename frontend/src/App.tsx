@@ -44,6 +44,11 @@ import {
 } from "./runSnapshot";
 import { describeRunUsage, type RunUsageInfo } from "./runUsage";
 import {
+  dispatchFailureRecovery,
+  resolveRunSelection,
+  terminalRunPath,
+} from "./runContinuity";
+import {
   docxImportBoundary,
   supportedUploadAccept,
   supportedUploadLabel,
@@ -61,14 +66,19 @@ import {
   type IssueEvidenceReviewDiagnosticView,
 } from "./issueEvidenceReview";
 import {
+  ApiError,
   apiJson,
+  apiJsonIdempotent,
   apiUrl,
   createBoundedSessionProbe,
 } from "./api/client";
 import {
   browserNavigate,
+  reportRouteStateFromSearch,
+  reportSearch,
   useWorkspaceRoute,
   workspacePath,
+  type IssueStatusFilter,
   type WorkspaceView,
 } from "./routing";
 import type { SessionIdentity } from "./app/session";
@@ -320,7 +330,8 @@ type AppProps = {
 };
 
 export default function App({ identity, onLoggedOut }: AppProps) {
-  const [activeView, setActiveView, routedProjectId] = useWorkspaceRoute();
+  const [activeView, setActiveView, routedProjectId, routedRunId, routeSearch] =
+    useWorkspaceRoute();
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState("");
   const [projectName, setProjectName] = useState("");
@@ -341,6 +352,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [records, setRecords] = useState<RecordRow[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [filter, setFilter] = useState("all");
+  const [issueStatusFilter, setIssueStatusFilter] =
+    useState<IssueStatusFilter>("all");
   const [busy, setBusy] = useState(false);
   const [runInfo, setRunInfo] = useState<RunInfo | null>(null);
   const [action, setAction] = useState("");
@@ -372,14 +385,26 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     useState<ProviderConnectionView>(unknownProviderConnection);
   const [providerChecking, setProviderChecking] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
+  const [routeProblem, setRouteProblem] = useState<{
+    projectId: string;
+    runId: string | null;
+    message: string;
+  } | null>(null);
   const streamRef = useRef<EventSource | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const viewEpochRef = useRef(0);
-  const loadedProjectRef = useRef("");
+  const loadedRouteRef = useRef("");
+  const runMutationRef = useRef(false);
+  const quickMutationRef = useRef(false);
+  const terminalHandledRef = useRef(new Set<string>());
   const visibleIssues = useMemo(
     () =>
-      filter === "all" ? issues : issues.filter((x) => x.category === filter),
-    [issues, filter],
+      issues.filter((issue) => {
+        if (filter !== "all" && issue.category !== filter) return false;
+        const feedback = feedbacks[issue.id]?.label || "unreviewed";
+        return issueStatusFilter === "all" || feedback === issueStatusFilter;
+      }),
+    [issues, filter, issueStatusFilter, feedbacks],
   );
   const modelStatus = useMemo(
     () => describeModelStatus(diagnostics.model),
@@ -416,6 +441,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   );
   const selectedRunUsage = useMemo(() => describeRunUsage(runInfo), [runInfo]);
   const selectedProject = projects.find((row) => row.id === project);
+  const activeDocuments = useMemo(
+    () => docs.filter((row) => row.active),
+    [docs],
+  );
 
   function clearAnalysisView() {
     streamRef.current?.close();
@@ -494,9 +523,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       setProjectsLoading(false);
     }
   }
-  async function loadProject(id: string, syncRoute = true) {
+  async function loadProject(
+    id: string,
+    syncRoute = true,
+    requestedRunId: string | null = null,
+  ) {
     const epoch = ++viewEpochRef.current;
-    loadedProjectRef.current = id;
+    loadedRouteRef.current = `${id}:${requestedRunId || ""}`;
+    setRouteProblem(null);
     if (syncRoute) {
       const nextPath = workspacePath(activeView, id || null);
       if (window.location.pathname !== nextPath) browserNavigate(nextPath);
@@ -540,16 +574,37 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         setDiffFrom(versionGroup[0].id);
         setDiffTo(versionGroup[versionGroup.length - 1].id);
       }
-      if (history[0]) await restoreRun(history[0], true, epoch);
-      else
+      const selection = resolveRunSelection(history, id, requestedRunId);
+      if (selection.kind === "not-found") {
+        setRouteProblem({
+          projectId: id,
+          runId: requestedRunId,
+          message: "这次运行不存在，或不属于当前项目。页面没有改为显示其他运行。",
+        });
+        setMessage("无法打开指定运行");
+        return;
+      }
+      if (selection.kind === "selected") {
+        await restoreRun(selection.run, true, epoch);
+      } else {
         setMessage(
           documentRows.length
             ? "项目已加载，尚未运行分析"
             : "项目已加载，请先上传剧情文档",
         );
+      }
     } catch (error) {
-      if (epoch === viewEpochRef.current)
-        setMessage(`加载项目失败：${String(error)}`);
+      if (epoch === viewEpochRef.current) {
+        setRouteProblem({
+          projectId: id,
+          runId: requestedRunId,
+          message:
+            error instanceof ApiError && error.status === 404
+              ? "这个项目不存在，或当前账户没有访问权限。"
+              : `暂时无法读取这个项目：${String(error)}`,
+        });
+        setMessage("加载项目失败");
+      }
     } finally {
       if (epoch === viewEpochRef.current) setProjectLoading(false);
     }
@@ -609,6 +664,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       const data = JSON.parse((event as MessageEvent).data);
       es.close();
       if (epoch !== viewEpochRef.current) return;
+      if (terminalHandledRef.current.has(runId)) return;
+      terminalHandledRef.current.add(runId);
       streamRef.current = null;
       setBusy(false);
       setAction("");
@@ -623,9 +680,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         );
         if (epoch !== viewEpochRef.current) return;
         setRunInfo(status);
-        if (data.status === "completed") await loadCompleted(runId, epoch);
+        if (data.status === "completed") {
+          await loadCompleted(runId, epoch);
+          if (epoch !== viewEpochRef.current) return;
+          loadedRouteRef.current = `${projectId}:${runId}`;
+          browserNavigate(terminalRunPath(data.status, projectId, runId));
+        }
         await Promise.all([loadProjects(), loadProjectRuns(projectId)]);
       } catch (error) {
+        terminalHandledRef.current.delete(runId);
         if (epoch === viewEpochRef.current)
           setMessage(
             `任务已结束，但结果加载失败：${String(error)}。可从运行历史再次恢复。`,
@@ -707,19 +770,30 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       setBusy(true);
       subscribe(info.id, info.project_id, epoch);
     }
+    if (activeView === "report") {
+      const routed = reportRouteStateFromSearch(window.location.search);
+      setFilter(routed.category);
+      setIssueStatusFilter(routed.status);
+      setFocusedIssue(routed.issueId);
+    }
   }
-  async function restoreSelectedRun(info: RunInfo) {
-    try {
-      setAction(`restore:${info.id}`);
-      await restoreRun(info);
-    } catch (error) {
-      setMessage(`恢复运行失败：${String(error)}`);
-    } finally {
-      setAction("");
+  function restoreSelectedRun(info: RunInfo) {
+    const view = info.status === "completed" ? "report" : "audit";
+    const query =
+      view === "report"
+        ? reportSearch({ category: "all", status: "all", issueId: null })
+        : "";
+    browserNavigate(`${workspacePath(view, info.project_id, info.id)}${query}`);
+    if (info.id === run && info.project_id === project) {
+      void restoreRun(info, true).catch((error) => {
+        setMessage(`恢复运行失败：${String(error)}`);
+      });
     }
   }
   async function runProject(id: string) {
     if (!id) throw new Error("请先选择项目");
+    if (runMutationRef.current) return;
+    runMutationRef.current = true;
     const epoch = ++viewEpochRef.current;
     setProject(id);
     setBusy(true);
@@ -736,25 +810,33 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setRunInfo(null);
     setProgress(0);
     setMessage("任务已提交（若服务器启用模型，可能消耗 Token）");
-    const created = await apiJson<RunInfo>(
-      `/api/v1/projects/${id}/analysis-runs`,
-      { method: "POST" },
-    );
-    if (epoch !== viewEpochRef.current) return;
-    setRun(created.id);
-    subscribe(created.id, id, epoch);
     try {
-      const status = await apiJson<RunInfo>(
-        `/api/v1/analysis-runs/${created.id}`,
+      const created = await apiJsonIdempotent<RunInfo>(
+        `/api/v1/projects/${id}/analysis-runs`,
+        { method: "POST" },
       );
       if (epoch !== viewEpochRef.current) return;
-      setRunInfo(status);
-      await loadProjectRuns(id);
-    } catch (error) {
-      if (epoch === viewEpochRef.current)
-        setMessage(
-          `任务已启动，但输入快照或运行历史暂时无法刷新：${String(error)}`,
+      setRun(created.id);
+      terminalHandledRef.current.delete(created.id);
+      loadedRouteRef.current = `${id}:${created.id}`;
+      browserNavigate(workspacePath("audit", id, created.id));
+      subscribe(created.id, id, epoch);
+      try {
+        const status = await apiJson<RunInfo>(
+          `/api/v1/analysis-runs/${created.id}`,
         );
+        if (epoch !== viewEpochRef.current) return;
+        setRunInfo(status);
+        await loadProjectRuns(id);
+      } catch (error) {
+        if (epoch === viewEpochRef.current) {
+          setMessage(
+            `任务已启动，但输入快照或运行历史暂时无法刷新：${String(error)}`,
+          );
+        }
+      }
+    } finally {
+      runMutationRef.current = false;
     }
   }
   async function startCurrentProject() {
@@ -762,6 +844,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       await runProject(project);
     } catch (error) {
       setBusy(false);
+      const recovery = dispatchFailureRecovery(error);
+      if (recovery && project) {
+        setMessage(`${recovery.message} 正在打开可恢复的失败运行。`);
+        browserNavigate(workspacePath("audit", project, recovery.runId));
+        return;
+      }
       setMessage(`启动分析失败：${String(error)}`);
     }
   }
@@ -845,6 +933,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     }
   }
   async function custom() {
+    if (quickMutationRef.current) return;
+    quickMutationRef.current = true;
     try {
       const inputs = quickTextDocuments({
         mode: quickMode,
@@ -877,6 +967,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       setBusy(false);
       setAction("");
       setMessage(String(error));
+    } finally {
+      quickMutationRef.current = false;
     }
   }
   async function cancel() {
@@ -891,11 +983,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     }
   }
   async function retry() {
+    if (runMutationRef.current) return;
     try {
       if (!run || !runInfo || !retryState(runInfo).allowed) return;
+      runMutationRef.current = true;
       const projectId = runInfo.project_id;
       const epoch = ++viewEpochRef.current;
-      const created = await apiJson<RunInfo>(
+      const created = await apiJsonIdempotent<RunInfo>(
         `/api/v1/analysis-runs/${run}/retry`,
         { method: "POST" },
       );
@@ -903,6 +997,9 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       setRun(created.id);
       setRunInfo(null);
       setBusy(true);
+      terminalHandledRef.current.delete(created.id);
+      loadedRouteRef.current = `${projectId}:${created.id}`;
+      browserNavigate(workspacePath("audit", projectId, created.id));
       setMessage(
         `重试已提交，继承运行 ${shortIdentifier(created.retried_from || run)} 的冻结输入（若服务器启用模型，可能消耗 Token）`,
       );
@@ -922,7 +1019,18 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       }
     } catch (error) {
       setBusy(false);
+      const recovery = dispatchFailureRecovery(error);
+      const recoveryProjectId = runInfo?.project_id || project;
+      if (recovery && recoveryProjectId) {
+        setMessage(`${recovery.message} 正在打开可恢复的失败运行。`);
+        browserNavigate(
+          workspacePath("audit", recoveryProjectId, recovery.runId),
+        );
+        return;
+      }
       setMessage(String(error));
+    } finally {
+      runMutationRef.current = false;
     }
   }
   async function submitFeedback(id: string, label: string) {
@@ -1011,6 +1119,41 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     }
   }
 
+  function updateReportRoute(
+    next: {
+      category?: string;
+      status?: IssueStatusFilter;
+      issueId?: string | null;
+    },
+    replace = false,
+  ) {
+    const state = {
+      category: next.category ?? filter,
+      status: next.status ?? issueStatusFilter,
+      issueId: next.issueId === undefined ? focusedIssue : next.issueId,
+    };
+    browserNavigate(
+      `${workspacePath("report", project || routedProjectId, run || routedRunId)}${reportSearch(state)}`,
+      { replace },
+    );
+  }
+
+  function navigateWorkspace(view: WorkspaceView) {
+    if (["audit", "report", "visual"].includes(view) && project && run) {
+      const query =
+        view === "report"
+          ? reportSearch({
+              category: filter,
+              status: issueStatusFilter,
+              issueId: focusedIssue,
+            })
+          : "";
+      browserNavigate(`${workspacePath(view, project, run)}${query}`);
+      return;
+    }
+    setActiveView(view);
+  }
+
   useEffect(() => {
     void loadProjects().catch((error) => setMessage(String(error)));
     void loadProviderHealth();
@@ -1027,9 +1170,27 @@ export default function App({ identity, onLoggedOut }: AppProps) {
 
   useEffect(() => {
     const targetProjectId = routedProjectId || "";
-    if (targetProjectId === loadedProjectRef.current) return;
-    void loadProject(targetProjectId, false);
-  }, [routedProjectId]);
+    const targetRoute = `${targetProjectId}:${routedRunId || ""}`;
+    if (targetRoute === loadedRouteRef.current) return;
+    void loadProject(targetProjectId, false, routedRunId);
+  }, [routedProjectId, routedRunId]);
+
+  useEffect(() => {
+    if (activeView !== "report") return;
+    const routed = reportRouteStateFromSearch(routeSearch);
+    setFilter(routed.category);
+    setIssueStatusFilter(routed.status);
+    setFocusedIssue(routed.issueId);
+  }, [activeView, routeSearch]);
+
+  useEffect(() => {
+    if (activeView !== "report" || !focusedIssue) return;
+    requestAnimationFrame(() => {
+      document.getElementById(`issue-${focusedIssue}`)?.scrollIntoView({
+        block: "nearest",
+      });
+    });
+  }, [activeView, focusedIssue, issues]);
 
   return (
     <>
@@ -1042,7 +1203,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       <header className="topBar">
         <button
           className="brand"
-          onClick={() => setActiveView("check")}
+          onClick={() => navigateWorkspace("check")}
           aria-label="返回文稿校验台"
         >
           <span className="brandSeal" aria-hidden="true">
@@ -1054,7 +1215,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </span>
         </button>
         <div className="topContext">
-          <button onClick={() => setActiveView("projects")}>
+          <button onClick={() => navigateWorkspace("projects")}>
             <small>当前项目</small>
             <b>{selectedProject?.name || "尚未选择项目"}</b>
             <span>
@@ -1065,7 +1226,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </button>
           <button
             className={`providerPill ${providerConnection.tone}`}
-            onClick={() => setActiveView("provider")}
+            onClick={() => navigateWorkspace("provider")}
           >
             <i aria-hidden="true" />
             <span>{providerConnection.label}</span>
@@ -1098,7 +1259,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           <button
             className="workspaceSecondaryAction"
             onClick={() => {
-              setActiveView("projects");
+              navigateWorkspace("projects");
               requestAnimationFrame(() =>
                 document.getElementById("project-name")?.focus(),
               );
@@ -1109,7 +1270,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           <button
             className="workspaceSecondaryAction"
             onClick={() => {
-              setActiveView("projects");
+              navigateWorkspace("projects");
               if (!project) setMessage("请先新建或选择项目，再导入文稿");
               requestAnimationFrame(() =>
                 document.getElementById("document-upload")?.focus(),
@@ -1120,23 +1281,9 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </button>
           <button
             className="reportShortcut workspaceSecondaryAction"
-            onClick={() => setActiveView("report")}
+            onClick={() => navigateWorkspace("report")}
           >
             查看报告 <span>{issues.length + clarifications.length}</span>
-          </button>
-          <button
-            className="primary topRunButton"
-            disabled={
-              !project ||
-              busy ||
-              projectLoading ||
-              docs.filter((row) => row.active).length === 0
-            }
-            title="分析当前项目；服务端启用模型时可能消耗 Token"
-            onClick={startCurrentProject}
-          >
-            <span aria-hidden="true">✦</span>
-            {busy ? "校验中…" : "开始校验"}
           </button>
         </div>
       </header>
@@ -1178,7 +1325,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                 aria-current={activeView === view ? "page" : undefined}
                 aria-label={label}
                 title={label}
-                onClick={() => setActiveView(view)}
+                onClick={() => navigateWorkspace(view)}
               >
                 <span className="navGlyph" aria-hidden="true">
                   {glyph}
@@ -1191,7 +1338,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           <div className="sideNavBottom">
             <button
               className={`navProvider ${providerConnection.tone}`}
-              onClick={() => setActiveView("provider")}
+              onClick={() => navigateWorkspace("provider")}
             >
               <i aria-hidden="true" />
               <span>
@@ -1236,7 +1383,28 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             </section>
           )}
 
-          {activeView === "provider" && (
+          {routeProblem && (
+            <section className="routeProblem workspaceView" role="status">
+              <p className="routeProblemCode">404 · 精确链接未找到</p>
+              <h2>{routeProblem.runId ? "无法打开这次运行" : "无法打开这个项目"}</h2>
+              <p>{routeProblem.message}</p>
+              <div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    browserNavigate(workspacePath("audit", routeProblem.projectId))
+                  }
+                >
+                  查看该项目的运行历史
+                </button>
+                <button type="button" onClick={() => browserNavigate("/app")}>
+                  返回项目中心
+                </button>
+              </div>
+            </section>
+          )}
+
+          {!routeProblem && activeView === "provider" && (
             <section
               className={`providerConnection ${providerConnection.tone}`}
               aria-live="polite"
@@ -1311,7 +1479,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             </section>
           )}
 
-          {(activeView === "projects" ||
+          {!routeProblem && (activeView === "projects" ||
             activeView === "diff" ||
             activeView === "audit") && (
             <section
@@ -1362,18 +1530,6 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       onClick={createProject}
                     >
                       {action === "create" ? "创建中…" : "新建项目"}
-                    </button>
-                    <button
-                      className="primary"
-                      disabled={
-                        !project ||
-                        busy ||
-                        projectLoading ||
-                        docs.filter((row) => row.active).length === 0
-                      }
-                      onClick={startCurrentProject}
-                    >
-                      分析当前项目（可能消耗 Token）
                     </button>
                   </div>
                   {projectLoading ? (
@@ -1609,14 +1765,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                                   </td>
                                   <td>
                                     <button
-                                      disabled={action.startsWith("restore:")}
                                       onClick={() =>
-                                        void restoreSelectedRun(row)
+                                        restoreSelectedRun(row)
                                       }
                                     >
-                                      {action === `restore:${row.id}`
-                                        ? "恢复中…"
-                                        : "恢复"}
+                                      {row.status === "completed"
+                                        ? "查看报告"
+                                        : ["queued", "running"].includes(row.status)
+                                          ? "查看进度"
+                                          : "查看详情"}
                                     </button>
                                   </td>
                                 </tr>
@@ -1752,158 +1909,113 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             </section>
           )}
 
-          {activeView === "check" && (
+          {!routeProblem && activeView === "check" && (
             <section className="workspace workspaceView">
-              <div className="sectionHead">
-                <div>
-                  <p className="eyebrow">QUICK TEXT</p>
-                  <h2>快速自然文本实验台</h2>
-                </div>
-                <button
-                  className="primary startValidation"
-                  disabled={busy}
-                  onClick={custom}
-                >
-                  <span aria-hidden="true">✦</span>
-                  {action === "custom"
-                    ? "校验中…"
-                    : "开始校验（可能消耗 Token）"}
-                </button>
-              </div>
-              <div className="quickMode">
-                <button
-                  className={quickMode === "body" ? "active" : ""}
-                  onClick={() => setQuickMode("body")}
-                >
-                  只有故事正文
-                </button>
-                <button
-                  className={quickMode === "advanced" ? "active" : ""}
-                  onClick={() => setQuickMode("advanced")}
-                >
-                  高级：设定 + 章节
-                </button>
-                <select
-                  aria-label="快速文本类型"
-                  disabled={quickMode === "advanced"}
-                  value={quickMode === "advanced" ? "chapter" : quickRole}
-                  onChange={(event) =>
-                    setQuickRole(event.target.value as DocumentRole)
-                  }
-                >
-                  {documentRoles.map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  aria-label="快速文本故事作用域"
-                  maxLength={80}
-                  value={quickScope}
-                  onChange={(event) => setQuickScope(event.target.value)}
-                  placeholder="故事作用域，默认 global"
-                />
-              </div>
-              {quickMode === "body" ? (
-                <div className="editors single">
-                  <label>
-                    <span>需要审查的故事正文 / chapter.md</span>
-                    <textarea
-                      value={chapter}
-                      onChange={(event) => setChapter(event.target.value)}
-                    />
-                  </label>
+              {project ? (
+                <div className="projectScanLaunch">
+                  <div className="scanLaunchHead">
+                    <div>
+                      <p className="eyebrow">FROZEN REVIEW INPUT</p>
+                      <h2>确认本次校验范围</h2>
+                      <p>
+                        开始后，服务端会冻结下面的活动版本。本次运行始终对应这组输入，后续更新文稿不会覆盖旧报告。
+                      </p>
+                    </div>
+                    <button
+                      className="startValidation"
+                      disabled={busy || projectLoading || activeDocuments.length === 0}
+                      onClick={startCurrentProject}
+                    >
+                      {busy ? "正在校验…" : "开始校验"}
+                    </button>
+                  </div>
+                  {activeDocuments.length ? (
+                    <div className="scanInputList" aria-label="即将冻结的活动文档">
+                      {activeDocuments.map((document) => (
+                        <div key={document.id}>
+                          <span>
+                            <b>{document.name}</b>
+                            <small>版本 v{document.version}</small>
+                          </span>
+                          <span>
+                            <small>文档类型</small>
+                            <b>
+                              {documentRoles.find(([value]) => value === document.document_role)?.[1] || document.document_role}
+                            </b>
+                          </span>
+                          <span>
+                            <small>故事作用域</small>
+                            <b>{document.story_scope}</b>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="scanInputEmpty">
+                      <b>还没有可校验的活动文档</b>
+                      <p>先导入正文、设定或参考资料，再回到这里确认范围。</p>
+                      <button type="button" onClick={() => navigateWorkspace("projects")}>
+                        前往导入文稿
+                      </button>
+                    </div>
+                  )}
+                  <div className="scanBoundaries">
+                    <section>
+                      <span className={`boundaryLight ${providerConnection.tone}`} aria-hidden="true" />
+                      <div>
+                        <b>模型准备状态</b>
+                        <p>{providerConnection.label}</p>
+                        <small>
+                          这是服务端配置或连接状态，不代表本次运行一定成功调用模型。实际参与情况以完成后的“模型语义覆盖”为准。
+                        </small>
+                      </div>
+                    </section>
+                    <section>
+                      <span className="boundaryLight ready" aria-hidden="true" />
+                      <div>
+                        <b>可恢复降级</b>
+                        <p>模型不可用时仍保留确定性检查结果</p>
+                        <small>报告会明确标注语义覆盖边界，不会把本地规则结果冒充模型判断。</small>
+                      </div>
+                    </section>
+                  </div>
+                  <p className="scanCostNote">启用模型时，本次校验可能消耗 Token。重复点击由一次性请求键保护。</p>
                 </div>
               ) : (
-                <div className="editors">
-                  <label>
-                    <span>可选权威设定 / world.md</span>
-                    <textarea
-                      value={world}
-                      onChange={(event) => setWorld(event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>待审章节 / chapter.md</span>
-                    <textarea
-                      value={chapter}
-                      onChange={(event) => setChapter(event.target.value)}
-                    />
-                  </label>
+                <div className="legacyQuickReview">
+                  <div className="sectionHead">
+                    <div>
+                      <p className="eyebrow">QUICK TEXT</p>
+                      <h2>快速自然文本实验台</h2>
+                      <p>这是无项目的快捷入口；开始后会创建一个独立项目，不会写入已有项目。</p>
+                    </div>
+                    <button className="startValidation" disabled={busy} onClick={custom}>
+                      {action === "custom" ? "正在校验…" : "开始校验"}
+                    </button>
+                  </div>
+                  <div className="quickMode">
+                    <button className={quickMode === "body" ? "active" : ""} onClick={() => setQuickMode("body")}>只有故事正文</button>
+                    <button className={quickMode === "advanced" ? "active" : ""} onClick={() => setQuickMode("advanced")}>高级：设定 + 章节</button>
+                    <select aria-label="快速文本类型" disabled={quickMode === "advanced"} value={quickMode === "advanced" ? "chapter" : quickRole} onChange={(event) => setQuickRole(event.target.value as DocumentRole)}>
+                      {documentRoles.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </select>
+                    <input aria-label="快速文本故事作用域" maxLength={80} value={quickScope} onChange={(event) => setQuickScope(event.target.value)} placeholder="故事作用域，默认 global" />
+                  </div>
+                  {quickMode === "body" ? (
+                    <div className="editors single"><label><span>需要审查的故事正文 / chapter.md</span><textarea value={chapter} onChange={(event) => setChapter(event.target.value)} /></label></div>
+                  ) : (
+                    <div className="editors">
+                      <label><span>可选权威设定 / world.md</span><textarea value={world} onChange={(event) => setWorld(event.target.value)} /></label>
+                      <label><span>待审章节 / chapter.md</span><textarea value={chapter} onChange={(event) => setChapter(event.target.value)} /></label>
+                    </div>
+                  )}
+                  <p className="contextHint">高级模式会把设定标为“权威世界观”、章节标为“故事正文”；只有正文时无需提前准备世界观。启用模型时可能消耗 Token。</p>
                 </div>
               )}
-              <p className="contextHint">
-                高级模式会把设定标为“权威世界观”、章节标为“故事正文”；只有正文时无需提前准备世界观。
-              </p>
-              <div className="visualDeck">
-                <article>
-                  <span className="navGlyph" aria-hidden="true">
-                    RG
-                  </span>
-                  <div>
-                    <b>角色关系预览</b>
-                    <small>
-                      {graph
-                        ? `${graph.nodes.length} 个节点已就绪`
-                        : "按需生成，不自动请求"}
-                    </small>
-                  </div>
-                  <button
-                    disabled={
-                      !run ||
-                      runInfo?.status !== "completed" ||
-                      visualLoading !== null
-                    }
-                    onClick={() =>
-                      graph
-                        ? setActiveView("visual")
-                        : void loadVisualization("graph")
-                    }
-                  >
-                    {visualLoading === "graph"
-                      ? "生成中…"
-                      : graph
-                        ? "查看"
-                        : "生成"}
-                  </button>
-                </article>
-                <article>
-                  <span className="navGlyph" aria-hidden="true">
-                    TL
-                  </span>
-                  <div>
-                    <b>故事时间线</b>
-                    <small>
-                      {timeline
-                        ? `${timeline.groups.reduce((count, group) => count + group.entries.length, 0) + timeline.unscheduled.length} 个事件已就绪`
-                        : "按需生成，不自动请求"}
-                    </small>
-                  </div>
-                  <button
-                    disabled={
-                      !run ||
-                      runInfo?.status !== "completed" ||
-                      visualLoading !== null
-                    }
-                    onClick={() =>
-                      timeline
-                        ? setActiveView("visual")
-                        : void loadVisualization("timeline")
-                    }
-                  >
-                    {visualLoading === "timeline"
-                      ? "生成中…"
-                      : timeline
-                        ? "查看"
-                        : "生成"}
-                  </button>
-                </article>
-              </div>
             </section>
           )}
 
-          {activeView === "audit" && (
+          {!routeProblem && activeView === "audit" && (
             <>
               <section className="status" aria-live="polite">
                 <div>
@@ -2151,7 +2263,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               </details>
             </section>
           )}
-          {activeView === "visual" && (
+          {!routeProblem && activeView === "visual" && (
             <section className="visualization workspaceView">
               <div className="sectionHead">
                 <div>
@@ -2216,7 +2328,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               )}
             </section>
           )}
-          {activeView === "report" && (
+          {!routeProblem && activeView === "report" && (
             <>
               <section className="clarifications workspaceView">
                 <div className="sectionHead">
@@ -2276,17 +2388,46 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       已确认的一致性问题 <em>{visibleIssues.length}</em>
                     </h2>
                   </div>
-                  <select
-                    value={filter}
-                    onChange={(event) => setFilter(event.target.value)}
-                  >
-                    <option value="all">全部类别</option>
-                    {Object.entries(categoryNames).map(([key, value]) => (
-                      <option key={key} value={key}>
-                        {value}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="reportFilters" aria-label="报告筛选">
+                    <label>
+                      <span>问题类别</span>
+                      <select
+                        value={filter}
+                        onChange={(event) =>
+                          updateReportRoute(
+                            { category: event.target.value, issueId: null },
+                            true,
+                          )
+                        }
+                      >
+                        <option value="all">全部类别</option>
+                        {Object.entries(categoryNames).map(([key, value]) => (
+                          <option key={key} value={key}>{value}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>反馈状态</span>
+                      <select
+                        value={issueStatusFilter}
+                        onChange={(event) =>
+                          updateReportRoute(
+                            {
+                              status: event.target.value as IssueStatusFilter,
+                              issueId: null,
+                            },
+                            true,
+                          )
+                        }
+                      >
+                        <option value="all">全部状态</option>
+                        <option value="unreviewed">未反馈</option>
+                        <option value="accepted">已接受</option>
+                        <option value="false_positive">误报</option>
+                        <option value="resolved">已解决</option>
+                      </select>
+                    </label>
+                  </div>
                 </div>
                 {issues.length === 0 && !busy && (
                   <div className="empty">
@@ -2297,7 +2438,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                 )}
                 {issues.length > 0 && visibleIssues.length === 0 && (
                   <div className="empty">
-                    当前筛选类别没有问题，请切换到“全部类别”。
+                    当前类别与反馈状态下没有问题，请调整筛选条件。
                   </div>
                 )}
                 {visibleIssues.map((issue, index) => {
@@ -2307,11 +2448,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   );
                   return (
                     <article
+                      id={`issue-${issue.id}`}
                       key={issue.id}
                       className={
                         focusedIssue === issue.id ? "focusedIssue" : ""
                       }
-                      onClick={() => setFocusedIssue(issue.id)}
                     >
                       <div className="rank">
                         {String(index + 1).padStart(2, "0")}
@@ -2323,6 +2464,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                           {(issue.confidence * 100).toFixed(0)}%
                         </p>
                         <h3>{issue.title}</h3>
+                        <button
+                          className="issuePermalink"
+                          type="button"
+                          aria-pressed={focusedIssue === issue.id}
+                          onClick={() => updateReportRoute({ issueId: issue.id })}
+                        >
+                          {focusedIssue === issue.id ? "当前选中问题" : "选中并写入链接"}
+                        </button>
                         <p>{issue.explanation}</p>
                         <div className="evidence">
                           {issue.evidence.map((evidence, index) => (
@@ -2447,7 +2596,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   {retryState(runInfo).label}
                 </button>
               )}
-              <button onClick={() => setActiveView("audit")}>运行审计</button>
+              <button onClick={() => navigateWorkspace("audit")}>运行审计</button>
             </div>
           </section>
           <section className="railSummary" aria-label="运行摘要">
@@ -2477,7 +2626,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             <section className="issuePreview">
               <div className="railSectionHead">
                 <h3>问题预览</h3>
-                <button onClick={() => setActiveView("report")}>
+                <button onClick={() => navigateWorkspace("report")}>
                   全部 {issues.length}
                 </button>
               </div>
@@ -2493,8 +2642,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     className={`issuePreviewCard ${focusedIssue === issue.id ? "focused" : ""}`}
                     key={issue.id}
                     onClick={() => {
-                      setFocusedIssue(issue.id);
-                      setActiveView("report");
+                      updateReportRoute({ issueId: issue.id });
                     }}
                   >
                     <span>
@@ -2519,7 +2667,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   <span>{clarifications.length}</span>
                 </div>
                 {clarifications.slice(0, 2).map((item) => (
-                  <button key={item.id} onClick={() => setActiveView("report")}>
+                  <button key={item.id} onClick={() => navigateWorkspace("report")}>
                     <span>{clarificationKindName(item.kind)}</span>
                     <b>{item.text}</b>
                   </button>
@@ -2529,7 +2677,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </div>
           <button
             className="railReportButton"
-            onClick={() => setActiveView("report")}
+            onClick={() => navigateWorkspace("report")}
           >
             查看完整报告 <span>{issues.length + clarifications.length}</span>
           </button>

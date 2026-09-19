@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Thread
@@ -14,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
@@ -25,7 +28,21 @@ from .auth import (
     require_csrf,
     router as auth_router,
 )
-from .db import AnalysisDiagnosticRow, AnalysisRecordRow, AnalysisRunExecutionRow, AnalysisRunInputRow, AnalysisRunRow, DocumentContextRow, DocumentRow, FeedbackRow, IssueRow, ProjectRow, RunEventRow, SessionLocal, init_db
+from .db import (
+    AnalysisDiagnosticRow,
+    AnalysisRecordRow,
+    AnalysisRunExecutionRow,
+    AnalysisRunInputRow,
+    AnalysisRunRow,
+    DocumentContextRow,
+    DocumentRow,
+    FeedbackRow,
+    IssueRow,
+    ProjectRow,
+    RunEventRow,
+    SessionLocal,
+    init_db,
+)
 from .document_diff import build_document_diff
 from .docx_import import DocxImportError, extract_docx_text
 from .domain import CertaintyLevel, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
@@ -40,7 +57,17 @@ from .provider import (
 )
 from .rate_limit import SlidingWindowLimiter, WriteRateLimitMiddleware
 from .runtime_provenance import safe_runtime_provenance
-from .service import DEFAULT_DOCUMENT_ROLE, DEFAULT_STORY_SCOPE, MISSING_SNAPSHOT_ERROR, capture_run_inputs, copy_run_inputs, execute_analysis, run_input_metadata, safe_persisted_analysis_error
+from .service import (
+    DEFAULT_DOCUMENT_ROLE,
+    DEFAULT_STORY_SCOPE,
+    DISPATCH_FAILED_ERROR,
+    MISSING_SNAPSHOT_ERROR,
+    capture_run_inputs,
+    copy_run_inputs,
+    execute_analysis,
+    run_input_metadata,
+    safe_persisted_analysis_error,
+)
 from .time_utils import utc_now_naive
 
 @asynccontextmanager
@@ -62,7 +89,7 @@ app.add_middleware(
     allow_origins=settings.parsed_cors_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Accept", "Content-Type", "X-CSRF-Token"],
+    allow_headers=["Accept", "Content-Type", "X-CSRF-Token", "Idempotency-Key"],
     expose_headers=["X-CSRF-Token"],
 )
 app.include_router(auth_router)
@@ -300,6 +327,140 @@ def dispatch_analysis(run_id: str) -> None:
         analyze_project.delay(run_id)
     else:
         Thread(target=execute_analysis, args=(run_id,), daemon=True).start()
+
+
+def _normalize_idempotency_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(400, "Idempotency-Key 不能为空")
+    if len(normalized) > 128 or re.fullmatch(r"[A-Za-z0-9._:-]+", normalized) is None:
+        raise HTTPException(
+            400,
+            "Idempotency-Key 仅支持 1–128 位字母、数字及 . _ : -",
+        )
+    return normalized
+
+
+def _idempotent_run(
+    db, project_id: str, idempotency_key: str | None
+) -> AnalysisRunRow | None:
+    if idempotency_key is None:
+        return None
+    return db.scalar(
+        select(AnalysisRunRow).where(
+            AnalysisRunRow.project_id == project_id,
+            AnalysisRunRow.idempotency_key == idempotency_key,
+        )
+    )
+
+
+def _create_run_or_load_winner(
+    db,
+    run: AnalysisRunRow,
+    idempotency_key: str | None,
+    prepare: Callable[[AnalysisRunRow], object],
+) -> tuple[AnalysisRunRow, bool]:
+    """Create a run and snapshot, or load the concurrent winner for its key.
+
+    The pre-insert lookup is only a fast path.  Correctness comes from the
+    database unique index and this IntegrityError recovery path.
+    """
+    project_id = run.project_id
+    try:
+        db.add(run)
+        db.flush()
+        prepare(run)
+        db.commit()
+        return run, True
+    except IntegrityError:
+        db.rollback()
+        winner = _idempotent_run(db, project_id, idempotency_key)
+        if winner is None:
+            raise
+        return winner, False
+
+
+def _accepted_run_payload(db, run: AnalysisRunRow, *, created: bool) -> dict:
+    execution = db.get(AnalysisRunExecutionRow, run.id)
+    return {
+        "id": run.id,
+        "project_id": run.project_id,
+        "status": run.status,
+        "retried_from": execution.retried_from_run_id if execution else None,
+        "deduplicated": not created,
+    }
+
+
+def _require_idempotency_operation(
+    db,
+    run: AnalysisRunRow,
+    *,
+    retried_from_run_id: str | None,
+) -> None:
+    """Reject reuse of a project-scoped key for a different user intent."""
+    execution = db.get(AnalysisRunExecutionRow, run.id)
+    actual_source = execution.retried_from_run_id if execution else None
+    if actual_source == retried_from_run_id:
+        return
+    raise HTTPException(
+        409,
+        detail={
+            "code": "idempotency_key_conflict",
+            "message": "这个 Idempotency-Key 已用于另一项分析操作，请为新操作生成新键",
+        },
+    )
+
+
+def _mark_dispatch_failure(run_id: str) -> bool:
+    """Persist a safe terminal state if scheduling fails before worker claim."""
+    with SessionLocal() as db:
+        changed = db.execute(
+            update(AnalysisRunRow)
+            .where(
+                AnalysisRunRow.id == run_id,
+                AnalysisRunRow.status == "queued",
+            )
+            .values(
+                status="failed",
+                error=DISPATCH_FAILED_ERROR,
+                completed_at=utc_now_naive(),
+            )
+        ).rowcount
+        if changed != 1:
+            db.rollback()
+            return False
+        db.add(
+            RunEventRow(
+                run_id=run_id,
+                stage="failed",
+                progress=100,
+                message="任务调度失败，输入快照已保留，可稍后重试",
+            )
+        )
+        db.commit()
+        return True
+
+
+def _dispatch_created_run(run_id: str) -> None:
+    try:
+        dispatch_analysis(run_id)
+    except Exception:
+        marked_failed = _mark_dispatch_failure(run_id)
+        if marked_failed:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "analysis_dispatch_failed",
+                    "message": "任务暂未进入执行队列，请稍后重试",
+                    "run_id": run_id,
+                    "retryable": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from None
+        # A worker may have claimed the run in the narrow interval after a
+        # transport-ambiguous dispatch.  Do not overwrite that durable state.
 
 
 def enforce_daily_model_budget(db, workspace_id: str | None = None) -> None:
@@ -901,11 +1062,21 @@ async def upload_document(
 @app.post("/api/v1/projects/{project_id}/analysis-runs", status_code=202)
 def start_analysis(
     project_id: str,
+    idempotency_key_header: Annotated[
+        str | None, Header(alias="Idempotency-Key", max_length=128)
+    ] = None,
     context: AuthContext = Depends(require_csrf),
 ) -> dict:
+    idempotency_key = _normalize_idempotency_key(idempotency_key_header)
     with SessionLocal() as db:
         if not _project_in_workspace(db, project_id, context.workspace_id):
             raise HTTPException(404, "项目不存在")
+        existing = _idempotent_run(db, project_id, idempotency_key)
+        if existing is not None:
+            _require_idempotency_operation(
+                db, existing, retried_from_run_id=None
+            )
+            return _accepted_run_payload(db, existing, created=False)
         documents = db.scalars(
             select(DocumentRow)
             .where(DocumentRow.project_id == project_id, DocumentRow.active.is_(True))
@@ -917,14 +1088,20 @@ def start_analysis(
         run = AnalysisRunRow(
             project_id=project_id,
             requested_by_user_id=context.user_id,
+            idempotency_key=idempotency_key,
         )
-        db.add(run)
-        db.flush()
-        capture_run_inputs(db, run, list(documents))
-        db.commit()
+        run, created = _create_run_or_load_winner(
+            db,
+            run,
+            idempotency_key,
+            lambda created_run: capture_run_inputs(db, created_run, list(documents)),
+        )
+        _require_idempotency_operation(db, run, retried_from_run_id=None)
+        payload = _accepted_run_payload(db, run, created=created)
         run_id = run.id
-    dispatch_analysis(run_id)
-    return {"id": run_id, "status": "queued"}
+    if created:
+        _dispatch_created_run(run_id)
+    return payload
 
 
 @app.get("/api/v1/analysis-runs/{run_id}")
@@ -949,7 +1126,10 @@ def list_analysis_runs(
         rows = db.scalars(
             select(AnalysisRunRow)
             .where(AnalysisRunRow.project_id == project_id)
-            .order_by(AnalysisRunRow.created_at.desc())
+            .order_by(
+                AnalysisRunRow.created_at.desc(),
+                AnalysisRunRow.id.desc(),
+            )
         ).all()
         return [serialize_run(row, db) for row in rows]
 
@@ -1014,11 +1194,21 @@ def cancel_run(
 @app.post("/api/v1/analysis-runs/{run_id}/retry", status_code=202)
 def retry_run(
     run_id: str,
+    idempotency_key_header: Annotated[
+        str | None, Header(alias="Idempotency-Key", max_length=128)
+    ] = None,
     context: AuthContext = Depends(require_csrf),
 ) -> dict:
+    idempotency_key = _normalize_idempotency_key(idempotency_key_header)
     with SessionLocal() as db:
         old = _run_in_workspace(db, run_id, context.workspace_id)
         if not old: raise HTTPException(404, "分析任务不存在")
+        existing = _idempotent_run(db, old.project_id, idempotency_key)
+        if existing is not None:
+            _require_idempotency_operation(
+                db, existing, retried_from_run_id=run_id
+            )
+            return _accepted_run_payload(db, existing, created=False)
         if old.status not in {"failed", "cancelled"}:
             raise HTTPException(409, "仅失败或已取消任务可以重试")
         snapshot_count = db.scalar(
@@ -1032,14 +1222,22 @@ def retry_run(
         row = AnalysisRunRow(
             project_id=old.project_id,
             requested_by_user_id=context.user_id,
+            idempotency_key=idempotency_key,
         )
-        db.add(row)
-        db.flush()
-        copy_run_inputs(db, old.id, row)
-        db.commit()
+        row, created = _create_run_or_load_winner(
+            db,
+            row,
+            idempotency_key,
+            lambda created_run: copy_run_inputs(db, old.id, created_run),
+        )
+        _require_idempotency_operation(
+            db, row, retried_from_run_id=run_id
+        )
+        payload = _accepted_run_payload(db, row, created=created)
         new_id = row.id
-    dispatch_analysis(new_id)
-    return {"id": new_id, "status": "queued", "retried_from": run_id}
+    if created:
+        _dispatch_created_run(new_id)
+    return payload
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/issues")

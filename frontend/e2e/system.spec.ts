@@ -102,6 +102,26 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
 
   let workerPaused = false;
   let eventRequests = 0;
+  let replayedRunId = "";
+  let runCreateRequests = 0;
+  await page.route("**/api/v1/projects/*/analysis-runs", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    runCreateRequests += 1;
+    const headers = route.request().headers();
+    expect(headers["idempotency-key"]).toBeTruthy();
+    const primary = await route.fetch();
+    const replay = await page.request.post(route.request().url(), { headers });
+    expect(replay.status()).toBe(202);
+    const primaryPayload = await primary.json();
+    const replayPayload = await replay.json();
+    expect(replayPayload.id).toBe(primaryPayload.id);
+    expect(replayPayload.deduplicated).toBe(true);
+    replayedRunId = primaryPayload.id;
+    await route.fulfill({ response: primary });
+  });
   await page.route("**/api/v1/analysis-runs/*/events", async (route) => {
     eventRequests += 1;
     if (eventRequests === 1) await route.abort("connectionrefused");
@@ -111,9 +131,18 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
   try {
     compose("pause", "worker");
     workerPaused = true;
-    await projectControls
-      .getByRole("button", { name: /分析当前项目/ })
-      .click();
+    await page.getByRole("button", { name: "文稿校验", exact: true }).click();
+    const startButton = page.getByRole("button", { name: "开始校验", exact: true });
+    await expect(startButton).toHaveCount(1);
+    await startButton.evaluate((button: HTMLButtonElement) => {
+      button.click();
+      button.click();
+    });
+
+    await expect.poll(() => runCreateRequests).toBe(1);
+    await expect.poll(() => replayedRunId).not.toBe("");
+    const preciseRunPath = `/app/projects/${projectValueFromUrl(page.url())}/runs/${replayedRunId}`;
+    await expect(page).toHaveURL(new RegExp(`${escapeRegex(preciseRunPath)}$`));
 
     await expect(page.locator(".railLive")).toContainText("正在校验");
     await expect(page.locator(".railLive")).toContainText(
@@ -121,19 +150,10 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
     );
     await expect.poll(() => eventRequests).toBeGreaterThanOrEqual(2);
 
+    const exactQueuedUrl = page.url();
     await page.reload();
-    await page.getByRole("button", { name: "项目与文档" }).click();
-    const projectSelect = page.getByLabel("选择项目");
-    const projectValue = await projectSelect
-      .locator("option")
-      .filter({ hasText: projectName })
-      .getAttribute("value");
-    expect(projectValue).toBeTruthy();
-    await projectSelect.selectOption(projectValue!);
-    await expect(page.getByText(`当前：${projectName}`, { exact: false })).toBeVisible();
-    await page.getByRole("button", { name: "运行审计" }).first().click();
+    await expect(page).toHaveURL(exactQueuedUrl);
     await expect(page.locator(".tables .badge.queued")).toBeVisible();
-    await page.locator(".tables").getByRole("button", { name: "恢复" }).click();
     await expect(page.locator(".railLive")).toContainText("正在校验");
 
     compose("unpause", "worker");
@@ -142,8 +162,12 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
       "运行 completed",
       { timeout: 45_000 },
     );
-
+    await expect(page).toHaveURL(
+      new RegExp(`${escapeRegex(preciseRunPath)}/report\\?category=all&status=all$`),
+    );
+    const reportUrl = page.url();
     await page.getByRole("button", { name: "完整报告", exact: true }).click();
+    await expect(page).toHaveURL(reportUrl);
     const issueCards = page.locator(".issues article");
     await expect(issueCards).toHaveCount(1);
     await expect(issueCards.first()).toContainText("事实冲突");
@@ -153,6 +177,12 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
     await expect(issueCards.first()).toContainText("林澈的发色是黑色。");
     const issueTexts = await issueCards.allTextContents();
     expect(new Set(issueTexts).size).toBe(issueTexts.length);
+    await issueCards.first().getByRole("button", { name: "选中并写入链接" }).click();
+    await expect(page).toHaveURL(/&issue=[A-Za-z0-9_-]+$/);
+    const selectedIssueUrl = page.url();
+    await page.reload();
+    await expect(page).toHaveURL(selectedIssueUrl);
+    await expect(issueCards.first()).toHaveClass(/focusedIssue/);
 
     await page.getByRole("button", { name: "运行审计" }).first().click();
     await page
@@ -174,3 +204,13 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
 
   expect([...browserApiOrigins]).toEqual(["http://127.0.0.1:8080"]);
 });
+
+function projectValueFromUrl(value: string): string {
+  const match = new URL(value).pathname.match(/^\/app\/projects\/([^/]+)\//);
+  if (!match) throw new Error(`project route missing from ${value}`);
+  return decodeURIComponent(match[1]);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

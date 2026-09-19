@@ -139,6 +139,15 @@ function errorMessage(payload: unknown, response: Response): string {
   if (payload && typeof payload === "object" && "detail" in payload) {
     const detail = (payload as { detail?: unknown }).detail;
     if (typeof detail === "string" && detail.trim()) return detail;
+    if (
+      detail &&
+      typeof detail === "object" &&
+      "message" in detail &&
+      typeof (detail as { message?: unknown }).message === "string" &&
+      (detail as { message: string }).message.trim()
+    ) {
+      return (detail as { message: string }).message;
+    }
   }
   return response.statusText || `HTTP ${response.status}`;
 }
@@ -174,4 +183,34 @@ export async function apiJson<T = unknown>(
   if (response.status === 204) return undefined as T;
 
   return payload as T;
+}
+
+export function createIdempotencyKey(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  const random = Math.random().toString(36).slice(2);
+  return `lg-${Date.now().toString(36)}-${random}`;
+}
+
+/**
+ * Submit a mutation that may safely retry once after a transport failure. The
+ * key is created before the first attempt and deliberately reused by every
+ * attempt in this call; HTTP responses are never retried here.
+ */
+export async function apiJsonIdempotent<T = unknown>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (!headers.has("Idempotency-Key")) {
+    headers.set("Idempotency-Key", createIdempotencyKey());
+  }
+  const request = { ...init, headers };
+  try {
+    return await apiJson<T>(path, request);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    return apiJson<T>(path, request);
+  }
 }

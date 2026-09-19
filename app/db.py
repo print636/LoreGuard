@@ -15,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Integer,
+    Index,
     JSON,
     String,
     Text,
@@ -146,8 +147,26 @@ class DocumentContextRow(Base):
 
 class AnalysisRunRow(Base):
     __tablename__ = "analysis_runs"
+    __table_args__ = (
+        Index(
+            "uq_analysis_runs_project_id_idempotency_key",
+            "project_id",
+            "idempotency_key",
+            unique=True,
+        ),
+        Index(
+            "ix_analysis_runs_project_created_id",
+            "project_id",
+            "created_at",
+            "id",
+        ),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    # Optional so legacy and non-idempotent clients remain compatible.  A key
+    # is scoped to one project by the unique index above; nullable keys may
+    # appear on any number of ordinary runs on both PostgreSQL and SQLite.
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Nullable by design so audit history survives future user deletion.  The
     # HTTP creation paths always populate it; the ownership migration backfills
     # legacy rows to the fixed local identity.

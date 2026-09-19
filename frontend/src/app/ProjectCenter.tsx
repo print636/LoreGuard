@@ -1,4 +1,11 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  MouseEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { apiJson } from "../api/client";
 import { browserNavigate, workspacePath } from "../routing";
 import { documentRoles, type DocumentRole } from "../documentContext";
@@ -8,7 +15,11 @@ import {
   updateImportFileRole,
   type ImportFilePlan,
 } from "./importPlan";
-import { backendTimestamp, relativeProjectDate } from "./projectPresentation";
+import {
+  backendTimestamp,
+  projectNextAction,
+  relativeProjectDate,
+} from "./projectPresentation";
 import { apiErrorDetail, type SessionIdentity } from "./session";
 
 type RunSummary = {
@@ -67,6 +78,21 @@ function statusLabel(status: string | undefined): string {
     cancelled: "已取消",
   };
   return status ? labels[status] || status : "尚未校验";
+}
+
+function followSpaLink(event: MouseEvent<HTMLAnchorElement>) {
+  if (
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  ) {
+    return;
+  }
+  event.preventDefault();
+  browserNavigate(event.currentTarget.getAttribute("href") || "/app");
 }
 
 export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterProps) {
@@ -379,17 +405,21 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
             </div>
           ) : (
             <ul className="projectList">
-              {visibleProjects.map((project) => (
+              {visibleProjects.map((project) => {
+                const nextAction = projectNextAction(project);
+                return (
                 <li key={project.id}>
-                  <button type="button" className="projectRow" onClick={() => browserNavigate(workspacePath("check", project.id))}>
+                  <a className="projectRow" href={nextAction.path} onClick={followSpaLink}>
                     <span className="projectRowIdentity"><ProjectIcon /><span><strong>{project.name}</strong><small>{project.description || "尚未添加项目说明"}</small></span></span>
                     <span><small>文档</small><b>{project.active_document_count}</b></span>
                     <span><small>最近运行</small><b>{statusLabel(project.latest_run?.status)}</b></span>
                     <span><small>创建时间</small><b>{relativeProjectDate(project.created_at)}</b></span>
+                    <span className="projectRowAction"><small>下一步</small><b>{nextAction.label}</b></span>
                     <svg className="rowChevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
-                  </button>
+                  </a>
                 </li>
-              ))}
+                );
+              })}
             </ul>
           )}
         </section>

@@ -56,6 +56,9 @@ CORRUPT_SNAPSHOT_ERROR = (
 INTERNAL_ANALYSIS_ERROR = (
     "ANALYSIS_EXECUTION_FAILED: 分析执行失败，内部错误详情已隐藏；请重试任务"
 )
+DISPATCH_FAILED_ERROR = (
+    "ANALYSIS_DISPATCH_FAILED: 分析任务未能进入执行队列；输入快照已保留，可安全重试"
+)
 
 _SAFE_INTERRUPTED_PROVIDER_CATEGORIES = {
     "success",
@@ -108,6 +111,8 @@ def safe_persisted_analysis_error(value: object) -> str | None:
         return CORRUPT_SNAPSHOT_ERROR
     if message == INTERNAL_ANALYSIS_ERROR:
         return INTERNAL_ANALYSIS_ERROR
+    if message == DISPATCH_FAILED_ERROR:
+        return DISPATCH_FAILED_ERROR
     return INTERNAL_ANALYSIS_ERROR
 
 

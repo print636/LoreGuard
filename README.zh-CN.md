@@ -136,9 +136,13 @@ Evidence RAG 已实现独立显式配置的 OpenAI-compatible embedding client�
 
 1. 在“本地项目工作台”新建或选择项目。
 2. 一次选择多个 `.md`、`.txt`、`.json`、`.docx` 文件上传。同一项目内再次上传同名文件会自动生成下一版本，并把旧的同名活动版本标记为历史版本；明确选择“替换”时，上传文件名必须与目标一致，否则返回 `409`。
-3. 点击“分析当前项目”。所有启动分析的按钮都会提示：仅当服务端显式启用模型时才可能消耗 Token。
-4. 运行中可以请求取消；只有 `failed` 或 `cancelled` 任务允许重试，终态任务不能取消。刷新页面后重新选择项目，可从运行历史恢复状态、错误或已完成报告。
-5. 问题可标记为接受、误报或已解决并附备注；相同标签与备注不会重复写入，历史反馈仍可由 API 审计。
+3. 在校验确认页核对本次冻结的文档版本、类型与作用域，再点击唯一的“开始校验”。页面会区分“模型已配置”与“本次运行实际使用模型”；仅当服务端显式启用模型时才可能消耗 Token。
+4. 运行中可以请求取消；只有 `failed` 或 `cancelled` 任务允许重试，终态任务不能取消。运行 URL 同时包含 `projectId` 与 `runId`；刷新、浏览器前进后退或重新登录后仍恢复同一次运行，完成后自动进入该运行的精确报告。
+
+创建分析和用户重试接口都接受可选的 `Idempotency-Key` 请求头，用于网络重试时复用同一运行；
+调度失败会留下可查询、可重试的失败运行，不会永久停在 `queued`。具体并发语义与非
+exactly-once 边界见 [分析运行创建可靠性](docs/run-creation-reliability.md)。
+5. 报告类别、反馈状态和选中问题写入白名单 Query，可复制链接回到同一阅读位置。问题可标记为接受、误报或已解决并附备注；相同标签与备注不会重复写入，历史反馈仍可由 API 审计。
 
 SSE 客户端可用 `Last-Event-ID` 请求头或 `last_event_id` 查询参数从指定事件之后恢复。终态事件固定返回 `status` 和 `error`；失败任务不会被当成成功结果加载。
 
@@ -268,7 +272,7 @@ python scripts/run_long_text_smoke.py
 | GET | `/api/v1/projects/{id}/documents/diff?from_document_id=...&to_document_id=...` | 比较同名文档的两个版本（本地行级 diff） |
 | POST | `/api/v1/projects/{id}/documents` | 上传或更新文档 |
 | POST | `/api/v1/projects/{id}/documents/text` | 粘贴自然文本 |
-| POST | `/api/v1/projects/{id}/analysis-runs` | 启动分析 |
+| POST | `/api/v1/projects/{id}/analysis-runs` | 启动分析；可带 `Idempotency-Key` |
 | GET | `/api/v1/projects/{id}/analysis-runs` | 获取项目运行历史 |
 | GET | `/api/v1/analysis-runs/{id}` | 查询状态与成本 |
 | GET | `/api/v1/analysis-runs/{id}/events` | SSE 进度流 |
@@ -281,7 +285,7 @@ python scripts/run_long_text_smoke.py
 | POST | `/api/v1/issues/{id}/feedback` | 提交反馈 |
 | GET | `/api/v1/issues/{id}/feedback` | 获取最新反馈与审计历史 |
 | POST | `/api/v1/analysis-runs/{id}/cancel` | 取消任务 |
-| POST | `/api/v1/analysis-runs/{id}/retry` | 重试任务 |
+| POST | `/api/v1/analysis-runs/{id}/retry` | 以冻结输入重试任务；可带 `Idempotency-Key` |
 | GET | `/api/v1/evaluations/latest` | 获取内置显式指令规则回归（非自然文本准确率） |
 
 ## 项目边界
