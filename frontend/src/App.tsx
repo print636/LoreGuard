@@ -1080,6 +1080,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </button>
           {identity.mode === "required" && (
             <button
+              className="accountSettingsAction"
+              onClick={() => browserNavigate("/app/settings/account")}
+            >
+              账户安全
+            </button>
+          )}
+          {identity.mode === "required" && (
+            <button
               className="logoutAction"
               disabled={logoutPending}
               onClick={() => void logout()}

@@ -27,6 +27,7 @@ export type ProductRoute =
   | { kind: "login" }
   | { kind: "register" }
   | { kind: "projects" }
+  | { kind: "settings-account" }
   | { kind: "workspace" }
   | { kind: "root" }
   | { kind: "not-found" };
@@ -37,7 +38,7 @@ export function shouldResetProductScroll(
 ): boolean {
   return (
     (previous === "login" || previous === "register") &&
-    (next === "projects" || next === "workspace")
+    (next === "projects" || next === "settings-account" || next === "workspace")
   );
 }
 
@@ -47,6 +48,7 @@ export function productRouteFromPath(pathname: string): ProductRoute {
   if (normalized === "/login") return { kind: "login" };
   if (normalized === "/register") return { kind: "register" };
   if (normalized === "/app") return { kind: "projects" };
+  if (normalized === "/app/settings/account") return { kind: "settings-account" };
   if (
     normalized === "/app/settings/model" ||
     /^\/app\/projects\/[^/]+\/(?:check|documents|compare|visuals|runs|report)(?:\/.*)?$/.test(

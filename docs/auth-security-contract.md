@@ -11,7 +11,10 @@ deployment hardening or team-workspace authorization.
 - `AUTH_MODE=required` enables account registration and opaque server sessions.
   It fails startup unless `AUTH_SECRET_KEY` contains at least 32 characters.
 - `DEPLOYMENT_ENVIRONMENT=production` fails startup unless authentication is
-  required, cookies are `Secure`, and all configured CORS origins use HTTPS.
+  required, cookies are `Secure`, all configured CORS origins use HTTPS, and
+  `DATABASE_URL` uses the supported `postgresql+psycopg` SQLAlchemy scheme.
+  SQLite, bare `postgresql` (which would require the uninstalled psycopg2
+  driver), and other driver schemes are rejected before the application starts.
 
 The authentication secret is a server-only trust root. It must not be reused as
 an LLM provider credential or exposed through the frontend.
@@ -24,6 +27,27 @@ an LLM provider credential or exposed through the frontend.
 - Sessions have a fixed server-side expiry and can be revoked on logout.
 - `last_seen_at` is updated at most once every five minutes to avoid a write for
   every authenticated read.
+- Account settings can list only the current user's unexpired, unrevoked
+  sessions. The API deliberately does not infer or fabricate device, IP, or
+  user-agent metadata that is not collected by the server.
+- A user can revoke another live session, revoke every other live session, or
+  change the account password. These writes require the session-bound CSRF
+  token. Changing the password preserves the current session and revokes every
+  other live session in the same transaction.
+- Login and password change acquire the same PostgreSQL user-row lock. Password
+  verification, hash replacement, session creation, and other-session
+  revocation therefore cannot interleave in a way that lets an old-password
+  login escape a completed password change. SQLite ignores `FOR UPDATE`; unit
+  tests compile both password-path queries with the PostgreSQL dialect, while a
+  real PostgreSQL concurrency rehearsal remains part of pre-release validation.
+- Password-form validation errors such as an incorrect current password or an
+  unchanged replacement return `400`. A `401` remains reserved for an absent,
+  expired, or otherwise invalid login session so clients do not mistake a form
+  error for a global authentication failure.
+- Session identifiers from another account, expired/revoked sessions, and
+  nonexistent identifiers all return the same `404`; the current session can
+  only be ended through logout. Account-security endpoints return `409` in
+  explicit anonymous mode rather than simulating account state.
 
 ## Browser request boundary
 
@@ -56,18 +80,18 @@ an LLM provider credential or exposed through the frontend.
 
 This establishes personal-workspace data isolation, not team sharing or a full
 role/permission matrix. Team invitations, shared workspaces, account recovery,
-email verification, distributed authentication rate limits, and session
-management UI remain later product work.
+email verification, and distributed authentication rate limits remain later
+product work.
 
 ## Public deployment boundary
 
 The application security checks fail closed only when the deployment declares
 `DEPLOYMENT_ENVIRONMENT=production`. A public deployment must also provide
 `AUTH_MODE=required`, a unique high-entropy `AUTH_SECRET_KEY`, secure cookies,
-and the exact HTTPS browser origin. The default Compose stack remains a local
-development stack: it exposes service ports, uses development database
-credentials, and leaves `/metrics` for an operator-controlled monitoring
-boundary. It must not be published unchanged.
+the exact HTTPS browser origin, and a supported PostgreSQL `DATABASE_URL`. The
+default Compose stack remains a local development stack: it exposes service
+ports, uses development database credentials, and leaves `/metrics` for an
+operator-controlled monitoring boundary. It must not be published unchanged.
 
 The workspace migration is exercised through SQLite upgrade/downgrade tests.
 A real PostgreSQL migration rehearsal and backup/restore drill are still

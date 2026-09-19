@@ -1,0 +1,75 @@
+# Production hardening overlay. Use together with docker-compose.yml; this file
+# is deliberately not a complete public deployment. An external HTTPS reverse
+# proxy must terminate TLS and forward only to the loopback-bound web service.
+services:
+  migrate:
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the production PostgreSQL SQLAlchemy URL}
+    restart: "no"
+
+  api:
+    environment:
+      DEPLOYMENT_ENVIRONMENT: production
+      AUTH_MODE: required
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:?Set a unique server-only secret of at least 32 characters}
+      AUTH_COOKIE_SECURE: "true"
+      AUTH_COOKIE_SAMESITE: lax
+      CORS_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?Set one exact public HTTPS origin, for example https://loreguard.example.com}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the production PostgreSQL SQLAlchemy URL}
+    # `ports` in the development file is a unique-list field, so !reset is
+    # required; writing `ports: []` would leave 8000 published after merging.
+    ports: !reset []
+    expose:
+      - "8000"
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+
+  web:
+    # Only the external TLS reverse proxy on this host should reach the web
+    # entry point. `!override` replaces, rather than appends to, dev port 8080.
+    ports: !override
+      - "127.0.0.1:${WEB_BIND_PORT:-8080}:80"
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+
+  worker:
+    environment:
+      DEPLOYMENT_ENVIRONMENT: production
+      AUTH_MODE: required
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:?Set a unique server-only secret of at least 32 characters}
+      AUTH_COOKIE_SECURE: "true"
+      AUTH_COOKIE_SAMESITE: lax
+      CORS_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?Set one exact public HTTPS origin, for example https://loreguard.example.com}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the production PostgreSQL SQLAlchemy URL}
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+
+  postgres:
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set the production PostgreSQL database name}
+      POSTGRES_USER: ${POSTGRES_USER:?Set the production PostgreSQL user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a strong production PostgreSQL password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  prometheus:
+    # Monitoring is opt-in and remains reachable only on the Compose network.
+    profiles: [observability]
+    ports: !reset []
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true

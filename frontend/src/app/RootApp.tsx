@@ -7,6 +7,7 @@ import {
   shouldResetProductScroll,
 } from "../routing";
 import AuthPage from "./AuthPage";
+import AccountSettings from "./AccountSettings";
 import ProjectCenter from "./ProjectCenter";
 import { apiErrorDetail, type SessionIdentity } from "./session";
 
@@ -64,6 +65,12 @@ export default function RootApp() {
   useEffect(() => {
     if (startup.status === "ready") {
       if (["root", "login", "register"].includes(route.kind)) {
+        browserNavigate("/app", { replace: true });
+      }
+      if (
+        startup.identity.mode === "anonymous" &&
+        route.kind === "settings-account"
+      ) {
         browserNavigate("/app", { replace: true });
       }
       return;
@@ -128,6 +135,13 @@ export default function RootApp() {
 
   if (route.kind === "projects" || route.kind === "root") {
     return <ProjectCenter identity={startup.identity} onLoggedOut={() => setStartup({ status: "signed-out", identity: null })} />;
+  }
+
+  if (route.kind === "settings-account") {
+    if (startup.identity.mode !== "required") {
+      return <main className="startupPage productPage" aria-busy="true"><p>正在返回项目中心…</p></main>;
+    }
+    return <AccountSettings identity={startup.identity} onLoggedOut={() => setStartup({ status: "signed-out", identity: null })} />;
   }
 
   if (route.kind === "workspace") {

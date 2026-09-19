@@ -12,7 +12,7 @@ from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -73,6 +73,13 @@ class LoginIn(BaseModel):
 
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=128)
+
+
+class ChangePasswordIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=10, max_length=128)
 
 
 class ExactOriginMiddleware(BaseHTTPMiddleware):
@@ -230,6 +237,18 @@ def _verify_password(password_hash: str, password: str) -> None:
         _PASSWORD_HASHER.verify(password_hash, password)
 
 
+def _locked_user_by_email_query(email: str):
+    """Build the password-path query whose PostgreSQL form locks the user row."""
+
+    return select(UserRow).where(UserRow.email == email).with_for_update()
+
+
+def _locked_user_by_id_query(user_id: str):
+    """Build the account-mutation query whose PostgreSQL form locks the user row."""
+
+    return select(UserRow).where(UserRow.id == user_id).with_for_update()
+
+
 def _session_context(db, raw_token: str, settings: Settings) -> AuthContext | None:
     token_hash = _digest_token(raw_token, settings)
     session = db.execute(
@@ -349,6 +368,32 @@ def _require_enabled() -> None:
         raise HTTPException(status_code=409, detail="本地匿名模式未启用账号登录")
 
 
+def _require_account_security(context: AuthContext) -> None:
+    """Reject account-only operations in the explicit anonymous/demo mode."""
+
+    if context.anonymous or get_settings().auth_mode != "required":
+        raise HTTPException(status_code=409, detail="本地匿名模式不支持账户安全操作")
+
+
+def _revoke_other_active_sessions(db, context: AuthContext) -> int:
+    """Revoke this user's other live sessions and return the affected count."""
+
+    if context.session_id is None:
+        raise HTTPException(status_code=401, detail="登录状态已失效")
+    now = utc_now_naive()
+    result = db.execute(
+        update(AuthSessionRow)
+        .where(
+            AuthSessionRow.user_id == context.user_id,
+            AuthSessionRow.id != context.session_id,
+            AuthSessionRow.revoked_at.is_(None),
+            AuthSessionRow.expires_at > now,
+        )
+        .values(revoked_at=now)
+    )
+    return int(result.rowcount or 0)
+
+
 @router.post("/register", status_code=201)
 def register(payload: RegisterIn, response: Response) -> dict:
     _require_enabled()
@@ -390,7 +435,11 @@ def login(payload: LoginIn, response: Response) -> dict:
     _require_enabled()
     email = normalize_email(payload.email)
     with SessionLocal() as db:
-        user = db.execute(select(UserRow).where(UserRow.email == email)).scalar_one_or_none()
+        # Serialize login with password changes for this account. If login wins
+        # the row lock, its new session is committed before password change
+        # revokes other sessions. If password change wins, this verification
+        # observes the new hash and rejects the old password.
+        user = db.execute(_locked_user_by_email_query(email)).scalar_one_or_none()
         invalid = user is None or not user.is_active
         candidate_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
         try:
@@ -438,3 +487,100 @@ def me(context: AuthContext = Depends(get_auth_context)) -> dict:
             "mode": "anonymous" if context.anonymous else "required",
             **_serialize_identity(user, workspace, context.role),
         }
+
+
+@router.get("/sessions")
+def list_sessions(context: AuthContext = Depends(get_auth_context)) -> dict:
+    _require_account_security(context)
+    now = utc_now_naive()
+    with SessionLocal() as db:
+        rows = db.scalars(
+            select(AuthSessionRow)
+            .where(
+                AuthSessionRow.user_id == context.user_id,
+                AuthSessionRow.revoked_at.is_(None),
+                AuthSessionRow.expires_at > now,
+            )
+            .order_by(AuthSessionRow.created_at.desc(), AuthSessionRow.id)
+        ).all()
+        return {
+            "sessions": [
+                {
+                    "id": row.id,
+                    "created_at": row.created_at,
+                    "last_seen_at": row.last_seen_at,
+                    "expires_at": row.expires_at,
+                    "current": row.id == context.session_id,
+                }
+                for row in rows
+            ]
+        }
+
+
+@router.post("/password")
+def change_password(
+    payload: ChangePasswordIn,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    _require_account_security(context)
+    with SessionLocal() as db:
+        # Keep verification, password replacement, and other-session
+        # revocation in one transaction while holding the same row lock used
+        # by login. This prevents concurrent password writes or an old-password
+        # login from escaping the revocation boundary.
+        user = db.execute(
+            _locked_user_by_id_query(context.user_id)
+        ).scalar_one_or_none()
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=401, detail="账号上下文不可用")
+        try:
+            _verify_password(user.password_hash, payload.current_password)
+        except (VerifyMismatchError, VerificationError, InvalidHashError) as exc:
+            raise HTTPException(status_code=400, detail="当前密码错误") from exc
+
+        if payload.new_password == payload.current_password:
+            raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
+
+        user.password_hash = _hash_password(payload.new_password)
+        revoked_sessions = _revoke_other_active_sessions(db, context)
+        db.commit()
+        return {"revoked_sessions": revoked_sessions}
+
+
+@router.post("/sessions/revoke-others")
+def revoke_other_sessions(
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    _require_account_security(context)
+    with SessionLocal() as db:
+        revoked_sessions = _revoke_other_active_sessions(db, context)
+        db.commit()
+        return {"revoked_sessions": revoked_sessions}
+
+
+@router.delete("/sessions/{session_id}")
+def revoke_session(
+    session_id: str,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    _require_account_security(context)
+    if session_id == context.session_id:
+        raise HTTPException(status_code=409, detail="当前会话请使用退出登录")
+
+    now = utc_now_naive()
+    with SessionLocal() as db:
+        session = db.scalar(
+            select(AuthSessionRow).where(
+                AuthSessionRow.id == session_id,
+                AuthSessionRow.user_id == context.user_id,
+                AuthSessionRow.revoked_at.is_(None),
+                AuthSessionRow.expires_at > now,
+            )
+        )
+        if session is None:
+            # Deliberately do not reveal whether this id belongs to another
+            # account, is already revoked, expired, or never existed.
+            raise HTTPException(status_code=404, detail="会话不存在")
+        session.revoked_at = now
+        db.commit()
+        return {"revoked_sessions": 1}

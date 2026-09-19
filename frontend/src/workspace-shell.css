@@ -137,6 +137,10 @@ body {
   border-color: rgba(139, 233, 240, .28);
 }
 
+.topActions .accountSettingsAction {
+  color: var(--text-2);
+}
+
 .topActions .logoutAction {
   color: var(--muted);
 }
@@ -630,7 +634,7 @@ footer {
   .topContext { display: none; }
   .topActions > button { display: none !important; }
   .topActions .projectCenterAction,
-  .topActions .logoutAction { display: inline-flex !important; min-width: 44px; justify-content: center; padding-inline: 8px; font-size: 11px; }
+  .topActions .accountSettingsAction { display: inline-flex !important; min-width: 44px; justify-content: center; padding-inline: 8px; font-size: 11px; }
   .topActions .topRunButton { display: inline-flex !important; min-width: 96px; justify-content: center; }
   .appShell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 9px; height: calc(100dvh - 64px); padding: 8px; }
   .sideNav { display: block; padding: 6px; border-radius: 15px; overflow-x: auto; overflow-y: hidden; }

@@ -76,6 +76,37 @@ class AuthConfigurationTests(unittest.TestCase):
                 cors_allowed_origins="https://loreguard.example",
             )
 
+    def test_production_rejects_non_postgresql_database(self):
+        for database_url in (
+            "sqlite:///./loreguard.db",
+            "mysql+pymysql://user:password@database/loreguard",
+            "postgresql://user:password@database/loreguard",
+            "postgresql+asyncpg://user:password@database/loreguard",
+        ):
+            with self.subTest(database_url=database_url), self.assertRaisesRegex(
+                ValidationError, "DATABASE_URL must use postgresql"
+            ):
+                Settings(
+                    deployment_environment="production",
+                    auth_mode="required",
+                    auth_secret_key="x" * 32,
+                    auth_cookie_secure=True,
+                    cors_allowed_origins="https://loreguard.example",
+                    database_url=database_url,
+                )
+
+    def test_production_accepts_installed_psycopg_database_scheme(self):
+        database_url = "postgresql+psycopg://user:password@database/loreguard"
+        configured = Settings(
+            deployment_environment="production",
+            auth_mode="required",
+            auth_secret_key="x" * 32,
+            auth_cookie_secure=True,
+            cors_allowed_origins="https://loreguard.example",
+            database_url=database_url,
+        )
+        self.assertEqual(database_url, configured.database_url)
+
     def test_credentialed_cors_rejects_wildcard(self):
         with self.assertRaisesRegex(ValidationError, "invalid exact CORS origin"):
             Settings(cors_allowed_origins="*")

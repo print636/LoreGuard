@@ -145,6 +145,29 @@ test("session probe turns auth 401 into the central expiry event", async (contex
   assert.equal(expiredEvents, 1);
 });
 
+test("authenticated account endpoints turn 401 into the central expiry event", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  const target = new EventTarget();
+  let expiredEvents = 0;
+  target.addEventListener(SESSION_EXPIRED_EVENT, () => { expiredEvents += 1; });
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+    globalThis.window = originalWindow;
+    globalThis.document = originalDocument;
+  });
+  globalThis.window = target;
+  globalThis.document = { cookie: "loreguard_csrf=expired-session-token" };
+  globalThis.fetch = async () => new Response(null, { status: 401 });
+
+  await assert.rejects(
+    apiJson("/api/v1/auth/password", { method: "POST" }),
+    (error) => error instanceof ApiError && error.status === 401,
+  );
+  assert.equal(expiredEvents, 1);
+});
+
 test("bounded session probe collapses parallel EventSource error checks", async () => {
   let calls = 0;
   let resolveProbe;

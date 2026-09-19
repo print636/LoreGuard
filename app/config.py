@@ -4,6 +4,8 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 
 class Settings(BaseSettings):
@@ -311,6 +313,16 @@ class Settings(BaseSettings):
                 raise ValueError("production requires AUTH_MODE=required")
             if not self.auth_cookie_secure:
                 raise ValueError("production authentication cookies must be Secure")
+            try:
+                database_scheme = make_url(self.database_url).drivername
+            except ArgumentError as exc:
+                raise ValueError(
+                    "production DATABASE_URL must be a valid PostgreSQL SQLAlchemy URL"
+                ) from exc
+            if database_scheme != "postgresql+psycopg":
+                raise ValueError(
+                    "production DATABASE_URL must use postgresql+psycopg"
+                )
         # Parse eagerly so a typo cannot silently broaden or break browser
         # credential handling after the process has started.
         self.parsed_cors_origins()

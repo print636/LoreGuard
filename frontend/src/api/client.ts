@@ -5,6 +5,11 @@ const API_BASE = (
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const CSRF_COOKIE = "loreguard_csrf";
+const AUTH_ENTRY_PATHS = new Set([
+  "/api/v1/auth/login",
+  "/api/v1/auth/register",
+  "/api/v1/auth/me",
+]);
 export const SESSION_EXPIRED_EVENT = "loreguard:session-expired";
 export type SessionProbeResult = "active" | "expired" | "unknown" | "skipped";
 
@@ -73,7 +78,7 @@ export async function apiFetch(
   });
   if (
     response.status === 401 &&
-    !path.startsWith("/api/v1/auth/") &&
+    !AUTH_ENTRY_PATHS.has(path) &&
     typeof window !== "undefined"
   ) {
     dispatchSessionExpired();

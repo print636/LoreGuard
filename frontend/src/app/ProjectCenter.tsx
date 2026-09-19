@@ -49,6 +49,15 @@ function ProjectIcon() {
   );
 }
 
+function ShieldIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3.5 19 6v5.3c0 4.2-2.8 7.7-7 9.2-4.2-1.5-7-5-7-9.2V6z" />
+      <path d="m9.2 12 1.8 1.8 3.9-4.1" />
+    </svg>
+  );
+}
+
 function statusLabel(status: string | undefined): string {
   const labels: Record<string, string> = {
     queued: "等待中",
@@ -202,14 +211,22 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
           <button type="button" onClick={() => browserNavigate("/provider")}>
             <span className="navStatusMark" aria-hidden="true" /><span>模型连接</span>
           </button>
+          {identity.mode === "required" && (
+            <button type="button" onClick={() => browserNavigate("/app/settings/account")}>
+              <ShieldIcon /><span>账户安全</span>
+            </button>
+          )}
         </nav>
         <div className="sidebarAccount">
           <span className="accountAvatar" aria-hidden="true">{identity.user.display_name.slice(0, 1)}</span>
           <span><b>{identity.user.display_name}</b><small>{identity.mode === "anonymous" ? "本地体验模式" : identity.user.email}</small></span>
           {identity.mode === "required" && (
-            <button className="textButton" type="button" disabled={logoutPending} onClick={() => void logout()}>
-              {logoutPending ? "退出中…" : "退出"}
-            </button>
+            <div className="sidebarAccountActions">
+              <button className="textButton" type="button" onClick={() => browserNavigate("/app/settings/account")}>账户安全</button>
+              <button className="textButton" type="button" disabled={logoutPending} onClick={() => void logout()}>
+                {logoutPending ? "退出中…" : "退出"}
+              </button>
+            </div>
           )}
         </div>
       </aside>

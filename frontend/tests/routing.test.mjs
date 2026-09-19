@@ -30,6 +30,7 @@ test("product routes distinguish authentication, project center, and workspaces"
   assert.equal(productRouteFromPath("/register/").kind, "register");
   assert.equal(productRouteFromPath("/app").kind, "projects");
   assert.equal(productRouteFromPath("/app/projects/p-1/check").kind, "workspace");
+  assert.equal(productRouteFromPath("/app/settings/account").kind, "settings-account");
   assert.equal(productRouteFromPath("/missing").kind, "not-found");
 });
 
@@ -62,6 +63,7 @@ test("returnTo accepts only known same-origin application paths", () => {
 test("leaving authentication resets scroll only when entering product work", () => {
   assert.equal(shouldResetProductScroll("register", "projects"), true);
   assert.equal(shouldResetProductScroll("login", "workspace"), true);
+  assert.equal(shouldResetProductScroll("login", "settings-account"), true);
   assert.equal(shouldResetProductScroll("projects", "workspace"), false);
   assert.equal(shouldResetProductScroll("login", "register"), false);
 });
