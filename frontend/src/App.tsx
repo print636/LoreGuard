@@ -60,6 +60,7 @@ import {
   type ProviderConnectionView,
 } from "./providerConnection";
 import IssueEvidenceReview from "./components/IssueEvidenceReview";
+import { revisionSearch } from "./revisionWorkflow";
 import {
   describeIssueEvidenceReview,
   describeIssueEvidenceReviewDiagnostic,
@@ -84,6 +85,7 @@ import {
 import type { SessionIdentity } from "./app/session";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
+const RevisionReview = lazy(() => import("./components/RevisionReview"));
 
 type FeedbackState = {
   id: string;
@@ -1139,7 +1141,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   }
 
   function navigateWorkspace(view: WorkspaceView) {
-    if (["audit", "report", "visual"].includes(view) && project && run) {
+    if (["audit", "report", "visual", "revision"].includes(view) && project && run) {
       const query =
         view === "report"
           ? reportSearch({
@@ -1147,7 +1149,18 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               status: issueStatusFilter,
               issueId: focusedIssue,
             })
-          : "";
+          : view === "revision"
+            ? revisionSearch({
+                step: "review",
+                issueId: focusedIssue,
+                documentId: null,
+                recheckRunId: null,
+                outcome: "all",
+                generateGraph: false,
+                generateTimeline: false,
+                page: 1,
+              })
+            : "";
       browserNavigate(`${workspacePath(view, project, run)}${query}`);
       return;
     }
@@ -1304,6 +1317,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   String(docs.filter((row) => row.active).length || ""),
                 ],
                 ["diff", "DF", "版本对比", documentDiff ? "1" : ""],
+                ["revision", "RV", "修订复检", ""],
                 [
                   "visual",
                   "TL",
@@ -2328,6 +2342,26 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               )}
             </section>
           )}
+          {!routeProblem && activeView === "revision" && (
+            <Suspense fallback={<section className="revisionReview workspaceView" aria-busy="true"><p>正在打开修订工作区…</p></section>}>
+              <RevisionReview
+                key={`${project}:${run}`}
+                projectId={project}
+                projectName={selectedProject?.name || ""}
+                baselineRun={runInfo}
+                documents={docs}
+                baselineIssues={issues}
+                routeSearch={routeSearch}
+                onRouteChange={(search, replace) =>
+                  browserNavigate(
+                    `${workspacePath("revision", project, run)}${search}`,
+                    { replace },
+                  )
+                }
+                onDocumentsChanged={() => loadProject(project, false, run)}
+              />
+            </Suspense>
+          )}
           {!routeProblem && activeView === "report" && (
             <>
               <section className="clarifications workspaceView">
@@ -2389,6 +2423,23 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </h2>
                   </div>
                   <div className="reportFilters" aria-label="报告筛选">
+                    {runInfo?.status === "completed" && runSnapshotDocuments(runInfo).length > 0 && (
+                      <a
+                        className="revisionEntry"
+                        href={`${workspacePath("revision", project, run)}${revisionSearch({
+                          step: "review",
+                          issueId: focusedIssue,
+                          documentId: null,
+                          recheckRunId: null,
+                          outcome: "all",
+                          generateGraph: false,
+                          generateTimeline: false,
+                          page: 1,
+                        })}`}
+                      >
+                        修订并复检
+                      </a>
+                    )}
                     <label>
                       <span>问题类别</span>
                       <select
@@ -2472,6 +2523,21 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                         >
                           {focusedIssue === issue.id ? "当前选中问题" : "选中并写入链接"}
                         </button>
+                        <a
+                          className="issueRevisionLink"
+                          href={`${workspacePath("revision", project, run)}${revisionSearch({
+                            step: "review",
+                            issueId: issue.id,
+                            documentId: null,
+                            recheckRunId: null,
+                            outcome: "all",
+                            generateGraph: false,
+                            generateTimeline: false,
+                            page: 1,
+                          })}`}
+                        >
+                          修订此问题
+                        </a>
                         <p>{issue.explanation}</p>
                         <div className="evidence">
                           {issue.evidence.map((evidence, index) => (

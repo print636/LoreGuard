@@ -80,7 +80,7 @@ class ComposeSmokeTests(unittest.TestCase):
         self.assertEqual(command[:4], ["docker", "compose", "exec", "-T"])
         self.assertIn("BEGIN;", PGVECTOR_SMOKE_SQL)
         self.assertIn("ROLLBACK;", PGVECTOR_SMOKE_SQL)
-        self.assertIn("0006_run_idempotency", PGVECTOR_SMOKE_SQL)
+        self.assertIn("0008_document_concurrency", PGVECTOR_SMOKE_SQL)
         self.assertIn("INSERT INTO workspaces", PGVECTOR_SMOKE_SQL)
         self.assertIn("workspace_id, name", PGVECTOR_SMOKE_SQL)
         self.assertIn("<=>", PGVECTOR_SMOKE_SQL)

@@ -37,6 +37,7 @@ from .issue_evidence_review import (
 )
 from .pipeline import AnalysisPipeline, DocumentInput, build_result_provenance
 from .runtime_provenance import safe_runtime_provenance
+from .run_comparison import mark_comparison_unverifiable, materialize_run_comparison
 from .time_utils import utc_now_naive
 from .usage import configured_cost_usd
 
@@ -1584,6 +1585,18 @@ def execute_analysis(
                 db.rollback()
                 _checkpoint(run_id, token, heartbeat)
                 raise WorkerLeaseLost("run could not be completed by this worker")
+
+            # Comparison depends on the final diagnostics and on the guarded
+            # completed transition above. A matcher defect must not discard a
+            # valid analysis, but it must also never leave a completed recheck
+            # looking silently pending: roll back its savepoint and persist an
+            # explicit all-unverifiable comparison instead.
+            try:
+                with db.begin_nested():
+                    materialize_run_comparison(db, run_id)
+            except Exception:
+                with db.begin_nested():
+                    mark_comparison_unverifiable(db, run_id)
 
             last_progress = db.scalar(
                 select(func.max(RunEventRow.progress)).where(

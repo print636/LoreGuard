@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from hashlib import sha256
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Thread
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,12 +32,14 @@ from .auth import (
 from .db import (
     AnalysisDiagnosticRow,
     AnalysisRecordRow,
+    AnalysisRunComparisonRow,
     AnalysisRunExecutionRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
     DocumentContextRow,
     DocumentRow,
     FeedbackRow,
+    IssueComparisonItemRow,
     IssueRow,
     ProjectRow,
     RunEventRow,
@@ -57,6 +60,12 @@ from .provider import (
 )
 from .rate_limit import SlidingWindowLimiter, WriteRateLimitMiddleware
 from .runtime_provenance import safe_runtime_provenance
+from .run_comparison import (
+    MATCHER_VERSION,
+    build_input_diff,
+    mark_comparison_unverifiable,
+    materialize_run_comparison,
+)
 from .service import (
     DEFAULT_DOCUMENT_ROLE,
     DEFAULT_STORY_SCOPE,
@@ -187,6 +196,9 @@ ClarificationCategory = Literal[
     "ambiguous_reference",
     "insufficient_evidence",
 ]
+ComparisonOutcome = Literal[
+    "no_longer_detected", "persisting", "new", "unverifiable"
+]
 
 
 class SemanticReviewItemOut(BaseModel):
@@ -251,6 +263,15 @@ def serialize_run(row: AnalysisRunRow, db=None) -> dict:
         execution = db.get(AnalysisRunExecutionRow, row.id)
         payload["attempt_no"] = execution.attempt_no if execution else None
         payload["retried_from"] = execution.retried_from_run_id if execution else None
+        comparison = db.scalar(
+            select(AnalysisRunComparisonRow).where(
+                AnalysisRunComparisonRow.target_run_id == row.id
+            )
+        )
+        payload["comparison_id"] = comparison.id if comparison else None
+        payload["comparison_baseline_run_id"] = (
+            comparison.baseline_run_id if comparison else None
+        )
         payload["input_snapshot_available"] = bool(payload["input_documents"])
         if row.status == "completed":
             counts = dict(
@@ -398,11 +419,21 @@ def _require_idempotency_operation(
     run: AnalysisRunRow,
     *,
     retried_from_run_id: str | None,
+    recheck_baseline_run_id: str | None = None,
 ) -> None:
     """Reject reuse of a project-scoped key for a different user intent."""
     execution = db.get(AnalysisRunExecutionRow, run.id)
     actual_source = execution.retried_from_run_id if execution else None
-    if actual_source == retried_from_run_id:
+    comparison = db.scalar(
+        select(AnalysisRunComparisonRow).where(
+            AnalysisRunComparisonRow.target_run_id == run.id
+        )
+    )
+    actual_baseline = comparison.baseline_run_id if comparison else None
+    if (
+        actual_source == retried_from_run_id
+        and actual_baseline == recheck_baseline_run_id
+    ):
         return
     raise HTTPException(
         409,
@@ -556,6 +587,14 @@ def prepare_document_version(
     document_role: DocumentRole | None = None,
     story_scope: str | None = None,
 ) -> tuple[int, list[str], str, str]:
+    # Serialize version allocation per project on PostgreSQL. The unique
+    # logical-name/version and partial-active indexes remain authoritative and
+    # also protect SQLite/tests where SELECT FOR UPDATE is advisory/no-op.
+    locked_project = db.scalar(
+        select(ProjectRow).where(ProjectRow.id == project_id).with_for_update()
+    )
+    if locked_project is None:
+        raise HTTPException(404, "项目不存在")
     same_name = db.scalars(
         select(DocumentRow).where(
             DocumentRow.project_id == project_id,
@@ -924,16 +963,26 @@ def create_text_document(
             payload.story_scope,
         )
         row = DocumentRow(project_id=project_id, name=payload.name, content=payload.content, version=version)
-        db.add(row)
-        db.flush()
-        db.add(
-            DocumentContextRow(
-                document_id=row.id,
-                document_role=document_role,
-                story_scope=story_scope,
+        try:
+            db.add(row)
+            db.flush()
+            db.add(
+                DocumentContextRow(
+                    document_id=row.id,
+                    document_role=document_role,
+                    story_scope=story_scope,
+                )
             )
-        )
-        db.commit()
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "document_version_conflict",
+                    "message": "同名文档版本正在被更新，请刷新后重试",
+                },
+            ) from None
         return {**serialize_document(row, db=db), "superseded_document_ids": superseded}
 
 
@@ -1046,16 +1095,26 @@ async def upload_document(
             story_scope,
         )
         row = DocumentRow(project_id=project_id, name=file.filename, content=content, version=version)
-        db.add(row)
-        db.flush()
-        db.add(
-            DocumentContextRow(
-                document_id=row.id,
-                document_role=resolved_role,
-                story_scope=resolved_scope,
+        try:
+            db.add(row)
+            db.flush()
+            db.add(
+                DocumentContextRow(
+                    document_id=row.id,
+                    document_role=resolved_role,
+                    story_scope=resolved_scope,
+                )
             )
-        )
-        db.commit()
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "document_version_conflict",
+                    "message": "同名文档版本正在被更新，请刷新后重试",
+                },
+            ) from None
         return {**serialize_document(row, db=db), "superseded_document_ids": superseded}
 
 
@@ -1240,6 +1299,334 @@ def retry_run(
     return payload
 
 
+@app.post("/api/v1/analysis-runs/{baseline_run_id}/rechecks", status_code=202)
+def start_recheck(
+    baseline_run_id: str,
+    idempotency_key_header: Annotated[
+        str | None, Header(alias="Idempotency-Key", max_length=128)
+    ] = None,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    """Analyze the project's current revision against one frozen baseline."""
+    idempotency_key = _normalize_idempotency_key(idempotency_key_header)
+    with SessionLocal() as db:
+        baseline = _run_in_workspace(db, baseline_run_id, context.workspace_id)
+        if baseline is None:
+            raise HTTPException(404, "基准分析任务不存在")
+        existing = _idempotent_run(db, baseline.project_id, idempotency_key)
+        if existing is not None:
+            _require_idempotency_operation(
+                db,
+                existing,
+                retried_from_run_id=None,
+                recheck_baseline_run_id=baseline_run_id,
+            )
+            comparison = db.scalar(
+                select(AnalysisRunComparisonRow).where(
+                    AnalysisRunComparisonRow.target_run_id == existing.id
+                )
+            )
+            payload = _accepted_run_payload(db, existing, created=False)
+            return {
+                **payload,
+                "baseline_run_id": baseline_run_id,
+                "comparison_id": comparison.id,
+                "comparison_status": comparison.status,
+            }
+        if baseline.status != "completed":
+            raise HTTPException(409, "只有已完成的分析任务可以作为复检基准")
+        baseline_inputs = list(
+            db.scalars(
+                select(AnalysisRunInputRow)
+                .where(AnalysisRunInputRow.run_id == baseline_run_id)
+                .order_by(AnalysisRunInputRow.ordinal)
+            ).all()
+        )
+        if not baseline_inputs:
+            raise HTTPException(409, MISSING_SNAPSHOT_ERROR)
+        documents = list(
+            db.scalars(
+                select(DocumentRow)
+                .where(
+                    DocumentRow.project_id == baseline.project_id,
+                    DocumentRow.active.is_(True),
+                )
+                .order_by(DocumentRow.created_at, DocumentRow.id)
+            ).all()
+        )
+        if not documents:
+            raise HTTPException(400, "项目没有可复检文档")
+        baseline_signature = sorted(
+            (
+                row.document_name.casefold(),
+                row.document_version,
+                row.content_sha256,
+            )
+            for row in baseline_inputs
+        )
+        current_signature = sorted(
+            (
+                row.name.casefold(),
+                row.version,
+                sha256(row.content.encode("utf-8")).hexdigest(),
+            )
+            for row in documents
+        )
+        if baseline_signature == current_signature:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "no_document_changes",
+                    "message": "当前活动文档与基准运行的冻结输入相同，请先保存新版本",
+                },
+            )
+        enforce_daily_model_budget(db, context.workspace_id)
+        row = AnalysisRunRow(
+            project_id=baseline.project_id,
+            requested_by_user_id=context.user_id,
+            idempotency_key=idempotency_key,
+        )
+
+        def prepare_recheck(created_run: AnalysisRunRow) -> None:
+            capture_run_inputs(db, created_run, documents)
+            db.flush()
+            target_inputs = list(
+                db.scalars(
+                    select(AnalysisRunInputRow)
+                    .where(AnalysisRunInputRow.run_id == created_run.id)
+                    .order_by(AnalysisRunInputRow.ordinal)
+                ).all()
+            )
+            db.add(
+                AnalysisRunComparisonRow(
+                    project_id=baseline.project_id,
+                    baseline_run_id=baseline_run_id,
+                    target_run_id=created_run.id,
+                    matcher_version=MATCHER_VERSION,
+                    status="pending",
+                    summary={},
+                    provenance={
+                        "matcher_version": MATCHER_VERSION,
+                        "input_diff": build_input_diff(
+                            baseline_inputs, target_inputs
+                        ),
+                        "semantic_equivalence_guaranteed": False,
+                    },
+                )
+            )
+
+        row, created = _create_run_or_load_winner(
+            db, row, idempotency_key, prepare_recheck
+        )
+        _require_idempotency_operation(
+            db,
+            row,
+            retried_from_run_id=None,
+            recheck_baseline_run_id=baseline_run_id,
+        )
+        comparison = db.scalar(
+            select(AnalysisRunComparisonRow).where(
+                AnalysisRunComparisonRow.target_run_id == row.id
+            )
+        )
+        payload = {
+            **_accepted_run_payload(db, row, created=created),
+            "baseline_run_id": baseline_run_id,
+            "comparison_id": comparison.id,
+            "comparison_status": comparison.status,
+        }
+        target_run_id = row.id
+    if created:
+        _dispatch_created_run(target_run_id)
+    return payload
+
+
+def _serialize_issue(row: IssueRow | None) -> dict | None:
+    if row is None:
+        return None
+    return {
+        "id": row.id,
+        "category": row.category,
+        "severity": row.severity,
+        "confidence": row.confidence,
+        "title": row.title,
+        "explanation": row.explanation,
+        "evidence": row.evidence,
+        "suggestion": row.suggestion,
+        "metadata": row.extra,
+    }
+
+
+def _comparison_feedback_snapshot(provenance: object) -> dict | None:
+    if not isinstance(provenance, dict):
+        return None
+    snapshot = provenance.get("baseline_feedback_snapshot")
+    if not isinstance(snapshot, dict):
+        return None
+    identifier = snapshot.get("id")
+    label = snapshot.get("label")
+    comment = snapshot.get("comment")
+    created_at = snapshot.get("created_at")
+    if (
+        not isinstance(identifier, str)
+        or label not in {"accepted", "false_positive", "resolved"}
+        or not isinstance(comment, str)
+        or not isinstance(created_at, str)
+    ):
+        return None
+    return {
+        "id": identifier,
+        "label": label,
+        "comment": comment,
+        "created_at": created_at,
+    }
+
+
+@app.get("/api/v1/analysis-runs/{target_run_id}/comparison")
+def get_run_comparison(
+    target_run_id: str,
+    outcome: ComparisonOutcome | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    with SessionLocal() as db:
+        target = _run_in_workspace(db, target_run_id, context.workspace_id)
+        if target is None:
+            raise HTTPException(404, "分析任务不存在")
+        comparison = db.scalar(
+            select(AnalysisRunComparisonRow).where(
+                AnalysisRunComparisonRow.target_run_id == target_run_id
+            )
+        )
+        if comparison is None:
+            raise HTTPException(404, "该分析任务不是复检任务")
+        baseline = _run_in_workspace(
+            db, comparison.baseline_run_id, context.workspace_id
+        )
+        if (
+            baseline is None
+            or baseline.project_id != target.project_id
+            or comparison.project_id != target.project_id
+        ):
+            # Fail closed if persisted lineage was corrupted or manually
+            # inserted across projects; never follow it into another workspace.
+            raise HTTPException(404, "复检谱系不存在")
+        if target.status == "completed" and comparison.status != "ready":
+            try:
+                with db.begin_nested():
+                    comparison = materialize_run_comparison(db, target_run_id)
+            except Exception:
+                with db.begin_nested():
+                    comparison = mark_comparison_unverifiable(db, target_run_id)
+            db.commit()
+
+        effective_status = (
+            "ready"
+            if comparison.status == "ready"
+            else target.status
+            if target.status in {"failed", "cancelled"}
+            else "pending"
+        )
+        payload = {
+            "id": comparison.id,
+            "project_id": comparison.project_id,
+            "baseline_run_id": comparison.baseline_run_id,
+            "target_run_id": comparison.target_run_id,
+            "status": effective_status,
+            "target_run_status": target.status,
+            "matcher": {
+                "version": comparison.matcher_version,
+                "kind": "deterministic_heuristic",
+                "semantic_equivalence_guaranteed": False,
+            },
+            "summary": comparison.summary if comparison.status == "ready" else None,
+            "provenance": comparison.provenance,
+            "created_at": comparison.created_at,
+            "completed_at": comparison.completed_at,
+            "page": {
+                "outcome": outcome,
+                "limit": limit,
+                "offset": offset,
+                "returned": 0,
+                "total": 0,
+                "has_more": False,
+            },
+            "items": [],
+        }
+        if comparison.status != "ready":
+            return payload
+        item_filter = [IssueComparisonItemRow.comparison_id == comparison.id]
+        if outcome is not None:
+            item_filter.append(IssueComparisonItemRow.outcome == outcome)
+        total_items = db.scalar(
+            select(func.count()).select_from(IssueComparisonItemRow).where(*item_filter)
+        ) or 0
+        rows = list(
+            db.scalars(
+                select(IssueComparisonItemRow)
+                .where(*item_filter)
+                .order_by(IssueComparisonItemRow.outcome, IssueComparisonItemRow.id)
+                .offset(offset)
+                .limit(limit)
+            ).all()
+        )
+        issue_ids = {
+            issue_id
+            for row in rows
+            for issue_id in (row.baseline_issue_id, row.target_issue_id)
+            if issue_id is not None
+        }
+        issues = (
+            {
+                row.id: row
+                for row in db.scalars(
+                    select(IssueRow).where(
+                        IssueRow.id.in_(issue_ids),
+                        IssueRow.run_id.in_(
+                            (comparison.baseline_run_id, comparison.target_run_id)
+                        ),
+                    )
+                ).all()
+            }
+            if issue_ids
+            else {}
+        )
+        baseline_issues = {
+            issue_id: issue
+            for issue_id, issue in issues.items()
+            if issue.run_id == comparison.baseline_run_id
+        }
+        target_issues = {
+            issue_id: issue
+            for issue_id, issue in issues.items()
+            if issue.run_id == comparison.target_run_id
+        }
+        payload["items"] = [
+            {
+                "id": row.id,
+                "outcome": row.outcome,
+                "baseline_issue": _serialize_issue(
+                    baseline_issues.get(row.baseline_issue_id)
+                ),
+                "target_issue": _serialize_issue(
+                    target_issues.get(row.target_issue_id)
+                ),
+                "match_method": row.match_method,
+                "match_score": row.match_score,
+                "provenance": row.provenance,
+                "baseline_latest_feedback": _comparison_feedback_snapshot(
+                    row.provenance
+                ),
+            }
+            for row in rows
+        ]
+        payload["page"]["returned"] = len(rows)
+        payload["page"]["total"] = total_items
+        payload["page"]["has_more"] = offset + len(rows) < total_items
+        return payload
+
+
 @app.get("/api/v1/analysis-runs/{run_id}/issues")
 def get_issues(
     run_id: str,
@@ -1249,7 +1636,7 @@ def get_issues(
         if not _run_in_workspace(db, run_id, context.workspace_id):
             raise HTTPException(404, "分析任务不存在")
         rows = db.scalars(select(IssueRow).where(IssueRow.run_id == run_id)).all()
-        return [{"id": r.id, "category": r.category, "severity": r.severity, "confidence": r.confidence, "title": r.title, "explanation": r.explanation, "evidence": r.evidence, "suggestion": r.suggestion, "metadata": r.extra} for r in rows]
+        return [_serialize_issue(row) for row in rows]
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/records")

@@ -7,6 +7,7 @@ export const workspaceViews = [
   "visual",
   "audit",
   "report",
+  "revision",
   "provider",
 ] as const;
 
@@ -21,6 +22,7 @@ const nestedViewSegments: Record<string, WorkspaceView> = {
   visuals: "visual",
   runs: "audit",
   report: "report",
+  revise: "revision",
 };
 
 export type ProductRoute =
@@ -48,15 +50,18 @@ export function productRouteFromPath(pathname: string): ProductRoute {
   if (normalized === "/login") return { kind: "login" };
   if (normalized === "/register") return { kind: "register" };
   if (normalized === "/app") return { kind: "projects" };
+  if (normalized === "/revision") {
+    return { kind: "workspace", projectId: null, runId: null };
+  }
   if (normalized === "/app/settings/account") return { kind: "settings-account" };
   if (normalized === "/app/settings/model") {
     return { kind: "workspace", projectId: null, runId: null };
   }
   if (
-    /^\/app\/projects\/[^/]+\/(?:check|documents|compare|visuals|runs|report)$/.test(
+    /^\/app\/projects\/[^/]+\/(?:check|documents|compare|visuals|runs|report|revise)$/.test(
       normalized,
     ) ||
-    /^\/app\/projects\/[^/]+\/runs\/[^/]+(?:\/(?:report|visuals))?$/.test(
+    /^\/app\/projects\/[^/]+\/runs\/[^/]+(?:\/(?:report|visuals|revise))?$/.test(
       normalized,
     ) ||
     /^\/(?:check|projects|diff|visual|audit|report|provider)$/.test(normalized)
@@ -89,17 +94,19 @@ export function workspaceRunIdFromPath(pathname: string): string | null {
 }
 
 export function workspaceViewFromPath(pathname: string): WorkspaceView {
+  if (pathname.replace(/\/+$/, "") === "/revision") return "check";
   if (pathname === "/app/settings/model") return "provider";
   const preciseRun = pathname.match(
-    /^\/app\/projects\/[^/]+\/runs\/[^/]+(?:\/(report|visuals))?\/?$/,
+    /^\/app\/projects\/[^/]+\/runs\/[^/]+(?:\/(report|visuals|revise))?\/?$/,
   );
   if (preciseRun) {
     if (preciseRun[1] === "report") return "report";
     if (preciseRun[1] === "visuals") return "visual";
+    if (preciseRun[1] === "revise") return "revision";
     return "audit";
   }
   const nested = pathname.match(
-    /^\/app\/projects\/[^/]+\/(check|documents|compare|visuals|runs|report)(?:\/|$)/,
+    /^\/app\/projects\/[^/]+\/(check|documents|compare|visuals|runs|report|revise)(?:\/|$)/,
   );
   if (nested) return nestedViewSegments[nested[1]] || "check";
   const segment = pathname.split("/").filter(Boolean)[0] || "check";
@@ -186,12 +193,14 @@ export function workspacePath(
   runId?: string | null,
 ): string {
   if (view === "provider" && projectId) return "/app/settings/model";
+  if (view === "revision" && !projectId) return "/check";
   if (!projectId) return `/${view}`;
   const encodedId = encodeURIComponent(projectId);
-  if (runId && ["audit", "report", "visual"].includes(view)) {
+  if (runId && ["audit", "report", "visual", "revision"].includes(view)) {
     const encodedRunId = encodeURIComponent(runId);
     if (view === "report") return `/app/projects/${encodedId}/runs/${encodedRunId}/report`;
     if (view === "visual") return `/app/projects/${encodedId}/runs/${encodedRunId}/visuals`;
+    if (view === "revision") return `/app/projects/${encodedId}/runs/${encodedRunId}/revise`;
     return `/app/projects/${encodedId}/runs/${encodedRunId}`;
   }
   const segment: Record<Exclude<WorkspaceView, "provider">, string> = {
@@ -201,6 +210,7 @@ export function workspacePath(
     visual: "visuals",
     audit: "runs",
     report: "report",
+    revision: "revise",
   };
   return `/app/projects/${encodedId}/${segment[view as Exclude<WorkspaceView, "provider">]}`;
 }

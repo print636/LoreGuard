@@ -277,6 +277,8 @@ python scripts/run_long_text_smoke.py
 | GET | `/api/v1/analysis-runs/{id}` | 查询状态与成本 |
 | GET | `/api/v1/analysis-runs/{id}/events` | SSE 进度流 |
 | GET | `/api/v1/analysis-runs/{id}/issues` | 获取问题与证据 |
+| POST | `/api/v1/analysis-runs/{id}/rechecks` | 冻结当前文档版本并从已完成任务发起复检 |
+| GET | `/api/v1/analysis-runs/{id}/comparison` | 分页读取四态复检对比，可按 outcome 过滤 |
 | GET | `/api/v1/analysis-runs/{id}/clarifications` | 获取与确认问题隔离的待澄清/开放问题（仅完成态） |
 | GET | `/api/v1/analysis-runs/{id}/records` | 查看实际抽取记录与提示 |
 | GET | `/api/v1/analysis-runs/{id}/diagnostics` | 获取分块、别名和检索候选诊断 |

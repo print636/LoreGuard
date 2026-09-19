@@ -5,6 +5,7 @@ import "./style.css";
 import "./workflow.css";
 import "./starrail-study.css";
 import "./workspace-shell.css";
+import "./revision.css";
 import "./product-shell.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

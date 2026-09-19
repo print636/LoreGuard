@@ -35,6 +35,7 @@ flowchart LR
 - 本地候选排序继续使用关键词、SHA-256 稳定桶字符 n-gram 余弦和共享 canonical entity graph 三分。`CandidatePair.consumed` 仅表示类型兼容，确定性裁决仍调用全量 `detect_issues`；这条主路没有被向量相似度替代。
 - Evidence RAG 是与确定性裁决解耦、默认关闭的后置通路：独立显式配置的 OpenAI-compatible embedding client、中文确定性行号分块、版本化 embedding profile，以及按项目、文档、版本、内容哈希和 chunker 精确隔离的 chunk/vector schema；PostgreSQL 使用真实 `vector` 列并执行精确余弦搜索，关键词与 dense 候选通过 RRF 合并。真实固定 BGE embedding、索引复用、pgvector 检索和隔离负例均已运行。
 - `IssueEvidenceReviewer` 在规则引擎已经产生 issue 后才工作。它从本次运行冻结快照中检索获授权证据，用服务端签发的引用标签调用同一结构化模型合同，并把 `supports_issue`、`contextual_exception` 或 `insufficient_evidence` 保存到 issue 的 `metadata.ai_evidence_review`。它不会删除、改写 issue 的类别、严重度、证据或建议；检索、模型或校验失败时保留原规则报告并记录降级诊断。
+- 修订复检使用独立 lineage：`retry` 继续重用原冻结输入，`recheck` 冻结项目当前活动版本。目标任务完成并落下最终 diagnostics 后，`issue-match-v1` 才持久化 `no_longer_detected`、`persisting`、`new` 或 `unverifiable`。匹配只接受唯一的一对一规则身份/证据签名；降级、歧义和不可比输入均 fail-closed。完整契约见 [修订—复检闭环 V1](revision-recheck-v1.md)。
 - Evidence Reviewer 由 `ENABLE_ISSUE_EVIDENCE_REVIEW` 显式开启，默认 `false`；默认还要求真正的 hybrid 检索。Key、endpoint、Prompt、原文和模型原始响应不进入持久化注释或公开评测报告。
 - 模型/基线合并后还有一层不调用模型的候选归一化：把“取出工具并执行操作”映射为 `uses`，把范围内能力禁用规则和实际发动行为映射为共享 canonical key。该层只依据服务端原文证据生成状态，仍由规则引擎比较两侧证据后产生 issue。
 - 基线对带“日志显示/记录记载”等报告前缀的显式时间—人物—地点句单独解析，报告来源不会再被并入人物名；地点在会面、检查等动作前保守截断。

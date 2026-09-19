@@ -22,6 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     event,
+    func,
     select,
 )
 from sqlalchemy.engine import Engine
@@ -132,6 +133,26 @@ class DocumentRow(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+# The project row is locked while allocating versions, and these constraints
+# remain the final concurrency authority. The partial index guarantees there
+# is never more than one active revision for a case-insensitive logical name.
+Index(
+    "uq_documents_project_lower_name_version",
+    DocumentRow.project_id,
+    func.lower(DocumentRow.name),
+    DocumentRow.version,
+    unique=True,
+)
+Index(
+    "uq_documents_project_lower_name_active",
+    DocumentRow.project_id,
+    func.lower(DocumentRow.name),
+    unique=True,
+    sqlite_where=DocumentRow.active.is_(True),
+    postgresql_where=DocumentRow.active.is_(True),
+)
 
 
 class DocumentContextRow(Base):
@@ -252,6 +273,80 @@ class IssueRow(Base):
     evidence: Mapped[list] = mapped_column(JSON)
     suggestion: Mapped[str] = mapped_column(Text)
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class AnalysisRunComparisonRow(Base):
+    """Durable lineage between a completed baseline and one revision run.
+
+    The matcher version and summary are frozen with the comparison so a later
+    matcher upgrade cannot silently reinterpret an already presented report.
+    """
+
+    __tablename__ = "analysis_run_comparisons"
+    __table_args__ = (
+        UniqueConstraint(
+            "baseline_run_id",
+            "target_run_id",
+            name="uq_analysis_run_comparison_pair",
+        ),
+        Index(
+            "ix_analysis_run_comparisons_baseline_created",
+            "baseline_run_id",
+            "created_at",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    baseline_run_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    target_run_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    matcher_version: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(24), default="pending")
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    provenance: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class IssueComparisonItemRow(Base):
+    """One conservative outcome in a revision comparison."""
+
+    __tablename__ = "issue_comparison_items"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('no_longer_detected', 'persisting', 'new', 'unverifiable')",
+            name="ck_issue_comparison_outcome",
+        ),
+        UniqueConstraint(
+            "comparison_id",
+            "baseline_issue_id",
+            name="uq_issue_comparison_baseline_issue",
+        ),
+        UniqueConstraint(
+            "comparison_id",
+            "target_issue_id",
+            name="uq_issue_comparison_target_issue",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    comparison_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_run_comparisons.id", ondelete="CASCADE"), index=True
+    )
+    outcome: Mapped[str] = mapped_column(String(24), index=True)
+    baseline_issue_id: Mapped[str | None] = mapped_column(
+        ForeignKey("issues.id", ondelete="CASCADE"), nullable=True
+    )
+    target_issue_id: Mapped[str | None] = mapped_column(
+        ForeignKey("issues.id", ondelete="CASCADE"), nullable=True
+    )
+    match_method: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    match_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provenance: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class AnalysisRecordRow(Base):

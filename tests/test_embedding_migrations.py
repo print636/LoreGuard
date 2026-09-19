@@ -19,7 +19,7 @@ from app import db as app_db
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0006_run_idempotency"
+HEAD_REVISION = "0008_document_concurrency"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
@@ -68,6 +68,27 @@ class EmbeddingMigrationTests(unittest.TestCase):
         config.set_main_option("script_location", str(ROOT / "migrations"))
         config.attributes["database_url"] = database_url
         command.stamp(config, revision)
+
+    def test_document_concurrency_downgrade_preserves_0007_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "comparison-downgrade.db"
+            url = f"sqlite:///{path.as_posix()}"
+            self.upgrade(url)
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            config.attributes["database_url"] = url
+            command.downgrade(config, "0007_revision_comparisons")
+            engine = create_engine(url)
+            try:
+                columns = {
+                    row["name"]
+                    for row in inspect(engine).get_columns(
+                        "analysis_run_comparisons"
+                    )
+                }
+                self.assertIn("provenance", columns)
+            finally:
+                engine.dispose()
 
     def create_prior_wip_embedding_tables(
         self,

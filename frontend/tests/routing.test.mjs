@@ -17,8 +17,13 @@ import {
 
 test("each workspace view has a stable deep-link path", () => {
   for (const view of workspaceViews) {
-    assert.equal(workspacePath(view), `/${view}`);
-    assert.equal(workspaceViewFromPath(`/${view}`), view);
+    if (view === "revision") {
+      assert.equal(workspacePath(view), "/check");
+      assert.equal(workspaceViewFromPath("/revision"), "check");
+    } else {
+      assert.equal(workspacePath(view), `/${view}`);
+      assert.equal(workspaceViewFromPath(`/${view}`), view);
+    }
   }
 });
 
@@ -32,8 +37,18 @@ test("product routes distinguish authentication, project center, and workspaces"
   assert.equal(productRouteFromPath("/login").kind, "login");
   assert.equal(productRouteFromPath("/register/").kind, "register");
   assert.equal(productRouteFromPath("/app").kind, "projects");
+  assert.deepEqual(productRouteFromPath("/revision"), {
+    kind: "workspace",
+    projectId: null,
+    runId: null,
+  });
   assert.equal(productRouteFromPath("/app/projects/p-1/check").kind, "workspace");
   assert.deepEqual(productRouteFromPath("/app/projects/p-1/runs/r-2/report"), {
+    kind: "workspace",
+    projectId: "p-1",
+    runId: "r-2",
+  });
+  assert.deepEqual(productRouteFromPath("/app/projects/p-1/runs/r-2/revise"), {
     kind: "workspace",
     projectId: "p-1",
     runId: "r-2",
@@ -60,6 +75,14 @@ test("nested project routes preserve project context across old workspace views"
   assert.equal(
     workspacePath("audit", "p-1", "run-2"),
     "/app/projects/p-1/runs/run-2",
+  );
+  assert.equal(
+    workspacePath("revision", "p-1", "run-2"),
+    "/app/projects/p-1/runs/run-2/revise",
+  );
+  assert.equal(
+    workspaceViewFromPath("/app/projects/p-1/runs/run-2/revise"),
+    "revision",
   );
 });
 
