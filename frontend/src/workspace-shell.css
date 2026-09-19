@@ -132,6 +132,15 @@ body {
   margin: 0;
 }
 
+.topActions .projectCenterAction {
+  color: var(--cyan);
+  border-color: rgba(139, 233, 240, .28);
+}
+
+.topActions .logoutAction {
+  color: var(--muted);
+}
+
 .reportShortcut span,
 .railReportButton span {
   display: inline-grid;
@@ -607,8 +616,7 @@ footer {
 @media (max-width: 1023px) {
   body { overflow: auto; }
   .topBar .topContext > button:first-child,
-  .topActions > button:nth-child(1),
-  .topActions > button:nth-child(2) { display: none; }
+  .topActions .workspaceSecondaryAction { display: none; }
   .appShell { grid-template-columns: 72px minmax(0, 1fr); }
   .resultRail { display: none; }
   .mobileRunStrip { display: grid; grid-template-columns: auto minmax(80px, 1fr) auto; align-items: center; gap: 10px; margin-bottom: 10px; padding: 8px 10px; border: 1px solid rgba(139,233,240,.28); border-radius: 12px; background: rgba(22, 36, 56, .84); }
@@ -617,12 +625,12 @@ footer {
 }
 
 @media (max-width: 767px) {
-  .topBar { position: sticky; grid-template-columns: minmax(0, 1fr) auto auto; min-height: 64px; padding: 8px 12px; }
+  .topBar { position: sticky; grid-template-columns: minmax(0, 1fr) auto; min-height: 64px; padding: 8px 12px; }
   .topBar .brand small { display: none; }
-  .topContext { justify-self: end; }
-  .topContext .providerPill { min-width: 38px; width: 38px; padding: 0; justify-items: center; border-radius: 50%; }
-  .providerPill span { display: none; }
+  .topContext { display: none; }
   .topActions > button { display: none !important; }
+  .topActions .projectCenterAction,
+  .topActions .logoutAction { display: inline-flex !important; min-width: 44px; justify-content: center; padding-inline: 8px; font-size: 11px; }
   .topActions .topRunButton { display: inline-flex !important; min-width: 96px; justify-content: center; }
   .appShell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 9px; height: calc(100dvh - 64px); padding: 8px; }
   .sideNav { display: block; padding: 6px; border-radius: 15px; overflow-x: auto; overflow-y: hidden; }
@@ -658,7 +666,7 @@ footer {
 
 @media (max-width: 430px) {
   .brandSeal { width: 32px; height: 32px; }
-  .topBar .brand strong { font-size: 14px; }
+  .topBar .brand > span:last-child { display: none; }
   .topActions .topRunButton { min-width: 88px; padding-inline: 8px; font-size: 11px; }
   .workbenchIntro .eyebrow { font-size: 9px; }
   .workbenchIntro h1 { font-size: 25px; }

@@ -18,6 +18,15 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./loreguard.db"
     redis_url: str = "redis://localhost:6379/0"
     use_celery: bool = False
+    deployment_environment: Literal["local", "production"] = "local"
+    auth_mode: Literal["anonymous", "required"] = "anonymous"
+    # Server-only HMAC key for opaque session and CSRF token digests. It is
+    # deliberately independent from provider/API credentials.
+    auth_secret_key: str = Field(default="", repr=False, max_length=4_096)
+    auth_session_ttl_seconds: int = Field(default=14 * 24 * 60 * 60, ge=300, le=90 * 24 * 60 * 60)
+    auth_cookie_secure: bool = False
+    auth_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    cors_allowed_origins: str = "http://localhost:5173,http://localhost:8080"
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
@@ -286,6 +295,52 @@ class Settings(BaseSettings):
                     "evidence investigator requires a complete embedding profile"
                 )
         return self
+
+    @model_validator(mode="after")
+    def validate_auth_security_boundary(self):
+        """Fail closed when authentication is enabled without its trust root."""
+
+        if self.auth_mode == "required" and len(self.auth_secret_key) < 32:
+            raise ValueError(
+                "AUTH_MODE=required requires AUTH_SECRET_KEY with at least 32 characters"
+            )
+        if self.auth_cookie_samesite == "none" and not self.auth_cookie_secure:
+            raise ValueError("SameSite=None authentication cookies must be Secure")
+        if self.deployment_environment == "production":
+            if self.auth_mode != "required":
+                raise ValueError("production requires AUTH_MODE=required")
+            if not self.auth_cookie_secure:
+                raise ValueError("production authentication cookies must be Secure")
+        # Parse eagerly so a typo cannot silently broaden or break browser
+        # credential handling after the process has started.
+        self.parsed_cors_origins()
+        return self
+
+    def parsed_cors_origins(self) -> list[str]:
+        origins = [item.strip() for item in self.cors_allowed_origins.split(",")]
+        if not origins or any(not item for item in origins):
+            raise ValueError("CORS_ALLOWED_ORIGINS must contain exact origins")
+        for origin in origins:
+            try:
+                value = urlsplit(origin)
+                valid = (
+                    value.scheme in {"http", "https"}
+                    and bool(value.hostname)
+                    and value.username is None
+                    and value.password is None
+                    and value.path in {"", "/"}
+                    and not value.query
+                    and not value.fragment
+                    and origin != "*"
+                )
+                _ = value.port
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise ValueError(f"invalid exact CORS origin: {origin!r}")
+            if self.deployment_environment == "production" and value.scheme != "https":
+                raise ValueError("production CORS origins must use https")
+        return origins
 
 
 @lru_cache

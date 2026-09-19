@@ -10,6 +10,13 @@ services:
   api:
     build: .
     environment:
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+      AUTH_MODE: ${AUTH_MODE:-anonymous}
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:-}
+      AUTH_SESSION_TTL_SECONDS: ${AUTH_SESSION_TTL_SECONDS:-1209600}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:8080}
       LOREGUARD_BUILD_REVISION: ${LOREGUARD_BUILD_REVISION:-}
       DATABASE_URL: postgresql+psycopg://loreguard:loreguard@postgres:5432/loreguard
       REDIS_URL: redis://redis:6379/0
@@ -100,6 +107,13 @@ services:
     build: .
     command: celery -A app.tasks.celery_app worker --loglevel=INFO
     environment:
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+      AUTH_MODE: ${AUTH_MODE:-anonymous}
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:-}
+      AUTH_SESSION_TTL_SECONDS: ${AUTH_SESSION_TTL_SECONDS:-1209600}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:8080}
       LOREGUARD_BUILD_REVISION: ${LOREGUARD_BUILD_REVISION:-}
       DATABASE_URL: postgresql+psycopg://loreguard:loreguard@postgres:5432/loreguard
       REDIS_URL: redis://redis:6379/0

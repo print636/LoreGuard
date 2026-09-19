@@ -106,6 +106,25 @@ class TokenBudgetTests(unittest.TestCase):
         example = (ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("DAILY_TOKEN_BUDGET=100000", example)
 
+    def test_compose_passes_authentication_boundary_to_api_and_worker(self):
+        compose = yaml.safe_load(
+            (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        )
+        expected = {
+            "DEPLOYMENT_ENVIRONMENT": "${DEPLOYMENT_ENVIRONMENT:-local}",
+            "AUTH_MODE": "${AUTH_MODE:-anonymous}",
+            "AUTH_SECRET_KEY": "${AUTH_SECRET_KEY:-}",
+            "AUTH_SESSION_TTL_SECONDS": "${AUTH_SESSION_TTL_SECONDS:-1209600}",
+            "AUTH_COOKIE_SECURE": "${AUTH_COOKIE_SECURE:-false}",
+            "AUTH_COOKIE_SAMESITE": "${AUTH_COOKIE_SAMESITE:-lax}",
+            "CORS_ALLOWED_ORIGINS": (
+                "${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:8080}"
+            ),
+        }
+        for service_name in ("api", "worker"):
+            environment = compose["services"][service_name]["environment"]
+            self.assertEqual(expected, {key: environment.get(key) for key in expected})
+
     def test_exact_conservative_budget_allows_request_and_one_less_rejects(self):
         document = DocumentInput(id="doc", name="doc.md", content="普通叙述没有结构化状态。")
         chunk = chunk_document(document, 64, 0)[0]

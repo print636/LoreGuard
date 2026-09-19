@@ -10,6 +10,15 @@ Quick start:
 docker compose up --build
 ```
 
+The default stack is an explicit local/demo deployment with one durable
+anonymous workspace. Real account registration and personal-workspace
+isolation are enabled with `AUTH_MODE=required` and a unique server-only
+`AUTH_SECRET_KEY` of at least 32 characters. A public deployment must also set
+`DEPLOYMENT_ENVIRONMENT=production`, secure cookies, and an exact HTTPS CORS
+origin. The development Compose file exposes ports and development database
+credentials and must not be published unchanged; see
+[`docs/auth-security-contract.md`](docs/auth-security-contract.md).
+
 The default stack keeps embeddings disabled and does not pull or start an
 embedding model. An optional CPU-only local TEI overlay is pinned by image
 digest and model revision:

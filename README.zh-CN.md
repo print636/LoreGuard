@@ -69,6 +69,23 @@ set DATABASE_URL=sqlite:///./loreguard.db
 uvicorn app.main:app --reload
 ```
 
+本地启动默认使用 `AUTH_MODE=anonymous`：所有数据归入一个固定的本地体验工作区，
+无需登录。需要验收真实账户流程时，至少设置以下服务端环境变量后重启 API：
+
+```bash
+set AUTH_MODE=required
+set AUTH_SECRET_KEY=请替换为独立且至少32字符的高熵随机值
+set CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:8080
+```
+
+此后可在 `/register` 创建账户；每个账户会自动获得个人工作区。项目、文档、
+分析运行、问题、反馈、SSE、取消与重试都在服务端按工作区隔离，跨工作区 UUID
+统一返回 `404`。公开部署还必须设置 `DEPLOYMENT_ENVIRONMENT=production`、
+`AUTH_COOKIE_SECURE=true` 和精确的 HTTPS Origin，并使用独立的数据库凭据、
+反向代理及受保护的监控入口。默认 Compose 暴露开发端口和开发数据库口令，
+不能原样发布到公网。完整边界见
+[`docs/auth-security-contract.md`](docs/auth-security-contract.md)。
+
 默认不需要模型 API，确定性基线可以独立完成全流程。配置 OpenAI-compatible Provider 后，分析流水线会在基线抽取之上调用模型，使用 Pydantic 校验结构化结果，并按文档行号绑定证据：
 
 ```bash

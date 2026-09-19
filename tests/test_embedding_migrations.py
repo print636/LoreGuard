@@ -17,7 +17,7 @@ from app import db as app_db
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0003_embedding_identity"
+HEAD_REVISION = "0005_workspace_isolation"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
@@ -238,6 +238,46 @@ class EmbeddingMigrationTests(unittest.TestCase):
                     "SELECT version_num FROM alembic_version"
                 ).scalar_one()
             self.assertEqual(revision, HEAD_REVISION)
+            engine.dispose()
+
+    def test_workspace_isolation_migration_round_trips_on_sqlite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "workspace-round-trip.db"
+            url = f"sqlite:///{path.as_posix()}"
+            self.upgrade(url)
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            config.attributes["database_url"] = url
+            command.downgrade(config, "0004_auth_foundation")
+            engine = create_engine(url)
+            inspector = inspect(engine)
+            self.assertNotIn(
+                "workspace_id",
+                {column["name"] for column in inspector.get_columns("projects")},
+            )
+            self.assertNotIn(
+                "requested_by_user_id",
+                {
+                    column["name"]
+                    for column in inspector.get_columns("analysis_runs")
+                },
+            )
+            engine.dispose()
+
+            self.upgrade(url)
+            engine = create_engine(url)
+            inspector = inspect(engine)
+            self.assertIn(
+                "workspace_id",
+                {column["name"] for column in inspector.get_columns("projects")},
+            )
+            with engine.connect() as connection:
+                self.assertEqual(
+                    HEAD_REVISION,
+                    connection.exec_driver_sql(
+                        "SELECT version_num FROM alembic_version"
+                    ).scalar_one(),
+                )
             engine.dispose()
 
     def test_incomplete_legacy_table_stops_before_head_stamp(self):

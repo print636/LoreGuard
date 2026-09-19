@@ -7,15 +7,24 @@ from pathlib import Path
 from threading import Thread
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import func, select, update
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import Scope
 
 from .config import get_settings
+from .auth import (
+    AuthContext,
+    ExactOriginMiddleware,
+    get_auth_context,
+    require_csrf,
+    router as auth_router,
+)
 from .db import AnalysisDiagnosticRow, AnalysisRecordRow, AnalysisRunExecutionRow, AnalysisRunInputRow, AnalysisRunRow, DocumentContextRow, DocumentRow, FeedbackRow, IssueRow, ProjectRow, RunEventRow, SessionLocal, init_db
 from .document_diff import build_document_diff
 from .docx_import import DocxImportError, extract_docx_text
@@ -44,7 +53,79 @@ app = FastAPI(title="LoreGuard API", version="0.1.0", lifespan=lifespan)
 settings = get_settings()
 write_limiter = SlidingWindowLimiter(settings.rate_limit_per_minute, settings.rate_limit_window_seconds)
 app.add_middleware(WriteRateLimitMiddleware, limiter=write_limiter)
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://localhost:8080"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    ExactOriginMiddleware,
+    allowed_origins=settings.parsed_cors_origins(),
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.parsed_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type", "X-CSRF-Token"],
+    expose_headers=["X-CSRF-Token"],
+)
+app.include_router(auth_router)
+
+
+class SpaStaticFiles(StaticFiles):
+    """Serve known client routes from ``index.html`` without hiding 404s.
+
+    ``StaticFiles(html=True)`` only falls back to an index file for real
+    directories. LoreGuard's browser routes are virtual, so a direct refresh
+    of ``/login`` or ``/app/projects/...`` otherwise returns 404. The fallback
+    is intentionally allow-listed: API paths, asset paths, file-like paths,
+    unknown top-level paths, and traversal attempts retain normal static-file
+    404 behaviour.
+    """
+
+    _LEGACY_WORKSPACE_ROUTES = frozenset(
+        {"check", "projects", "diff", "visual", "audit", "report", "provider"}
+    )
+
+    @classmethod
+    def _is_client_route(cls, path: str, request_path: str = "") -> bool:
+        # Starlette builds nested static paths with the host OS separator, so
+        # normalise Windows paths before applying URL-segment rules. Encoded
+        # backslash traversal still becomes a ``..`` segment and is rejected.
+        normalized_path = path.replace("\\", "/")
+        normalized_request_path = request_path.replace("\\", "/")
+        request_segments = [
+            segment
+            for segment in normalized_request_path.strip("/").split("/")
+            if segment
+        ]
+        if any(segment in {".", ".."} for segment in request_segments):
+            return False
+        segments = [
+            segment for segment in normalized_path.strip("/").split("/") if segment
+        ]
+        if any(segment in {".", ".."} for segment in segments):
+            return False
+        if not segments:
+            return True
+        if "." in segments[-1]:
+            return False
+        if len(segments) == 1:
+            return segments[0] in {"login", "register", "app"} | cls._LEGACY_WORKSPACE_ROUTES
+        return segments[0] == "app"
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        not_found_response: Response | None = None
+        try:
+            response = await super().get_response(path, scope)
+            if response.status_code != 404:
+                return response
+            not_found_response = response
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404:
+                raise
+
+        if not self._is_client_route(path, str(scope.get("path", ""))):
+            if not_found_response is not None:
+                return not_found_response
+            raise StarletteHTTPException(status_code=404)
+        return await super().get_response("index.html", scope)
 
 
 class ProjectIn(BaseModel):
@@ -90,6 +171,38 @@ class SemanticReviewItemOut(BaseModel):
     certainty: CertaintyLevel
     text: str
     evidence: EvidenceSpan
+
+
+def _project_in_workspace(db, project_id: str, workspace_id: str) -> ProjectRow | None:
+    return db.scalar(
+        select(ProjectRow).where(
+            ProjectRow.id == project_id,
+            ProjectRow.workspace_id == workspace_id,
+        )
+    )
+
+
+def _run_in_workspace(db, run_id: str, workspace_id: str) -> AnalysisRunRow | None:
+    return db.scalar(
+        select(AnalysisRunRow)
+        .join(ProjectRow, ProjectRow.id == AnalysisRunRow.project_id)
+        .where(
+            AnalysisRunRow.id == run_id,
+            ProjectRow.workspace_id == workspace_id,
+        )
+    )
+
+
+def _issue_in_workspace(db, issue_id: str, workspace_id: str) -> IssueRow | None:
+    return db.scalar(
+        select(IssueRow)
+        .join(AnalysisRunRow, AnalysisRunRow.id == IssueRow.run_id)
+        .join(ProjectRow, ProjectRow.id == AnalysisRunRow.project_id)
+        .where(
+            IssueRow.id == issue_id,
+            ProjectRow.workspace_id == workspace_id,
+        )
+    )
 
 
 def serialize_run(row: AnalysisRunRow, db=None) -> dict:
@@ -189,7 +302,7 @@ def dispatch_analysis(run_id: str) -> None:
         Thread(target=execute_analysis, args=(run_id,), daemon=True).start()
 
 
-def enforce_daily_model_budget(db) -> None:
+def enforce_daily_model_budget(db, workspace_id: str | None = None) -> None:
     """Reject model-backed work after the local daily usage threshold.
 
     This is intentionally a single-database check, not a distributed quota
@@ -205,12 +318,13 @@ def enforce_daily_model_budget(db) -> None:
         return
     now = utc_now_naive()
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    usage_rows = db.execute(
+    statement = (
         select(
             AnalysisRunRow.prompt_tokens,
             AnalysisRunRow.completion_tokens,
             AnalysisDiagnosticRow.payload,
         )
+        .join(ProjectRow, ProjectRow.id == AnalysisRunRow.project_id)
         .outerjoin(
             AnalysisDiagnosticRow,
             AnalysisDiagnosticRow.run_id == AnalysisRunRow.id,
@@ -224,7 +338,10 @@ def enforce_daily_model_budget(db) -> None:
                 ("queued", "running", "completed", "failed", "cancelled")
             ),
         )
-    ).all()
+    )
+    if workspace_id is not None:
+        statement = statement.where(ProjectRow.workspace_id == workspace_id)
+    usage_rows = db.execute(statement).all()
     daily_usage = sum(_conservative_run_token_debit(*row) for row in usage_rows)
     if settings.daily_token_budget <= 0 or daily_usage >= settings.daily_token_budget:
         seconds_to_reset = max(
@@ -285,8 +402,13 @@ def prepare_document_version(
         )
     ).all()
     if replace_document_id:
-        old = db.get(DocumentRow, replace_document_id)
-        if not old or old.project_id != project_id:
+        old = db.scalar(
+            select(DocumentRow).where(
+                DocumentRow.id == replace_document_id,
+                DocumentRow.project_id == project_id,
+            )
+        )
+        if not old:
             raise HTTPException(404, "待替换文档不存在")
         if old.name.lower() != name.lower():
             raise HTTPException(409, "替换文档必须保持同名；如需新文件请直接上传")
@@ -390,7 +512,9 @@ def _provider_check_metrics(
 
 
 @app.post("/api/v1/model/provider-check")
-def check_model_provider() -> dict:
+def check_model_provider(
+    _context: AuthContext = Depends(require_csrf),
+) -> dict:
     """Run an explicit, minimal provider preflight and return safe diagnostics."""
     provider = OpenAICompatibleProvider(settings)
     thinking = safe_thinking_configuration(settings)
@@ -464,17 +588,30 @@ def check_model_provider() -> dict:
 
 
 @app.post("/api/v1/projects", status_code=201)
-def create_project(payload: ProjectIn) -> dict:
+def create_project(
+    payload: ProjectIn,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
     with SessionLocal() as db:
-        row = ProjectRow(name=payload.name, description=payload.description)
+        row = ProjectRow(
+            workspace_id=context.workspace_id,
+            name=payload.name,
+            description=payload.description,
+        )
         db.add(row); db.commit()
         return {"id": row.id, "name": row.name, "description": row.description, "created_at": row.created_at}
 
 
 @app.get("/api/v1/projects")
-def list_projects() -> list[dict]:
+def list_projects(
+    context: AuthContext = Depends(get_auth_context),
+) -> list[dict]:
     with SessionLocal() as db:
-        projects = db.scalars(select(ProjectRow).order_by(ProjectRow.created_at.desc())).all()
+        projects = db.scalars(
+            select(ProjectRow)
+            .where(ProjectRow.workspace_id == context.workspace_id)
+            .order_by(ProjectRow.created_at.desc())
+        ).all()
         result = []
         for project in projects:
             active_document_count = db.scalar(
@@ -500,9 +637,12 @@ def list_projects() -> list[dict]:
 
 
 @app.get("/api/v1/projects/{project_id}")
-def get_project(project_id: str) -> dict:
+def get_project(
+    project_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
     with SessionLocal() as db:
-        project = db.get(ProjectRow, project_id)
+        project = _project_in_workspace(db, project_id, context.workspace_id)
         if not project:
             raise HTTPException(404, "项目不存在")
         documents = db.scalars(
@@ -519,9 +659,13 @@ def get_project(project_id: str) -> dict:
 
 
 @app.get("/api/v1/projects/{project_id}/documents")
-def list_documents(project_id: str, include_history: bool = False) -> list[dict]:
+def list_documents(
+    project_id: str,
+    include_history: bool = False,
+    context: AuthContext = Depends(get_auth_context),
+) -> list[dict]:
     with SessionLocal() as db:
-        if not db.get(ProjectRow, project_id):
+        if not _project_in_workspace(db, project_id, context.workspace_id):
             raise HTTPException(404, "项目不存在")
         statement = select(DocumentRow).where(DocumentRow.project_id == project_id)
         if not include_history:
@@ -535,7 +679,10 @@ def list_documents(project_id: str, include_history: bool = False) -> list[dict]
 
 @app.get("/api/v1/projects/{project_id}/documents/diff")
 def compare_document_versions(
-    project_id: str, from_document_id: str, to_document_id: str
+    project_id: str,
+    from_document_id: str,
+    to_document_id: str,
+    context: AuthContext = Depends(get_auth_context),
 ) -> dict:
     """Compare two stored versions of one same-named document.
 
@@ -543,13 +690,29 @@ def compare_document_versions(
     extraction provider and therefore cannot consume model tokens.
     """
     with SessionLocal() as db:
-        if not db.get(ProjectRow, project_id):
+        if not _project_in_workspace(db, project_id, context.workspace_id):
             raise HTTPException(404, "项目不存在")
-        old = db.get(DocumentRow, from_document_id)
-        new = db.get(DocumentRow, to_document_id)
-        if not old or old.project_id != project_id:
+        old = db.scalar(
+            select(DocumentRow)
+            .join(ProjectRow, ProjectRow.id == DocumentRow.project_id)
+            .where(
+                DocumentRow.id == from_document_id,
+                DocumentRow.project_id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+        )
+        new = db.scalar(
+            select(DocumentRow)
+            .join(ProjectRow, ProjectRow.id == DocumentRow.project_id)
+            .where(
+                DocumentRow.id == to_document_id,
+                DocumentRow.project_id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+        )
+        if not old:
             raise HTTPException(404, "起始文档版本不存在于当前项目")
-        if not new or new.project_id != project_id:
+        if not new:
             raise HTTPException(404, "目标文档版本不存在于当前项目")
         if old.id == new.id:
             raise HTTPException(409, "请选择两个不同版本进行比较")
@@ -579,13 +742,17 @@ def compare_document_versions(
 
 
 @app.post("/api/v1/projects/{project_id}/documents/text", status_code=201)
-def create_text_document(project_id: str, payload: TextDocumentIn) -> dict:
+def create_text_document(
+    project_id: str,
+    payload: TextDocumentIn,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
     if not payload.name.lower().endswith((".md", ".txt", ".json")):
         raise HTTPException(415, "名称必须以 .md、.txt 或 .json 结尾")
     if len(payload.content.encode("utf-8")) > settings.max_upload_bytes:
         raise HTTPException(413, "文本超过上传限制")
     with SessionLocal() as db:
-        if not db.get(ProjectRow, project_id):
+        if not _project_in_workspace(db, project_id, context.workspace_id):
             raise HTTPException(404, "项目不存在")
         version, superseded, document_role, story_scope = prepare_document_version(
             db,
@@ -610,7 +777,9 @@ def create_text_document(project_id: str, payload: TextDocumentIn) -> dict:
 
 
 @app.post("/api/v1/demo", status_code=201)
-def create_demo() -> dict:
+def create_demo(
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
     data_dir = Path(__file__).resolve().parents[1] / "data" / "demo-natural"
     files = [
         (data_dir / "world.md", DocumentRole.canon),
@@ -619,7 +788,11 @@ def create_demo() -> dict:
     if not all(path.exists() for path, _ in files):
         raise HTTPException(500, "演示数据缺失")
     with SessionLocal() as db:
-        project = ProjectRow(name="潮汐之门 · 自然文本体验", description="无需 API Key 的中文自然文本基线")
+        project = ProjectRow(
+            workspace_id=context.workspace_id,
+            name="潮汐之门 · 自然文本体验",
+            description="无需 API Key 的中文自然文本基线",
+        )
         db.add(project); db.flush()
         for path, role in files:
             document = DocumentRow(project_id=project.id, name=path.name, content=path.read_text(encoding="utf-8"))
@@ -637,7 +810,9 @@ def create_demo() -> dict:
 
 
 @app.post("/api/v1/demo/advanced", status_code=201)
-def create_advanced_demo() -> dict:
+def create_advanced_demo(
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
     """Create the original multi-document acceptance scenario."""
     data_dir = Path(__file__).resolve().parents[1] / "data" / "advanced"
     files = [
@@ -649,6 +824,7 @@ def create_advanced_demo() -> dict:
         raise HTTPException(500, "复杂演示数据缺失")
     with SessionLocal() as db:
         project = ProjectRow(
+            workspace_id=context.workspace_id,
             name="静默海域 · 复杂多章节验收",
             description="原创三文档场景，覆盖时间、地点、知识、物品与世界规则",
         )
@@ -680,6 +856,7 @@ async def upload_document(
         max_length=80,
         pattern=r"^[A-Za-z0-9_\-\u4e00-\u9fff]+$",
     ),
+    context: AuthContext = Depends(require_csrf),
 ) -> dict:
     data = await file.read(settings.max_upload_bytes + 1)
     if len(data) > settings.max_upload_bytes:
@@ -697,7 +874,7 @@ async def upload_document(
         except UnicodeDecodeError:
             raise HTTPException(400, "Markdown、TXT 与 JSON 文件必须为 UTF-8 编码") from None
     with SessionLocal() as db:
-        if not db.get(ProjectRow, project_id):
+        if not _project_in_workspace(db, project_id, context.workspace_id):
             raise HTTPException(404, "项目不存在")
         version, superseded, resolved_role, resolved_scope = prepare_document_version(
             db,
@@ -722,9 +899,12 @@ async def upload_document(
 
 
 @app.post("/api/v1/projects/{project_id}/analysis-runs", status_code=202)
-def start_analysis(project_id: str) -> dict:
+def start_analysis(
+    project_id: str,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
     with SessionLocal() as db:
-        if not db.get(ProjectRow, project_id):
+        if not _project_in_workspace(db, project_id, context.workspace_id):
             raise HTTPException(404, "项目不存在")
         documents = db.scalars(
             select(DocumentRow)
@@ -733,8 +913,11 @@ def start_analysis(project_id: str) -> dict:
         ).all()
         if not documents:
             raise HTTPException(400, "项目没有可分析文档")
-        enforce_daily_model_budget(db)
-        run = AnalysisRunRow(project_id=project_id)
+        enforce_daily_model_budget(db, context.workspace_id)
+        run = AnalysisRunRow(
+            project_id=project_id,
+            requested_by_user_id=context.user_id,
+        )
         db.add(run)
         db.flush()
         capture_run_inputs(db, run, list(documents))
@@ -745,17 +928,23 @@ def start_analysis(project_id: str) -> dict:
 
 
 @app.get("/api/v1/analysis-runs/{run_id}")
-def get_run(run_id: str) -> dict:
+def get_run(
+    run_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
     with SessionLocal() as db:
-        row = db.get(AnalysisRunRow, run_id)
+        row = _run_in_workspace(db, run_id, context.workspace_id)
         if not row: raise HTTPException(404, "分析任务不存在")
         return serialize_run(row, db)
 
 
 @app.get("/api/v1/projects/{project_id}/analysis-runs")
-def list_analysis_runs(project_id: str) -> list[dict]:
+def list_analysis_runs(
+    project_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> list[dict]:
     with SessionLocal() as db:
-        if not db.get(ProjectRow, project_id):
+        if not _project_in_workspace(db, project_id, context.workspace_id):
             raise HTTPException(404, "项目不存在")
         rows = db.scalars(
             select(AnalysisRunRow)
@@ -766,9 +955,12 @@ def list_analysis_runs(project_id: str) -> list[dict]:
 
 
 @app.post("/api/v1/analysis-runs/{run_id}/cancel", status_code=202)
-def cancel_run(run_id: str) -> dict:
+def cancel_run(
+    run_id: str,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
     with SessionLocal() as db:
-        row = db.get(AnalysisRunRow, run_id)
+        row = _run_in_workspace(db, run_id, context.workspace_id)
         if not row: raise HTTPException(404, "分析任务不存在")
         if row.status == "cancelled" and row.cancel_requested:
             return {"id": row.id, "cancel_requested": True, "already_requested": True}
@@ -820,9 +1012,12 @@ def cancel_run(run_id: str) -> dict:
 
 
 @app.post("/api/v1/analysis-runs/{run_id}/retry", status_code=202)
-def retry_run(run_id: str) -> dict:
+def retry_run(
+    run_id: str,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
     with SessionLocal() as db:
-        old = db.get(AnalysisRunRow, run_id)
+        old = _run_in_workspace(db, run_id, context.workspace_id)
         if not old: raise HTTPException(404, "分析任务不存在")
         if old.status not in {"failed", "cancelled"}:
             raise HTTPException(409, "仅失败或已取消任务可以重试")
@@ -833,8 +1028,11 @@ def retry_run(run_id: str) -> dict:
         )
         if not snapshot_count:
             raise HTTPException(409, MISSING_SNAPSHOT_ERROR)
-        enforce_daily_model_budget(db)
-        row = AnalysisRunRow(project_id=old.project_id)
+        enforce_daily_model_budget(db, context.workspace_id)
+        row = AnalysisRunRow(
+            project_id=old.project_id,
+            requested_by_user_id=context.user_id,
+        )
         db.add(row)
         db.flush()
         copy_run_inputs(db, old.id, row)
@@ -845,17 +1043,24 @@ def retry_run(run_id: str) -> dict:
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/issues")
-def get_issues(run_id: str) -> list[dict]:
+def get_issues(
+    run_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> list[dict]:
     with SessionLocal() as db:
-        if not db.get(AnalysisRunRow, run_id): raise HTTPException(404, "分析任务不存在")
+        if not _run_in_workspace(db, run_id, context.workspace_id):
+            raise HTTPException(404, "分析任务不存在")
         rows = db.scalars(select(IssueRow).where(IssueRow.run_id == run_id)).all()
         return [{"id": r.id, "category": r.category, "severity": r.severity, "confidence": r.confidence, "title": r.title, "explanation": r.explanation, "evidence": r.evidence, "suggestion": r.suggestion, "metadata": r.extra} for r in rows]
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/records")
-def get_records(run_id: str) -> dict:
+def get_records(
+    run_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
     with SessionLocal() as db:
-        run = db.get(AnalysisRunRow, run_id)
+        run = _run_in_workspace(db, run_id, context.workspace_id)
         if not run:
             raise HTTPException(404, "分析任务不存在")
         rows = list(db.scalars(
@@ -882,10 +1087,13 @@ def get_records(run_id: str) -> dict:
     "/api/v1/analysis-runs/{run_id}/clarifications",
     response_model=list[SemanticReviewItemOut],
 )
-def get_clarifications(run_id: str) -> list[SemanticReviewItemOut]:
+def get_clarifications(
+    run_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> list[SemanticReviewItemOut]:
     """Return only reviewable questions/gaps, never arbitrary record attrs."""
     with SessionLocal() as db:
-        run = db.get(AnalysisRunRow, run_id)
+        run = _run_in_workspace(db, run_id, context.workspace_id)
         if not run:
             raise HTTPException(404, "分析任务不存在")
         if run.status != "completed":
@@ -922,8 +1130,8 @@ def get_clarifications(run_id: str) -> list[SemanticReviewItemOut]:
         return result
 
 
-def _completed_visualization_rows(db, run_id: str):
-    run = db.get(AnalysisRunRow, run_id)
+def _completed_visualization_rows(db, run_id: str, workspace_id: str):
+    run = _run_in_workspace(db, run_id, workspace_id)
     if not run:
         raise HTTPException(404, "分析任务不存在")
     if run.status != "completed":
@@ -938,23 +1146,36 @@ def _completed_visualization_rows(db, run_id: str):
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/graph", response_model=GraphResponse)
-def get_graph(run_id: str) -> GraphResponse:
+def get_graph(
+    run_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> GraphResponse:
     with SessionLocal() as db:
-        records, issues = _completed_visualization_rows(db, run_id)
+        records, issues = _completed_visualization_rows(
+            db, run_id, context.workspace_id
+        )
         return project_graph(run_id, records, issues)
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/timeline", response_model=TimelineResponse)
-def get_timeline(run_id: str) -> TimelineResponse:
+def get_timeline(
+    run_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> TimelineResponse:
     with SessionLocal() as db:
-        records, issues = _completed_visualization_rows(db, run_id)
+        records, issues = _completed_visualization_rows(
+            db, run_id, context.workspace_id
+        )
         return project_timeline(run_id, records, issues)
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/diagnostics")
-def get_diagnostics(run_id: str) -> dict:
+def get_diagnostics(
+    run_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
     with SessionLocal() as db:
-        if not db.get(AnalysisRunRow, run_id):
+        if not _run_in_workspace(db, run_id, context.workspace_id):
             raise HTTPException(404, "分析任务不存在")
         row = db.get(AnalysisDiagnosticRow, run_id)
         return row.payload if row else {
@@ -969,7 +1190,14 @@ async def stream_events(
     run_id: str,
     last_event_id: int = 0,
     last_event_id_header: Annotated[int | None, Header(alias="Last-Event-ID")] = None,
+    context: AuthContext = Depends(get_auth_context),
 ):
+    # Authorize before returning StreamingResponse so an unrelated run id is a
+    # normal 404 and never establishes an SSE connection.
+    with SessionLocal() as db:
+        if not _run_in_workspace(db, run_id, context.workspace_id):
+            raise HTTPException(404, "分析任务不存在")
+
     async def generate():
         cursor = max(last_event_id, last_event_id_header or 0)
         while True:
@@ -995,11 +1223,17 @@ async def stream_events(
 
 
 @app.post("/api/v1/issues/{issue_id}/feedback", status_code=201)
-def feedback(issue_id: str, payload: FeedbackIn, response: Response) -> dict:
+def feedback(
+    issue_id: str,
+    payload: FeedbackIn,
+    response: Response,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
     if payload.label not in {"accepted", "false_positive", "resolved"}:
         raise HTTPException(422, "label 必须是 accepted、false_positive 或 resolved")
     with SessionLocal() as db:
-        if not db.get(IssueRow, issue_id): raise HTTPException(404, "问题不存在")
+        if not _issue_in_workspace(db, issue_id, context.workspace_id):
+            raise HTTPException(404, "问题不存在")
         latest = db.scalar(
             select(FeedbackRow)
             .where(FeedbackRow.issue_id == issue_id)
@@ -1016,7 +1250,12 @@ def feedback(issue_id: str, payload: FeedbackIn, response: Response) -> dict:
                 "comment": latest.comment, "created_at": latest.created_at,
                 "history_count": count, "duplicate_ignored": True,
             }
-        row = FeedbackRow(issue_id=issue_id, label=payload.label, comment=payload.comment)
+        row = FeedbackRow(
+            issue_id=issue_id,
+            created_by_user_id=context.user_id,
+            label=payload.label,
+            comment=payload.comment,
+        )
         db.add(row); db.commit()
         count = db.scalar(
             select(func.count()).select_from(FeedbackRow).where(FeedbackRow.issue_id == issue_id)
@@ -1029,9 +1268,12 @@ def feedback(issue_id: str, payload: FeedbackIn, response: Response) -> dict:
 
 
 @app.get("/api/v1/issues/{issue_id}/feedback")
-def feedback_history(issue_id: str) -> dict:
+def feedback_history(
+    issue_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
     with SessionLocal() as db:
-        if not db.get(IssueRow, issue_id):
+        if not _issue_in_workspace(db, issue_id, context.workspace_id):
             raise HTTPException(404, "问题不存在")
         rows = db.scalars(
             select(FeedbackRow)
@@ -1046,7 +1288,10 @@ def feedback_history(issue_id: str) -> dict:
 
 
 @app.get("/api/v1/evaluations/{evaluation_id}")
-def evaluation(evaluation_id: str) -> dict:
+def evaluation(
+    evaluation_id: str,
+    _context: AuthContext = Depends(get_auth_context),
+) -> dict:
     if evaluation_id not in {"baseline", "latest"}: raise HTTPException(404, "仅内置 baseline/latest 评测")
     return {
         "benchmark_kind": "rule-engine synthetic directive regression",
@@ -1082,4 +1327,4 @@ def metrics():
 # registered first, then the single-page app handles every remaining path.
 frontend_dist = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 if frontend_dist.exists():
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="web")
+    app.mount("/", SpaStaticFiles(directory=frontend_dist, html=True), name="web")

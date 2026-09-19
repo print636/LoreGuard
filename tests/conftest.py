@@ -18,6 +18,9 @@ os.environ["OPENAI_API_KEY"] = ""
 os.environ["ENABLE_MODEL_EXTRACTION"] = "false"
 os.environ["ENABLE_REVIEW_AGENT"] = "false"
 os.environ["ENABLE_EMBEDDINGS"] = "false"
+os.environ["AUTH_MODE"] = "anonymous"
+os.environ["AUTH_SECRET_KEY"] = ""
+os.environ["DEPLOYMENT_ENVIRONMENT"] = "local"
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:

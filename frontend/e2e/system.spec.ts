@@ -64,9 +64,24 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
     }
   });
 
+  await page.goto("/provider");
+  await expect(page).toHaveURL(/\/provider$/);
+  await expect(page.locator(".providerConnection")).toBeVisible();
+
   await page.goto("/");
   expect(new URL(page.url()).origin).toBe("http://127.0.0.1:8080");
+  await expect(page).toHaveURL(/\/app$/);
+  await expect(page.getByRole("heading", { name: "项目", exact: true })).toBeVisible();
+
+  await page.goto("/check");
+  await expect(page).toHaveURL(/\/check$/);
+  await expect(page.getByRole("heading", { name: "文稿校验台" })).toBeVisible();
   await page.getByRole("button", { name: "项目与文档" }).click();
+  await expect(page).toHaveURL(/\/projects$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/check$/);
+  await page.goForward();
+  await expect(page).toHaveURL(/\/projects$/);
 
   const projectControls = page.locator(".projectControls");
   await projectControls.getByPlaceholder("新项目名称").fill(projectName);

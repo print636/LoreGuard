@@ -60,10 +60,21 @@ import {
   describeIssueEvidenceReviewDiagnostic,
   type IssueEvidenceReviewDiagnosticView,
 } from "./issueEvidenceReview";
+import {
+  apiJson,
+  apiUrl,
+  createBoundedSessionProbe,
+} from "./api/client";
+import {
+  browserNavigate,
+  useWorkspaceRoute,
+  workspacePath,
+  type WorkspaceView,
+} from "./routing";
+import type { SessionIdentity } from "./app/session";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
 
-const API = import.meta.env.VITE_API_BASE || "";
 type FeedbackState = {
   id: string;
   label: string;
@@ -303,17 +314,13 @@ const feedbackNames: Record<string, string> = {
   resolved: "已解决",
 };
 
-type WorkspaceView =
-  | "check"
-  | "projects"
-  | "diff"
-  | "visual"
-  | "audit"
-  | "report"
-  | "provider";
+type AppProps = {
+  identity: SessionIdentity;
+  onLoggedOut: () => void;
+};
 
-export default function App() {
-  const [activeView, setActiveView] = useState<WorkspaceView>("check");
+export default function App({ identity, onLoggedOut }: AppProps) {
+  const [activeView, setActiveView, routedProjectId] = useWorkspaceRoute();
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState("");
   const [projectName, setProjectName] = useState("");
@@ -364,9 +371,11 @@ export default function App() {
   const [providerConnection, setProviderConnection] =
     useState<ProviderConnectionView>(unknownProviderConnection);
   const [providerChecking, setProviderChecking] = useState(false);
+  const [logoutPending, setLogoutPending] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const viewEpochRef = useRef(0);
+  const loadedProjectRef = useRef("");
   const visibleIssues = useMemo(
     () =>
       filter === "all" ? issues : issues.filter((x) => x.category === filter),
@@ -408,15 +417,6 @@ export default function App() {
   const selectedRunUsage = useMemo(() => describeRunUsage(runInfo), [runInfo]);
   const selectedProject = projects.find((row) => row.id === project);
 
-  async function readJson(response: Response) {
-    if (!response.ok) {
-      const body = await response
-        .json()
-        .catch(() => ({ detail: response.statusText }));
-      throw new Error(body.detail || response.statusText);
-    }
-    return response.json();
-  }
   function clearAnalysisView() {
     streamRef.current?.close();
     streamRef.current = null;
@@ -440,13 +440,13 @@ export default function App() {
     setFocusedIssue(null);
   }
   async function loadProjects() {
-    const rows = await readJson(await fetch(`${API}/api/v1/projects`));
+    const rows = await apiJson<Project[]>("/api/v1/projects");
     setProjects(rows);
   }
   async function loadProviderHealth() {
     try {
       setProviderConnection(
-        describeProviderHealth(await readJson(await fetch(`${API}/health`))),
+        describeProviderHealth(await apiJson("/health")),
       );
     } catch {
       setProviderConnection({
@@ -467,9 +467,9 @@ export default function App() {
         label: "正在测试模型连接",
         detail: "正在发起一次最小 JSON 调用，可能消耗少量 Token。",
       });
-      const payload = await readJson(
-        await fetch(`${API}/api/v1/model/provider-check`, { method: "POST" }),
-      );
+      const payload = await apiJson("/api/v1/model/provider-check", {
+        method: "POST",
+      });
       setProviderConnection(describeProviderCheck(payload));
     } catch {
       setProviderConnection({
@@ -494,8 +494,13 @@ export default function App() {
       setProjectsLoading(false);
     }
   }
-  async function loadProject(id: string) {
+  async function loadProject(id: string, syncRoute = true) {
     const epoch = ++viewEpochRef.current;
+    loadedProjectRef.current = id;
+    if (syncRoute) {
+      const nextPath = workspacePath(activeView, id || null);
+      if (window.location.pathname !== nextPath) browserNavigate(nextPath);
+    }
     setProject(id);
     setDocumentDiff(null);
     setDocs([]);
@@ -511,12 +516,10 @@ export default function App() {
       setProjectLoading(true);
       setMessage("正在加载项目…");
       const [documents, history] = await Promise.all([
-        readJson(
-          await fetch(
-            `${API}/api/v1/projects/${id}/documents?include_history=true`,
-          ),
+        apiJson<Doc[]>(
+          `/api/v1/projects/${id}/documents?include_history=true`,
         ),
-        readJson(await fetch(`${API}/api/v1/projects/${id}/analysis-runs`)),
+        apiJson<RunInfo[]>(`/api/v1/projects/${id}/analysis-runs`),
       ]);
       if (epoch !== viewEpochRef.current) return;
       const documentRows = documents as Doc[];
@@ -554,8 +557,8 @@ export default function App() {
   async function loadFeedback(rows: Issue[], epoch: number) {
     const pairs = await Promise.all(
       rows.map(async (issue) => {
-        const value = await readJson(
-          await fetch(`${API}/api/v1/issues/${issue.id}/feedback`),
+        const value = await apiJson<{ latest: FeedbackState | null }>(
+          `/api/v1/issues/${issue.id}/feedback`,
         );
         return [issue.id, value.latest] as const;
       }),
@@ -564,18 +567,13 @@ export default function App() {
   }
   async function loadCompleted(runId: string, epoch = viewEpochRef.current) {
     const paths = completedResultPaths(runId);
-    const [ir, rr, sr, dr, cr] = await Promise.all([
-      fetch(`${API}${paths.issues}`),
-      fetch(`${API}${paths.records}`),
-      fetch(`${API}${paths.status}`),
-      fetch(`${API}${paths.diagnostics}`),
-      fetch(`${API}${paths.clarifications}`),
+    const [loadedIssues, rec, status, diag, reviewItems] = await Promise.all([
+      apiJson<Issue[]>(paths.issues),
+      apiJson<{ records: RecordRow[]; warnings: string[] }>(paths.records),
+      apiJson<RunInfo>(paths.status),
+      apiJson<Diagnostics>(paths.diagnostics),
+      apiJson<ClarificationView[]>(paths.clarifications),
     ]);
-    const loadedIssues = await readJson(ir);
-    const rec = await readJson(rr);
-    const status = await readJson(sr);
-    const diag = await readJson(dr);
-    const reviewItems = await readJson(cr);
     if (epoch !== viewEpochRef.current) return;
     setIssues(loadedIssues);
     setClarifications(reviewItems);
@@ -595,7 +593,11 @@ export default function App() {
     epoch = viewEpochRef.current,
   ) {
     streamRef.current?.close();
-    const es = new EventSource(`${API}/api/v1/analysis-runs/${runId}/events`);
+    const es = new EventSource(
+      apiUrl(`/api/v1/analysis-runs/${runId}/events`),
+      { withCredentials: true },
+    );
+    const probeSession = createBoundedSessionProbe();
     streamRef.current = es;
     es.addEventListener("progress", (event) => {
       if (epoch !== viewEpochRef.current) return;
@@ -616,8 +618,8 @@ export default function App() {
           : `任务状态：${data.status}`,
       );
       try {
-        const status = await readJson(
-          await fetch(`${API}/api/v1/analysis-runs/${runId}`),
+        const status = await apiJson<RunInfo>(
+          `/api/v1/analysis-runs/${runId}`,
         );
         if (epoch !== viewEpochRef.current) return;
         setRunInfo(status);
@@ -640,12 +642,35 @@ export default function App() {
       // recovery path and could make an active run look idle.
       setMessage("连接暂时中断，正在自动重连");
       setBusy(true);
+      void probeSession().then((status) => {
+        if (status !== "expired") return;
+        if (streamRef.current === es) streamRef.current = null;
+        es.close();
+        if (epoch === viewEpochRef.current) {
+          setBusy(false);
+          setMessage("登录状态已失效，请重新登录");
+        }
+      });
     };
+  }
+
+  async function logout() {
+    try {
+      setLogoutPending(true);
+      await apiJson("/api/v1/auth/logout", { method: "POST" });
+      streamRef.current?.close();
+      streamRef.current = null;
+      onLoggedOut();
+      browserNavigate("/login", { replace: true });
+    } catch (error) {
+      setMessage(`退出失败：${String(error)}`);
+      setLogoutPending(false);
+    }
   }
   async function loadProjectRuns(id: string) {
     if (!id) return;
     setRuns(
-      await readJson(await fetch(`${API}/api/v1/projects/${id}/analysis-runs`)),
+      await apiJson<RunInfo[]>(`/api/v1/projects/${id}/analysis-runs`),
     );
   }
   async function restoreRun(
@@ -711,17 +736,16 @@ export default function App() {
     setRunInfo(null);
     setProgress(0);
     setMessage("任务已提交（若服务器启用模型，可能消耗 Token）");
-    const created = await readJson(
-      await fetch(`${API}/api/v1/projects/${id}/analysis-runs`, {
-        method: "POST",
-      }),
+    const created = await apiJson<RunInfo>(
+      `/api/v1/projects/${id}/analysis-runs`,
+      { method: "POST" },
     );
     if (epoch !== viewEpochRef.current) return;
     setRun(created.id);
     subscribe(created.id, id, epoch);
     try {
-      const status = await readJson(
-        await fetch(`${API}/api/v1/analysis-runs/${created.id}`),
+      const status = await apiJson<RunInfo>(
+        `/api/v1/analysis-runs/${created.id}`,
       );
       if (epoch !== viewEpochRef.current) return;
       setRunInfo(status);
@@ -745,16 +769,14 @@ export default function App() {
     try {
       if (!projectName.trim()) return;
       setAction("create");
-      const created = await readJson(
-        await fetch(`${API}/api/v1/projects`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: projectName.trim(),
-            description: "本地工作台项目",
-          }),
+      const created = await apiJson<Project>("/api/v1/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: projectName.trim(),
+          description: "本地工作台项目",
         }),
-      );
+      });
       setProjectName("");
       await loadProjects();
       await loadProject(created.id);
@@ -780,12 +802,10 @@ export default function App() {
           form.append("document_role", context.document_role);
           form.append("story_scope", context.story_scope);
           if (replaceId) form.append("replace_document_id", replaceId);
-          await readJson(
-            await fetch(`${API}/api/v1/projects/${project}/documents`, {
-              method: "POST",
-              body: form,
-            }),
-          );
+          await apiJson(`/api/v1/projects/${project}/documents`, {
+            method: "POST",
+            body: form,
+          });
           uploaded += 1;
         } catch (error) {
           failed.push(`${file.name}（${String(error)}）`);
@@ -814,9 +834,7 @@ export default function App() {
       setAction(kind);
       const url =
         kind === "advanced" ? "/api/v1/demo/advanced" : "/api/v1/demo";
-      const created = await readJson(
-        await fetch(`${API}${url}`, { method: "POST" }),
-      );
+      const created = await apiJson<Project>(url, { method: "POST" });
       await loadProjects();
       await loadProject(created.id);
       await runProject(created.id);
@@ -837,25 +855,21 @@ export default function App() {
       });
       setBusy(true);
       setAction("custom");
-      const created = await readJson(
-        await fetch(`${API}/api/v1/projects`, {
+      const created = await apiJson<Project>("/api/v1/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: `自然文本审查 ${new Date().toLocaleString()}`,
+          description:
+            quickMode === "body" ? "单篇正文审查" : "设定与章节审查",
+        }),
+      });
+      for (const input of inputs)
+        await apiJson(`/api/v1/projects/${created.id}/documents/text`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: `自然文本审查 ${new Date().toLocaleString()}`,
-            description:
-              quickMode === "body" ? "单篇正文审查" : "设定与章节审查",
-          }),
-        }),
-      );
-      for (const input of inputs)
-        await readJson(
-          await fetch(`${API}/api/v1/projects/${created.id}/documents/text`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(input),
-          }),
-        );
+          body: JSON.stringify(input),
+        });
       await loadProjects();
       await loadProject(created.id);
       await runProject(created.id);
@@ -868,11 +882,9 @@ export default function App() {
   async function cancel() {
     try {
       if (!run) return;
-      await readJson(
-        await fetch(`${API}/api/v1/analysis-runs/${run}/cancel`, {
-          method: "POST",
-        }),
-      );
+      await apiJson(`/api/v1/analysis-runs/${run}/cancel`, {
+        method: "POST",
+      });
       setMessage("取消请求已提交");
     } catch (error) {
       setMessage(String(error));
@@ -883,22 +895,21 @@ export default function App() {
       if (!run || !runInfo || !retryState(runInfo).allowed) return;
       const projectId = runInfo.project_id;
       const epoch = ++viewEpochRef.current;
-      const created = await readJson(
-        await fetch(`${API}/api/v1/analysis-runs/${run}/retry`, {
-          method: "POST",
-        }),
+      const created = await apiJson<RunInfo>(
+        `/api/v1/analysis-runs/${run}/retry`,
+        { method: "POST" },
       );
       if (epoch !== viewEpochRef.current) return;
       setRun(created.id);
       setRunInfo(null);
       setBusy(true);
       setMessage(
-        `重试已提交，继承运行 ${shortIdentifier(created.retried_from)} 的冻结输入（若服务器启用模型，可能消耗 Token）`,
+        `重试已提交，继承运行 ${shortIdentifier(created.retried_from || run)} 的冻结输入（若服务器启用模型，可能消耗 Token）`,
       );
       subscribe(created.id, projectId, epoch);
       try {
-        const status = await readJson(
-          await fetch(`${API}/api/v1/analysis-runs/${created.id}`),
+        const status = await apiJson<RunInfo>(
+          `/api/v1/analysis-runs/${created.id}`,
         );
         if (epoch !== viewEpochRef.current) return;
         setRunInfo(status);
@@ -919,13 +930,13 @@ export default function App() {
     try {
       setFeedbackPending((current) => ({ ...current, [id]: true }));
       const comment = notes[id] || "";
-      const value = await readJson(
-        await fetch(`${API}/api/v1/issues/${id}/feedback`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ label, comment }),
-        }),
-      );
+      const value = await apiJson<
+        FeedbackState & { duplicate_ignored?: boolean }
+      >(`/api/v1/issues/${id}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label, comment }),
+      });
       setFeedbacks((current) => ({ ...current, [id]: value }));
       setMessage(
         value.duplicate_ignored
@@ -956,10 +967,8 @@ export default function App() {
       if (!project || !diffFrom || !diffTo) return;
       setDiffBusy(true);
       setDocumentDiff(
-        await readJson(
-          await fetch(
-            `${API}/api/v1/projects/${project}/documents/diff?from_document_id=${encodeURIComponent(diffFrom)}&to_document_id=${encodeURIComponent(diffTo)}`,
-          ),
+        await apiJson<DocumentDiff>(
+          `/api/v1/projects/${project}/documents/diff?from_document_id=${encodeURIComponent(diffFrom)}&to_document_id=${encodeURIComponent(diffTo)}`,
         ),
       );
     } catch (error) {
@@ -986,12 +995,12 @@ export default function App() {
     try {
       setVisualLoading(kind);
       setVisualError("");
-      const data = await readJson(
-        await fetch(`${API}${visualizationPath(run, kind)}`),
+      const data = await apiJson<GraphResponse | TimelineResponse>(
+        visualizationPath(run, kind),
       );
       if (epoch !== viewEpochRef.current) return;
-      if (kind === "graph") setGraph(data);
-      else setTimeline(data);
+      if (kind === "graph") setGraph(data as GraphResponse);
+      else setTimeline(data as TimelineResponse);
     } catch (error) {
       if (epoch === viewEpochRef.current)
         setVisualError(
@@ -1003,10 +1012,24 @@ export default function App() {
   }
 
   useEffect(() => {
-    loadProjects().catch((error) => setMessage(String(error)));
+    void loadProjects().catch((error) => setMessage(String(error)));
     void loadProviderHealth();
+    const intent = new URLSearchParams(window.location.search).get("intent");
+    if (intent === "create" || intent === "import") {
+      requestAnimationFrame(() =>
+        document
+          .getElementById(intent === "create" ? "project-name" : "document-upload")
+          ?.focus(),
+      );
+    }
     return () => streamRef.current?.close();
   }, []);
+
+  useEffect(() => {
+    const targetProjectId = routedProjectId || "";
+    if (targetProjectId === loadedProjectRef.current) return;
+    void loadProject(targetProjectId, false);
+  }, [routedProjectId]);
 
   return (
     <>
@@ -1050,6 +1073,22 @@ export default function App() {
         </div>
         <div className="topActions">
           <button
+            className="projectCenterAction"
+            onClick={() => browserNavigate("/app")}
+          >
+            项目中心
+          </button>
+          {identity.mode === "required" && (
+            <button
+              className="logoutAction"
+              disabled={logoutPending}
+              onClick={() => void logout()}
+            >
+              {logoutPending ? "退出中…" : "退出"}
+            </button>
+          )}
+          <button
+            className="workspaceSecondaryAction"
             onClick={() => {
               setActiveView("projects");
               requestAnimationFrame(() =>
@@ -1060,6 +1099,7 @@ export default function App() {
             新建项目
           </button>
           <button
+            className="workspaceSecondaryAction"
             onClick={() => {
               setActiveView("projects");
               if (!project) setMessage("请先新建或选择项目，再导入文稿");
@@ -1071,7 +1111,7 @@ export default function App() {
             导入文稿
           </button>
           <button
-            className="reportShortcut"
+            className="reportShortcut workspaceSecondaryAction"
             onClick={() => setActiveView("report")}
           >
             查看报告 <span>{issues.length + clarifications.length}</span>

@@ -21,12 +21,31 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     event,
+    select,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from .config import get_settings
 from .time_utils import utc_now_naive
+
+
+LOCAL_USER_ID = "00000000-0000-0000-0000-000000000001"
+LOCAL_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001"
+LOCAL_MEMBERSHIP_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def default_project_workspace_id() -> str:
+    """Compatibility default for anonymous/local callers only.
+
+    Required-auth code must always pass an explicit workspace.  Raising here
+    turns any future forgotten ownership assignment into a failed transaction
+    instead of silently leaking the resource into the local workspace.
+    """
+
+    if get_settings().auth_mode != "anonymous":
+        raise RuntimeError("workspace_id is required when authentication is enabled")
+    return LOCAL_WORKSPACE_ID
 
 
 class Base(DeclarativeBase):
@@ -37,9 +56,63 @@ def new_id() -> str:
     return str(uuid4())
 
 
+class UserRow(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(80))
+    password_hash: Mapped[str] = mapped_column(String(512))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class WorkspaceRow(Base):
+    __tablename__ = "workspaces"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(24), default="personal")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class WorkspaceMemberRow(Base):
+    __tablename__ = "workspace_members"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_member"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(24), default="member")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class AuthSessionRow(Base):
+    __tablename__ = "auth_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    csrf_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class ProjectRow(Base):
     __tablename__ = "projects"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        default=default_project_workspace_id,
+        nullable=False,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
@@ -75,6 +148,12 @@ class AnalysisRunRow(Base):
     __tablename__ = "analysis_runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    # Nullable by design so audit history survives future user deletion.  The
+    # HTTP creation paths always populate it; the ownership migration backfills
+    # legacy rows to the fixed local identity.
+    requested_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(32), default="queued")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -186,6 +265,11 @@ class FeedbackRow(Base):
     __tablename__ = "issue_feedback"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     issue_id: Mapped[str] = mapped_column(ForeignKey("issues.id"), index=True)
+    # Feedback remains attributable while the user exists but is retained when
+    # an account is removed.  New API writes always set this field.
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     label: Mapped[str] = mapped_column(String(32))
     comment: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
@@ -302,6 +386,60 @@ class EvidenceEmbeddingRow(Base):
         Vector().with_variant(JSON(), "sqlite")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+@event.listens_for(Base.metadata, "after_create")
+def seed_create_all_local_identity(metadata, connection, **_kwargs) -> None:
+    """Give direct ``create_all`` databases the same anonymous identity as migrations.
+
+    Production startup uses Alembic.  This hook keeps isolated SDK/tests and
+    local tools that intentionally use ``Base.metadata.create_all`` compatible
+    with the non-null project workspace foreign key.
+    """
+
+    del metadata
+    users = UserRow.__table__
+    workspaces = WorkspaceRow.__table__
+    memberships = WorkspaceMemberRow.__table__
+    if connection.execute(
+        select(users.c.id).where(users.c.id == LOCAL_USER_ID)
+    ).first() is None:
+        connection.execute(
+            users.insert().values(
+                id=LOCAL_USER_ID,
+                email="local@loreguard.invalid",
+                display_name="本地体验用户",
+                password_hash="!anonymous-local-account",
+                is_active=True,
+                created_at=utc_now_naive(),
+            )
+        )
+    if connection.execute(
+        select(workspaces.c.id).where(workspaces.c.id == LOCAL_WORKSPACE_ID)
+    ).first() is None:
+        connection.execute(
+            workspaces.insert().values(
+                id=LOCAL_WORKSPACE_ID,
+                name="本地工作区",
+                kind="personal",
+                created_at=utc_now_naive(),
+            )
+        )
+    if connection.execute(
+        select(memberships.c.id).where(
+            memberships.c.workspace_id == LOCAL_WORKSPACE_ID,
+            memberships.c.user_id == LOCAL_USER_ID,
+        )
+    ).first() is None:
+        connection.execute(
+            memberships.insert().values(
+                id=LOCAL_MEMBERSHIP_ID,
+                workspace_id=LOCAL_WORKSPACE_ID,
+                user_id=LOCAL_USER_ID,
+                role="owner",
+                created_at=utc_now_naive(),
+            )
+        )
 
 
 def enable_sqlite_foreign_keys(target_engine: Engine) -> None:
