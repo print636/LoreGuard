@@ -28,7 +28,11 @@ class Settings(BaseSettings):
     auth_session_ttl_seconds: int = Field(default=14 * 24 * 60 * 60, ge=300, le=90 * 24 * 60 * 60)
     auth_cookie_secure: bool = False
     auth_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
-    cors_allowed_origins: str = "http://localhost:5173,http://localhost:8080"
+    cors_allowed_origins: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "http://localhost:8000,http://127.0.0.1:8000,"
+        "http://localhost:8080,http://127.0.0.1:8080"
+    )
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"

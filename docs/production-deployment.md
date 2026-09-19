@@ -59,6 +59,8 @@ The merged production configuration has these deliberate properties:
 - API port `8000` and Prometheus port `9090` are not published to the host;
 - PostgreSQL and Redis have no published host ports;
 - the Web container is published only on `127.0.0.1:${WEB_BIND_PORT}`;
+- the shared Python image runs API, migration, and Celery processes as the
+  dedicated unprivileged `loreguard` user;
 - browser API requests pass through the Web container's `/api/` proxy.
 
 An external reverse proxy on the same host must terminate HTTPS for

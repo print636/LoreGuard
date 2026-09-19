@@ -118,12 +118,23 @@ class TokenBudgetTests(unittest.TestCase):
             "AUTH_COOKIE_SECURE": "${AUTH_COOKIE_SECURE:-false}",
             "AUTH_COOKIE_SAMESITE": "${AUTH_COOKIE_SAMESITE:-lax}",
             "CORS_ALLOWED_ORIGINS": (
-                "${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:8080}"
+                "${CORS_ALLOWED_ORIGINS:-http://localhost:5173,"
+                "http://127.0.0.1:5173,http://localhost:8000,"
+                "http://127.0.0.1:8000,http://localhost:8080,"
+                "http://127.0.0.1:8080}"
             ),
         }
         for service_name in ("api", "worker"):
             environment = compose["services"][service_name]["environment"]
             self.assertEqual(expected, {key: environment.get(key) for key in expected})
+
+    def test_backend_image_drops_root_before_runtime_commands(self):
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("adduser --system --ingroup loreguard", dockerfile)
+        self.assertIn("COPY --chown=loreguard:loreguard app app", dockerfile)
+        user_offset = dockerfile.index("USER loreguard")
+        command_offset = dockerfile.index('CMD ["uvicorn"')
+        self.assertLess(user_offset, command_offset)
 
     def test_exact_conservative_budget_allows_request_and_one_less_rejects(self):
         document = DocumentInput(id="doc", name="doc.md", content="普通叙述没有结构化状态。")

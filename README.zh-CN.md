@@ -75,7 +75,7 @@ uvicorn app.main:app --reload
 ```bash
 set AUTH_MODE=required
 set AUTH_SECRET_KEY=请替换为独立且至少32字符的高熵随机值
-set CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:8080
+set CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost:8080,http://127.0.0.1:8080
 ```
 
 此后可在 `/register` 创建账户；每个账户会自动获得个人工作区。项目、文档、
