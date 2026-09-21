@@ -12,7 +12,7 @@ from .evidence_chunks import EvidenceChunker
 from .provider import safe_thinking_configuration
 
 
-RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v2"
+RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v3"
 _MAX_BUNDLE_FILES = 512
 _MAX_BUNDLE_FILE_BYTES = 4 * 1024 * 1024
 _MAX_BUNDLE_TOTAL_BYTES = 32 * 1024 * 1024
@@ -76,10 +76,65 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
         },
         "capabilities": {
             "model_extraction": settings.enable_model_extraction,
+            "character_consistency": settings.enable_character_consistency,
             "issue_evidence_review": settings.enable_issue_evidence_review,
             "record_repair_agent": settings.enable_review_agent,
             "evidence_investigator": settings.enable_evidence_investigator,
             "embeddings": settings.enable_embeddings,
+        },
+        "character_consistency_limits": {
+            "sensitivity": settings.character_consistency_sensitivity,
+            "stage_token_budget": (
+                settings.character_consistency_stage_token_budget
+            ),
+            "max_chunks_per_run": (
+                settings.character_consistency_max_chunks_per_run
+            ),
+            "max_candidates_per_run": (
+                settings.character_consistency_max_candidates_per_run
+            ),
+            "signal_max_chunk_chars": settings.character_signal_max_chunk_chars,
+            "signal_provider_max_attempts": (
+                settings.character_signal_max_attempts
+            ),
+            "signal_package_max_attempts": (
+                settings.character_signal_package_max_attempts
+            ),
+            "signal_token_budget": settings.character_signal_token_budget,
+            "signal_max_completion_tokens": (
+                settings.character_signal_max_completion_tokens
+            ),
+            "signal_total_deadline_seconds": min(
+                value
+                for value in (
+                    float(settings.character_signal_total_deadline_seconds),
+                    (
+                        float(settings.provider_total_deadline_seconds)
+                        if settings.provider_total_deadline_seconds is not None
+                        else None
+                    ),
+                )
+                if value is not None
+            ),
+            "drift_max_observations": settings.character_drift_max_observations,
+            "drift_max_support_evidence": (
+                settings.character_drift_max_support_evidence
+            ),
+            "drift_provider_max_attempts": (
+                settings.character_drift_max_attempts
+            ),
+            "drift_total_deadline_seconds": min(
+                value
+                for value in (
+                    float(settings.character_drift_total_deadline_seconds),
+                    (
+                        float(settings.provider_total_deadline_seconds)
+                        if settings.provider_total_deadline_seconds is not None
+                        else None
+                    ),
+                )
+                if value is not None
+            ),
         },
         "investigator_limits": {
             "max_seeds": settings.evidence_investigator_max_seeds,

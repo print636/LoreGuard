@@ -20,24 +20,35 @@ from app.config import Settings
 from app.domain import AnalysisCancelled
 from app.db import (
     AnalysisDiagnosticRow,
+    AnalysisRunCharacterTraitInputRow,
     AnalysisRunExecutionRow,
     AnalysisRunInputContextRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
     Base,
+    CharacterTraitCandidateRow,
+    CharacterTraitReviewRow,
     DocumentRow,
     DocumentContextRow,
     ProjectRow,
     RunEventRow,
 )
+from app.character_consistency_stage import failed_character_consistency_stage
+from app.character_trait_extraction import (
+    CHARACTER_SIGNAL_SYSTEM_PROMPT,
+    TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
+)
+from app.narrative_context import add_context_revision, payload_sha256
 from app.service import (
     CORRUPT_SNAPSHOT_ERROR,
     INTERNAL_ANALYSIS_ERROR,
     MISSING_SNAPSHOT_ERROR,
+    CharacterConsistencyUsageAccumulator,
     ExecutionLeaseHeartbeat,
     WorkerLeaseBusy,
     WorkerLeaseHeartbeatError,
     WorkerLeaseLost,
+    _CharacterConsistencyAccountingProvider,
     _finalize_terminal,
     _interrupted_review_agent_usage,
     capture_run_inputs,
@@ -208,6 +219,131 @@ class RunReliabilityTests(unittest.TestCase):
             self.assertEqual("reference", context.document_role)
             self.assertEqual("route_a", context.story_scope)
 
+    def test_trait_snapshot_includes_only_bounded_history_for_target_release(self):
+        scope = {"schema_version": 1, "timeline_key": "main"}
+        scope_hash = payload_sha256(scope)
+        empty_evidence_hash = payload_sha256([])
+        with self.Session() as db:
+            project = ProjectRow(name="历史角色设定边界")
+            db.add(project)
+            db.flush()
+            source = AnalysisRunRow(project_id=project.id, status="completed")
+            target = AnalysisRunRow(project_id=project.id)
+            document = DocumentRow(
+                project_id=project.id,
+                name="draft.md",
+                content="第五版草稿",
+            )
+            db.add_all([source, target, document])
+            db.flush()
+            db.add(
+                DocumentContextRow(
+                    document_id=document.id,
+                    document_role="chapter",
+                    story_scope="global",
+                )
+            )
+            add_context_revision(
+                db,
+                project_id=project.id,
+                document_id=document.id,
+                document_role="chapter",
+                resolution_state="confirmed",
+                publication_status="draft",
+                scope={
+                    "schema_version": 1,
+                    "timeline_key": "main",
+                    "release": {"key": "v5", "ordinal": 5},
+                },
+                origin="explicit",
+                created_by_user_id=None,
+            )
+
+            def trait(
+                suffix,
+                *,
+                state,
+                lower=None,
+                upper=None,
+            ):
+                row = CharacterTraitCandidateRow(
+                    project_id=project.id,
+                    source_run_id=source.id,
+                    character_key="林澈",
+                    character_display_name="林澈",
+                    trait_type="preference",
+                    trait_key=f"偏好:{suffix}",
+                    value=f"林澈偏好{suffix}",
+                    polarity="positive",
+                    stability="stable",
+                    contexts=[],
+                    origin="explicit_setting",
+                    authority_tier="formal_record",
+                    confidence=1.0,
+                    scope_payload=scope,
+                    scope_sha256=scope_hash,
+                    valid_from_release_ordinal=lower,
+                    valid_until_release_ordinal=upper,
+                    evidence=[],
+                    evidence_sha256=empty_evidence_hash,
+                    candidate_fingerprint=payload_sha256({"trait": suffix}),
+                    generator_version="test-v1",
+                    provenance={},
+                    review_state=state,
+                    lock_version=1 if state == "confirmed" else 2,
+                )
+                db.add(row)
+                db.flush()
+                db.add(
+                    CharacterTraitReviewRow(
+                        project_id=project.id,
+                        candidate_id=row.id,
+                        decision="confirm",
+                        expected_lock_version=0,
+                    )
+                )
+                return row
+
+            active = trait("当前", state="confirmed")
+            at_upper = trait(
+                "上界",
+                state="superseded",
+                lower=1,
+                upper=5,
+            )
+            at_lower = trait(
+                "下界",
+                state="superseded",
+                lower=5,
+                upper=7,
+            )
+            trait("过期", state="superseded", lower=1, upper=4)
+            trait("未来", state="superseded", lower=6, upper=9)
+            trait("无结束版本", state="superseded", lower=1, upper=None)
+
+            capture_run_inputs(db, target, [document])
+            db.commit()
+            target_id = target.id
+            expected = {active.id, at_upper.id, at_lower.id}
+
+        with self.Session() as db:
+            snapshots = list(
+                db.scalars(
+                    select(AnalysisRunCharacterTraitInputRow).where(
+                        AnalysisRunCharacterTraitInputRow.run_id == target_id
+                    )
+                ).all()
+            )
+            self.assertEqual(expected, {row.candidate_id for row in snapshots})
+            historical = [
+                row.payload
+                for row in snapshots
+                if row.candidate_id in {at_upper.id, at_lower.id}
+            ]
+            self.assertEqual({5, 7}, {
+                row["valid_until_release_ordinal"] for row in historical
+            })
+
     def test_legacy_snapshot_context_defaults_and_retry_materializes_context(self):
         project_id, _, source_run_id = self.create_snapshotted_run("旧快照")
         with self.Session() as db:
@@ -317,6 +453,220 @@ class RunReliabilityTests(unittest.TestCase):
         with self.Session() as db:
             self.assertEqual("completed", db.get(AnalysisRunRow, run_id).status)
             self.assertEqual(1, db.get(AnalysisRunExecutionRow, run_id).attempt_no)
+
+    def test_character_stage_releases_candidate_transaction_before_model_wait(self):
+        _, _, run_id = self.create_snapshotted_run()
+        settings = Settings(
+            _env_file=None,
+            enable_character_consistency=True,
+            openai_api_key="not-used",
+        )
+        independent_write_finished = Event()
+
+        class QuietHeartbeat:
+            def start(self):
+                pass
+
+            def raise_if_failed(self):
+                pass
+
+            def stop(self):
+                pass
+
+        class CandidateThenModelStage:
+            def __init__(self, **_kwargs):
+                pass
+
+            def run(stage_self, db, **_kwargs):
+                # This represents the candidate write immediately before a
+                # slow model call. The transaction must be fully committed,
+                # not merely released to a savepoint in the worker session.
+                with db.begin_nested():
+                    db.execute(
+                        update(AnalysisRunRow)
+                        .where(AnalysisRunRow.id == run_id)
+                        .values(input_chars=AnalysisRunRow.input_chars)
+                    )
+
+                def independent_lease_write():
+                    with self.Session() as other:
+                        changed = other.execute(
+                            update(AnalysisRunExecutionRow)
+                            .where(
+                                AnalysisRunExecutionRow.run_id == run_id,
+                                AnalysisRunExecutionRow.worker_token
+                                == "character-worker",
+                            )
+                            .values(worker_token="character-worker")
+                        ).rowcount
+                        other.commit()
+                    independent_write_finished.set()
+                    return changed
+
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    changed = pool.submit(independent_lease_write).result(timeout=1)
+                self.assertEqual(1, changed)
+                return failed_character_consistency_stage()
+
+        with (
+            patch("app.service.get_settings", return_value=settings),
+            patch("app.service.CharacterConsistencyStage", CandidateThenModelStage),
+            patch("app.service.AnalysisPipeline", type(
+                "ImmediatePipeline",
+                (),
+                {"run": lambda *_args, **_kwargs: pipeline_result()},
+            )),
+        ):
+            execute_analysis(
+                run_id,
+                worker_token="character-worker",
+                heartbeat_factory=lambda *_args: QuietHeartbeat(),
+            )
+
+        self.assertTrue(independent_write_finished.is_set())
+        with self.Session() as db:
+            self.assertEqual("completed", db.get(AnalysisRunRow, run_id).status)
+
+    def test_character_usage_survives_stage_cancellation_and_internal_failure(self):
+        settings = Settings(
+            _env_file=None,
+            enable_character_consistency=True,
+            openai_api_key="not-used",
+        )
+
+        class AccountingProvider:
+            def __init__(self, _settings, usage):
+                self.usage = usage
+
+            def complete(self, _system, _user):
+                self.usage.record(
+                    prompt_tokens=11,
+                    completion_tokens=7,
+                    charged_tokens=23,
+                    successful=True,
+                )
+                return SimpleNamespace(prompt_tokens=11, completion_tokens=7)
+
+        for failure, expected_status in (
+            (AnalysisCancelled("requested"), "cancelled"),
+            (RuntimeError("stage integration defect"), "completed"),
+        ):
+            with self.subTest(expected_status=expected_status):
+                _, _, run_id = self.create_snapshotted_run()
+
+                class EndingStage:
+                    def __init__(self, *, provider, **_kwargs):
+                        self.provider = provider
+
+                    def run(self, _db, **_kwargs):
+                        self.provider.complete(
+                            CHARACTER_SIGNAL_SYSTEM_PROMPT,
+                            "private story text that must not be persisted",
+                        )
+                        raise failure
+
+                with (
+                    patch("app.service.get_settings", return_value=settings),
+                    patch(
+                        "app.service._CharacterConsistencyAccountingProvider",
+                        AccountingProvider,
+                    ),
+                    patch("app.service.CharacterConsistencyStage", EndingStage),
+                    patch("app.service.AnalysisPipeline", type(
+                        "ImmediatePipeline",
+                        (),
+                        {"run": lambda *_args, **_kwargs: pipeline_result()},
+                    )),
+                ):
+                    execute_analysis(run_id)
+
+                with self.Session() as db:
+                    run = db.get(AnalysisRunRow, run_id)
+                    diagnostic = db.get(AnalysisDiagnosticRow, run_id)
+                    self.assertEqual(expected_status, run.status)
+                    self.assertIsNotNone(diagnostic)
+                    usage = diagnostic.payload["usage_accounting"]
+                    self.assertEqual(1, usage["logical_calls"])
+                    self.assertEqual((11, 7, 23), (
+                        usage["prompt_tokens"],
+                        usage["completion_tokens"],
+                        usage["charged_tokens"],
+                    ))
+                    self.assertEqual(expected_status, usage["terminal_status"])
+                    self.assertNotIn("private story text", str(diagnostic.payload))
+
+    def test_character_accounting_provider_charges_failed_call_without_content(self):
+        settings = Settings(_env_file=None, openai_api_key="not-used")
+        usage = CharacterConsistencyUsageAccumulator()
+
+        class FailedProvider:
+            def complete(self, _system, _user):
+                raise RuntimeError("sk-secret private response")
+
+        provider = _CharacterConsistencyAccountingProvider(
+            settings,
+            usage,
+            signal_provider=FailedProvider(),
+            drift_provider=FailedProvider(),
+        )
+        with self.assertRaisesRegex(RuntimeError, "private response"):
+            provider.complete(CHARACTER_SIGNAL_SYSTEM_PROMPT, "private story")
+
+        accounting = usage.safe_dict(terminal_status="failed")
+        self.assertIsNotNone(accounting)
+        self.assertEqual(1, accounting["logical_calls"])
+        self.assertEqual((0, 0), (
+            accounting["prompt_tokens"],
+            accounting["completion_tokens"],
+        ))
+        self.assertGreater(accounting["charged_tokens"], 0)
+        self.assertNotIn("private story", str(accounting))
+        self.assertNotIn("sk-secret", str(accounting))
+
+    def test_character_accounting_provider_routes_and_charges_targeted_signal_call(self):
+        settings = Settings(_env_file=None, openai_api_key="not-used")
+        usage = CharacterConsistencyUsageAccumulator()
+
+        class SignalProvider:
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, system, user):
+                self.calls.append((system, user))
+                return SimpleNamespace(
+                    text='{"records":[]}',
+                    prompt_tokens=13,
+                    completion_tokens=5,
+                )
+
+        class DriftProvider:
+            def complete(self, _system, _user):
+                raise AssertionError("targeted signal call reached drift provider")
+
+        signal_provider = SignalProvider()
+        provider = _CharacterConsistencyAccountingProvider(
+            settings,
+            usage,
+            signal_provider=signal_provider,
+            drift_provider=DriftProvider(),
+        )
+
+        response = provider.complete(
+            TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
+            "content-free targeted prompt fixture",
+        )
+
+        self.assertEqual('{"records":[]}', response.text)
+        self.assertEqual(
+            [(TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT, "content-free targeted prompt fixture")],
+            signal_provider.calls,
+        )
+        accounting = usage.safe_dict(terminal_status="completed")
+        self.assertIsNotNone(accounting)
+        self.assertEqual(1, accounting["logical_calls"])
+        self.assertEqual(13, accounting["prompt_tokens"])
+        self.assertEqual(5, accounting["completion_tokens"])
+        self.assertGreaterEqual(accounting["charged_tokens"], 18)
 
     def test_ownership_loss_fences_commit_and_next_external_call(self):
         _, _, run_id = self.create_snapshotted_run()

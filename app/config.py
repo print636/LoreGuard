@@ -130,6 +130,80 @@ class Settings(BaseSettings):
         default=64_000, ge=1, le=64_000
     )
     issue_evidence_review_require_hybrid: bool = True
+    # Character consistency is an independent, default-off capability.  Its
+    # extraction and review calls share one feature gate but retain dedicated
+    # resource ceilings, so enabling it cannot silently borrow the evidence
+    # reviewer's budget or change that reviewer's behavior.
+    enable_character_consistency: bool = False
+    character_consistency_sensitivity: Literal[
+        "conservative", "balanced", "exploratory"
+    ] = "balanced"
+    # One shared admission budget covers every extraction and drift-review
+    # call in the optional stage.  The per-call budgets below can only tighten
+    # this ceiling; they are not additive entitlements.
+    character_consistency_stage_token_budget: int = Field(
+        default=60_000, ge=256, le=100_000
+    )
+    character_consistency_max_chunks_per_run: int = Field(
+        default=24, ge=1, le=128
+    )
+    character_consistency_max_candidates_per_run: int = Field(
+        default=64, ge=1, le=256
+    )
+    character_signal_max_chunk_chars: int = Field(
+        default=8_000, ge=256, le=12_000
+    )
+    character_signal_max_records: int = Field(default=48, ge=1, le=64)
+    # A draft chunk can receive bounded, one-trait-at-a-time recall calls for
+    # undercovered confirmed traits. Keep the selected set no larger than the
+    # content-free context boundary; the shared stage budget remains final.
+    character_signal_targeted_max_targets_per_chunk: int = Field(
+        default=12, ge=1, le=12
+    )
+    character_signal_timeout_seconds: float = Field(
+        default=20.0, gt=0, le=30.0
+    )
+    character_signal_max_attempts: int = Field(default=2, ge=1, le=4)
+    # Logical full-package generations are separate from transport retries.
+    # A second call is allowed only after local structure/evidence validation
+    # rejects the first complete response.
+    character_signal_package_max_attempts: int = Field(default=2, ge=1, le=2)
+    character_signal_total_deadline_seconds: float = Field(
+        default=30.0, gt=0, le=60.0
+    )
+    # One logical signal extraction may generate at most two complete packages.
+    # This budget spans that whole regeneration cycle; it is independent from
+    # the per-response completion cap and remains subordinate to the stage cap.
+    character_signal_token_budget: int = Field(
+        default=22_000, ge=256, le=22_000
+    )
+    character_signal_max_completion_tokens: int = Field(
+        default=4_096, ge=64, le=8_192
+    )
+    character_signal_max_response_bytes: int = Field(
+        default=64_000, ge=1_024, le=128_000
+    )
+    character_drift_max_observations: int = Field(default=12, ge=1, le=24)
+    character_drift_max_support_evidence: int = Field(default=8, ge=0, le=16)
+    character_drift_max_evidence_chars: int = Field(
+        default=8_000, ge=256, le=16_000
+    )
+    character_drift_token_budget: int = Field(
+        default=4_000, ge=256, le=8_000
+    )
+    character_drift_timeout_seconds: float = Field(
+        default=20.0, gt=0, le=30.0
+    )
+    character_drift_max_attempts: int = Field(default=2, ge=1, le=4)
+    character_drift_total_deadline_seconds: float = Field(
+        default=30.0, gt=0, le=60.0
+    )
+    character_drift_max_completion_tokens: int = Field(
+        default=1_000, ge=64, le=1_500
+    )
+    character_drift_max_response_bytes: int = Field(
+        default=32_000, ge=1_024, le=64_000
+    )
     # Evidence Investigator is an independent, default-off capability.  These
     # values are server-owned safety ceilings, not model-selected tuning knobs.
     # The token budget is an internal admission/quota budget; it is not a hard
@@ -178,7 +252,9 @@ class Settings(BaseSettings):
     # permits a clearly diagnosed lexical fallback only after a transient
     # index/query-vector failure; it is not a no-embedding operating mode.
     evidence_investigator_require_hybrid: bool = True
-    per_run_token_budget: int = 20_000
+    # Must leave enough headroom for the 60K optional character stage after
+    # deterministic/model extraction has already consumed part of the run.
+    per_run_token_budget: int = 100_000
     daily_token_budget: int = 100_000
     model_input_price_per_million: float | None = None
     model_output_price_per_million: float | None = None
@@ -300,6 +376,39 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "evidence investigator requires a complete embedding profile"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_character_consistency_limits(self):
+        """Keep the two model stages independently bounded and admissible."""
+
+        if (
+            self.character_signal_total_deadline_seconds
+            < self.character_signal_timeout_seconds
+        ):
+            raise ValueError("character signal deadline is shorter than timeout")
+        if (
+            self.character_drift_total_deadline_seconds
+            < self.character_drift_timeout_seconds
+        ):
+            raise ValueError("character drift deadline is shorter than timeout")
+        if (
+            self.character_signal_token_budget
+            < self.character_signal_max_completion_tokens
+        ):
+            raise ValueError("character signal budget cannot reserve model output")
+        if (
+            self.character_drift_token_budget
+            < self.character_drift_max_completion_tokens
+        ):
+            raise ValueError("character drift budget cannot reserve model output")
+        if self.character_consistency_stage_token_budget < max(
+            self.character_signal_max_completion_tokens,
+            self.character_drift_max_completion_tokens,
+        ):
+            raise ValueError(
+                "character consistency stage budget cannot reserve a model output"
+            )
         return self
 
     @model_validator(mode="after")

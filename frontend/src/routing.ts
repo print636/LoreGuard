@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 export const workspaceViews = [
   "check",
   "projects",
+  "characters",
   "diff",
   "visual",
   "audit",
@@ -18,6 +19,7 @@ const workspaceViewSet = new Set<string>(workspaceViews);
 const nestedViewSegments: Record<string, WorkspaceView> = {
   check: "check",
   documents: "projects",
+  characters: "characters",
   compare: "diff",
   visuals: "visual",
   runs: "audit",
@@ -58,13 +60,13 @@ export function productRouteFromPath(pathname: string): ProductRoute {
     return { kind: "workspace", projectId: null, runId: null };
   }
   if (
-    /^\/app\/projects\/[^/]+\/(?:check|documents|compare|visuals|runs|report|revise)$/.test(
+    /^\/app\/projects\/[^/]+\/(?:check|documents|characters|compare|visuals|runs|report|revise)$/.test(
       normalized,
     ) ||
     /^\/app\/projects\/[^/]+\/runs\/[^/]+(?:\/(?:report|visuals|revise))?$/.test(
       normalized,
     ) ||
-    /^\/(?:check|projects|diff|visual|audit|report|provider)$/.test(normalized)
+    /^\/(?:check|projects|characters|diff|visual|audit|report|provider)$/.test(normalized)
   ) {
     return {
       kind: "workspace",
@@ -106,7 +108,7 @@ export function workspaceViewFromPath(pathname: string): WorkspaceView {
     return "audit";
   }
   const nested = pathname.match(
-    /^\/app\/projects\/[^/]+\/(check|documents|compare|visuals|runs|report|revise)(?:\/|$)/,
+    /^\/app\/projects\/[^/]+\/(check|documents|characters|compare|visuals|runs|report|revise)(?:\/|$)/,
   );
   if (nested) return nestedViewSegments[nested[1]] || "check";
   const segment = pathname.split("/").filter(Boolean)[0] || "check";
@@ -135,6 +137,7 @@ export const issueCategoryFilters = [
   "knowledge_without_acquisition",
   "item_ownership",
   "world_rule_conflict",
+  "character_drift",
 ] as const;
 
 export type IssueStatusFilter = (typeof issueStatusFilters)[number];
@@ -206,6 +209,7 @@ export function workspacePath(
   const segment: Record<Exclude<WorkspaceView, "provider">, string> = {
     check: "check",
     projects: "documents",
+    characters: "characters",
     diff: "compare",
     visual: "visuals",
     audit: "runs",

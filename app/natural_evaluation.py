@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .domain import IssueCategory
+from .domain import DETERMINISTIC_RULE_CATEGORIES, IssueCategory
 from .pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
 
 
@@ -176,7 +176,8 @@ def aggregate_results(case_results: list[dict]) -> dict:
 
     overall = metrics({"tp": tp, "fp": fp, "fn": fn, "evidence_hits": evidence_hits})
     per_category = {
-        category.value: metrics(counts[category.value]) for category in IssueCategory
+        category.value: metrics(counts[category.value])
+        for category in DETERMINISTIC_RULE_CATEGORIES
     }
     return {"overall": overall, "per_category": per_category}
 

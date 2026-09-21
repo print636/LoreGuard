@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from .domain import EvaluationResult, IssueCategory
+from .domain import DETERMINISTIC_RULE_CATEGORIES, EvaluationResult, IssueCategory
 from .parser import parse_document
 from .rules import detect_issues
 
 
-CATEGORIES = list(IssueCategory)
+CATEGORIES = list(DETERMINISTIC_RULE_CATEGORIES)
 
 
 def generate_cases(per_category: int = 16) -> list[dict]:

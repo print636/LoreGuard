@@ -611,7 +611,10 @@ class IssueEvidenceReviewServiceTests(unittest.TestCase):
         self.assertEqual(content, captured["documents"][0].content)
         self.assertEqual(2, captured["documents"][0].snapshot.document_version)
         self.assertEqual((issue,), captured["issues"])
-        self.assertEqual(19_980, captured["remaining"])
+        self.assertEqual(
+            settings.per_run_token_budget - 20,
+            captured["remaining"],
+        )
         with self.Session() as db:
             saved_issue = db.scalar(select(IssueRow).where(IssueRow.run_id == run_id))
             saved_run = db.get(AnalysisRunRow, run_id)

@@ -43,7 +43,7 @@ FIXTURE_CHUNKER = "d" * 64
 
 def runtime_provenance():
     return {
-        "schema_version": "loreguard-runtime-provenance-v2",
+        "schema_version": "loreguard-runtime-provenance-v3",
         "build": {
             "git_revision": FIXTURE_GIT_REVISION,
             "service_artifact_sha256": FIXTURE_SERVICE_ARTIFACT,
@@ -57,10 +57,27 @@ def runtime_provenance():
         },
         "capabilities": {
             "model_extraction": False,
+            "character_consistency": False,
             "issue_evidence_review": False,
             "record_repair_agent": False,
             "evidence_investigator": True,
             "embeddings": True,
+        },
+        "character_consistency_limits": {
+            "sensitivity": "balanced",
+            "stage_token_budget": 60000,
+            "max_chunks_per_run": 24,
+            "max_candidates_per_run": 64,
+            "signal_max_chunk_chars": 8000,
+            "signal_provider_max_attempts": 2,
+            "signal_package_max_attempts": 2,
+            "signal_token_budget": 22000,
+            "signal_max_completion_tokens": 4096,
+            "signal_total_deadline_seconds": 30.0,
+            "drift_max_observations": 12,
+            "drift_max_support_evidence": 8,
+            "drift_provider_max_attempts": 2,
+            "drift_total_deadline_seconds": 30.0,
         },
         "investigator_limits": {
             "max_seeds": 1,
@@ -1323,6 +1340,30 @@ def test_runtime_provenance_parser_is_exact_and_fail_closed():
     unexpected_url = json.loads(json.dumps(value))
     unexpected_url["chat_provider"]["base_url"] = "https://relay.example/v1"
     assert _safe_runtime_provenance(unexpected_url) is None
+
+    missing_character_limit = json.loads(json.dumps(value))
+    missing_character_limit["character_consistency_limits"].pop(
+        "signal_provider_max_attempts"
+    )
+    assert _safe_runtime_provenance(missing_character_limit) is None
+
+    unexpected_character_limit = json.loads(json.dumps(value))
+    unexpected_character_limit["character_consistency_limits"][
+        "provider_payload"
+    ] = "private"
+    assert _safe_runtime_provenance(unexpected_character_limit) is None
+
+    invalid_character_attempts = json.loads(json.dumps(value))
+    invalid_character_attempts["character_consistency_limits"][
+        "drift_provider_max_attempts"
+    ] = 5
+    assert _safe_runtime_provenance(invalid_character_attempts) is None
+
+    invalid_character_sensitivity = json.loads(json.dumps(value))
+    invalid_character_sensitivity["character_consistency_limits"][
+        "sensitivity"
+    ] = "automatic"
+    assert _safe_runtime_provenance(invalid_character_sensitivity) is None
 
 
 def _qualified_case(

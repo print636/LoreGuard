@@ -3,7 +3,7 @@ import json
 import unittest
 from pathlib import Path
 
-from app.domain import IssueCategory
+from app.domain import DETERMINISTIC_RULE_CATEGORIES, IssueCategory
 from app.natural_evaluation import load_cases
 from scripts.generate_complex_v3 import DATASET_VERSION, WORLD, build, validate
 from scripts.run_complex_v3_evaluation import build_report
@@ -40,7 +40,7 @@ class ComplexV3DatasetTests(unittest.TestCase):
         self.assertEqual(14, len(rows))
         self.assertEqual(10, sum(len(row.expected_issues) for row in rows))
         self.assertGreaterEqual(min(len(row.documents) for row in rows), 4)
-        for category in IssueCategory:
+        for category in DETERMINISTIC_RULE_CATEGORIES:
             focused = [row for row in rows if row.category_focus == category]
             self.assertTrue(any(row.expected_issues for row in focused), category.value)
             self.assertTrue(any(not row.expected_issues for row in focused), category.value)
@@ -48,7 +48,10 @@ class ComplexV3DatasetTests(unittest.TestCase):
     def test_integrated_case_fixes_all_five_evidence_pairs(self):
         rows = load_cases("test", DATASET_ROOT)
         integrated = next(row for row in rows if row.case_id == "complex-v3-integrated-conflicts")
-        self.assertEqual(set(IssueCategory), {issue.category for issue in integrated.expected_issues})
+        self.assertEqual(
+            set(DETERMINISTIC_RULE_CATEGORIES),
+            {issue.category for issue in integrated.expected_issues},
+        )
         self.assertEqual(5, len(integrated.documents))
         self.assertEqual(5, len(integrated.expected_issues))
         self.assertTrue(

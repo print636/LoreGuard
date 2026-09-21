@@ -6,7 +6,12 @@ from dataclasses import replace
 import pytest
 from pydantic import ValidationError
 
-from app.domain import EvidenceSpan, IssueCategory, ParsedDirective
+from app.domain import (
+    DETERMINISTIC_RULE_CATEGORIES,
+    EvidenceSpan,
+    IssueCategory,
+    ParsedDirective,
+)
 from app.evidence_chunks import EvidenceChunker, SnapshotDocumentKey
 from app.evidence_authority import (
     EvidenceGrantAuthority,
@@ -241,7 +246,7 @@ def test_seed_builder_covers_five_rule_families_and_is_stable_and_balanced():
     first = build_investigation_seeds("run-a", rows, limit=8)
     second = build_investigation_seeds("run-a", list(reversed(rows)), limit=8)
 
-    assert [row.family for row in first] == list(IssueCategory)
+    assert [row.family for row in first] == list(DETERMINISTIC_RULE_CATEGORIES)
     assert [row.seed_ref for row in first] == [row.seed_ref for row in second]
     assert all(row.run_hash == hashlib.sha256(b"run-a").hexdigest() for row in first)
     assert all("岚" not in repr(row) and "星钥" not in repr(row) for row in first)
@@ -265,7 +270,7 @@ def test_seed_builder_covers_five_rule_families_and_is_stable_and_balanced():
         for i in range(10)
     ]
     limited = build_investigation_seeds("run-a", [*extras, *rows], limit=5)
-    assert {row.family for row in limited} == set(IssueCategory)
+    assert {row.family for row in limited} == set(DETERMINISTIC_RULE_CATEGORIES)
 
 
 def test_seed_builder_excludes_noncanonical_and_non_rule_fact_anchors():

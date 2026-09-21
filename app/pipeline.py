@@ -10,6 +10,7 @@ from typing import Callable, Protocol, Sequence
 
 from .domain import (
     ConsistencyIssue,
+    IssueCategory,
     ModelExecutionDiagnostics,
     ParsedDirective,
     apply_semantic_quality_gate_with_provenance,
@@ -734,7 +735,8 @@ def _build_provenance(
     for issue in issues:
         evidence_details = []
         aggregate_sources: set[str] = set()
-        for evidence in issue.evidence:
+        character_semantic = issue.category == IssueCategory.character_drift
+        for evidence_index, evidence in enumerate(issue.evidence):
             key = (
                 evidence.document_id,
                 evidence.document_name,
@@ -743,6 +745,14 @@ def _build_provenance(
                 evidence.text,
             )
             sources = sorted(evidence_source_map.get(key, set()))
+            if character_semantic and not sources:
+                sources = [
+                    (
+                        "confirmed_trait_snapshot"
+                        if evidence_index == 0
+                        else "character_signal_model"
+                    )
+                ]
             aggregate_sources.update(sources)
             evidence_details.append(
                 {
@@ -758,10 +768,17 @@ def _build_provenance(
                 "fingerprint": issue_fingerprint(
                     issue, document_paths=document_paths
                 ),
-                # `deterministic` is the frozen runner token; the explicit type
-                # below documents the derivation without widening that enum.
-                "derivation": ["deterministic"],
-                "derivation_type": "deterministic_rule",
+                # Character drift has its own evidence-grounded AI extraction
+                # and bounded review path; it must never be mislabeled as one
+                # of the five directive rules in the audit sidecar.
+                "derivation": (
+                    ["model"] if character_semantic else ["deterministic"]
+                ),
+                "derivation_type": (
+                    "ai_character_consistency"
+                    if character_semantic
+                    else "deterministic_rule"
+                ),
                 "evidence_sources": sorted(aggregate_sources),
                 "evidence_source_details": sorted(
                     evidence_details,

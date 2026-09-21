@@ -1,28 +1,48 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import timedelta
 from hashlib import sha256
 from math import ceil
 from threading import Event, Lock, Thread
 from time import perf_counter
-from typing import Callable
+from typing import Any, Callable
 from uuid import uuid4
 
-from sqlalchemy import delete, exists, func, or_, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 
 from .config import get_settings
 from .db import (
     AnalysisDiagnosticRow,
     AnalysisRecordRow,
+    AnalysisRunCharacterTraitInputRow,
     AnalysisRunExecutionRow,
     AnalysisRunInputContextRow,
+    AnalysisRunInputNarrativeContextRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
+    CharacterTraitCandidateRow,
     DocumentContextRow,
     DocumentRow,
     IssueRow,
     RunEventRow,
     SessionLocal,
+)
+from .character_traits import (
+    CHARACTER_TRAIT_SCHEMA_VERSION,
+    MAX_CONFIRMED_TRAITS_PER_RUN,
+    candidate_snapshot_payload,
+    latest_confirm_reviews,
+)
+from .character_consistency_stage import (
+    CharacterConsistencyStage,
+    failed_character_consistency_stage,
+)
+from .character_drift import CHARACTER_REVIEW_SYSTEM_PROMPT
+from .character_trait_extraction import (
+    CHARACTER_SIGNAL_SYSTEM_PROMPT,
+    TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
+    _bounded_provider,
 )
 from .domain import AnalysisCancelled
 from .evidence_investigator_runtime import (
@@ -36,10 +56,18 @@ from .issue_evidence_review import (
     failed_issue_evidence_review,
 )
 from .pipeline import AnalysisPipeline, DocumentInput, build_result_provenance
+from .provider import OpenAICompatibleProvider
+from .narrative_context import (
+    canonical_scope_payload,
+    context_snapshot_payload,
+    latest_context_revisions,
+    narrative_context_semantic_sha256,
+    payload_sha256,
+)
 from .runtime_provenance import safe_runtime_provenance
 from .run_comparison import mark_comparison_unverifiable, materialize_run_comparison
 from .time_utils import utc_now_naive
-from .usage import configured_cost_usd
+from .usage import configured_cost_usd, estimate_issue_evidence_review_tokens
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
@@ -97,6 +125,10 @@ class WorkerLeaseBusy(RuntimeError):
 
 class WorkerLeaseHeartbeatError(WorkerLeaseLost):
     """The background renewal loop could not verify continued ownership."""
+
+
+class CharacterTraitSnapshotLimitExceeded(RuntimeError):
+    pass
 
 
 def safe_persisted_analysis_error(value: object) -> str | None:
@@ -271,8 +303,483 @@ class ExecutionLeaseHeartbeat:
             )
 
 
+class CharacterConsistencyUsageAccumulator:
+    """Content-free accounting for calls completed inside the character stage.
+
+    The semantic stage normally returns aggregate usage, but cancellation and
+    an unexpected integration failure can unwind it after one or more provider
+    calls have already completed.  Recording immediately at the provider
+    boundary keeps those calls chargeable without retaining prompts, source
+    text, responses, request ids, URLs, or credentials.
+    """
+
+    def __init__(self) -> None:
+        self.logical_calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.charged_tokens = 0
+        self.successful_calls = 0
+
+    @staticmethod
+    def _token_count(value: object) -> int:
+        return value if type(value) is int and 0 <= value <= _SIGNED_64_MAX // 4 else 0
+
+    def record(
+        self,
+        *,
+        prompt_tokens: object,
+        completion_tokens: object,
+        charged_tokens: object,
+        successful: bool,
+    ) -> None:
+        prompt = self._token_count(prompt_tokens)
+        completion = self._token_count(completion_tokens)
+        charged = self._token_count(charged_tokens)
+        charged = max(charged, prompt + completion)
+        self.logical_calls += 1
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.charged_tokens += charged
+        if successful:
+            self.successful_calls += 1
+
+    def safe_dict(self, *, terminal_status: str) -> dict[str, Any] | None:
+        if self.logical_calls <= 0:
+            return None
+        values = (
+            self.logical_calls,
+            self.prompt_tokens,
+            self.completion_tokens,
+            self.charged_tokens,
+        )
+        if any(type(value) is not int or value < 0 for value in values):
+            return None
+        if self.charged_tokens < self.prompt_tokens + self.completion_tokens:
+            return None
+        return {
+            "completeness": "completed_calls",
+            "scope": "character_consistency",
+            "terminal_status": terminal_status,
+            "logical_calls": self.logical_calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "charged_tokens": self.charged_tokens,
+            "charged_token_semantics": "heuristic_or_reported_internal_debit",
+            "provider_calls": None,
+        }
+
+
+class _CharacterConsistencyAccountingProvider:
+    """Stage-bounded provider that records aggregate usage before unwinding."""
+
+    def __init__(
+        self,
+        settings,
+        usage: CharacterConsistencyUsageAccumulator,
+        *,
+        signal_provider=None,
+        drift_provider=None,
+    ) -> None:
+        self.settings = settings
+        self.usage = usage
+        if signal_provider is None or drift_provider is None:
+            base = OpenAICompatibleProvider(settings)
+            signal_provider = signal_provider or _bounded_provider(
+                base, settings, stage="signal"
+            )
+            drift_provider = drift_provider or _bounded_provider(
+                base, settings, stage="drift"
+            )
+        self.signal_provider = signal_provider
+        self.drift_provider = drift_provider
+
+    def fork_for_character_consistency(
+        self,
+        *,
+        settings,
+        stage: str,
+        remaining_deadline_seconds: float | None = None,
+    ):
+        """Preserve accounting while forwarding per-call resource bounds.
+
+        In particular, package regeneration receives only the remainder of
+        the extractor's shared logical deadline instead of starting a fresh
+        full provider deadline behind this wrapper.
+        """
+
+        if stage == "signal":
+            signal_provider = _bounded_provider(
+                self.signal_provider,
+                settings,
+                stage="signal",
+                remaining_deadline_seconds=remaining_deadline_seconds,
+            )
+            drift_provider = self.drift_provider
+        elif stage == "drift":
+            signal_provider = self.signal_provider
+            drift_provider = _bounded_provider(
+                self.drift_provider,
+                settings,
+                stage="drift",
+                remaining_deadline_seconds=remaining_deadline_seconds,
+            )
+        else:
+            raise ValueError("unsupported character consistency provider stage")
+        return _CharacterConsistencyAccountingProvider(
+            settings,
+            self.usage,
+            signal_provider=signal_provider,
+            drift_provider=drift_provider,
+        )
+
+    def complete(self, system: str, user: str):
+        if system in {
+            CHARACTER_SIGNAL_SYSTEM_PROMPT,
+            TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
+        }:
+            provider = self.signal_provider
+            completion_reserve = self.settings.character_signal_max_completion_tokens
+        elif system == CHARACTER_REVIEW_SYSTEM_PROMPT:
+            provider = self.drift_provider
+            completion_reserve = self.settings.character_drift_max_completion_tokens
+        else:
+            # This boundary is deliberately closed over the audited signal
+            # (primary and targeted) plus drift-review prompt contracts. A new
+            # model purpose must opt into its own limits and accounting instead
+            # of silently borrowing either one.
+            raise RuntimeError("unsupported character consistency provider purpose")
+        estimate = estimate_issue_evidence_review_tokens(
+            system,
+            user,
+            completion_reserve=completion_reserve,
+        )
+        try:
+            result = provider.complete(system, user)
+        except Exception:
+            self.usage.record(
+                prompt_tokens=0,
+                completion_tokens=0,
+                charged_tokens=estimate,
+                successful=False,
+            )
+            raise
+        prompt = getattr(result, "prompt_tokens", 0)
+        completion = getattr(result, "completion_tokens", 0)
+        self.usage.record(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            charged_tokens=max(
+                estimate,
+                (prompt if type(prompt) is int and prompt >= 0 else 0)
+                + (
+                    completion
+                    if type(completion) is int and completion >= 0
+                    else 0
+                ),
+            ),
+            successful=True,
+        )
+        return result
+
+
+class _EagerScalarRows:
+    """Minimal detached ``ScalarResult`` surface consumed by the stage."""
+
+    def __init__(self, rows: list[object]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[object]:
+        return list(self._rows)
+
+
+class CharacterConsistencyDatabase:
+    """Short-transaction database boundary for the optional character stage.
+
+    Model calls must not inherit a SQLite writer (or reader) transaction from
+    candidate persistence. Reads are eagerly materialized and detached in a
+    short-lived session. Each ``begin_nested`` requested by the stage is mapped
+    to one independent top-level candidate transaction and fenced against the
+    current worker token before commit. PostgreSQL therefore keeps its normal
+    row-level correctness while SQLite never holds the candidate write lock
+    across a later provider call.
+    """
+
+    def __init__(
+        self,
+        session_factory,
+        *,
+        run_id: str,
+        worker_token: str,
+    ) -> None:
+        self.session_factory = session_factory
+        self.run_id = run_id
+        self.worker_token = worker_token
+        self._active = None
+        self._ownership_lost = False
+
+    @staticmethod
+    def _detach(session, value: object) -> object:
+        try:
+            session.expunge(value)
+        except Exception:
+            pass
+        return value
+
+    def scalars(self, statement):
+        if self._active is not None:
+            return self._active.scalars(statement)
+        with self.session_factory() as session:
+            rows = list(session.scalars(statement).all())
+            detached = [self._detach(session, row) for row in rows]
+            session.rollback()
+        return _EagerScalarRows(detached)
+
+    def scalar(self, statement):
+        if self._active is not None:
+            return self._active.scalar(statement)
+        with self.session_factory() as session:
+            value = session.scalar(statement)
+            value = self._detach(session, value)
+            session.rollback()
+            return value
+
+    def get(self, entity, identifier):
+        if self._active is not None:
+            return self._active.get(entity, identifier)
+        with self.session_factory() as session:
+            value = session.get(entity, identifier)
+            value = self._detach(session, value)
+            session.rollback()
+            return value
+
+    def add(self, value) -> None:
+        if self._active is None:
+            raise RuntimeError("character candidate write is outside its transaction")
+        self._active.add(value)
+
+    def flush(self) -> None:
+        if self._active is None:
+            raise RuntimeError("character candidate flush is outside its transaction")
+        self._active.flush()
+
+    def execute(self, statement):
+        if self._active is None:
+            raise RuntimeError("character candidate execution is outside its transaction")
+        return self._active.execute(statement)
+
+    @contextmanager
+    def begin_nested(self):
+        if self._active is not None:
+            with self._active.begin_nested():
+                yield
+            return
+        with self.session_factory() as session:
+            self._active = session
+            try:
+                with session.begin():
+                    yield
+                    owned = session.execute(
+                        update(AnalysisRunExecutionRow)
+                        .where(
+                            AnalysisRunExecutionRow.run_id == self.run_id,
+                            AnalysisRunExecutionRow.worker_token
+                            == self.worker_token,
+                        )
+                        .values(worker_token=self.worker_token)
+                    ).rowcount
+                    if owned != 1:
+                        self._ownership_lost = True
+                        raise WorkerLeaseLost(
+                            "analysis worker lease was lost during candidate persistence"
+                        )
+            finally:
+                self._active = None
+
+    def raise_if_ownership_lost(self) -> None:
+        if self._ownership_lost:
+            raise WorkerLeaseLost(
+                "analysis worker lease was lost during candidate persistence"
+            )
+
+
 def document_content_sha256(content: str) -> str:
     return sha256(content.encode("utf-8")).hexdigest()
+
+
+def _snapshot_narrative_contexts(
+    db,
+    snapshots: list[AnalysisRunInputRow],
+    documents: list[DocumentRow],
+    document_contexts: dict[str, DocumentContextRow],
+) -> list[dict[str, Any]]:
+    latest = latest_context_revisions(db, [document.id for document in documents])
+    payloads: list[dict[str, Any]] = []
+    for snapshot, document in zip(snapshots, documents, strict=True):
+        legacy = document_contexts.get(document.id)
+        role = legacy.document_role if legacy else DEFAULT_DOCUMENT_ROLE
+        story_scope = legacy.story_scope if legacy else DEFAULT_STORY_SCOPE
+        revision = latest.get(document.id)
+        payload = context_snapshot_payload(
+            revision,
+            document_role=role,
+            story_scope=story_scope,
+        )
+        payloads.append(payload)
+        db.add(
+            AnalysisRunInputNarrativeContextRow(
+                input_id=snapshot.id,
+                context_revision_id=revision.id if revision else None,
+                schema_version=1,
+                payload=payload,
+                payload_sha256=payload_sha256(payload),
+            )
+        )
+    return payloads
+
+
+def _draft_target_release_ordinals(
+    narrative_contexts: list[dict[str, Any]],
+) -> tuple[int, ...]:
+    """Return only explicit release ordinals for documents the stage treats as drafts."""
+
+    result: set[int] = set()
+    for context in narrative_contexts:
+        if (
+            context.get("resolution_state") != "confirmed"
+            or context.get("publication_status") != "draft"
+            or context.get("legacy_document_role") != "chapter"
+        ):
+            continue
+        scope = context.get("scope")
+        release = scope.get("release") if isinstance(scope, dict) else None
+        ordinal = release.get("ordinal") if isinstance(release, dict) else None
+        if type(ordinal) is int and 0 <= ordinal <= 2_147_483_647:
+            result.add(ordinal)
+    return tuple(sorted(result))
+
+
+def _historical_trait_snapshot_payload(candidate, review) -> dict[str, Any]:
+    """Snapshot a formerly confirmed, explicitly version-bounded profile row."""
+
+    lower = candidate.valid_from_release_ordinal
+    upper = candidate.valid_until_release_ordinal
+    if (
+        candidate.review_state != "superseded"
+        or review.decision != "confirm"
+        or upper is None
+        or (lower is not None and upper < lower)
+    ):
+        raise ValueError("historical character trait is not safely bounded")
+    scope = canonical_scope_payload(candidate.scope_payload)
+    if payload_sha256(scope) != candidate.scope_sha256:
+        raise ValueError("candidate scope hash mismatch")
+    if payload_sha256(candidate.evidence) != candidate.evidence_sha256:
+        raise ValueError("candidate evidence hash mismatch")
+    return {
+        "schema_version": CHARACTER_TRAIT_SCHEMA_VERSION,
+        "candidate_id": candidate.id,
+        "confirmation_review_id": review.id,
+        "character_key": candidate.character_key,
+        "character_display_name": candidate.character_display_name,
+        "trait_type": candidate.trait_type,
+        "trait_key": candidate.trait_key,
+        "value": candidate.value,
+        "polarity": candidate.polarity,
+        "stability": candidate.stability,
+        "contexts": candidate.contexts,
+        "origin": candidate.origin,
+        "authority_tier": candidate.authority_tier,
+        "scope": scope,
+        "scope_sha256": candidate.scope_sha256,
+        "valid_from_release_ordinal": lower,
+        "valid_until_release_ordinal": upper,
+        "evidence": candidate.evidence,
+        "evidence_sha256": candidate.evidence_sha256,
+        "candidate_fingerprint": candidate.candidate_fingerprint,
+        "generator_version": candidate.generator_version,
+        "candidate_lock_version": candidate.lock_version,
+    }
+
+
+def _capture_confirmed_traits(
+    db,
+    run: AnalysisRunRow,
+    narrative_contexts: list[dict[str, Any]],
+) -> None:
+    """Freeze active traits and historical traits applicable to a target release.
+
+    Superseded rows are human-confirmed history, but an unbounded superseded row
+    must never become a current baseline. They are included only when they have
+    an explicit upper release bound and overlap an explicit, confirmed draft
+    release in this run. The semantic stage still enforces scope compatibility.
+    """
+
+    target_ordinals = _draft_target_release_ordinals(narrative_contexts)
+    historical_filters = [
+        and_(
+            CharacterTraitCandidateRow.review_state == "superseded",
+            CharacterTraitCandidateRow.valid_until_release_ordinal.is_not(None),
+            or_(
+                CharacterTraitCandidateRow.valid_from_release_ordinal.is_(None),
+                CharacterTraitCandidateRow.valid_from_release_ordinal <= ordinal,
+            ),
+            CharacterTraitCandidateRow.valid_until_release_ordinal >= ordinal,
+            or_(
+                CharacterTraitCandidateRow.valid_from_release_ordinal.is_(None),
+                CharacterTraitCandidateRow.valid_from_release_ordinal
+                <= CharacterTraitCandidateRow.valid_until_release_ordinal,
+            ),
+        )
+        for ordinal in target_ordinals
+    ]
+    eligible_state = or_(
+        CharacterTraitCandidateRow.review_state == "confirmed",
+        *historical_filters,
+    )
+    candidates = list(
+        db.scalars(
+            select(CharacterTraitCandidateRow)
+            .where(
+                CharacterTraitCandidateRow.project_id == run.project_id,
+                eligible_state,
+            )
+            .order_by(
+                CharacterTraitCandidateRow.character_key,
+                CharacterTraitCandidateRow.trait_type,
+                CharacterTraitCandidateRow.trait_key,
+                CharacterTraitCandidateRow.id,
+            )
+            .limit(MAX_CONFIRMED_TRAITS_PER_RUN + 1)
+        ).all()
+    )
+    if len(candidates) > MAX_CONFIRMED_TRAITS_PER_RUN:
+        raise CharacterTraitSnapshotLimitExceeded(
+            "confirmed character profile exceeds the per-run snapshot limit"
+        )
+    reviews = latest_confirm_reviews(db, [row.id for row in candidates])
+    if len(reviews) != len(candidates):
+        raise ValueError("confirmed character profile is missing review provenance")
+    for ordinal, candidate in enumerate(candidates):
+        review = reviews[candidate.id]
+        if review.project_id != run.project_id:
+            raise ValueError("confirmed character profile crosses projects")
+        payload = (
+            candidate_snapshot_payload(candidate, review)
+            if candidate.review_state == "confirmed"
+            else _historical_trait_snapshot_payload(candidate, review)
+        )
+        db.add(
+            AnalysisRunCharacterTraitInputRow(
+                run_id=run.id,
+                project_id=run.project_id,
+                candidate_id=candidate.id,
+                confirmation_review_id=review.id,
+                candidate_lock_version=candidate.lock_version,
+                ordinal=ordinal,
+                payload=payload,
+                payload_sha256=payload_sha256(payload),
+            )
+        )
 
 
 def capture_run_inputs(
@@ -312,6 +819,10 @@ def capture_run_inputs(
                 story_scope=context.story_scope if context else DEFAULT_STORY_SCOPE,
             )
         )
+    narrative_contexts = _snapshot_narrative_contexts(
+        db, snapshots, documents, document_contexts
+    )
+    _capture_confirmed_traits(db, run, narrative_contexts)
     db.add(AnalysisRunExecutionRow(run_id=run.id))
     run.input_chars = sum(len(row.content) for row in snapshots)
     return snapshots
@@ -333,6 +844,16 @@ def copy_run_inputs(
         for row in db.scalars(
             select(AnalysisRunInputContextRow).where(
                 AnalysisRunInputContextRow.input_id.in_([item.id for item in source])
+            )
+        ).all()
+    }
+    source_narrative_context = {
+        row.input_id: row
+        for row in db.scalars(
+            select(AnalysisRunInputNarrativeContextRow).where(
+                AnalysisRunInputNarrativeContextRow.input_id.in_(
+                    [item.id for item in source]
+                )
             )
         ).all()
     }
@@ -361,6 +882,54 @@ def copy_run_inputs(
                 story_scope=context.story_scope if context else DEFAULT_STORY_SCOPE,
             )
         )
+        narrative = source_narrative_context.get(source_row.id)
+        if narrative is not None:
+            db.add(
+                AnalysisRunInputNarrativeContextRow(
+                    input_id=copied_row.id,
+                    context_revision_id=narrative.context_revision_id,
+                    schema_version=narrative.schema_version,
+                    payload=narrative.payload,
+                    payload_sha256=narrative.payload_sha256,
+                )
+            )
+        else:
+            payload = context_snapshot_payload(
+                None,
+                document_role=(
+                    context.document_role if context else DEFAULT_DOCUMENT_ROLE
+                ),
+                story_scope=context.story_scope if context else DEFAULT_STORY_SCOPE,
+            )
+            db.add(
+                AnalysisRunInputNarrativeContextRow(
+                    input_id=copied_row.id,
+                    context_revision_id=None,
+                    schema_version=1,
+                    payload=payload,
+                    payload_sha256=payload_sha256(payload),
+                )
+            )
+    source_traits = list(
+        db.scalars(
+            select(AnalysisRunCharacterTraitInputRow)
+            .where(AnalysisRunCharacterTraitInputRow.run_id == source_run_id)
+            .order_by(AnalysisRunCharacterTraitInputRow.ordinal)
+        ).all()
+    )
+    for trait in source_traits:
+        db.add(
+            AnalysisRunCharacterTraitInputRow(
+                run_id=target_run.id,
+                project_id=trait.project_id,
+                candidate_id=trait.candidate_id,
+                confirmation_review_id=trait.confirmation_review_id,
+                candidate_lock_version=trait.candidate_lock_version,
+                ordinal=trait.ordinal,
+                payload=trait.payload,
+                payload_sha256=trait.payload_sha256,
+            )
+        )
     db.add(
         AnalysisRunExecutionRow(
             run_id=target_run.id,
@@ -385,6 +954,16 @@ def run_input_metadata(db, run_id: str) -> list[dict]:
             )
         ).all()
     } if rows else {}
+    narrative_contexts = {
+        context.input_id: context
+        for context in db.scalars(
+            select(AnalysisRunInputNarrativeContextRow).where(
+                AnalysisRunInputNarrativeContextRow.input_id.in_(
+                    [row.id for row in rows]
+                )
+            )
+        ).all()
+    } if rows else {}
     return [
         {
             "document_id": row.document_id,
@@ -401,12 +980,215 @@ def run_input_metadata(db, run_id: str) -> list[dict]:
                 else DEFAULT_STORY_SCOPE
             ),
             "context_explicit": row.id in contexts,
+            "narrative_context": (
+                narrative_contexts[row.id].payload
+                if row.id in narrative_contexts
+                else context_snapshot_payload(
+                    None,
+                    document_role=(
+                        contexts[row.id].document_role
+                        if row.id in contexts
+                        else DEFAULT_DOCUMENT_ROLE
+                    ),
+                    story_scope=(
+                        contexts[row.id].story_scope
+                        if row.id in contexts
+                        else DEFAULT_STORY_SCOPE
+                    ),
+                )
+            ),
+            "narrative_context_sha256": (
+                narrative_context_semantic_sha256(
+                    narrative_contexts[row.id].payload
+                )
+                if row.id in narrative_contexts
+                else narrative_context_semantic_sha256(
+                    context_snapshot_payload(
+                        None,
+                        document_role=(
+                            contexts[row.id].document_role
+                            if row.id in contexts
+                            else DEFAULT_DOCUMENT_ROLE
+                        ),
+                        story_scope=(
+                            contexts[row.id].story_scope
+                            if row.id in contexts
+                            else DEFAULT_STORY_SCOPE
+                        ),
+                    )
+                )
+            ),
+            "narrative_context_payload_sha256": (
+                narrative_contexts[row.id].payload_sha256
+                if row.id in narrative_contexts
+                else payload_sha256(
+                    context_snapshot_payload(
+                        None,
+                        document_role=(
+                            contexts[row.id].document_role
+                            if row.id in contexts
+                            else DEFAULT_DOCUMENT_ROLE
+                        ),
+                        story_scope=(
+                            contexts[row.id].story_scope
+                            if row.id in contexts
+                            else DEFAULT_STORY_SCOPE
+                        ),
+                    )
+                )
+            ),
             "content_sha256": row.content_sha256,
             "char_count": len(row.content),
             "ordinal": row.ordinal,
         }
         for row in rows
     ]
+
+
+def run_trait_snapshot_metadata(db, run_id: str) -> dict:
+    rows = list(
+        db.scalars(
+            select(AnalysisRunCharacterTraitInputRow)
+            .where(AnalysisRunCharacterTraitInputRow.run_id == run_id)
+            .order_by(AnalysisRunCharacterTraitInputRow.ordinal)
+        ).all()
+    )
+    fingerprint = payload_sha256(
+        [
+            {
+                "candidate_id": row.candidate_id,
+                "candidate_lock_version": row.candidate_lock_version,
+                "payload_sha256": row.payload_sha256,
+                "ordinal": row.ordinal,
+            }
+            for row in rows
+        ]
+    )
+    return {
+        "confirmed_trait_count": len(rows),
+        "character_profile_snapshot_sha256": fingerprint,
+    }
+
+
+def run_narrative_context_fingerprint(db, run_id: str) -> str:
+    rows = run_input_metadata(db, run_id)
+    return payload_sha256(
+        [
+            {
+                "document_id": row["document_id"],
+                "narrative_context_sha256": row["narrative_context_sha256"],
+                "ordinal": row["ordinal"],
+            }
+            for row in rows
+        ]
+    )
+
+
+def frozen_run_source_signature(db, run_id: str) -> str:
+    documents = run_input_metadata(db, run_id)
+    traits = run_trait_snapshot_metadata(db, run_id)
+    return payload_sha256(
+        {
+            "documents": [
+                {
+                    "name": row["document_name"].casefold(),
+                    "version": row["document_version"],
+                    "content_sha256": row["content_sha256"],
+                    "document_role": row["document_role"],
+                    "story_scope": row["story_scope"],
+                    "narrative_context_sha256": row[
+                        "narrative_context_sha256"
+                    ],
+                }
+                for row in documents
+            ],
+            "character_profile_snapshot_sha256": traits[
+                "character_profile_snapshot_sha256"
+            ],
+        }
+    )
+
+
+def current_project_source_signature(
+    db, project_id: str, documents: list[DocumentRow]
+) -> str:
+    contexts = {
+        row.document_id: row
+        for row in db.scalars(
+            select(DocumentContextRow).where(
+                DocumentContextRow.document_id.in_(
+                    [document.id for document in documents]
+                )
+            )
+        ).all()
+    } if documents else {}
+    narrative = latest_context_revisions(
+        db, [document.id for document in documents]
+    )
+    document_rows: list[dict] = []
+    for document in documents:
+        legacy = contexts.get(document.id)
+        role = legacy.document_role if legacy else DEFAULT_DOCUMENT_ROLE
+        story_scope = legacy.story_scope if legacy else DEFAULT_STORY_SCOPE
+        context_payload = context_snapshot_payload(
+            narrative.get(document.id),
+            document_role=role,
+            story_scope=story_scope,
+        )
+        document_rows.append(
+            {
+                "name": document.name.casefold(),
+                "version": document.version,
+                "content_sha256": document_content_sha256(document.content),
+                "document_role": role,
+                "story_scope": story_scope,
+                "narrative_context_sha256": narrative_context_semantic_sha256(
+                    context_payload
+                ),
+            }
+        )
+    candidates = list(
+        db.scalars(
+            select(CharacterTraitCandidateRow)
+            .where(
+                CharacterTraitCandidateRow.project_id == project_id,
+                CharacterTraitCandidateRow.review_state == "confirmed",
+            )
+            .order_by(
+                CharacterTraitCandidateRow.character_key,
+                CharacterTraitCandidateRow.trait_type,
+                CharacterTraitCandidateRow.trait_key,
+                CharacterTraitCandidateRow.id,
+            )
+            .limit(MAX_CONFIRMED_TRAITS_PER_RUN + 1)
+        ).all()
+    )
+    if len(candidates) > MAX_CONFIRMED_TRAITS_PER_RUN:
+        raise CharacterTraitSnapshotLimitExceeded(
+            "confirmed character profile exceeds the per-run snapshot limit"
+        )
+    reviews = latest_confirm_reviews(db, [row.id for row in candidates])
+    if len(reviews) != len(candidates):
+        raise ValueError("confirmed character profile is missing review provenance")
+    trait_fingerprint = payload_sha256(
+        [
+            {
+                "candidate_id": candidate.id,
+                "candidate_lock_version": candidate.lock_version,
+                "payload_sha256": payload_sha256(
+                    candidate_snapshot_payload(candidate, reviews[candidate.id])
+                ),
+                "ordinal": ordinal,
+            }
+            for ordinal, candidate in enumerate(candidates)
+        ]
+    )
+    return payload_sha256(
+        {
+            "documents": document_rows,
+            "character_profile_snapshot_sha256": trait_fingerprint,
+        }
+    )
 
 
 def emit(db, run_id: str, stage: str, progress: int, message: str) -> bool:
@@ -853,6 +1635,7 @@ def _combined_interrupted_usage(
     issue_review_usage: IssueEvidenceReviewUsageAccumulator,
     *,
     terminal_status: str,
+    character_usage: CharacterConsistencyUsageAccumulator | None = None,
 ) -> dict | None:
     """Combine independently content-free completed-call ledgers."""
     agent = _interrupted_review_agent_usage(pipeline) if pipeline is not None else None
@@ -860,7 +1643,14 @@ def _combined_interrupted_usage(
         terminal_status=terminal_status
     )
     evidence = issue_review_usage.safe_dict(terminal_status=terminal_status)
-    parts = [row for row in (agent, investigator, evidence) if row is not None]
+    character = (
+        character_usage.safe_dict(terminal_status=terminal_status)
+        if character_usage is not None
+        else None
+    )
+    parts = [
+        row for row in (agent, character, investigator, evidence) if row is not None
+    ]
     if not parts:
         return None
     if len(parts) == 1:
@@ -1131,6 +1921,47 @@ def _load_verified_snapshot(db, run_id: str) -> tuple[list[DocumentInput], list[
             )
         ).all()
     }
+    narrative_contexts = {
+        context.input_id: context
+        for context in db.scalars(
+            select(AnalysisRunInputNarrativeContextRow).where(
+                AnalysisRunInputNarrativeContextRow.input_id.in_(
+                    [row.id for row in rows]
+                )
+            )
+        ).all()
+    }
+    if narrative_contexts and len(narrative_contexts) != len(rows):
+        raise RuntimeError(
+            "RUN_INPUT_SNAPSHOT_CORRUPT: narrative context snapshot is incomplete"
+        )
+    run = db.get(AnalysisRunRow, run_id)
+    if run is None:
+        raise RuntimeError("RUN_INPUT_SNAPSHOT_CORRUPT: analysis run is missing")
+    trait_rows = list(
+        db.scalars(
+            select(AnalysisRunCharacterTraitInputRow)
+            .where(AnalysisRunCharacterTraitInputRow.run_id == run_id)
+            .order_by(AnalysisRunCharacterTraitInputRow.ordinal)
+        ).all()
+    )
+    if [row.ordinal for row in trait_rows] != list(range(len(trait_rows))):
+        raise RuntimeError(
+            "RUN_INPUT_SNAPSHOT_CORRUPT: character profile ordinals are invalid"
+        )
+    for trait in trait_rows:
+        if (
+            trait.project_id != run.project_id
+            or payload_sha256(trait.payload) != trait.payload_sha256
+            or trait.payload.get("candidate_id") != trait.candidate_id
+            or trait.payload.get("confirmation_review_id")
+            != trait.confirmation_review_id
+            or trait.payload.get("candidate_lock_version")
+            != trait.candidate_lock_version
+        ):
+            raise RuntimeError(
+                "RUN_INPUT_SNAPSHOT_CORRUPT: character profile snapshot is invalid"
+            )
     documents: list[DocumentInput] = []
     metadata: list[dict] = []
     for row in rows:
@@ -1139,6 +1970,30 @@ def _load_verified_snapshot(db, run_id: str) -> tuple[list[DocumentInput], list[
         if actual_hash != row.content_sha256:
             raise RuntimeError(
                 f"RUN_INPUT_SNAPSHOT_CORRUPT: document {row.document_id} hash mismatch"
+            )
+        narrative = narrative_contexts.get(row.id)
+        if narrative is not None:
+            if (
+                narrative.schema_version != 1
+                or payload_sha256(narrative.payload) != narrative.payload_sha256
+            ):
+                raise RuntimeError(
+                    "RUN_INPUT_SNAPSHOT_CORRUPT: narrative context hash mismatch"
+                )
+            narrative_payload = narrative.payload
+            narrative_hash = narrative_context_semantic_sha256(
+                narrative.payload
+            )
+        else:
+            narrative_payload = context_snapshot_payload(
+                None,
+                document_role=(
+                    context.document_role if context else DEFAULT_DOCUMENT_ROLE
+                ),
+                story_scope=context.story_scope if context else DEFAULT_STORY_SCOPE,
+            )
+            narrative_hash = narrative_context_semantic_sha256(
+                narrative_payload
             )
         documents.append(
             DocumentInput(
@@ -1159,6 +2014,13 @@ def _load_verified_snapshot(db, run_id: str) -> tuple[list[DocumentInput], list[
                 ),
                 "story_scope": context.story_scope if context else DEFAULT_STORY_SCOPE,
                 "context_explicit": context is not None,
+                "narrative_context": narrative_payload,
+                "narrative_context_sha256": narrative_hash,
+                "narrative_context_payload_sha256": (
+                    narrative.payload_sha256
+                    if narrative is not None
+                    else payload_sha256(narrative_payload)
+                ),
                 "content_sha256": row.content_sha256,
                 "char_count": len(row.content),
                 "ordinal": row.ordinal,
@@ -1188,6 +2050,7 @@ def execute_analysis(
     pipeline = None
     investigator_usage = InvestigatorUsageAccumulator()
     issue_review_usage = IssueEvidenceReviewUsageAccumulator()
+    character_usage_tracker = CharacterConsistencyUsageAccumulator()
     previous_usage: dict | None = None
     try:
         _checkpoint(run_id, token, heartbeat)
@@ -1219,7 +2082,10 @@ def execute_analysis(
                 result.prompt_tokens + result.completion_tokens
             )
             pipeline_budget_debit = baseline_reported_tokens
-            if settings.enable_evidence_investigator:
+            if (
+                settings.enable_evidence_investigator
+                or settings.enable_character_consistency
+            ):
                 pipeline_budget_getter = getattr(
                     pipeline, "conservative_run_token_debit", None
                 )
@@ -1238,12 +2104,131 @@ def execute_analysis(
                 if previous_usage is not None
                 else 0
             )
+            run = db.get(AnalysisRunRow, run_id)
+            character_stage_result = None
+            character_stage_db = CharacterConsistencyDatabase(
+                SessionLocal,
+                run_id=run_id,
+                worker_token=token,
+            )
+            if settings.enable_character_consistency:
+                _checkpoint(run_id, token, heartbeat)
+                _emit_owned(
+                    db,
+                    run_id,
+                    token,
+                    "character_consistency",
+                    76,
+                    "正在从冻结设定与新稿中核对角色一致性",
+                )
+            try:
+                if run is None:
+                    raise ValueError("analysis run is unavailable")
+                character_stage_result = CharacterConsistencyStage(
+                    settings=settings,
+                    provider=_CharacterConsistencyAccountingProvider(
+                        settings,
+                        character_usage_tracker,
+                    ),
+                    checkpoint=lambda: _checkpoint(
+                        run_id, token, heartbeat
+                    ),
+                ).run(
+                    character_stage_db,
+                    run_id=run_id,
+                    project_id=run.project_id,
+                    documents=documents,
+                    metadata=input_metadata,
+                    remaining_run_tokens=max(
+                        0,
+                        settings.per_run_token_budget
+                        - pipeline_budget_debit
+                        - historical_charged_tokens,
+                    ),
+                )
+                character_stage_db.raise_if_ownership_lost()
+            except (AnalysisCancelled, WorkerLeaseLost):
+                raise
+            except Exception:
+                character_stage_result = failed_character_consistency_stage()
+
+            tracked_character_usage = character_usage_tracker.safe_dict(
+                terminal_status="completed"
+            )
+            character_usage = (
+                tracked_character_usage
+                or character_stage_result.usage_accounting(
+                    terminal_status="completed"
+                )
+            )
+            character_charged_tokens = (
+                int(character_usage["charged_tokens"])
+                if character_usage is not None
+                else 0
+            )
+            if tracked_character_usage is not None:
+                # Keep diagnostics useful after an integration failure without
+                # exposing prompts or provider payloads.
+                character_stage_result.diagnostics["usage"] = {
+                    "attempted_calls": tracked_character_usage["logical_calls"],
+                    "input_tokens": tracked_character_usage["prompt_tokens"],
+                    "completion_tokens": tracked_character_usage[
+                        "completion_tokens"
+                    ],
+                    "charged_tokens": tracked_character_usage["charged_tokens"],
+                }
+
+            result.diagnostics["character_consistency"] = (
+                character_stage_result.diagnostics
+            )
+            if settings.enable_character_consistency:
+                if character_stage_result.issues:
+                    try:
+                        combined_issues = [
+                            *result.issues,
+                            *character_stage_result.issues,
+                        ]
+                        combined_provenance = build_result_provenance(
+                            result.directives,
+                            combined_issues,
+                            documents,
+                        )
+                    except Exception:
+                        result.diagnostics[
+                            "character_consistency"
+                        ] = failed_character_consistency_stage().diagnostics
+                    else:
+                        result.issues = combined_issues
+                        result.diagnostics["provenance"] = combined_provenance
+                if character_usage is not None:
+                    result.prompt_tokens += int(character_usage["prompt_tokens"])
+                    result.completion_tokens += int(
+                        character_usage["completion_tokens"]
+                    )
+                result.model_used = (
+                    result.model_used
+                    or character_stage_result.model_used
+                    or character_usage_tracker.successful_calls > 0
+                )
+                _checkpoint(run_id, token, heartbeat)
+                _emit_owned(
+                    db,
+                    run_id,
+                    token,
+                    "character_consistency",
+                    78,
+                    (
+                        f"角色一致性阶段新增 {len(character_stage_result.issues)} 条问题"
+                        if character_stage_result.issues
+                        else "角色一致性阶段未追加问题或已安全降级"
+                    ),
+                )
+                _checkpoint(run_id, token, heartbeat)
             frozen_bundle = None
             if (
                 settings.enable_evidence_investigator
                 or settings.enable_issue_evidence_review
             ):
-                run = db.get(AnalysisRunRow, run_id)
                 try:
                     if run is None:
                         raise ValueError("analysis run is unavailable")
@@ -1265,7 +2250,7 @@ def execute_analysis(
                     run_id,
                     token,
                     "evidence_investigator",
-                    76,
+                    80 if settings.enable_character_consistency else 76,
                     "正在用冻结版本建立证据调查范围",
                 )
                 investigator_runtime_result = None
@@ -1292,7 +2277,8 @@ def execute_analysis(
                             0,
                             settings.per_run_token_budget
                             - pipeline_budget_debit
-                            - historical_charged_tokens,
+                            - historical_charged_tokens
+                            - character_charged_tokens,
                         ),
                     )
                     investigator_diagnostics = dict(
@@ -1340,7 +2326,7 @@ def execute_analysis(
                     run_id,
                     token,
                     "evidence_investigator",
-                    78,
+                    82 if settings.enable_character_consistency else 78,
                     (
                         "证据调查已完成受控检索"
                         if investigator_diagnostics.get("outcome") == "completed"
@@ -1403,7 +2389,7 @@ def execute_analysis(
                     run_id,
                     token,
                     "evidence_investigator",
-                    81,
+                    85 if settings.enable_character_consistency else 81,
                     (
                         f"确定性复核接受 {accepted_candidates} 条候选，新增 "
                         f"{added_issues} 条问题"
@@ -1420,7 +2406,12 @@ def execute_analysis(
                     run_id,
                     token,
                     "evidence_review",
-                    82,
+                    (
+                        86
+                        if settings.enable_character_consistency
+                        and settings.enable_evidence_investigator
+                        else 82
+                    ),
                     "正在用冻结版本的检索证据复核规则问题",
                 )
                 try:
@@ -1439,6 +2430,7 @@ def execute_analysis(
                             settings.per_run_token_budget
                             - pipeline_budget_debit
                             - historical_charged_tokens
+                            - character_charged_tokens
                             - investigator_usage.charged_tokens,
                         ),
                     )
@@ -1470,7 +2462,12 @@ def execute_analysis(
                     run_id,
                     token,
                     "evidence_review",
-                    88,
+                    (
+                        90
+                        if settings.enable_character_consistency
+                        and settings.enable_evidence_investigator
+                        else 88
+                    ),
                     (
                         f"证据复核已注释 {len(review_result.annotations)} 条规则问题"
                         if review_result.annotations
@@ -1479,8 +2476,12 @@ def execute_analysis(
                 )
                 _checkpoint(run_id, token, heartbeat)
             current_optional_usage = _merge_usage_accounting(
-                investigator_usage.safe_dict(terminal_status="completed"),
-                issue_review_usage.safe_dict(terminal_status="completed"),
+                character_usage,
+                _merge_usage_accounting(
+                    investigator_usage.safe_dict(terminal_status="completed"),
+                    issue_review_usage.safe_dict(terminal_status="completed"),
+                    terminal_status="completed",
+                ),
                 terminal_status="completed",
             )
             cumulative_usage = _merge_usage_accounting(
@@ -1554,6 +2555,19 @@ def execute_analysis(
             result.diagnostics["input_snapshot"] = {
                 "immutable": True,
                 "documents": input_metadata,
+                "narrative_context_snapshot_sha256": payload_sha256(
+                    [
+                        {
+                            "document_id": row["document_id"],
+                            "narrative_context_sha256": row[
+                                "narrative_context_sha256"
+                            ],
+                            "ordinal": row["ordinal"],
+                        }
+                        for row in input_metadata
+                    ]
+                ),
+                **run_trait_snapshot_metadata(db, run_id),
             }
             # API and worker each report the same content-free identity. The
             # live E2E runner compares them so a stale worker image or a
@@ -1644,6 +2658,7 @@ def execute_analysis(
             investigator_usage,
             issue_review_usage,
             terminal_status="cancelled",
+            character_usage=character_usage_tracker,
         )
         _finalize_terminal(
             run_id,
@@ -1668,6 +2683,7 @@ def execute_analysis(
                 investigator_usage,
                 issue_review_usage,
                 terminal_status="cancelled",
+                character_usage=character_usage_tracker,
             )
             _finalize_terminal(
                 run_id,
@@ -1694,6 +2710,7 @@ def execute_analysis(
                 investigator_usage,
                 issue_review_usage,
                 terminal_status="failed",
+                character_usage=character_usage_tracker,
             )
             _finalize_terminal(
                 run_id,
@@ -1709,6 +2726,7 @@ def execute_analysis(
                 investigator_usage,
                 issue_review_usage,
                 terminal_status="running",
+                character_usage=character_usage_tracker,
             )
             _release_failed_attempt(
                 run_id,

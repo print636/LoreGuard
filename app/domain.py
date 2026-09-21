@@ -668,10 +668,24 @@ class CertaintyLevel(StrEnum):
 
 class IssueCategory(StrEnum):
     fact_conflict = "fact_conflict"
+    character_drift = "character_drift"
     location_collision = "location_collision"
     knowledge_without_acquisition = "knowledge_without_acquisition"
     item_ownership = "item_ownership"
     world_rule_conflict = "world_rule_conflict"
+
+
+# The directive rule engine and Evidence Investigator intentionally retain
+# their original five-family contract. Character drift is produced by a
+# separate frozen-profile semantic stage and must not be treated as a
+# directive family merely because both share the public issue enum.
+DETERMINISTIC_RULE_CATEGORIES: tuple[IssueCategory, ...] = (
+    IssueCategory.fact_conflict,
+    IssueCategory.location_collision,
+    IssueCategory.knowledge_without_acquisition,
+    IssueCategory.item_ownership,
+    IssueCategory.world_rule_conflict,
+)
 
 
 class EvidenceSpan(BaseModel):

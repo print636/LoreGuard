@@ -39,7 +39,7 @@ HISTORICAL_ARTIFACT_SCHEMAS = frozenset(
         "evidence-investigator-live-http-v4",
     }
 )
-RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v2"
+RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v3"
 DEV_PAIR_SCHEMA = "evidence-investigator-live-dev-pair-v3"
 DATASET_ID = "evidence-investigator-live-v2"
 PINNED_MANIFEST_SHA256 = "64ded0988cb70ea591548facfc26f4867e39818d1b868a17dbadde402fc6d316"
@@ -303,10 +303,38 @@ SAFE_FAILURE_CODES = frozenset(
 _CAPABILITY_KEYS = frozenset(
     {
         "model_extraction",
+        "character_consistency",
         "issue_evidence_review",
         "record_repair_agent",
         "evidence_investigator",
         "embeddings",
+    }
+)
+_CHARACTER_CONSISTENCY_SENSITIVITIES = frozenset(
+    {"conservative", "balanced", "exploratory"}
+)
+_CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS = {
+    "stage_token_budget": (256, 100_000),
+    "max_chunks_per_run": (1, 128),
+    "max_candidates_per_run": (1, 256),
+    "signal_max_chunk_chars": (256, 12_000),
+    "signal_provider_max_attempts": (1, 4),
+    "signal_package_max_attempts": (1, 2),
+    "signal_token_budget": (256, 22_000),
+    "signal_max_completion_tokens": (64, 8_192),
+    "drift_max_observations": (1, 24),
+    "drift_max_support_evidence": (0, 16),
+    "drift_provider_max_attempts": (1, 4),
+}
+_CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS = {
+    "signal_total_deadline_seconds": (0.0, 60.0),
+    "drift_total_deadline_seconds": (0.0, 60.0),
+}
+_CHARACTER_CONSISTENCY_LIMIT_KEYS = frozenset(
+    {
+        "sensitivity",
+        *_CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS,
+        *_CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
     }
 )
 _INVESTIGATOR_INTEGER_LIMIT_KEYS = frozenset(
@@ -2730,6 +2758,7 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         "build",
         "chat_provider",
         "capabilities",
+        "character_consistency_limits",
         "investigator_limits",
         "rag",
     }:
@@ -2789,6 +2818,37 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         or any(type(value) is not bool for value in capabilities.values())
     ):
         return None
+
+    character_limits = root.get("character_consistency_limits")
+    if (
+        type(character_limits) is not dict
+        or set(character_limits) != _CHARACTER_CONSISTENCY_LIMIT_KEYS
+        or character_limits.get("sensitivity")
+        not in _CHARACTER_CONSISTENCY_SENSITIVITIES
+    ):
+        return None
+    safe_character_limits: dict[str, Any] = {
+        "sensitivity": character_limits["sensitivity"]
+    }
+    for key, (minimum, maximum) in (
+        _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS.items()
+    ):
+        parsed = _safe_int(character_limits.get(key))
+        if parsed is None or not minimum <= parsed <= maximum:
+            return None
+        safe_character_limits[key] = parsed
+    for key, (minimum, maximum) in (
+        _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS.items()
+    ):
+        parsed = character_limits.get(key)
+        if (
+            isinstance(parsed, bool)
+            or not isinstance(parsed, (int, float))
+            or not math.isfinite(float(parsed))
+            or not minimum < float(parsed) <= maximum
+        ):
+            return None
+        safe_character_limits[key] = float(parsed)
 
     limits = root.get("investigator_limits")
     if type(limits) is not dict or set(limits) != _INVESTIGATOR_LIMIT_KEYS:
@@ -2858,6 +2918,9 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             "thinking_mode": provider["thinking_mode"],
         },
         "capabilities": dict(sorted(capabilities.items())),
+        "character_consistency_limits": dict(
+            sorted(safe_character_limits.items())
+        ),
         "investigator_limits": dict(sorted(safe_limits.items())),
         "rag": {
             "strategy": rag["strategy"],
@@ -2971,6 +3034,7 @@ def _build_runtime_provenance_gate(
         if capabilities != {
             "embeddings": True,
             "evidence_investigator": True,
+            "character_consistency": False,
             "issue_evidence_review": False,
             "model_extraction": False,
             "record_repair_agent": False,

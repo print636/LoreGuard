@@ -43,6 +43,7 @@ test("product routes distinguish authentication, project center, and workspaces"
     runId: null,
   });
   assert.equal(productRouteFromPath("/app/projects/p-1/check").kind, "workspace");
+  assert.equal(productRouteFromPath("/app/projects/p-1/characters").kind, "workspace");
   assert.deepEqual(productRouteFromPath("/app/projects/p-1/runs/r-2/report"), {
     kind: "workspace",
     projectId: "p-1",
@@ -60,9 +61,11 @@ test("product routes distinguish authentication, project center, and workspaces"
 test("nested project routes preserve project context across old workspace views", () => {
   assert.equal(workspaceProjectIdFromPath("/app/projects/story%201/check"), "story 1");
   assert.equal(workspaceViewFromPath("/app/projects/p-1/documents"), "projects");
+  assert.equal(workspaceViewFromPath("/app/projects/p-1/characters"), "characters");
   assert.equal(workspaceViewFromPath("/app/projects/p-1/compare"), "diff");
   assert.equal(workspacePath("report", "p-1"), "/app/projects/p-1/report");
   assert.equal(workspacePath("provider", "p-1"), "/app/settings/model");
+  assert.equal(workspacePath("characters", "p-1"), "/app/projects/p-1/characters");
   assert.equal(workspaceRunIdFromPath("/app/projects/p-1/runs/run%202/report"), "run 2");
   assert.equal(
     workspacePath("report", "p-1", "run 2"),
@@ -127,6 +130,19 @@ test("report route query round-trips whitelisted filters and issue selection", (
   assert.deepEqual(
     reportRouteStateFromSearch("?category=<script>&status=private&issue=" + "x".repeat(200)),
     { category: "all", status: "all", issueId: null },
+  );
+});
+
+test("report route accepts the evidence-based character drift category", () => {
+  assert.deepEqual(
+    reportRouteStateFromSearch(
+      "?category=character_drift&status=unreviewed&issue=issue-drift-1",
+    ),
+    {
+      category: "character_drift",
+      status: "unreviewed",
+      issueId: "issue-drift-1",
+    },
   );
 });
 

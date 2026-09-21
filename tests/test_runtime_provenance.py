@@ -66,6 +66,25 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     assert result["investigator_limits"]["total_deadline_seconds"] == 90
     assert result["investigator_limits"]["max_completion_tokens"] == 1024
     assert result["investigator_limits"]["max_agent_input_bytes"] == 131072
+    assert result["character_consistency_limits"][
+        "signal_provider_max_attempts"
+    ] == 2
+    assert result["character_consistency_limits"][
+        "signal_package_max_attempts"
+    ] == 2
+    assert result["character_consistency_limits"]["signal_token_budget"] == 22_000
+    assert result["character_consistency_limits"][
+        "signal_max_completion_tokens"
+    ] == 4_096
+    assert result["character_consistency_limits"][
+        "drift_provider_max_attempts"
+    ] == 2
+    assert result["character_consistency_limits"][
+        "signal_total_deadline_seconds"
+    ] == 30
+    assert result["character_consistency_limits"][
+        "drift_total_deadline_seconds"
+    ] == 30
     assert re.fullmatch(r"[a-f0-9]{64}", result["rag"]["profile_fingerprint"])
     assert re.fullmatch(r"[a-f0-9]{64}", result["rag"]["chunker_fingerprint"])
     assert "test-only-secret" not in serialized

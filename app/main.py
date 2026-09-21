@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from hashlib import sha256
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -32,11 +31,17 @@ from .auth import (
 from .db import (
     AnalysisDiagnosticRow,
     AnalysisRecordRow,
+    AnalysisRunCharacterTraitInputRow,
     AnalysisRunComparisonRow,
     AnalysisRunExecutionRow,
+    AnalysisRunInputContextRow,
+    AnalysisRunInputNarrativeContextRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
+    CharacterTraitCandidateRow,
+    CharacterTraitReviewRow,
     DocumentContextRow,
+    DocumentNarrativeContextRevisionRow,
     DocumentRow,
     FeedbackRow,
     IssueComparisonItemRow,
@@ -46,11 +51,27 @@ from .db import (
     SessionLocal,
     init_db,
 )
+from .character_traits import (
+    normalize_character_key,
+    validate_character_trait_supersession,
+)
+from .character_trait_extraction import trait_keys_compatible
 from .document_diff import build_document_diff
 from .docx_import import DocxImportError, extract_docx_text
 from .domain import CertaintyLevel, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
 from .evaluation import run_evaluation
 from .observability import AnalysisMetricsUnavailable, render_analysis_metrics
+from .narrative_context import (
+    NarrativeContextInput,
+    NarrativeContextRevisionConflict,
+    NarrativeContextRevisionInput,
+    NarrativeScopeV1,
+    add_context_revision,
+    context_snapshot_payload,
+    latest_context_revisions,
+    payload_sha256,
+    scope_relation,
+)
 from .projections import project_graph, project_timeline, record_sort_key
 from .provider import (
     OpenAICompatibleProvider,
@@ -72,9 +93,15 @@ from .service import (
     DISPATCH_FAILED_ERROR,
     MISSING_SNAPSHOT_ERROR,
     capture_run_inputs,
+    CharacterTraitSnapshotLimitExceeded,
     copy_run_inputs,
+    current_project_source_signature,
+    document_content_sha256,
     execute_analysis,
     run_input_metadata,
+    run_narrative_context_fingerprint,
+    run_trait_snapshot_metadata,
+    frozen_run_source_signature,
     safe_persisted_analysis_error,
 )
 from .time_utils import utc_now_naive
@@ -187,6 +214,15 @@ class TextDocumentIn(BaseModel):
         max_length=80,
         pattern=r"^[A-Za-z0-9_\-\u4e00-\u9fff]+$",
     )
+    narrative_context: NarrativeContextInput | None = None
+
+
+class CharacterTraitDecisionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["confirm", "reject"]
+    expected_revision: int = Field(ge=0)
+    comment: str = Field(default="", max_length=2_000)
 
 
 ClarificationCategory = Literal[
@@ -273,6 +309,12 @@ def serialize_run(row: AnalysisRunRow, db=None) -> dict:
             comparison.baseline_run_id if comparison else None
         )
         payload["input_snapshot_available"] = bool(payload["input_documents"])
+        payload["narrative_context_snapshot_sha256"] = (
+            run_narrative_context_fingerprint(db, row.id)
+            if payload["input_documents"]
+            else None
+        )
+        payload.update(run_trait_snapshot_metadata(db, row.id))
         if row.status == "completed":
             counts = dict(
                 db.execute(
@@ -294,6 +336,13 @@ def serialize_run(row: AnalysisRunRow, db=None) -> dict:
 
 def serialize_document(row: DocumentRow, include_content: bool = True, db=None) -> dict:
     context = db.get(DocumentContextRow, row.id) if db is not None else None
+    narrative = (
+        latest_context_revisions(db, [row.id]).get(row.id)
+        if db is not None
+        else None
+    )
+    document_role = context.document_role if context else DEFAULT_DOCUMENT_ROLE
+    story_scope = context.story_scope if context else DEFAULT_STORY_SCOPE
     payload = {
         "id": row.id,
         "project_id": row.project_id,
@@ -301,12 +350,224 @@ def serialize_document(row: DocumentRow, include_content: bool = True, db=None) 
         "version": row.version,
         "active": row.active,
         "created_at": row.created_at,
-        "document_role": context.document_role if context else DEFAULT_DOCUMENT_ROLE,
-        "story_scope": context.story_scope if context else DEFAULT_STORY_SCOPE,
+        "document_role": document_role,
+        "story_scope": story_scope,
         "context_explicit": context is not None,
+        "narrative_context": context_snapshot_payload(
+            narrative,
+            document_role=document_role,
+            story_scope=story_scope,
+        ),
     }
     if include_content:
         payload["content"] = row.content
+    return payload
+
+
+def serialize_narrative_context_revision(
+    row: DocumentNarrativeContextRevisionRow,
+) -> dict:
+    return {
+        "id": row.id,
+        "project_id": row.project_id,
+        "document_id": row.document_id,
+        "revision": row.revision,
+        "resolution_state": row.resolution_state,
+        "origin": row.origin,
+        "authority_tier": row.authority_tier,
+        "publication_status": row.publication_status,
+        "scope": row.scope_payload,
+        "scope_sha256": row.scope_sha256,
+        "inference_confidence": row.inference_confidence,
+        "created_at": row.created_at,
+    }
+
+
+def serialize_character_trait_candidate(row: CharacterTraitCandidateRow) -> dict:
+    return {
+        "id": row.id,
+        "project_id": row.project_id,
+        "source_run_id": row.source_run_id,
+        "character_key": row.character_key,
+        "character_display_name": row.character_display_name,
+        "trait_type": row.trait_type,
+        "trait_key": row.trait_key,
+        "value": row.value,
+        "polarity": row.polarity,
+        "stability": row.stability,
+        "contexts": row.contexts,
+        "origin": row.origin,
+        "authority_tier": row.authority_tier,
+        "confidence": row.confidence,
+        "scope": row.scope_payload,
+        "scope_sha256": row.scope_sha256,
+        "valid_from_release_ordinal": row.valid_from_release_ordinal,
+        "valid_until_release_ordinal": row.valid_until_release_ordinal,
+        "evidence": row.evidence,
+        "candidate_fingerprint": row.candidate_fingerprint,
+        "generator_version": row.generator_version,
+        "review_state": row.review_state,
+        "revision": row.lock_version,
+        "supersedes_candidate_id": row.supersedes_candidate_id,
+        "reviewed_at": row.reviewed_at,
+        "created_at": row.created_at,
+    }
+
+
+def _candidate_source_is_current(
+    db, row: CharacterTraitCandidateRow
+) -> tuple[bool, str | None]:
+    source_run = db.get(AnalysisRunRow, row.source_run_id)
+    if (
+        source_run is None
+        or source_run.project_id != row.project_id
+        or source_run.status != "completed"
+    ):
+        return False, "来源分析尚未完整完成"
+    evidence = row.evidence if isinstance(row.evidence, list) else []
+    bindings: dict[str, tuple[str, int, str]] = {}
+    for item in evidence:
+        if not isinstance(item, dict):
+            return False, "候选缺少可核对的来源文档"
+        input_id = item.get("input_id")
+        document_id = item.get("document_id")
+        document_version = item.get("document_version")
+        content_sha256 = item.get("content_sha256")
+        if (
+            not isinstance(input_id, str)
+            or not input_id
+            or not isinstance(document_id, str)
+            or not document_id
+            or type(document_version) is not int
+            or document_version < 1
+            or not isinstance(content_sha256, str)
+            or len(content_sha256) != 64
+        ):
+            return False, "候选缺少可核对的来源文档"
+        binding = (document_id, document_version, content_sha256)
+        if input_id in bindings and bindings[input_id] != binding:
+            return False, "候选来源快照存在歧义"
+        bindings[input_id] = binding
+    if not bindings:
+        return False, "候选缺少可核对的来源文档"
+
+    frozen_inputs = list(
+        db.scalars(
+            select(AnalysisRunInputRow).where(
+                AnalysisRunInputRow.run_id == row.source_run_id,
+                AnalysisRunInputRow.id.in_(bindings),
+            )
+        ).all()
+    )
+    frozen_by_id = {item.id: item for item in frozen_inputs}
+    if len(frozen_by_id) != len(bindings):
+        return False, "候选来源快照已缺失"
+    for input_id, binding in bindings.items():
+        frozen = frozen_by_id[input_id]
+        if binding != (
+            frozen.document_id,
+            frozen.document_version,
+            frozen.content_sha256,
+        ):
+            return False, "候选来源与冻结输入不一致"
+
+    document_ids = {item.document_id for item in frozen_inputs}
+    active_documents = list(
+        db.scalars(
+            select(DocumentRow).where(
+                DocumentRow.project_id == row.project_id,
+                DocumentRow.id.in_(document_ids),
+                DocumentRow.active.is_(True),
+            )
+        ).all()
+    )
+    active_by_id = {item.id: item for item in active_documents}
+    if len(active_by_id) != len(document_ids):
+        return False, "来源文档已被新版本替代，请重新分析后确认"
+
+    for frozen in frozen_inputs:
+        current = active_by_id[frozen.document_id]
+        if (
+            current.version != frozen.document_version
+            or document_content_sha256(current.content) != frozen.content_sha256
+        ):
+            return False, "来源文档已变更，请重新分析后确认"
+
+    legacy_rows = list(
+        db.scalars(
+            select(DocumentContextRow).where(
+                DocumentContextRow.document_id.in_(document_ids)
+            )
+        ).all()
+    )
+    legacy_by_document = {item.document_id: item for item in legacy_rows}
+    if len(legacy_by_document) != len(document_ids):
+        return False, "来源文档的叙事上下文已缺失"
+
+    current_revisions = latest_context_revisions(db, list(document_ids))
+    if set(current_revisions) != document_ids:
+        return False, "来源文档的叙事上下文已缺失"
+
+    frozen_context_rows = list(
+        db.scalars(
+            select(AnalysisRunInputNarrativeContextRow).where(
+                AnalysisRunInputNarrativeContextRow.input_id.in_(bindings)
+            )
+        ).all()
+    )
+    frozen_context_by_input = {
+        item.input_id: item for item in frozen_context_rows
+    }
+    if len(frozen_context_by_input) != len(bindings):
+        return False, "来源分析的冻结叙事上下文已缺失"
+
+    for frozen in frozen_inputs:
+        frozen_context = frozen_context_by_input[frozen.id]
+        if (
+            frozen_context.schema_version != 1
+            or not isinstance(frozen_context.payload, dict)
+            or payload_sha256(frozen_context.payload)
+            != frozen_context.payload_sha256
+        ):
+            return False, "来源分析的冻结叙事上下文无法校验"
+        legacy = legacy_by_document[frozen.document_id]
+        try:
+            current_payload = context_snapshot_payload(
+                current_revisions[frozen.document_id],
+                document_role=legacy.document_role,
+                story_scope=legacy.story_scope,
+            )
+        except (TypeError, ValueError):
+            return False, "来源文档的叙事上下文无法校验"
+        if (
+            current_payload != frozen_context.payload
+            or payload_sha256(current_payload) != frozen_context.payload_sha256
+        ):
+            return False, "来源文档的叙事上下文已变更，请重新分析后确认"
+    return True, None
+
+
+def serialize_character_trait_candidate_for_review(
+    db, row: CharacterTraitCandidateRow
+) -> dict:
+    payload = serialize_character_trait_candidate(row)
+    current, reason = _candidate_source_is_current(db, row)
+    if row.review_state == "pending" and not current:
+        payload.update(
+            {
+                "status": "stale",
+                "reviewable": False,
+                "unreviewable_reason": reason,
+            }
+        )
+    else:
+        payload.update(
+            {
+                "status": row.review_state,
+                "reviewable": row.review_state == "pending",
+                "unreviewable_reason": None,
+            }
+        )
     return payload
 
 
@@ -505,6 +766,7 @@ def enforce_daily_model_budget(db, workspace_id: str | None = None) -> None:
         settings.enable_model_extraction
         or settings.enable_evidence_investigator
         or settings.enable_issue_evidence_review
+        or settings.enable_character_consistency
     ) and bool(settings.openai_api_key.strip())
     if not model_requested:
         return
@@ -628,6 +890,47 @@ def prepare_document_version(
     return version, superseded, resolved_role, resolved_scope
 
 
+def add_initial_narrative_context(
+    db,
+    *,
+    project_id: str,
+    document_id: str,
+    document_role: str,
+    narrative_context: NarrativeContextInput | None,
+    user_id: str | None,
+) -> DocumentNarrativeContextRevisionRow:
+    supplied = narrative_context or NarrativeContextInput()
+    return add_context_revision(
+        db,
+        project_id=project_id,
+        document_id=document_id,
+        document_role=document_role,
+        resolution_state=supplied.resolution_state,
+        publication_status=supplied.publication_status,
+        scope=supplied.scope,
+        origin="explicit",
+        created_by_user_id=user_id,
+        expected_revision=0,
+    )
+
+
+def parse_multipart_narrative_context(
+    value: str | None,
+) -> NarrativeContextInput | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        return NarrativeContextInput.model_validate_json(value)
+    except Exception:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "invalid_narrative_context",
+                "message": "叙事上下文必须是符合 schema v1 的 JSON",
+            },
+        ) from None
+
+
 @app.get("/health")
 def health() -> dict:
     return {
@@ -638,6 +941,7 @@ def health() -> dict:
                 settings.enable_model_extraction
                 or settings.enable_evidence_investigator
                 or settings.enable_issue_evidence_review
+                or settings.enable_character_consistency
             )
             and bool(settings.openai_api_key.strip()),
             "thinking": safe_thinking_configuration(settings),
@@ -941,6 +1245,125 @@ def compare_document_versions(
         }
 
 
+@app.get(
+    "/api/v1/projects/{project_id}/documents/{document_id}/narrative-context"
+)
+def get_document_narrative_context(
+    project_id: str,
+    document_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    with SessionLocal() as db:
+        document = db.scalar(
+            select(DocumentRow)
+            .join(ProjectRow, ProjectRow.id == DocumentRow.project_id)
+            .where(
+                DocumentRow.id == document_id,
+                DocumentRow.project_id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+        )
+        if document is None:
+            raise HTTPException(404, "文档不存在")
+        rows = list(
+            db.scalars(
+                select(DocumentNarrativeContextRevisionRow)
+                .where(
+                    DocumentNarrativeContextRevisionRow.project_id == project_id,
+                    DocumentNarrativeContextRevisionRow.document_id == document_id,
+                )
+                .order_by(DocumentNarrativeContextRevisionRow.revision.desc())
+            ).all()
+        )
+        legacy = db.get(DocumentContextRow, document_id)
+        role = legacy.document_role if legacy else DEFAULT_DOCUMENT_ROLE
+        story_scope = legacy.story_scope if legacy else DEFAULT_STORY_SCOPE
+        if not rows:
+            return {
+                "document_id": document_id,
+                "current": context_snapshot_payload(
+                    None,
+                    document_role=role,
+                    story_scope=story_scope,
+                ),
+                "revision_count": 0,
+                "revisions": [],
+            }
+        return {
+            "document_id": document_id,
+            "current": serialize_narrative_context_revision(rows[0]),
+            "revision_count": len(rows),
+            "revisions": [serialize_narrative_context_revision(row) for row in rows],
+        }
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/documents/{document_id}/narrative-context/revisions",
+    status_code=201,
+)
+def create_document_narrative_context_revision(
+    project_id: str,
+    document_id: str,
+    payload: NarrativeContextRevisionInput,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    with SessionLocal() as db:
+        project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if project is None:
+            raise HTTPException(404, "项目不存在")
+        document = db.scalar(
+            select(DocumentRow).where(
+                DocumentRow.id == document_id,
+                DocumentRow.project_id == project_id,
+            )
+        )
+        if document is None:
+            raise HTTPException(404, "文档不存在")
+        legacy = db.get(DocumentContextRow, document_id)
+        role = legacy.document_role if legacy else DEFAULT_DOCUMENT_ROLE
+        try:
+            row = add_context_revision(
+                db,
+                project_id=project_id,
+                document_id=document_id,
+                document_role=role,
+                resolution_state=payload.resolution_state,
+                publication_status=payload.publication_status,
+                scope=payload.scope,
+                origin="explicit",
+                created_by_user_id=context.user_id,
+                expected_revision=payload.expected_revision,
+            )
+            db.commit()
+        except NarrativeContextRevisionConflict as exc:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "narrative_context_revision_conflict",
+                    "message": "叙事上下文已被更新，请刷新后重试",
+                    "actual_revision": exc.actual_revision,
+                },
+            ) from None
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "narrative_context_revision_conflict",
+                    "message": "叙事上下文已被更新，请刷新后重试",
+                },
+            ) from None
+        return serialize_narrative_context_revision(row)
+
+
 @app.post("/api/v1/projects/{project_id}/documents/text", status_code=201)
 def create_text_document(
     project_id: str,
@@ -972,6 +1395,14 @@ def create_text_document(
                     document_role=document_role,
                     story_scope=story_scope,
                 )
+            )
+            add_initial_narrative_context(
+                db,
+                project_id=project_id,
+                document_id=row.id,
+                document_role=document_role,
+                narrative_context=payload.narrative_context,
+                user_id=context.user_id,
             )
             db.commit()
         except IntegrityError:
@@ -1015,6 +1446,14 @@ def create_demo(
                     story_scope=DEFAULT_STORY_SCOPE,
                 )
             )
+            add_initial_narrative_context(
+                db,
+                project_id=project.id,
+                document_id=document.id,
+                document_role=role.value,
+                narrative_context=None,
+                user_id=context.user_id,
+            )
         db.commit()
         return {"id": project.id, "name": project.name, "document_count": len(files)}
 
@@ -1050,6 +1489,14 @@ def create_advanced_demo(
                     story_scope=DEFAULT_STORY_SCOPE,
                 )
             )
+            add_initial_narrative_context(
+                db,
+                project_id=project.id,
+                document_id=document.id,
+                document_role=role.value,
+                narrative_context=None,
+                user_id=context.user_id,
+            )
         db.commit()
         return {"id": project.id, "name": project.name, "document_count": len(files)}
 
@@ -1066,8 +1513,12 @@ async def upload_document(
         max_length=80,
         pattern=r"^[A-Za-z0-9_\-\u4e00-\u9fff]+$",
     ),
+    narrative_context: str | None = Form(None, max_length=8_000),
     context: AuthContext = Depends(require_csrf),
 ) -> dict:
+    parsed_narrative_context = parse_multipart_narrative_context(
+        narrative_context
+    )
     data = await file.read(settings.max_upload_bytes + 1)
     if len(data) > settings.max_upload_bytes:
         raise HTTPException(413, "文件超过上传限制")
@@ -1105,6 +1556,14 @@ async def upload_document(
                     story_scope=resolved_scope,
                 )
             )
+            add_initial_narrative_context(
+                db,
+                project_id=project_id,
+                document_id=row.id,
+                document_role=resolved_role,
+                narrative_context=parsed_narrative_context,
+                user_id=context.user_id,
+            )
             db.commit()
         except IntegrityError:
             db.rollback()
@@ -1118,6 +1577,653 @@ async def upload_document(
         return {**serialize_document(row, db=db), "superseded_document_ids": superseded}
 
 
+def _candidate_in_workspace(
+    db,
+    *,
+    project_id: str,
+    candidate_id: str,
+    character_key: str,
+    workspace_id: str,
+    for_update: bool = False,
+) -> CharacterTraitCandidateRow | None:
+    statement = (
+        select(CharacterTraitCandidateRow)
+        .join(ProjectRow, ProjectRow.id == CharacterTraitCandidateRow.project_id)
+        .where(
+            CharacterTraitCandidateRow.id == candidate_id,
+            CharacterTraitCandidateRow.project_id == project_id,
+            CharacterTraitCandidateRow.character_key == character_key,
+            ProjectRow.workspace_id == workspace_id,
+        )
+    )
+    if for_update:
+        statement = statement.with_for_update()
+    return db.scalar(statement)
+
+
+def _release_ranges_overlap(
+    first: CharacterTraitCandidateRow, second: CharacterTraitCandidateRow
+) -> bool:
+    first_start = first.valid_from_release_ordinal or 0
+    second_start = second.valid_from_release_ordinal or 0
+    first_end = (
+        first.valid_until_release_ordinal
+        if first.valid_until_release_ordinal is not None
+        else 2_147_483_647
+    )
+    second_end = (
+        second.valid_until_release_ordinal
+        if second.valid_until_release_ordinal is not None
+        else 2_147_483_647
+    )
+    return max(first_start, second_start) <= min(first_end, second_end)
+
+
+def _character_coverage_for_run(
+    db, run: AnalysisRunRow | None
+) -> tuple[str, str | None]:
+    if run is None:
+        return "unknown", None
+    diagnostic = db.get(AnalysisDiagnosticRow, run.id)
+    payload = diagnostic.payload if diagnostic and isinstance(diagnostic.payload, dict) else {}
+    stage = payload.get("character_consistency")
+    if not isinstance(stage, dict):
+        return "unknown", "该次分析没有可核对的角色一致性执行记录"
+    outcome = stage.get("outcome")
+    if outcome == "completed":
+        return "full", "角色一致性阶段已完整执行"
+    if outcome == "partial":
+        return "partial", "仅完成部分材料审查；未覆盖内容不能视为没有问题"
+    if outcome == "degraded":
+        return "unknown", "模型阶段已降级；当前结果不能代表角色审查完成"
+    if outcome == "skipped":
+        return "unknown", "角色一致性阶段未执行；当前结果不能代表没有问题"
+    return "unknown", "角色一致性执行状态无法确认"
+
+
+@app.get("/api/v1/projects/{project_id}/characters")
+def list_characters(
+    project_id: str,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 40,
+    query: Annotated[str | None, Query(max_length=160)] = None,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    with SessionLocal() as db:
+        if not _project_in_workspace(db, project_id, context.workspace_id):
+            raise HTTPException(404, "项目不存在")
+        active_document_count = db.scalar(
+            select(func.count())
+            .select_from(DocumentRow)
+            .where(
+                DocumentRow.project_id == project_id,
+                DocumentRow.active.is_(True),
+            )
+        ) or 0
+        latest_completed_run = db.scalar(
+            select(AnalysisRunRow)
+            .where(
+                AnalysisRunRow.project_id == project_id,
+                AnalysisRunRow.status == "completed",
+            )
+            .order_by(
+                AnalysisRunRow.completed_at.desc(),
+                AnalysisRunRow.created_at.desc(),
+                AnalysisRunRow.id.desc(),
+            )
+            .limit(1)
+        )
+        rows = list(
+            db.scalars(
+                select(CharacterTraitCandidateRow)
+                .join(
+                    AnalysisRunRow,
+                    AnalysisRunRow.id == CharacterTraitCandidateRow.source_run_id,
+                )
+                .where(CharacterTraitCandidateRow.project_id == project_id)
+                .where(AnalysisRunRow.status == "completed")
+                .order_by(
+                    CharacterTraitCandidateRow.character_key,
+                    CharacterTraitCandidateRow.created_at,
+                )
+            ).all()
+        )
+        grouped: dict[str, dict] = {}
+        for row in rows:
+            item = grouped.setdefault(
+                row.character_key,
+                {
+                    "character_key": row.character_key,
+                    "character_display_name": row.character_display_name,
+                    "confirmed_trait_count": 0,
+                    "pending_candidate_count": 0,
+                    "profile_revision": 0,
+                    "updated_at": row.created_at,
+                },
+            )
+            if row.review_state == "confirmed":
+                item["confirmed_trait_count"] += 1
+            elif row.review_state == "pending":
+                item["pending_candidate_count"] += 1
+            item["profile_revision"] = max(
+                item["profile_revision"], row.lock_version
+            )
+            candidate_updated_at = row.reviewed_at or row.created_at
+            if candidate_updated_at > item["updated_at"]:
+                item["updated_at"] = candidate_updated_at
+        items = list(grouped.values())
+        normalized_query = (query or "").strip().casefold()
+        if normalized_query:
+            items = [
+                item
+                for item in items
+                if normalized_query
+                in item["character_display_name"].casefold()
+            ]
+        total = len(items)
+        offset = (page - 1) * page_size
+        items = items[offset : offset + page_size]
+        if not active_document_count:
+            readiness = "no_documents"
+        elif latest_completed_run is None:
+            readiness = "no_completed_run"
+        elif not grouped:
+            readiness = "not_generated"
+        else:
+            readiness = "ready"
+        model_coverage, coverage_detail = _character_coverage_for_run(
+            db, latest_completed_run
+        )
+        return {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "has_more": offset + len(items) < total,
+            "readiness": readiness,
+            "model_coverage": model_coverage,
+            "coverage_detail": coverage_detail,
+            "source_run_id": (
+                latest_completed_run.id if latest_completed_run else None
+            ),
+        }
+
+
+@app.get("/api/v1/projects/{project_id}/characters/{character_key}")
+def get_character_profile(
+    project_id: str,
+    character_key: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    try:
+        normalized = normalize_character_key(character_key)
+    except ValueError:
+        raise HTTPException(404, "角色不存在") from None
+    with SessionLocal() as db:
+        if not _project_in_workspace(db, project_id, context.workspace_id):
+            raise HTTPException(404, "项目不存在")
+        rows = list(
+            db.scalars(
+                select(CharacterTraitCandidateRow)
+                .where(
+                    CharacterTraitCandidateRow.project_id == project_id,
+                    CharacterTraitCandidateRow.character_key == normalized,
+                )
+                .order_by(
+                    CharacterTraitCandidateRow.trait_type,
+                    CharacterTraitCandidateRow.trait_key,
+                    CharacterTraitCandidateRow.created_at,
+                )
+            ).all()
+        )
+        if not rows:
+            raise HTTPException(404, "角色不存在")
+        return {
+            "character_key": normalized,
+            "character_display_name": rows[-1].character_display_name,
+            "confirmed_traits": [
+                serialize_character_trait_candidate(row)
+                for row in rows
+                if row.review_state == "confirmed"
+            ],
+            "pending_candidate_count": sum(
+                row.review_state == "pending" for row in rows
+            ),
+        }
+
+
+@app.get(
+    "/api/v1/projects/{project_id}/characters/{character_key}/profile-candidates"
+)
+def list_character_profile_candidates(
+    project_id: str,
+    character_key: str,
+    state: Literal["pending", "confirmed", "rejected", "superseded"] | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    try:
+        normalized = normalize_character_key(character_key)
+    except ValueError:
+        raise HTTPException(404, "角色不存在") from None
+    with SessionLocal() as db:
+        if not _project_in_workspace(db, project_id, context.workspace_id):
+            raise HTTPException(404, "项目不存在")
+        filters = [
+            CharacterTraitCandidateRow.project_id == project_id,
+            CharacterTraitCandidateRow.character_key == normalized,
+        ]
+        if state is not None:
+            filters.append(CharacterTraitCandidateRow.review_state == state)
+        total = db.scalar(
+            select(func.count())
+            .select_from(CharacterTraitCandidateRow)
+            .where(*filters)
+        ) or 0
+        rows = list(
+            db.scalars(
+                select(CharacterTraitCandidateRow)
+                .where(*filters)
+                .order_by(
+                    CharacterTraitCandidateRow.created_at,
+                    CharacterTraitCandidateRow.id,
+                )
+                .offset(offset)
+                .limit(limit)
+            ).all()
+        )
+        if total == 0:
+            # Do not reveal whether a differently-normalized/cross-project
+            # candidate exists; a project with no such character is a 404.
+            any_character = db.scalar(
+                select(CharacterTraitCandidateRow.id)
+                .where(
+                    CharacterTraitCandidateRow.project_id == project_id,
+                    CharacterTraitCandidateRow.character_key == normalized,
+                )
+                .limit(1)
+            )
+            if any_character is None:
+                raise HTTPException(404, "角色不存在")
+        return {
+            "character_key": normalized,
+            "state": state,
+            "limit": limit,
+            "offset": offset,
+            "total": total,
+            "has_more": offset + len(rows) < total,
+            "items": [
+                serialize_character_trait_candidate_for_review(db, row)
+                for row in rows
+            ],
+            "model_coverage": "unknown",
+            "coverage_detail": (
+                "候选的模型覆盖度以其来源运行诊断为准；确认前请核对证据"
+            ),
+        }
+
+
+@app.get(
+    "/api/v1/projects/{project_id}/characters/{character_key}/profile-candidates/{candidate_id}"
+)
+def get_character_profile_candidate(
+    project_id: str,
+    character_key: str,
+    candidate_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    try:
+        normalized = normalize_character_key(character_key)
+    except ValueError:
+        raise HTTPException(404, "角色候选不存在") from None
+    with SessionLocal() as db:
+        row = _candidate_in_workspace(
+            db,
+            project_id=project_id,
+            candidate_id=candidate_id,
+            character_key=normalized,
+            workspace_id=context.workspace_id,
+        )
+        if row is None:
+            raise HTTPException(404, "角色候选不存在")
+        reviews = list(
+            db.scalars(
+                select(CharacterTraitReviewRow)
+                .where(CharacterTraitReviewRow.candidate_id == row.id)
+                .order_by(
+                    CharacterTraitReviewRow.created_at,
+                    CharacterTraitReviewRow.id,
+                )
+            ).all()
+        )
+        return {
+            **serialize_character_trait_candidate_for_review(db, row),
+            "decisions": [
+                {
+                    "id": review.id,
+                    "decision": review.decision,
+                    "expected_revision": review.expected_lock_version,
+                    "comment": review.comment,
+                    "created_at": review.created_at,
+                }
+                for review in reviews
+            ],
+        }
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/characters/{character_key}/profile-candidates/{candidate_id}/decisions",
+    status_code=201,
+)
+def decide_character_profile_candidate(
+    project_id: str,
+    character_key: str,
+    candidate_id: str,
+    payload: CharacterTraitDecisionIn,
+    idempotency_key_header: Annotated[
+        str | None, Header(alias="Idempotency-Key", max_length=128)
+    ] = None,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    idempotency_key = _normalize_idempotency_key(idempotency_key_header)
+    try:
+        normalized = normalize_character_key(character_key)
+    except ValueError:
+        raise HTTPException(404, "角色候选不存在") from None
+    with SessionLocal() as db:
+        project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if project is None:
+            raise HTTPException(404, "项目不存在")
+        row = _candidate_in_workspace(
+            db,
+            project_id=project_id,
+            candidate_id=candidate_id,
+            character_key=normalized,
+            workspace_id=context.workspace_id,
+            for_update=True,
+        )
+        if row is None:
+            raise HTTPException(404, "角色候选不存在")
+        existing_review = (
+            db.scalar(
+                select(CharacterTraitReviewRow).where(
+                    CharacterTraitReviewRow.candidate_id == candidate_id,
+                    CharacterTraitReviewRow.idempotency_key == idempotency_key,
+                )
+            )
+            if idempotency_key is not None
+            else None
+        )
+        if existing_review is not None:
+            if (
+                existing_review.decision != payload.decision
+                or existing_review.expected_lock_version
+                != payload.expected_revision
+                or existing_review.comment != payload.comment
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "idempotency_key_conflict",
+                        "message": "同一幂等键不能用于不同的候选审核请求",
+                    },
+                )
+            return {
+                "candidate": serialize_character_trait_candidate(row),
+                "decision_id": existing_review.id,
+                "deduplicated": True,
+            }
+        source_is_current, stale_reason = _candidate_source_is_current(db, row)
+        if not source_is_current:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_candidate_stale",
+                    "message": stale_reason,
+                },
+            )
+        if row.review_state != "pending" or row.lock_version != payload.expected_revision:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_revision_conflict",
+                    "message": "角色特征候选已被审核，请刷新后重试",
+                    "actual_revision": row.lock_version,
+                    "review_state": row.review_state,
+                },
+            )
+        if payload.decision == "confirm":
+            confirmed = list(
+                db.scalars(
+                    select(CharacterTraitCandidateRow).where(
+                        CharacterTraitCandidateRow.project_id == project_id,
+                        CharacterTraitCandidateRow.character_key == row.character_key,
+                        CharacterTraitCandidateRow.trait_type == row.trait_type,
+                        CharacterTraitCandidateRow.review_state == "confirmed",
+                        CharacterTraitCandidateRow.id != row.id,
+                    )
+                ).all()
+            )
+            conflicts = [
+                other
+                for other in confirmed
+                if trait_keys_compatible(
+                    dimension=row.trait_type,
+                    baseline_key=other.trait_key,
+                    observation_key=row.trait_key,
+                )
+                if other.id != row.supersedes_candidate_id
+                and other.value != row.value
+                and _release_ranges_overlap(row, other)
+                and scope_relation(
+                    row.scope_payload,
+                    other.scope_payload,
+                    first_resolution="confirmed",
+                    second_resolution="confirmed",
+                )
+                != "incompatible"
+            ]
+            if conflicts:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_confirmation_conflict",
+                        "message": "同一作用域内已有不同的已确认角色特征",
+                    },
+                )
+            if row.supersedes_candidate_id:
+                replaced = db.scalar(
+                    select(CharacterTraitCandidateRow)
+                    .where(
+                        CharacterTraitCandidateRow.id
+                        == row.supersedes_candidate_id,
+                        CharacterTraitCandidateRow.project_id == project_id,
+                    )
+                    .with_for_update()
+                )
+                try:
+                    if replaced is None:
+                        raise ValueError("superseded candidate is missing")
+                    validate_character_trait_supersession(
+                        project_id=project_id,
+                        character_key=row.character_key,
+                        trait_type=row.trait_type,
+                        trait_key=row.trait_key,
+                        scope=row.scope_payload,
+                        valid_from_release_ordinal=(
+                            row.valid_from_release_ordinal
+                        ),
+                        valid_until_release_ordinal=(
+                            row.valid_until_release_ordinal
+                        ),
+                        superseded=replaced,
+                    )
+                except ValueError:
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": "character_trait_supersession_conflict",
+                            "message": "待替代的角色特征已发生变化",
+                        },
+                    ) from None
+                db.add(
+                    CharacterTraitReviewRow(
+                        project_id=project_id,
+                        candidate_id=replaced.id,
+                        decision="supersede",
+                        expected_lock_version=replaced.lock_version,
+                        idempotency_key=None,
+                        comment=f"由候选 {row.id} 替代",
+                        created_by_user_id=context.user_id,
+                    )
+                )
+                replaced.review_state = "superseded"
+                replaced.lock_version += 1
+                replaced.reviewed_at = utc_now_naive()
+                replaced.reviewed_by_user_id = context.user_id
+        changed = db.execute(
+            update(CharacterTraitCandidateRow)
+            .where(
+                CharacterTraitCandidateRow.id == row.id,
+                CharacterTraitCandidateRow.project_id == project_id,
+                CharacterTraitCandidateRow.review_state == "pending",
+                CharacterTraitCandidateRow.lock_version == payload.expected_revision,
+            )
+            .values(
+                review_state=(
+                    "confirmed" if payload.decision == "confirm" else "rejected"
+                ),
+                lock_version=payload.expected_revision + 1,
+                reviewed_at=utc_now_naive(),
+                reviewed_by_user_id=context.user_id,
+            )
+        ).rowcount
+        if changed != 1:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_revision_conflict",
+                    "message": "角色特征候选已被审核，请刷新后重试",
+                },
+            )
+        review = CharacterTraitReviewRow(
+            project_id=project_id,
+            candidate_id=row.id,
+            decision=payload.decision,
+            expected_lock_version=payload.expected_revision,
+            idempotency_key=idempotency_key,
+            comment=payload.comment,
+            created_by_user_id=context.user_id,
+        )
+        db.add(review)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_revision_conflict",
+                    "message": "角色特征候选已被审核，请刷新后重试",
+                },
+            ) from None
+        db.refresh(row)
+        return {
+            "candidate": serialize_character_trait_candidate(row),
+            "decision_id": review.id,
+            "deduplicated": False,
+        }
+
+
+@app.get("/api/v1/projects/{project_id}/drift-issues")
+def list_character_drift_issues(
+    project_id: str,
+    character_key: Annotated[
+        str | None, Query(min_length=1, max_length=160)
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    normalized_character_key: str | None = None
+    if character_key is not None:
+        try:
+            normalized_character_key = normalize_character_key(character_key)
+        except ValueError:
+            raise HTTPException(422, "角色标识无效") from None
+    with SessionLocal() as db:
+        if not _project_in_workspace(db, project_id, context.workspace_id):
+            raise HTTPException(404, "项目不存在")
+        filters = [
+            AnalysisRunRow.project_id == project_id,
+            IssueRow.category == "character_drift",
+        ]
+        if normalized_character_key is not None:
+            filters.append(
+                IssueRow.extra["character_key"].as_string()
+                == normalized_character_key
+            )
+        total = db.scalar(
+            select(func.count())
+            .select_from(IssueRow)
+            .join(AnalysisRunRow, AnalysisRunRow.id == IssueRow.run_id)
+            .where(*filters)
+        ) or 0
+        rows = list(
+            db.execute(
+                select(IssueRow, AnalysisRunRow.id)
+                .join(AnalysisRunRow, AnalysisRunRow.id == IssueRow.run_id)
+                .where(*filters)
+                .order_by(AnalysisRunRow.created_at.desc(), IssueRow.id)
+                .offset(offset)
+                .limit(limit)
+            ).all()
+        )
+        latest_feedback: dict[str, str] = {}
+        issue_ids = {issue.id for issue, _ in rows}
+        if issue_ids:
+            feedback_rows = list(
+                db.scalars(
+                    select(FeedbackRow)
+                    .where(FeedbackRow.issue_id.in_(issue_ids))
+                    .order_by(
+                        FeedbackRow.created_at.desc(),
+                        FeedbackRow.id.desc(),
+                    )
+                ).all()
+            )
+            for feedback_row in feedback_rows:
+                latest_feedback.setdefault(
+                    feedback_row.issue_id, feedback_row.label
+                )
+        return {
+            "project_id": project_id,
+            "limit": limit,
+            "offset": offset,
+            "total": total,
+            "has_more": offset + len(rows) < total,
+            "items": [
+                {
+                    "run_id": run_id,
+                    **_serialize_issue(issue),
+                    "feedback_status": latest_feedback.get(
+                        issue.id, "unreviewed"
+                    ),
+                }
+                for issue, run_id in rows
+            ],
+        }
+
+
 @app.post("/api/v1/projects/{project_id}/analysis-runs", status_code=202)
 def start_analysis(
     project_id: str,
@@ -1128,7 +2234,15 @@ def start_analysis(
 ) -> dict:
     idempotency_key = _normalize_idempotency_key(idempotency_key_header)
     with SessionLocal() as db:
-        if not _project_in_workspace(db, project_id, context.workspace_id):
+        project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if project is None:
             raise HTTPException(404, "项目不存在")
         existing = _idempotent_run(db, project_id, idempotency_key)
         if existing is not None:
@@ -1149,12 +2263,24 @@ def start_analysis(
             requested_by_user_id=context.user_id,
             idempotency_key=idempotency_key,
         )
-        run, created = _create_run_or_load_winner(
-            db,
-            run,
-            idempotency_key,
-            lambda created_run: capture_run_inputs(db, created_run, list(documents)),
-        )
+        try:
+            run, created = _create_run_or_load_winner(
+                db,
+                run,
+                idempotency_key,
+                lambda created_run: capture_run_inputs(
+                    db, created_run, list(documents)
+                ),
+            )
+        except CharacterTraitSnapshotLimitExceeded:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_profile_snapshot_limit_exceeded",
+                    "message": "已确认角色档案数量超过单次分析上限",
+                },
+            ) from None
         _require_idempotency_operation(db, run, retried_from_run_id=None)
         payload = _accepted_run_payload(db, run, created=created)
         run_id = run.id
@@ -1335,6 +2461,16 @@ def start_recheck(
             }
         if baseline.status != "completed":
             raise HTTPException(409, "只有已完成的分析任务可以作为复检基准")
+        locked_project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == baseline.project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if locked_project is None:
+            raise HTTPException(404, "项目不存在")
         baseline_inputs = list(
             db.scalars(
                 select(AnalysisRunInputRow)
@@ -1356,22 +2492,21 @@ def start_recheck(
         )
         if not documents:
             raise HTTPException(400, "项目没有可复检文档")
-        baseline_signature = sorted(
-            (
-                row.document_name.casefold(),
-                row.document_version,
-                row.content_sha256,
+        try:
+            baseline_signature = frozen_run_source_signature(
+                db, baseline_run_id
             )
-            for row in baseline_inputs
-        )
-        current_signature = sorted(
-            (
-                row.name.casefold(),
-                row.version,
-                sha256(row.content.encode("utf-8")).hexdigest(),
+            current_signature = current_project_source_signature(
+                db, baseline.project_id, documents
             )
-            for row in documents
-        )
+        except CharacterTraitSnapshotLimitExceeded:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_profile_snapshot_limit_exceeded",
+                    "message": "已确认角色档案数量超过单次分析上限",
+                },
+            ) from None
         if baseline_signature == current_signature:
             raise HTTPException(
                 409,
@@ -1415,9 +2550,19 @@ def start_recheck(
                 )
             )
 
-        row, created = _create_run_or_load_winner(
-            db, row, idempotency_key, prepare_recheck
-        )
+        try:
+            row, created = _create_run_or_load_winner(
+                db, row, idempotency_key, prepare_recheck
+            )
+        except CharacterTraitSnapshotLimitExceeded:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_profile_snapshot_limit_exceeded",
+                    "message": "已确认角色档案数量超过单次分析上限",
+                },
+            ) from None
         _require_idempotency_operation(
             db,
             row,

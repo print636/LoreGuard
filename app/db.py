@@ -166,6 +166,81 @@ class DocumentContextRow(Base):
     story_scope: Mapped[str] = mapped_column(String(80), default="global")
 
 
+class DocumentNarrativeContextRevisionRow(Base):
+    """Append-only authority and structured-scope metadata for one document.
+
+    ``document_context`` remains the compatibility contract consumed by the
+    existing rule engine.  This table is deliberately revisioned so a run can
+    freeze the exact metadata it observed without consulting a later edit.
+    """
+
+    __tablename__ = "document_narrative_context_revisions"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id", "document_id"],
+            ["documents.project_id", "documents.id"],
+            name="fk_document_narrative_context_document_owner",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "document_id",
+            "revision",
+            name="uq_document_narrative_context_revision",
+        ),
+        CheckConstraint(
+            "revision > 0", name="ck_document_narrative_context_revision"
+        ),
+        CheckConstraint(
+            "resolution_state IN ('unresolved', 'inferred', 'confirmed')",
+            name="ck_document_narrative_context_resolution",
+        ),
+        CheckConstraint(
+            "origin IN ('explicit', 'deterministic_import', 'model_inferred', 'legacy')",
+            name="ck_document_narrative_context_origin",
+        ),
+        CheckConstraint(
+            "authority_tier IN ('unresolved', 'core_canon', 'formal_record', 'draft', 'reference')",
+            name="ck_document_narrative_context_authority",
+        ),
+        CheckConstraint(
+            "publication_status IN ('draft', 'in_review', 'published', 'retired', 'unknown')",
+            name="ck_document_narrative_context_publication",
+        ),
+        CheckConstraint(
+            "inference_confidence IS NULL OR "
+            "(inference_confidence >= 0 AND inference_confidence <= 1)",
+            name="ck_document_narrative_context_confidence",
+        ),
+        CheckConstraint(
+            "length(scope_sha256) = 64",
+            name="ck_document_narrative_context_scope_hash",
+        ),
+        Index(
+            "ix_document_narrative_context_latest",
+            "project_id",
+            "document_id",
+            "revision",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    document_id: Mapped[str] = mapped_column(String(36), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    resolution_state: Mapped[str] = mapped_column(String(24))
+    origin: Mapped[str] = mapped_column(String(32))
+    authority_tier: Mapped[str] = mapped_column(String(24))
+    publication_status: Mapped[str] = mapped_column(String(24))
+    scope_payload: Mapped[dict] = mapped_column(JSON)
+    scope_sha256: Mapped[str] = mapped_column(String(64))
+    inference_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
 class AnalysisRunRow(Base):
     __tablename__ = "analysis_runs"
     __table_args__ = (
@@ -239,6 +314,29 @@ class AnalysisRunInputContextRow(Base):
     )
     document_role: Mapped[str | None] = mapped_column(String(40), nullable=True)
     story_scope: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
+class AnalysisRunInputNarrativeContextRow(Base):
+    """Frozen structured narrative context for one immutable run input."""
+
+    __tablename__ = "analysis_run_input_narrative_context"
+    __table_args__ = (
+        CheckConstraint(
+            "length(payload_sha256) = 64",
+            name="ck_analysis_run_input_narrative_context_hash",
+        ),
+    )
+    input_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_run_inputs.id", ondelete="CASCADE"), primary_key=True
+    )
+    context_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("document_narrative_context_revisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    payload: Mapped[dict] = mapped_column(JSON)
+    payload_sha256: Mapped[str] = mapped_column(String(64))
 
 
 class AnalysisRunExecutionRow(Base):
@@ -387,6 +485,200 @@ class FeedbackRow(Base):
     label: Mapped[str] = mapped_column(String(32))
     comment: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class CharacterTraitCandidateRow(Base):
+    """Evidence-bound candidate; confirmed rows double as profile entries."""
+
+    __tablename__ = "character_trait_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "source_run_id",
+            "candidate_fingerprint",
+            name="uq_character_trait_candidate_fingerprint",
+        ),
+        CheckConstraint(
+            "trait_type IN ('core_personality', 'preference', 'value', "
+            "'speech_pattern', 'behavior_boundary', 'contextual_behavior', "
+            "'current_state')",
+            name="ck_character_trait_candidate_type",
+        ),
+        CheckConstraint(
+            "polarity IN ('positive', 'negative', 'neutral', 'unclear')",
+            name="ck_character_trait_candidate_polarity",
+        ),
+        CheckConstraint(
+            "stability IN ('core', 'stable', 'temporary', 'situational', 'unknown')",
+            name="ck_character_trait_candidate_stability",
+        ),
+        CheckConstraint(
+            "origin IN ('explicit_setting', 'history_inference')",
+            name="ck_character_trait_candidate_origin",
+        ),
+        CheckConstraint(
+            "authority_tier IN ('core_canon', 'formal_record')",
+            name="ck_character_trait_candidate_authority",
+        ),
+        CheckConstraint(
+            "review_state IN ('pending', 'confirmed', 'rejected', 'superseded')",
+            name="ck_character_trait_candidate_review_state",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_character_trait_candidate_confidence",
+        ),
+        CheckConstraint(
+            "lock_version >= 0", name="ck_character_trait_candidate_lock_version"
+        ),
+        CheckConstraint(
+            "valid_from_release_ordinal IS NULL OR valid_from_release_ordinal >= 0",
+            name="ck_character_trait_candidate_valid_from",
+        ),
+        CheckConstraint(
+            "valid_until_release_ordinal IS NULL OR valid_until_release_ordinal >= 0",
+            name="ck_character_trait_candidate_valid_until",
+        ),
+        CheckConstraint(
+            "length(scope_sha256) = 64 AND length(evidence_sha256) = 64 "
+            "AND length(candidate_fingerprint) = 64",
+            name="ck_character_trait_candidate_hashes",
+        ),
+        Index(
+            "ix_character_trait_candidates_project_state_character",
+            "project_id",
+            "review_state",
+            "character_key",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    source_run_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    character_key: Mapped[str] = mapped_column(String(160))
+    character_display_name: Mapped[str] = mapped_column(String(160))
+    trait_type: Mapped[str] = mapped_column(String(32))
+    trait_key: Mapped[str] = mapped_column(String(160))
+    value: Mapped[str] = mapped_column(Text)
+    polarity: Mapped[str] = mapped_column(String(24), default="unclear")
+    stability: Mapped[str] = mapped_column(String(24))
+    contexts: Mapped[list] = mapped_column(JSON, default=list)
+    origin: Mapped[str] = mapped_column(String(32))
+    authority_tier: Mapped[str] = mapped_column(
+        String(24), default="formal_record"
+    )
+    confidence: Mapped[float] = mapped_column(Float)
+    scope_payload: Mapped[dict] = mapped_column(JSON)
+    scope_sha256: Mapped[str] = mapped_column(String(64))
+    valid_from_release_ordinal: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    valid_until_release_ordinal: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    evidence: Mapped[list] = mapped_column(JSON)
+    evidence_sha256: Mapped[str] = mapped_column(String(64))
+    candidate_fingerprint: Mapped[str] = mapped_column(String(64))
+    generator_version: Mapped[str] = mapped_column(String(80))
+    provenance: Mapped[dict] = mapped_column(JSON, default=dict)
+    review_state: Mapped[str] = mapped_column(String(24), default="pending")
+    lock_version: Mapped[int] = mapped_column(Integer, default=0)
+    supersedes_candidate_id: Mapped[str | None] = mapped_column(
+        ForeignKey("character_trait_candidates.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reviewed_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class CharacterTraitReviewRow(Base):
+    """Append-only human decision audit for a candidate."""
+
+    __tablename__ = "character_trait_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_id",
+            "idempotency_key",
+            name="uq_character_trait_review_idempotency",
+        ),
+        CheckConstraint(
+            "decision IN ('confirm', 'reject', 'supersede')",
+            name="ck_character_trait_review_decision",
+        ),
+        CheckConstraint(
+            "expected_lock_version >= 0",
+            name="ck_character_trait_review_expected_version",
+        ),
+        Index(
+            "ix_character_trait_reviews_project_candidate_created",
+            "project_id",
+            "candidate_id",
+            "created_at",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("character_trait_candidates.id", ondelete="CASCADE"), index=True
+    )
+    decision: Mapped[str] = mapped_column(String(24))
+    expected_lock_version: Mapped[int] = mapped_column(Integer)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class AnalysisRunCharacterTraitInputRow(Base):
+    """Immutable confirmed-profile snapshot consumed by one analysis run."""
+
+    __tablename__ = "analysis_run_character_trait_inputs"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "candidate_id", name="uq_analysis_run_character_trait_candidate"
+        ),
+        UniqueConstraint(
+            "run_id", "ordinal", name="uq_analysis_run_character_trait_ordinal"
+        ),
+        CheckConstraint(
+            "ordinal >= 0", name="ck_analysis_run_character_trait_ordinal"
+        ),
+        CheckConstraint(
+            "candidate_lock_version >= 0",
+            name="ck_analysis_run_character_trait_candidate_version",
+        ),
+        CheckConstraint(
+            "length(payload_sha256) = 64",
+            name="ck_analysis_run_character_trait_payload_hash",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("character_trait_candidates.id", ondelete="RESTRICT"), index=True
+    )
+    confirmation_review_id: Mapped[str] = mapped_column(
+        ForeignKey("character_trait_reviews.id", ondelete="RESTRICT")
+    )
+    candidate_lock_version: Mapped[int] = mapped_column(Integer)
+    ordinal: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict] = mapped_column(JSON)
+    payload_sha256: Mapped[str] = mapped_column(String(64))
 
 
 class EmbeddingProfileRow(Base):

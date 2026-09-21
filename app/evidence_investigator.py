@@ -9,7 +9,7 @@ from typing import Annotated, Any, Literal, TypeAlias, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from .domain import IssueCategory, ParsedDirective
+from .domain import DETERMINISTIC_RULE_CATEGORIES, IssueCategory, ParsedDirective
 from .semantic_quality import eligible_for_deterministic_rules
 
 
@@ -146,6 +146,13 @@ _FAMILY_SEMANTIC_GUIDANCE: dict[IssueCategory, str] = {
         "只有两条记录都有合法、精确且可排序的 time，并且 time 不同，才把明确的状态"
         "变更、恢复、更新或替代视为阶段演进并 ABSTAIN。任一方没有合法精确 time 或 "
         "time 相同，仍按真实冲突规则判断，不得仅因状态转变措辞而放弃。"
+    ),
+    # Character drift is produced by its own frozen-profile semantic stage.
+    # The directive Investigator cannot create character-trait candidates, but
+    # keeping the guidance registry total preserves the public family contract.
+    IssueCategory.character_drift: (
+        "角色漂移由独立的已确认角色档案与新稿观察流程处理；本调查器不为该类别"
+        "创建指令候选。"
     ),
     IssueCategory.location_collision: (
         "只调查同一参与者在同一精确时间（合法且可排序）出现在不同地点的冲突。候选"
@@ -530,7 +537,7 @@ def build_investigation_seeds(
                 candidates[key] = (anchor_hash, directive)
 
     by_family: dict[IssueCategory, list[InvestigationSeed]] = {
-        family: [] for family in IssueCategory
+        family: [] for family in DETERMINISTIC_RULE_CATEGORIES
     }
     for (family, join_key), (anchor_hash, anchor) in candidates.items():
         join_key_hash = _sha256(join_key)
@@ -552,7 +559,7 @@ def build_investigation_seeds(
     # Round-robin prevents ordinary facts starving the other four families.
     result: list[InvestigationSeed] = []
     while len(result) < limit and any(by_family.values()):
-        for family in IssueCategory:
+        for family in DETERMINISTIC_RULE_CATEGORIES:
             if by_family[family] and len(result) < limit:
                 result.append(by_family[family].pop(0))
     return tuple(result)

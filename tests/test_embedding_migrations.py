@@ -19,7 +19,7 @@ from app import db as app_db
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0008_document_concurrency"
+HEAD_REVISION = "0010_character_trait_authority"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):

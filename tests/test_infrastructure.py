@@ -105,6 +105,7 @@ class TokenBudgetTests(unittest.TestCase):
 
         example = (ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("DAILY_TOKEN_BUDGET=100000", example)
+        self.assertIn("PER_RUN_TOKEN_BUDGET=100000", example)
 
     def test_compose_passes_authentication_boundary_to_api_and_worker(self):
         compose = yaml.safe_load(

@@ -25,6 +25,7 @@ from app.db import (
 from app.main import app, settings, write_limiter
 from app.run_comparison import (
     MATCHER_VERSION,
+    _diagnostic_compatibility,
     _snapshot_valid,
     materialize_run_comparison,
 )
@@ -35,6 +36,7 @@ def _runtime() -> dict:
     return {
         "capabilities": {
             "model_extraction": False,
+            "character_consistency": False,
             "issue_evidence_review": False,
             "record_repair_agent": False,
             "evidence_investigator": False,
@@ -50,6 +52,31 @@ def _diagnostic(*, partial_fallback: bool = False) -> dict:
         "model": {"partial_fallback": partial_fallback},
         "runtime_provenance": _runtime(),
     }
+
+
+def test_character_consistency_degradation_makes_revision_incomparable():
+    runtime = _runtime()
+    runtime["capabilities"]["character_consistency"] = True
+    completed = AnalysisDiagnosticRow(
+        run_id="baseline",
+        payload={
+            "model": {"partial_fallback": False},
+            "runtime_provenance": runtime,
+            "character_consistency": {"outcome": "completed"},
+        },
+    )
+    degraded = AnalysisDiagnosticRow(
+        run_id="target",
+        payload={
+            "model": {"partial_fallback": False},
+            "runtime_provenance": runtime,
+            "character_consistency": {"outcome": "degraded"},
+        },
+    )
+
+    assert _diagnostic_compatibility(completed, degraded) == [
+        "target_character_consistency_incomplete"
+    ]
 
 
 def _evidence(document_id: str, text: str, line: int = 1) -> list[dict]:

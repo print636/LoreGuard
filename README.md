@@ -42,14 +42,22 @@ deterministic issue.
 Every remote model path is independently opt-in. `ENABLE_MODEL_EXTRACTION`
 enables chat-based record extraction; `ENABLE_REVIEW_AGENT` additionally enables
 the older LangGraph repair stage inside that extraction path and does not work as
-a standalone caller; `ENABLE_ISSUE_EVIDENCE_REVIEW` enables the post-rule chat
-annotation; and `ENABLE_EVIDENCE_INVESTIGATOR` enables the separate
+a standalone caller; `ENABLE_CHARACTER_CONSISTENCY` enables frozen-source
+character-profile candidate extraction and draft-drift review;
+`ENABLE_ISSUE_EVIDENCE_REVIEW` enables the post-rule chat annotation; and
+`ENABLE_EVIDENCE_INVESTIGATOR` enables the separate
 provider-native function-calling loop. `ENABLE_EMBEDDINGS` enables only the
 embedding client and does not enable chat by itself. The Reviewer and Investigator
-also require their documented embedding/PostgreSQL configuration, and all five
+also require their documented embedding/PostgreSQL configuration, and all six
 switches default to false. The UI connection test is a separate explicit user
 action that makes one minimal chat request; merely loading the page never calls a
 model.
+
+The character-consistency stage also has a bounded, developer-visible v26
+real-model checkpoint: three independent HTTP workflows passed all 12 frozen
+gates after candidate-confirmation and evidence-kind hardening. This is not a
+blind test, an open-text generalization result, or a production-quality claim. See the
+[sanitized checkpoint](docs/character-consistency-live-checkpoint-20260922.md).
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a

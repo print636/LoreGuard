@@ -301,6 +301,38 @@ class ApiFlowTests(unittest.TestCase):
                 settings.daily_token_budget,
             ) = previous
 
+    def test_health_and_daily_budget_recognize_character_consistency_capability(self):
+        previous = (
+            settings.enable_model_extraction,
+            settings.enable_evidence_investigator,
+            settings.enable_issue_evidence_review,
+            settings.enable_character_consistency,
+            settings.openai_api_key,
+            settings.daily_token_budget,
+        )
+        try:
+            settings.enable_model_extraction = False
+            settings.enable_evidence_investigator = False
+            settings.enable_issue_evidence_review = False
+            settings.enable_character_consistency = True
+            settings.openai_api_key = "unit-test-placeholder"
+            settings.daily_token_budget = 0
+            with TestClient(app) as client:
+                response = client.get("/health")
+            self.assertTrue(response.json()["model"]["configured"])
+            with SessionLocal() as db:
+                with self.assertRaisesRegex(Exception, "Token 预算已用尽"):
+                    enforce_daily_model_budget(db)
+        finally:
+            (
+                settings.enable_model_extraction,
+                settings.enable_evidence_investigator,
+                settings.enable_issue_evidence_review,
+                settings.enable_character_consistency,
+                settings.openai_api_key,
+                settings.daily_token_budget,
+            ) = previous
+
     def test_provider_check_reports_unconfigured_without_calling_complete(self):
         provider = SimpleNamespace(configured=False)
         with patch("app.main.OpenAICompatibleProvider", return_value=provider):

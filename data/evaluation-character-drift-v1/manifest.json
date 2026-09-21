@@ -1,0 +1,13 @@
+{
+  "name": "LoreGuard character drift v1",
+  "version": 1,
+  "language": "zh-CN",
+  "dataset_kind": "original synthetic contract fixture",
+  "human_annotated": false,
+  "blind_test": false,
+  "developer_visible": true,
+  "dev_case_count": 16,
+  "dev_sha256": "1deb4e6fd97b373076078aa537e32ca8cb7925c9c99f8a5ac45414c82914503b",
+  "holdout_status": "not_created",
+  "limitations": "用于协议和边界回归，不代表开放文本、真实剧情策划语料或生产准确率。"
+}

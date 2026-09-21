@@ -227,6 +227,7 @@ class OpenAICompatibleProvider:
             self.settings.enable_model_extraction
             or self.settings.enable_issue_evidence_review
             or self.settings.enable_evidence_investigator
+            or self.settings.enable_character_consistency
         )
         return capability_enabled and bool(self.settings.openai_api_key.strip())
 
@@ -243,6 +244,14 @@ class OpenAICompatibleProvider:
         """Report this capability without borrowing another feature's switch."""
 
         return self.settings.enable_evidence_investigator and bool(
+            self.settings.openai_api_key.strip()
+        )
+
+    @property
+    def character_consistency_configured(self) -> bool:
+        """Report character extraction/review readiness independently."""
+
+        return self.settings.enable_character_consistency and bool(
             self.settings.openai_api_key.strip()
         )
 

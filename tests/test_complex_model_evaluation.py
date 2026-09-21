@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 
-from app.domain import IssueCategory
+from app.domain import DETERMINISTIC_RULE_CATEGORIES, IssueCategory
 from app.model_extractor import ModelEnhancedExtractor
 from app.natural_evaluation import load_cases
 from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
@@ -211,8 +211,8 @@ class ComplexModelEvaluationTests(unittest.TestCase):
         negative_focus = {
             case.category_focus for case in selected if not case.expected_issues
         }
-        self.assertEqual(set(IssueCategory), expected_categories)
-        self.assertEqual(set(IssueCategory), negative_focus)
+        self.assertEqual(set(DETERMINISTIC_RULE_CATEGORIES), expected_categories)
+        self.assertEqual(set(DETERMINISTIC_RULE_CATEGORIES), negative_focus)
         self.assertEqual(6, len(selected))
 
     def test_budget_stops_before_unbounded_case_count(self):

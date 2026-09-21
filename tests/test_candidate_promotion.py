@@ -16,7 +16,12 @@ from app.candidate_promotion import (
     TrustedDocumentContext,
     promote_investigator_candidates,
 )
-from app.domain import EvidenceSpan, IssueCategory, ParsedDirective
+from app.domain import (
+    DETERMINISTIC_RULE_CATEGORIES,
+    EvidenceSpan,
+    IssueCategory,
+    ParsedDirective,
+)
 from app.evidence_authority import (
     EvidenceGrantAuthority,
     InvestigationScope,
@@ -318,7 +323,7 @@ def _promote(family: IssueCategory, **kwargs):
     return result, baseline, envelope, seed, resolver
 
 
-@pytest.mark.parametrize("family", list(IssueCategory))
+@pytest.mark.parametrize("family", list(DETERMINISTIC_RULE_CATEGORIES))
 def test_all_five_rule_families_require_and_pass_deterministic_reproduction(family):
     result, _, _, _, _ = _promote(family)
 

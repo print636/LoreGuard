@@ -98,7 +98,7 @@ set OPENAI_MODEL=gpt-4o-mini
 # 仅当上游明确支持 thinking 扩展时设置 disabled 或 enabled；默认省略
 set PROVIDER_THINKING_MODE=disabled
 set ENABLE_MODEL_EXTRACTION=true
-set PER_RUN_TOKEN_BUDGET=20000
+set PER_RUN_TOKEN_BUDGET=100000
 set DAILY_TOKEN_BUDGET=100000
 ```
 
@@ -107,10 +107,15 @@ set DAILY_TOKEN_BUDGET=100000
 | 能力 | 开关与调用边界 |
 |---|---|
 | 主模型抽取 | `ENABLE_MODEL_EXTRACTION=true` 后调用聊天模型抽取记录；失败时保留确定性基线。 |
+| 角色一致性 | `ENABLE_CHARACTER_CONSISTENCY=true` 后从冻结设定/历史归纳待确认角色档案，并以已确认档案复核新稿；部分覆盖、模型降级或角色无法对齐会明确显示为未完成审查，不会显示成“没有问题”。 |
 | 旧受限修复 Agent | `ENABLE_REVIEW_AGENT=true` 只在主模型抽取路径内追加 LangGraph 修复阶段，因此还需启用 `ENABLE_MODEL_EXTRACTION`；它使用应用层 JSON 动作，不是原生 function calls。 |
 | Evidence Investigator | `ENABLE_EVIDENCE_INVESTIGATOR=true` 后使用 Provider 原生 function calls；还需完整配置 chat Provider、embedding、PostgreSQL/pgvector 与 RAG，默认要求 hybrid 检索。 |
 | Issue Evidence Reviewer | `ENABLE_ISSUE_EVIDENCE_REVIEW=true` 后调用聊天模型生成规则问题的独立证据注释；还需 embedding、PostgreSQL 与对应 RAG 配置。 |
 | Embedding | `ENABLE_EMBEDDINGS=true` 只开放独立 embedding 客户端，不会单独启用任何聊天模型路径。 |
+
+默认单次运行预算为 100,000 Token，其中角色一致性阶段自身仍受 60,000 Token 上限约束；运行诊断会同时记录阶段配置上限、进入阶段时的剩余运行预算和二者取小后的实际阶段预算。定向查漏按单个角色特质分别调用，某个目标为空或失败不会吞掉其他目标，但任一未处理目标都会使材料覆盖明确标为 `partial`。
+
+角色一致性链路的 v26 检查点已在原创、开发者可见样例上完成 3 次独立真实模型 HTTP 全流程检查，候选确认、证据类型校准和定向查漏收紧后的 12 项门槛全部通过。这不是人工盲测、开放文本泛化或生产质量证明。构建边界、指标与复现方式见 [`docs/character-consistency-live-checkpoint-20260922.md`](docs/character-consistency-live-checkpoint-20260922.md)。
 
 首页“模型连接”卡只是被动读取配置状态，不会自动请求模型；只有用户点击“测试模型连接”时，才会额外发起一次可能消耗少量 Token 的最小聊天请求。请勿把 Key 写入源码、前端、README 或提交记录。`PROVIDER_THINKING_MODE` 默认不配置，因此通用 OpenAI-compatible 请求不会携带 `thinking`；只有显式设置为 `disabled` 或 `enabled` 时才发送顶层 `thinking={"type": ...}`。Compose 会把该配置同时传入 API 与 worker，空白值统一归一为 `None`。主模型抽取支持 `fact`、`event`、`knows`、`claims_knows`、`item`、`uses`、`world_rule` 与 `world_assert`。超时、429、5xx、空响应、非法 JSON、字段校验失败或证据行号越界时，系统会记录非敏感警告并降级到 `BaselineExtractor`；基线与模型结果会去重合并。默认单次请求最多尝试 2 次、每次 30 秒；某分块终态失败后停止当前文档剩余模型分块，一个文档出现终态失败后开启本次运行熔断，后续文档直接走全文基线，避免兼容服务异常时串行等待数分钟。运行事件和诊断会明确区分“完整模型增强”“模型增强（部分分块已降级）”“确定性基线（模型未参与或已降级）”与主动关闭模型的“确定性基线”，结果正确时也不会掩盖模型失败。
 

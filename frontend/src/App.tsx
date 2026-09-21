@@ -86,6 +86,9 @@ import type { SessionIdentity } from "./app/session";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
 const RevisionReview = lazy(() => import("./components/RevisionReview"));
+const CharacterWorkspace = lazy(
+  () => import("./features/characters/CharacterWorkspace"),
+);
 
 type FeedbackState = {
   id: string;
@@ -312,6 +315,7 @@ const categoryNames: Record<string, string> = {
   knowledge_without_acquisition: "知识越权",
   item_ownership: "物品状态",
   world_rule_conflict: "世界规则",
+  character_drift: "角色漂移",
 };
 const clarificationCategoryNames: Record<string, string> = {
   scope_unknown: "适用范围未确定",
@@ -1199,9 +1203,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   useEffect(() => {
     if (activeView !== "report" || !focusedIssue) return;
     requestAnimationFrame(() => {
-      document.getElementById(`issue-${focusedIssue}`)?.scrollIntoView({
-        block: "nearest",
-      });
+      const target = document.getElementById(`issue-${focusedIssue}`);
+      if (!target) return;
+      target.scrollIntoView({ block: "nearest" });
+      target.focus({ preventScroll: true });
     });
   }, [activeView, focusedIssue, issues]);
 
@@ -1300,7 +1305,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </button>
         </div>
       </header>
-      <main className="appShell">
+      <main className={`appShell ${activeView === "characters" ? "characterMode" : ""}`}>
         <aside className="sideNav" aria-label="创作工作台导航">
           <div className="sideNavTitle">
             <span>CREATIVE INDEX</span>
@@ -1316,6 +1321,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   "项目与文档",
                   String(docs.filter((row) => row.active).length || ""),
                 ],
+                ["characters", "CH", "角色档案", ""],
                 ["diff", "DF", "版本对比", documentDiff ? "1" : ""],
                 ["revision", "RV", "修订复检", ""],
                 [
@@ -2342,6 +2348,31 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               )}
             </section>
           )}
+          {!routeProblem && activeView === "characters" && (
+            <Suspense
+              fallback={
+                <section className="characterWorkspace workspaceView" aria-busy="true">
+                  <p>正在打开角色档案…</p>
+                </section>
+              }
+            >
+              <CharacterWorkspace
+                projectId={project}
+                documentCount={activeDocuments.length}
+                completedRunCount={runs.filter((row) => row.status === "completed").length}
+                projectLoading={projectLoading}
+                routeSearch={routeSearch}
+                onRouteChange={(search, replace) =>
+                  browserNavigate(
+                    `${workspacePath("characters", project)}${search}`,
+                    { replace },
+                  )
+                }
+                onNavigateWorkspace={navigateWorkspace}
+                onOpenProjectCenter={() => browserNavigate("/app")}
+              />
+            </Suspense>
+          )}
           {!routeProblem && activeView === "revision" && (
             <Suspense fallback={<section className="revisionReview workspaceView" aria-busy="true"><p>正在打开修订工作区…</p></section>}>
               <RevisionReview
@@ -2501,6 +2532,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     <article
                       id={`issue-${issue.id}`}
                       key={issue.id}
+                      tabIndex={-1}
                       className={
                         focusedIssue === issue.id ? "focusedIssue" : ""
                       }
@@ -2604,6 +2636,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           )}
         </div>
 
+        {activeView !== "characters" && (
         <aside className="resultRail" aria-label="运行与冲突报告">
           <div className="resultRailHead">
             <div>
@@ -2748,6 +2781,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             查看完整报告 <span>{issues.length + clarifications.length}</span>
           </button>
         </aside>
+        )}
       </main>
       <footer>
         原创演示文本 · 本地项目/版本/运行历史 · Provider 异常时安全降级

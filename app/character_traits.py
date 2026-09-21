@@ -1,0 +1,482 @@
+from __future__ import annotations
+
+import re
+import unicodedata
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import select
+
+from .db import (
+    AnalysisRunInputRow,
+    AnalysisRunRow,
+    CharacterTraitCandidateRow,
+    CharacterTraitReviewRow,
+)
+from .narrative_context import (
+    NarrativeScopeV1,
+    canonical_json,
+    canonical_scope_payload,
+    payload_sha256,
+    scope_relation,
+)
+
+
+CHARACTER_TRAIT_SCHEMA_VERSION = 1
+MAX_CONFIRMED_TRAITS_PER_RUN = 5_000
+MAX_CANDIDATES_PER_SOURCE_RUN = 500
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_FORBIDDEN_PROVENANCE_KEY_FRAGMENTS = (
+    "apikey",
+    "authorization",
+    "baseurl",
+    "credential",
+    "password",
+    "privatekey",
+    "prompt",
+    "providerresponse",
+    "rawresponse",
+    "responsebody",
+    "secret",
+)
+
+
+class TraitEvidenceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_id: str = Field(min_length=1, max_length=36)
+    document_id: str = Field(min_length=1, max_length=36)
+    document_name: str = Field(min_length=1, max_length=255)
+    document_version: int = Field(ge=1)
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    line_start: int = Field(ge=1)
+    line_end: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=8_000)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "TraitEvidenceInput":
+        if self.line_end < self.line_start:
+            raise ValueError("evidence range is invalid")
+        return self
+
+
+class TraitCandidateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    character_key: str = Field(min_length=1, max_length=160)
+    character_display_name: str = Field(min_length=1, max_length=160)
+    trait_type: Literal[
+        "core_personality",
+        "preference",
+        "value",
+        "speech_pattern",
+        "behavior_boundary",
+        "contextual_behavior",
+        "current_state",
+    ]
+    trait_key: str = Field(min_length=1, max_length=160)
+    comparison_key: str | None = Field(default=None, min_length=1, max_length=200)
+    value: str = Field(min_length=1, max_length=2_000)
+    polarity: Literal["positive", "negative", "neutral", "unclear"] = "unclear"
+    stability: Literal["core", "stable", "temporary", "situational", "unknown"]
+    contexts: list[str] = Field(default_factory=list, max_length=12)
+    origin: Literal["explicit_setting", "history_inference"]
+    authority_tier: Literal["core_canon", "formal_record"] = "formal_record"
+    confidence: float = Field(ge=0, le=1)
+    scope: NarrativeScopeV1 = Field(default_factory=NarrativeScopeV1)
+    valid_from_release_ordinal: int | None = Field(default=None, ge=0)
+    valid_until_release_ordinal: int | None = Field(default=None, ge=0)
+    evidence: list[TraitEvidenceInput] = Field(min_length=1, max_length=12)
+    generator_version: str = Field(min_length=1, max_length=80)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    supersedes_candidate_id: str | None = Field(default=None, max_length=36)
+
+    @model_validator(mode="after")
+    def validate_release_range(self) -> "TraitCandidateInput":
+        if (
+            self.valid_from_release_ordinal is not None
+            and self.valid_until_release_ordinal is not None
+            and self.valid_until_release_ordinal < self.valid_from_release_ordinal
+        ):
+            raise ValueError("trait release range is invalid")
+        normalized_contexts: dict[str, str] = {}
+        for value in self.contexts:
+            if not isinstance(value, str):
+                raise ValueError("trait context is invalid")
+            normalized = re.sub(
+                r"\s+", " ", unicodedata.normalize("NFKC", value)
+            ).strip()
+            if (
+                not normalized
+                or len(normalized) > 160
+                or _CONTROL.search(normalized)
+            ):
+                raise ValueError("trait context is invalid")
+            normalized_contexts.setdefault(normalized.casefold(), normalized)
+        self.contexts = sorted(
+            normalized_contexts.values(), key=lambda item: item.casefold()
+        )
+        if self.trait_type == "contextual_behavior" and not self.contexts:
+            raise ValueError("contextual behavior requires a context label")
+        if self.origin == "history_inference" and len(self.evidence) < 2:
+            raise ValueError("history inference requires independent evidence")
+        if self.stability not in {"core", "stable"}:
+            raise ValueError("temporary or situational signals cannot become stable traits")
+        return self
+
+
+def normalize_character_key(value: str) -> str:
+    normalized = re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).casefold()
+    if not normalized or len(normalized) > 160 or _CONTROL.search(normalized):
+        raise ValueError("character key is invalid")
+    return normalized
+
+
+def normalize_trait_key(value: str) -> str:
+    normalized = re.sub(
+        r"\s+", " ", unicodedata.normalize("NFKC", value)
+    ).strip().casefold()
+    if not normalized or len(normalized) > 160 or _CONTROL.search(normalized):
+        raise ValueError("trait key is invalid")
+    return normalized
+
+
+def _clean_text(value: str, *, maximum: int, label: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if not normalized or len(normalized) > maximum or _CONTROL.search(normalized):
+        raise ValueError(f"{label} is invalid")
+    return normalized
+
+
+def _validate_safe_provenance(value: object, *, depth: int = 0) -> None:
+    if depth > 8:
+        raise ValueError("candidate provenance is too deep")
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            canonical_key = (
+                re.sub(
+                    r"[^a-z0-9]",
+                    "",
+                    unicodedata.normalize("NFKC", key).casefold(),
+                )
+                if isinstance(key, str)
+                else ""
+            )
+            if not canonical_key or any(
+                fragment in canonical_key
+                for fragment in _FORBIDDEN_PROVENANCE_KEY_FRAGMENTS
+            ):
+                raise ValueError("candidate provenance contains a forbidden field")
+            _validate_safe_provenance(nested, depth=depth + 1)
+    elif isinstance(value, list):
+        if len(value) > 256:
+            raise ValueError("candidate provenance is too large")
+        for nested in value:
+            _validate_safe_provenance(nested, depth=depth + 1)
+    elif value is not None and not isinstance(value, (str, int, float, bool)):
+        raise ValueError("candidate provenance contains an invalid value")
+
+
+def _validate_evidence(
+    db, source_run_id: str, evidence: list[TraitEvidenceInput]
+) -> list[dict[str, Any]]:
+    input_ids = [row.input_id for row in evidence]
+    evidence_keys = [
+        (row.input_id, row.line_start, row.line_end) for row in evidence
+    ]
+    if len(set(evidence_keys)) != len(evidence_keys):
+        raise ValueError("candidate evidence contains duplicate spans")
+    snapshots = {
+        row.id: row
+        for row in db.scalars(
+            select(AnalysisRunInputRow).where(
+                AnalysisRunInputRow.run_id == source_run_id,
+                AnalysisRunInputRow.id.in_(set(input_ids)),
+            )
+        ).all()
+    }
+    if set(snapshots) != set(input_ids):
+        raise ValueError("candidate evidence is outside the frozen run")
+    result: list[dict[str, Any]] = []
+    for item in evidence:
+        snapshot = snapshots[item.input_id]
+        lines = snapshot.content.splitlines()
+        if (
+            snapshot.document_id != item.document_id
+            or snapshot.document_name != item.document_name
+            or snapshot.document_version != item.document_version
+            or snapshot.content_sha256 != item.content_sha256
+            or item.line_end > len(lines)
+        ):
+            raise ValueError("candidate evidence does not match the frozen run")
+        source = "\n".join(lines[item.line_start - 1 : item.line_end]).strip()
+        if source != item.text.strip():
+            raise ValueError("candidate evidence text does not match the frozen run")
+        result.append(item.model_dump(mode="json"))
+    return result
+
+
+def validate_character_trait_supersession(
+    *,
+    project_id: str,
+    character_key: str,
+    trait_type: str,
+    trait_key: str,
+    scope: NarrativeScopeV1 | dict[str, Any],
+    valid_from_release_ordinal: int | None,
+    valid_until_release_ordinal: int | None,
+    superseded: CharacterTraitCandidateRow,
+) -> None:
+    """Fail closed unless ``superseded`` is the same live profile identity.
+
+    A client-supplied internal id is never enough to establish that two rows
+    represent the same trait.  Narrative scopes must be provably compatible,
+    and their release ranges must overlap; unknown scope relations are rejected.
+    """
+
+    try:
+        same_identity = (
+            superseded.project_id == project_id
+            and superseded.review_state == "confirmed"
+            and normalize_character_key(superseded.character_key)
+            == normalize_character_key(character_key)
+            and superseded.trait_type == trait_type
+            and normalize_trait_key(superseded.trait_key)
+            == normalize_trait_key(trait_key)
+        )
+    except (TypeError, ValueError):
+        same_identity = False
+    if not same_identity:
+        raise ValueError("superseded candidate is incompatible")
+
+    first_start = valid_from_release_ordinal or 0
+    second_start = superseded.valid_from_release_ordinal or 0
+    first_end = (
+        valid_until_release_ordinal
+        if valid_until_release_ordinal is not None
+        else 2_147_483_647
+    )
+    second_end = (
+        superseded.valid_until_release_ordinal
+        if superseded.valid_until_release_ordinal is not None
+        else 2_147_483_647
+    )
+    if max(first_start, second_start) > min(first_end, second_end):
+        raise ValueError("superseded candidate is incompatible")
+
+    if scope_relation(
+        scope,
+        superseded.scope_payload,
+        first_resolution="confirmed",
+        second_resolution="confirmed",
+    ) != "compatible":
+        raise ValueError("superseded candidate is incompatible")
+
+
+def upsert_character_trait_candidate(
+    db,
+    *,
+    project_id: str,
+    source_run_id: str,
+    candidate: TraitCandidateInput | dict[str, Any],
+    allow_running_source: bool = False,
+) -> tuple[CharacterTraitCandidateRow, bool]:
+    """Persist one bounded pending candidate from a frozen run.
+
+    This is the only write helper intended for the later semantic module.  It
+    validates evidence against immutable run inputs and strips the temptation
+    to persist provider prompts, credentials, or raw responses.  The default
+    only accepts completed runs; the owned analysis worker must explicitly opt
+    in while its source run is still running.
+    """
+
+    parsed = (
+        candidate
+        if isinstance(candidate, TraitCandidateInput)
+        else TraitCandidateInput.model_validate(candidate)
+    )
+    run = db.get(AnalysisRunRow, source_run_id)
+    allowed_statuses = {"completed", "running"} if allow_running_source else {"completed"}
+    if (
+        run is None
+        or run.project_id != project_id
+        or run.status not in allowed_statuses
+    ):
+        raise ValueError("candidate source run is invalid")
+    character_key = normalize_character_key(parsed.character_key)
+    display_name = _clean_text(
+        parsed.character_display_name, maximum=160, label="character name"
+    )
+    trait_key = _clean_text(parsed.trait_key, maximum=160, label="trait key")
+    trait_value = _clean_text(parsed.value, maximum=2_000, label="trait value")
+    _validate_safe_provenance(parsed.provenance)
+    if len(canonical_json(parsed.provenance).encode("utf-8")) > 32_000:
+        raise ValueError("candidate provenance is too large")
+    evidence = _validate_evidence(db, source_run_id, parsed.evidence)
+    evidence_hash = payload_sha256(evidence)
+    semantic_evidence_hash = payload_sha256(
+        [
+            {
+                "document_id": item["document_id"],
+                "document_version": item["document_version"],
+                "content_sha256": item["content_sha256"],
+                "line_start": item["line_start"],
+                "line_end": item["line_end"],
+                "text": item["text"],
+            }
+            for item in evidence
+        ]
+    )
+    scope = canonical_scope_payload(parsed.scope)
+    scope_hash = payload_sha256(scope)
+    if parsed.supersedes_candidate_id:
+        superseded = db.get(
+            CharacterTraitCandidateRow, parsed.supersedes_candidate_id
+        )
+        if superseded is None:
+            raise ValueError("superseded candidate is invalid")
+        validate_character_trait_supersession(
+            project_id=project_id,
+            character_key=character_key,
+            trait_type=parsed.trait_type,
+            trait_key=trait_key,
+            scope=scope,
+            valid_from_release_ordinal=parsed.valid_from_release_ordinal,
+            valid_until_release_ordinal=parsed.valid_until_release_ordinal,
+            superseded=superseded,
+        )
+    fingerprint = payload_sha256(
+        {
+            "character_key": character_key,
+            "trait_type": parsed.trait_type,
+            "comparison_key": parsed.comparison_key or normalize_trait_key(trait_key),
+            "polarity": parsed.polarity,
+            "stability": parsed.stability,
+            "contexts": parsed.contexts,
+            "origin": parsed.origin,
+            "authority_tier": parsed.authority_tier,
+            "scope_sha256": scope_hash,
+            "valid_from_release_ordinal": parsed.valid_from_release_ordinal,
+            "valid_until_release_ordinal": parsed.valid_until_release_ordinal,
+            "semantic_evidence_sha256": semantic_evidence_hash,
+            "supersedes_candidate_id": parsed.supersedes_candidate_id,
+            "generator_version": parsed.generator_version,
+        }
+    )
+    existing = db.scalar(
+        select(CharacterTraitCandidateRow)
+        .join(
+            AnalysisRunRow,
+            AnalysisRunRow.id == CharacterTraitCandidateRow.source_run_id,
+        )
+        .where(
+            CharacterTraitCandidateRow.project_id == project_id,
+            CharacterTraitCandidateRow.candidate_fingerprint == fingerprint,
+            (
+                (CharacterTraitCandidateRow.source_run_id == source_run_id)
+                | (AnalysisRunRow.status == "completed")
+            ),
+        )
+        .order_by(CharacterTraitCandidateRow.created_at, CharacterTraitCandidateRow.id)
+    )
+    if existing is not None:
+        return existing, False
+    from sqlalchemy import func
+
+    total = db.scalar(
+        select(func.count())
+        .select_from(CharacterTraitCandidateRow)
+        .where(CharacterTraitCandidateRow.source_run_id == source_run_id)
+    ) or 0
+    if total >= MAX_CANDIDATES_PER_SOURCE_RUN:
+        raise ValueError("candidate limit exceeded")
+    row = CharacterTraitCandidateRow(
+        project_id=project_id,
+        source_run_id=source_run_id,
+        character_key=character_key,
+        character_display_name=display_name,
+        trait_type=parsed.trait_type,
+        trait_key=trait_key,
+        value=trait_value,
+        polarity=parsed.polarity,
+        stability=parsed.stability,
+        contexts=parsed.contexts,
+        origin=parsed.origin,
+        authority_tier=parsed.authority_tier,
+        confidence=parsed.confidence,
+        scope_payload=scope,
+        scope_sha256=scope_hash,
+        valid_from_release_ordinal=parsed.valid_from_release_ordinal,
+        valid_until_release_ordinal=parsed.valid_until_release_ordinal,
+        evidence=evidence,
+        evidence_sha256=evidence_hash,
+        candidate_fingerprint=fingerprint,
+        generator_version=parsed.generator_version,
+        provenance=parsed.provenance,
+        supersedes_candidate_id=parsed.supersedes_candidate_id,
+    )
+    db.add(row)
+    db.flush()
+    return row, True
+
+
+def candidate_snapshot_payload(
+    candidate: CharacterTraitCandidateRow,
+    review: CharacterTraitReviewRow,
+) -> dict[str, Any]:
+    if candidate.review_state != "confirmed" or review.decision != "confirm":
+        raise ValueError("only confirmed candidates can be snapshotted")
+    scope = canonical_scope_payload(candidate.scope_payload)
+    if payload_sha256(scope) != candidate.scope_sha256:
+        raise ValueError("candidate scope hash mismatch")
+    if payload_sha256(candidate.evidence) != candidate.evidence_sha256:
+        raise ValueError("candidate evidence hash mismatch")
+    return {
+        "schema_version": CHARACTER_TRAIT_SCHEMA_VERSION,
+        "candidate_id": candidate.id,
+        "confirmation_review_id": review.id,
+        "character_key": candidate.character_key,
+        "character_display_name": candidate.character_display_name,
+        "trait_type": candidate.trait_type,
+        "trait_key": candidate.trait_key,
+        "value": candidate.value,
+        "polarity": candidate.polarity,
+        "stability": candidate.stability,
+        "contexts": candidate.contexts,
+        "origin": candidate.origin,
+        "authority_tier": candidate.authority_tier,
+        "scope": scope,
+        "scope_sha256": candidate.scope_sha256,
+        "valid_from_release_ordinal": candidate.valid_from_release_ordinal,
+        "valid_until_release_ordinal": candidate.valid_until_release_ordinal,
+        "evidence": candidate.evidence,
+        "evidence_sha256": candidate.evidence_sha256,
+        "candidate_fingerprint": candidate.candidate_fingerprint,
+        "generator_version": candidate.generator_version,
+        "candidate_lock_version": candidate.lock_version,
+    }
+
+
+def latest_confirm_reviews(
+    db, candidate_ids: list[str]
+) -> dict[str, CharacterTraitReviewRow]:
+    if not candidate_ids:
+        return {}
+    rows = list(
+        db.scalars(
+            select(CharacterTraitReviewRow)
+            .where(
+                CharacterTraitReviewRow.candidate_id.in_(candidate_ids),
+                CharacterTraitReviewRow.decision == "confirm",
+            )
+            .order_by(
+                CharacterTraitReviewRow.candidate_id,
+                CharacterTraitReviewRow.created_at.desc(),
+                CharacterTraitReviewRow.id.desc(),
+            )
+        ).all()
+    )
+    result: dict[str, CharacterTraitReviewRow] = {}
+    for row in rows:
+        result.setdefault(row.candidate_id, row)
+    return result

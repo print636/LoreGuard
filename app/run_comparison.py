@@ -10,13 +10,20 @@ from sqlalchemy import delete, select
 
 from .db import (
     AnalysisDiagnosticRow,
+    AnalysisRunCharacterTraitInputRow,
     AnalysisRunComparisonRow,
     AnalysisRunInputContextRow,
+    AnalysisRunInputNarrativeContextRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
     FeedbackRow,
     IssueComparisonItemRow,
     IssueRow,
+)
+from .narrative_context import (
+    context_snapshot_payload,
+    narrative_context_semantic_sha256,
+    payload_sha256,
 )
 from .time_utils import utc_now_naive
 
@@ -28,6 +35,7 @@ MAX_ISSUES_PER_SIDE = 1_000
 # prose or a database id. Values are emitted by LoreGuard's rule engine.
 _RULE_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "fact_conflict": ("subject", "predicate"),
+    "character_drift": ("character_key", "dimension", "trait_key"),
     "location_collision": ("participant", "timestamp"),
     "knowledge_without_acquisition": ("character", "fact"),
     "item_ownership": ("item", "actual_user"),
@@ -139,15 +147,69 @@ def build_input_diff(
     }
 
 
-def _input_contexts(db, rows: list[AnalysisRunInputRow]) -> dict[str, tuple[str, str]]:
-    result: dict[str, tuple[str, str]] = {}
+def _input_contexts(
+    db, rows: list[AnalysisRunInputRow]
+) -> tuple[dict[str, tuple[str, str, str]], bool]:
+    result: dict[str, tuple[str, str, str]] = {}
+    valid = True
     for row in rows:
         context = db.get(AnalysisRunInputContextRow, row.id)
-        result[row.document_name.casefold()] = (
-            context.document_role if context and context.document_role else "chapter",
-            context.story_scope if context and context.story_scope else "global",
+        role = context.document_role if context and context.document_role else "chapter"
+        story_scope = (
+            context.story_scope if context and context.story_scope else "global"
         )
-    return result
+        narrative = db.get(AnalysisRunInputNarrativeContextRow, row.id)
+        if narrative is None:
+            payload = context_snapshot_payload(
+                None, document_role=role, story_scope=story_scope
+            )
+            narrative_hash = narrative_context_semantic_sha256(payload)
+        elif (
+            narrative.schema_version != 1
+            or not isinstance(narrative.payload, dict)
+            or payload_sha256(narrative.payload) != narrative.payload_sha256
+        ):
+            valid = False
+            narrative_hash = "invalid"
+        else:
+            narrative_hash = narrative_context_semantic_sha256(
+                narrative.payload
+            )
+        result[row.document_name.casefold()] = (
+            role,
+            story_scope,
+            narrative_hash,
+        )
+    return result, valid
+
+
+def _trait_snapshot(db, run: AnalysisRunRow | None) -> tuple[list[str], bool]:
+    if run is None:
+        return [], False
+    rows = list(
+        db.scalars(
+            select(AnalysisRunCharacterTraitInputRow)
+            .where(AnalysisRunCharacterTraitInputRow.run_id == run.id)
+            .order_by(AnalysisRunCharacterTraitInputRow.ordinal)
+        ).all()
+    )
+    if [row.ordinal for row in rows] != list(range(len(rows))):
+        return [], False
+    hashes: list[str] = []
+    for row in rows:
+        if (
+            row.project_id != run.project_id
+            or not isinstance(row.payload, dict)
+            or payload_sha256(row.payload) != row.payload_sha256
+            or row.payload.get("candidate_id") != row.candidate_id
+            or row.payload.get("confirmation_review_id")
+            != row.confirmation_review_id
+            or row.payload.get("candidate_lock_version")
+            != row.candidate_lock_version
+        ):
+            return [], False
+        hashes.append(row.payload_sha256)
+    return hashes, True
 
 
 def _diagnostic_compatibility(
@@ -190,6 +252,19 @@ def _diagnostic_compatibility(
             or investigator.get("outcome") != "completed"
         ):
             reasons.append(f"{side}_investigator_incomplete")
+        character_consistency = payload.get("character_consistency")
+        character_consistency_enabled = (
+            isinstance(capabilities, dict)
+            and capabilities.get("character_consistency") is True
+        )
+        if character_consistency_enabled and (
+            not isinstance(character_consistency, dict)
+            or character_consistency.get("outcome") != "completed"
+        ):
+            # A missing or bounded/degraded character pass cannot prove that a
+            # previously reported drift disappeared.  Fail the whole
+            # comparison closed instead of presenting absence as resolution.
+            reasons.append(f"{side}_character_consistency_incomplete")
 
     if all(payload is not None for _, payload in payloads):
         baseline_runtime = payloads[0][1].get("runtime_provenance")
@@ -202,7 +277,12 @@ def _diagnostic_compatibility(
             # Build hashes remain in diagnostics for audit but are not compared:
             # adding this feature necessarily changes the service bundle. The
             # detection capabilities and provider identity still fail closed.
-            for key in ("capabilities", "chat_provider", "rag"):
+            for key in (
+                "capabilities",
+                "chat_provider",
+                "character_consistency_limits",
+                "rag",
+            ):
                 if baseline_runtime.get(key) != target_runtime.get(key):
                     reasons.append(f"runtime_{key}_changed")
     return reasons
@@ -225,18 +305,38 @@ def _comparison_compatibility(
     if not _snapshot_valid(target_rows):
         reasons.append("target_snapshot_incomplete")
     input_diff = build_input_diff(baseline_rows, target_rows)
-    baseline_contexts = _input_contexts(db, baseline_rows)
-    target_contexts = _input_contexts(db, target_rows)
+    baseline_contexts, baseline_context_valid = _input_contexts(db, baseline_rows)
+    target_contexts, target_context_valid = _input_contexts(db, target_rows)
     context_changed = sorted(
         name
         for name in set(baseline_contexts) & set(target_contexts)
         if baseline_contexts[name] != target_contexts[name]
     )
     input_diff["context_changed_documents"] = context_changed
+    if not baseline_context_valid:
+        reasons.append("baseline_narrative_context_invalid")
+    if not target_context_valid:
+        reasons.append("target_narrative_context_invalid")
     if input_diff["removed_documents"]:
         reasons.append("documents_removed")
     if context_changed:
         reasons.append("document_context_changed")
+        if any(
+            baseline_contexts[name][2] != target_contexts[name][2]
+            for name in context_changed
+        ):
+            reasons.append("narrative_context_changed")
+    baseline_traits, baseline_traits_valid = _trait_snapshot(db, baseline_run)
+    target_traits, target_traits_valid = _trait_snapshot(db, target_run)
+    input_diff["baseline_confirmed_trait_count"] = len(baseline_traits)
+    input_diff["target_confirmed_trait_count"] = len(target_traits)
+    input_diff["character_profile_changed"] = baseline_traits != target_traits
+    if not baseline_traits_valid:
+        reasons.append("baseline_trait_snapshot_invalid")
+    if not target_traits_valid:
+        reasons.append("target_trait_snapshot_invalid")
+    if baseline_traits != target_traits:
+        reasons.append("character_profile_snapshot_changed")
     reasons.extend(
         _diagnostic_compatibility(
             db.get(AnalysisDiagnosticRow, comparison.baseline_run_id),
