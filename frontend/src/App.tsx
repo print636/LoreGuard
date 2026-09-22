@@ -1,9 +1,10 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
-  describeModelStatus,
+  describeCombinedReviewStatus,
   describeRepairStatus,
   describeReviewAgentStatus,
   type ModelDiagnostics,
+  type CharacterConsistencyDiagnostics,
   type RepairStatusView,
   type ReviewAgentStatusView,
 } from "./modelStatus";
@@ -83,6 +84,13 @@ import {
   type WorkspaceView,
 } from "./routing";
 import type { SessionIdentity } from "./app/session";
+import NarrativeContextWorkbench from "./features/workflow/NarrativeContextWorkbench";
+import GuidedReviewLaunch from "./features/workflow/GuidedReviewLaunch";
+import {
+  guidedDocumentState,
+  type AnalysisRunRequest,
+  type NarrativeContext,
+} from "./features/workflow/guidedReview";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
 const RevisionReview = lazy(() => import("./components/RevisionReview"));
@@ -119,6 +127,7 @@ type Doc = {
   document_role: DocumentRole;
   story_scope: string;
   context_explicit?: boolean;
+  narrative_context?: NarrativeContext;
 };
 type DiffLine = {
   type: "added" | "removed" | "unchanged";
@@ -162,6 +171,13 @@ type RunInfo = RunUsageInfo & {
   input_snapshot_available?: boolean;
   retried_from?: string | null;
   attempt_no?: number | null;
+  mode?: "baseline_build" | "draft_review" | string | null;
+  sensitivity?: "conservative" | "balanced" | "exploratory" | string | null;
+  review_batch?: {
+    mode: "baseline_build" | "draft_review" | string;
+    sensitivity: "conservative" | "balanced" | "exploratory" | string;
+    target_document_ids?: string[];
+  } | null;
 };
 type Project = {
   id: string;
@@ -173,6 +189,7 @@ type Project = {
 };
 type Diagnostics = {
   model?: ModelDiagnostics;
+  character_consistency?: CharacterConsistencyDiagnostics;
   chunking?: {
     total_chunks: number;
     documents: Array<{
@@ -380,7 +397,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     "graph" | "timeline" | null
   >(null);
   const [visualError, setVisualError] = useState("");
-  const [uploadRole, setUploadRole] = useState<DocumentRole>("chapter");
+  const [uploadRole, setUploadRole] = useState<DocumentRole>("reference");
   const [uploadScope, setUploadScope] = useState("global");
   const [quickMode, setQuickMode] = useState<QuickTextMode>("body");
   const [quickRole, setQuickRole] = useState<DocumentRole>("chapter");
@@ -413,8 +430,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     [issues, filter, issueStatusFilter, feedbacks],
   );
   const modelStatus = useMemo(
-    () => describeModelStatus(diagnostics.model),
-    [diagnostics.model],
+    () => describeCombinedReviewStatus(
+      diagnostics.model,
+      diagnostics.character_consistency,
+    ),
+    [diagnostics.model, diagnostics.character_consistency],
   );
   const repairStatus = useMemo(
     () => describeRepairStatus(diagnostics.model),
@@ -451,6 +471,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     () => docs.filter((row) => row.active),
     [docs],
   );
+  const guidedState = useMemo(() => guidedDocumentState(docs), [docs]);
 
   function clearAnalysisView() {
     streamRef.current?.close();
@@ -796,7 +817,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       });
     }
   }
-  async function runProject(id: string) {
+  async function runProject(id: string, request?: AnalysisRunRequest) {
     if (!id) throw new Error("请先选择项目");
     if (runMutationRef.current) return;
     runMutationRef.current = true;
@@ -819,7 +840,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     try {
       const created = await apiJsonIdempotent<RunInfo>(
         `/api/v1/projects/${id}/analysis-runs`,
-        { method: "POST" },
+        request
+          ? {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(request),
+            }
+          : { method: "POST" },
       );
       if (epoch !== viewEpochRef.current) return;
       setRun(created.id);
@@ -845,9 +872,9 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       runMutationRef.current = false;
     }
   }
-  async function startCurrentProject() {
+  async function startGuidedReview(request: AnalysisRunRequest) {
     try {
-      await runProject(project);
+      await runProject(project, request);
     } catch (error) {
       setBusy(false);
       const recovery = dispatchFailureRecovery(error);
@@ -856,7 +883,9 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         browserNavigate(workspacePath("audit", project, recovery.runId));
         return;
       }
-      setMessage(`启动分析失败：${String(error)}`);
+      const message = `启动分析失败：${String(error)}`;
+      setMessage(message);
+      throw error;
     }
   }
   async function createProject() {
@@ -922,6 +951,23 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     } finally {
       setAction("");
     }
+  }
+  function applyNarrativeContext(
+    documentId: string,
+    documentRole: DocumentRole,
+    narrativeContext: NarrativeContext,
+  ) {
+    setDocs((current) =>
+      current.map((document) =>
+        document.id === documentId
+          ? {
+              ...document,
+              document_role: documentRole,
+              narrative_context: narrativeContext,
+            }
+          : document,
+      ),
+    );
   }
   async function demo(kind: "simple" | "advanced") {
     try {
@@ -1625,7 +1671,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </button>
                   </div>
                   <p className="contextHint">
-                    支持 {supportedUploadLabel}。{docxImportBoundary}
+                    支持 {supportedUploadLabel}。{docxImportBoundary} 新资料默认按“参考材料”导入；上传后请在下方确认资料身份，系统不会根据文件名冒充 AI 判断。
                   </p>
                   {files.length > 0 && (
                     <p
@@ -1641,6 +1687,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       }
                       ” · 作用域 {uploadScope.trim() || "global"}
                     </p>
+                  )}
+                  {project && activeDocuments.length > 0 && (
+                    <NarrativeContextWorkbench
+                      projectId={project}
+                      documents={docs}
+                      disabled={projectLoading || action === "upload"}
+                      onSaved={applyNarrativeContext}
+                      onOpenProvider={() => navigateWorkspace("provider")}
+                    />
                   )}
                 </div>
               )}
@@ -1932,75 +1987,17 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           {!routeProblem && activeView === "check" && (
             <section className="workspace workspaceView">
               {project ? (
-                <div className="projectScanLaunch">
-                  <div className="scanLaunchHead">
-                    <div>
-                      <p className="eyebrow">FROZEN REVIEW INPUT</p>
-                      <h2>确认本次校验范围</h2>
-                      <p>
-                        开始后，服务端会冻结下面的活动版本。本次运行始终对应这组输入，后续更新文稿不会覆盖旧报告。
-                      </p>
-                    </div>
-                    <button
-                      className="startValidation"
-                      disabled={busy || projectLoading || activeDocuments.length === 0}
-                      onClick={startCurrentProject}
-                    >
-                      {busy ? "正在校验…" : "开始校验"}
-                    </button>
-                  </div>
-                  {activeDocuments.length ? (
-                    <div className="scanInputList" aria-label="即将冻结的活动文档">
-                      {activeDocuments.map((document) => (
-                        <div key={document.id}>
-                          <span>
-                            <b>{document.name}</b>
-                            <small>版本 v{document.version}</small>
-                          </span>
-                          <span>
-                            <small>文档类型</small>
-                            <b>
-                              {documentRoles.find(([value]) => value === document.document_role)?.[1] || document.document_role}
-                            </b>
-                          </span>
-                          <span>
-                            <small>故事作用域</small>
-                            <b>{document.story_scope}</b>
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="scanInputEmpty">
-                      <b>还没有可校验的活动文档</b>
-                      <p>先导入正文、设定或参考资料，再回到这里确认范围。</p>
-                      <button type="button" onClick={() => navigateWorkspace("projects")}>
-                        前往导入文稿
-                      </button>
-                    </div>
-                  )}
-                  <div className="scanBoundaries">
-                    <section>
-                      <span className={`boundaryLight ${providerConnection.tone}`} aria-hidden="true" />
-                      <div>
-                        <b>模型准备状态</b>
-                        <p>{providerConnection.label}</p>
-                        <small>
-                          这是服务端配置或连接状态，不代表本次运行一定成功调用模型。实际参与情况以完成后的“模型语义覆盖”为准。
-                        </small>
-                      </div>
-                    </section>
-                    <section>
-                      <span className="boundaryLight ready" aria-hidden="true" />
-                      <div>
-                        <b>可恢复降级</b>
-                        <p>模型不可用时仍保留确定性检查结果</p>
-                        <small>报告会明确标注语义覆盖边界，不会把本地规则结果冒充模型判断。</small>
-                      </div>
-                    </section>
-                  </div>
-                  <p className="scanCostNote">启用模型时，本次校验可能消耗 Token。重复点击由一次性请求键保护。</p>
-                </div>
+                <GuidedReviewLaunch
+                  projectId={project}
+                  documents={docs}
+                  runs={runs}
+                  busy={busy}
+                  projectLoading={projectLoading}
+                  providerLabel={providerConnection.label}
+                  providerTone={providerConnection.tone}
+                  onStart={startGuidedReview}
+                  onNavigate={navigateWorkspace}
+                />
               ) : (
                 <div className="legacyQuickReview">
                   <div className="sectionHead">
@@ -2361,6 +2358,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                 documentCount={activeDocuments.length}
                 completedRunCount={runs.filter((row) => row.status === "completed").length}
                 projectLoading={projectLoading}
+                baselineContextReady={
+                  guidedState.baseline.length > 0 &&
+                  guidedState.unresolvedBaseline.length === 0
+                }
+                baselineContextDetail={
+                  guidedState.baseline.length === 0
+                    ? "当前没有可作为角色基线的世界观、角色档案或已发布历史章节。参考材料和草稿不会自动提升为正式依据。"
+                    : `还有 ${guidedState.unresolvedBaseline.length} 份正式资料未人工确认。角色审查不会绕过这些上下文。`
+                }
                 routeSearch={routeSearch}
                 onRouteChange={(search, replace) =>
                   browserNavigate(

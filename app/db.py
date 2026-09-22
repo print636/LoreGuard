@@ -235,6 +235,9 @@ class DocumentNarrativeContextRevisionRow(Base):
     scope_payload: Mapped[dict] = mapped_column(JSON)
     scope_sha256: Mapped[str] = mapped_column(String(64))
     inference_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    inference_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    inference_evidence: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    inference_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by_user_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -269,6 +272,12 @@ class AnalysisRunRow(Base):
     requested_by_user_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # The batch contract is frozen on the run itself.  Legacy callers and
+    # migrated rows keep the historical all-active-document behaviour through
+    # the ``full_review`` default.
+    batch_mode: Mapped[str] = mapped_column(String(24), default="full_review")
+    sensitivity: Mapped[str] = mapped_column(String(24), default="balanced")
+    batch_coverage: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(32), default="queued")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -314,6 +323,10 @@ class AnalysisRunInputContextRow(Base):
     )
     document_role: Mapped[str | None] = mapped_column(String(40), nullable=True)
     story_scope: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # ``target`` is the draft under review; ``background`` is server-selected
+    # authority/history.  The worker receives both but may never infer the
+    # authority boundary from client-controlled request fields.
+    batch_role: Mapped[str] = mapped_column(String(16), default="target")
 
 
 class AnalysisRunInputNarrativeContextRow(Base):

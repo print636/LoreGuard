@@ -1,0 +1,283 @@
+.contextWorkbench {
+  container-type: inline-size;
+  margin-top: 24px;
+  padding-top: 22px;
+  border-top: 1px solid var(--color-border, var(--line));
+}
+
+.contextWorkbench > header,
+.guidedReviewHead,
+.stageBody > header,
+.contextActions,
+.guidedReviewBoundary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.contextWorkbench > header,
+.guidedReviewHead,
+.stageBody > header {
+  height: auto;
+  padding-inline: 0;
+  color: inherit;
+  background: transparent;
+  letter-spacing: normal;
+}
+.contextWorkbench > header,
+.stageBody > header { padding-block: 0; border: 0; }
+.contextWorkbench > header > div,
+.guidedReviewHead > div,
+.stageBody > header > div { display: block; min-width: 0; }
+
+.contextWorkbench h3,
+.guidedReviewLaunch h2,
+.guidedReviewLaunch h3 { margin: 0; }
+.contextWorkbench > header p,
+.guidedReviewHead p,
+.stageBody header p { margin: 4px 0 0; color: var(--color-text-secondary, var(--text-2)); line-height: 1.6; }
+.contextCount { flex: 0 0 auto; padding: 5px 9px; color: var(--color-cyan, var(--cyan)); border: 1px solid var(--color-border-strong, var(--line-strong)); border-radius: 999px; font-size: 12px; }
+
+.contextWorkbenchLayout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  margin-top: 18px;
+  border: 1px solid var(--color-border, var(--line));
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--color-field, rgba(16, 13, 36, .48));
+}
+
+.contextDocumentList { border-right: 1px solid var(--color-border, var(--line)); }
+.contextDocumentList button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  min-height: 68px;
+  padding: 11px 12px;
+  color: var(--color-text-secondary, var(--text-2));
+  border: 0;
+  border-bottom: 1px solid var(--color-border, var(--line));
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+.contextDocumentList button:hover:not(:disabled),
+.contextDocumentList button.selected { background: var(--color-subtle, rgba(183, 162, 255, .08)); }
+.contextDocumentList button.selected { box-shadow: inset 3px 0 var(--color-lavender, var(--lavender)); }
+.contextDocumentList button > span { min-width: 0; }
+.contextDocumentList b,
+.contextDocumentList small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.contextDocumentList b { color: var(--color-text, var(--text)); font-size: 13px; }
+.contextDocumentList small { margin-top: 3px; color: var(--color-text-muted, var(--muted)); font-size: 12px; }
+.contextDocumentList em { padding: 3px 6px; border: 1px solid currentColor; border-radius: 999px; font-size: 12px; font-style: normal; white-space: nowrap; }
+.contextDocumentList em.confirmed { color: var(--color-success, var(--success)); }
+.contextDocumentList em.inferred { color: var(--color-cyan, var(--cyan)); }
+.contextDocumentList em.attention { color: var(--color-warning, var(--warning)); }
+
+.contextEditor { min-width: 0; padding: 18px; }
+.contextLoading { min-height: 220px; display: grid; place-items: center; color: var(--color-text-muted, var(--muted)); }
+.contextOrigin { padding: 10px 12px; border-left: 3px solid currentColor; background: var(--color-subtle, rgba(183, 162, 255, .08)); }
+.contextOrigin.confirmed { color: var(--color-success, var(--success)); }
+.contextOrigin.inferred { color: var(--color-cyan, var(--cyan)); }
+.contextOrigin.attention { color: var(--color-warning, var(--warning)); }
+.contextOrigin p { margin: 3px 0 0; color: var(--color-text-secondary, var(--text-2)); font-size: 12px; line-height: 1.55; }
+.contextError { margin-top: 12px; padding: 12px; color: var(--color-danger, var(--danger)); border: 1px solid currentColor; border-radius: 9px; background: var(--color-danger-subtle, rgba(255,127,173,.1)); }
+.contextError p { margin: 4px 0 9px; color: var(--color-text-secondary, var(--text-2)); font-size: 12px; }
+.contextError button { min-height: 36px; padding: 6px 10px; }
+.contextAnnouncement { min-height: 22px; padding-top: 6px; color: var(--color-success, var(--success)); font-size: 12px; }
+
+.contextInferenceAction {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--color-border, var(--line));
+  border-radius: 10px;
+  background: var(--color-field, rgba(16, 13, 36, .48));
+}
+.contextInferenceAction > div { min-width: 0; }
+.contextInferenceAction b { color: var(--color-text, var(--text)); font-size: 13px; }
+.contextInferenceAction p { margin: 3px 0 0; color: var(--color-text-secondary, var(--text-2)); font-size: 12px; line-height: 1.55; }
+.contextInferenceButton {
+  flex: 0 0 auto;
+  min-height: 40px;
+  margin: 0;
+  padding: 8px 13px;
+  color: var(--color-cyan, var(--cyan));
+  border: 1px solid var(--color-border-strong, var(--line-strong));
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 12px;
+}
+.contextInferenceButton:hover:not(:disabled) {
+  border-color: var(--color-cyan, var(--cyan));
+  background: var(--color-subtle, rgba(183,162,255,.08));
+}
+.contextInferenceButton:disabled { cursor: wait; opacity: .64; }
+.contextInferenceProgress { margin: 8px 0 0; color: var(--color-cyan, var(--cyan)); font-size: 12px; line-height: 1.55; }
+
+.contextInferenceReview {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--color-border-strong, var(--line-strong));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--color-cyan, var(--cyan)) 5%, var(--color-field, #100d24));
+}
+.contextInferenceReview > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  width: auto;
+  height: auto;
+  padding: 0;
+  color: inherit;
+  border: 0;
+  background: transparent;
+  letter-spacing: normal;
+}
+.contextInferenceReview > header > div { display: block; min-width: 0; }
+.contextInferenceReview > header span { color: var(--color-cyan, var(--cyan)); font-size: 12px; }
+.contextInferenceReview h4 { margin: 2px 0 0; color: var(--color-text, var(--text)); font-size: 15px; }
+.contextInferenceReview > header strong { flex: 0 0 auto; padding: 4px 7px; color: var(--color-cyan, var(--cyan)); border: 1px solid currentColor; border-radius: 999px; font-size: 12px; }
+.contextInferenceReview > p { margin: 10px 0 0; color: var(--color-text-secondary, var(--text-2)); font-size: 12px; line-height: 1.65; }
+.contextInferenceReview ol { display: grid; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
+.contextInferenceReview li { min-width: 0; padding: 10px; border-left: 2px solid var(--color-cyan, var(--cyan)); background: rgba(7, 6, 20, .3); }
+.contextInferenceReview li > div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.contextInferenceReview li b,
+.contextInferenceReview li span { font-size: 12px; }
+.contextInferenceReview li b { color: var(--color-text, var(--text)); }
+.contextInferenceReview li span { color: var(--color-text-muted, var(--muted)); text-align: right; }
+.contextInferenceReview blockquote { margin: 7px 0 0; color: var(--color-text-secondary, var(--text-2)); font-size: 12px; line-height: 1.6; }
+.contextInferenceReview > small { display: block; margin-top: 8px; color: var(--color-text-muted, var(--muted)); font-size: 12px; }
+.contextInferenceReview > footer { margin: 11px 0 0; padding: 9px 0 0; color: var(--color-text-muted, var(--muted)); border-top: 1px solid var(--color-border, var(--line)); background: transparent; font-size: 12px; text-align: left; }
+
+.contextFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px 16px;
+  margin-top: 10px;
+}
+.contextFields label { display: grid; align-content: start; gap: 5px; min-width: 0; color: var(--color-text, var(--text)); font-size: 12px; font-weight: 700; }
+.contextFields :is(input, select) { width: 100%; min-height: 44px; margin: 0; padding: 8px 10px; color: var(--color-text, var(--text)); border: 1px solid var(--color-border-strong, var(--line-strong)); border-radius: 8px; background: var(--color-page, #0d0a1e); }
+.contextFields :is(input, select):disabled { cursor: wait; opacity: .62; }
+.contextFields small { color: var(--color-text-muted, var(--muted)); font-size: 12px; font-weight: 400; line-height: 1.5; }
+.contextWideField { grid-column: 1 / -1; }
+.contextConfirmation { display: flex; align-items: flex-start; gap: 10px; margin-top: 18px; padding: 13px; border: 1px solid var(--color-border-strong, var(--line-strong)); border-radius: 10px; background: var(--color-subtle, rgba(183,162,255,.08)); }
+.contextConfirmation input { width: 18px; height: 18px; margin: 3px 0 0; accent-color: var(--color-lavender, var(--lavender)); }
+.contextConfirmation b,
+.contextConfirmation small { display: block; }
+.contextConfirmation small { margin-top: 2px; color: var(--color-text-muted, var(--muted)); font-size: 12px; line-height: 1.5; }
+.contextActions { align-items: center; margin-top: 14px; }
+.contextActions .quietPrimary { width: auto; min-height: 44px; margin: 0; }
+.contextActions > small { color: var(--color-text-muted, var(--muted)); font-size: 12px; }
+
+.guidedReviewLaunch { container-type: inline-size; min-width: 0; }
+.guidedReviewHead { padding-bottom: 18px; border-bottom: 1px solid var(--color-border, var(--line)); }
+.guidedReviewHead > div { max-width: 640px; }
+.guidedReviewLaunch h2 { font: 700 28px/1.3 "Noto Serif SC", "STKaiti", serif; }
+.guidedReviewLaunch h3 { font-size: 17px; }
+.sensitivityControl { display: flex; flex: 0 0 auto; gap: 4px; margin: 0; padding: 4px; border: 1px solid var(--color-border, var(--line)); border-radius: 10px; }
+.sensitivityControl legend { padding: 0 5px; color: var(--color-text-muted, var(--muted)); font-size: 12px; }
+.sensitivityControl label { position: relative; cursor: pointer; }
+.sensitivityControl input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; }
+.sensitivityControl span { display: grid; min-width: 52px; min-height: 36px; place-items: center; padding: 6px 10px; color: var(--color-text-secondary, var(--text-2)); border: 1px solid transparent; border-radius: 7px; font-size: 12px; }
+.sensitivityControl input:checked + span { color: var(--color-text, var(--text)); border-color: var(--color-border-strong, var(--line-strong)); background: var(--color-subtle-strong, rgba(183,162,255,.14)); }
+.sensitivityControl input:focus-visible + span { outline: 2px solid var(--color-focus, var(--cyan)); outline-offset: 2px; }
+.guidedActionError { margin: 14px 0 0; padding: 11px 13px; color: var(--color-danger, var(--danger)); border-left: 3px solid currentColor; background: var(--color-danger-subtle, rgba(255,127,173,.1)); }
+
+.guidedStages { margin: 0; padding: 0; list-style: none; }
+.guidedStages > li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 14px;
+  padding: 22px 0;
+  border-bottom: 1px solid var(--color-border, var(--line));
+}
+.guidedStages > li::before { position: absolute; left: 22px; top: 58px; bottom: -23px; width: 1px; content: ""; background: var(--color-border-strong, var(--line-strong)); }
+.guidedStages > li:last-child::before { display: none; }
+.guidedStages > li.locked { opacity: .72; }
+.stageNumber { display: grid; width: 44px; height: 44px; place-items: center; color: var(--color-text-muted, var(--muted)); border: 1px solid var(--color-border-strong, var(--line-strong)); border-radius: 50%; background: var(--color-field, #100d24); font: 700 13px "Cascadia Code", monospace; }
+.guidedStages > li.current .stageNumber { color: var(--color-cyan, var(--cyan)); border-color: var(--color-cyan, var(--cyan)); }
+.guidedStages > li.complete .stageNumber { color: var(--color-page-deep, #090716); border-color: var(--color-success, var(--success)); background: var(--color-success, var(--success)); }
+.stageBody { min-width: 0; }
+.stageBody > header > b { flex: 0 0 auto; padding: 0; color: var(--color-text-muted, var(--muted)); background: transparent; font-size: 12px; letter-spacing: normal; }
+.complete .stageBody > header > b { color: var(--color-success, var(--success)); }
+.current .stageBody > header > b { color: var(--color-cyan, var(--cyan)); }
+.stageNotice { margin: 13px 0 0; color: var(--color-text-secondary, var(--text-2)); font-size: 12px; line-height: 1.65; }
+.stageNotice.warning { color: var(--color-warning, var(--warning)); }
+.stageNotice.success { color: var(--color-success, var(--success)); }
+.stageBody > button { min-height: 42px; margin-top: 13px; }
+.stageBody > .quietPrimary { width: auto; }
+
+.draftReviewSelection { margin-top: 14px; }
+.draftReviewSelection fieldset { display: grid; gap: 1px; margin: 0 0 16px; padding: 0; border: 1px solid var(--color-border, var(--line)); border-radius: 10px; overflow: hidden; }
+.draftReviewSelection legend { margin-left: 10px; padding: 0 6px; color: var(--color-text-muted, var(--muted)); font-size: 12px; }
+.draftReviewSelection label { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: center; min-height: 58px; padding: 9px 12px; background: var(--color-field, #100d24); }
+.draftReviewSelection label + label { border-top: 1px solid var(--color-border, var(--line)); }
+.draftReviewSelection input { width: 18px; height: 18px; accent-color: var(--color-lavender, var(--lavender)); }
+.draftReviewSelection b,
+.draftReviewSelection small { display: block; }
+.draftReviewSelection small { margin-top: 3px; color: var(--color-text-muted, var(--muted)); font-size: 12px; }
+.draftReviewSelection .startValidation { width: auto; min-width: 154px; min-height: 48px; margin: 0; }
+.guidedReviewBoundary { align-items: center; justify-content: flex-start; margin-top: 16px; padding: 12px; border: 1px solid var(--color-border, var(--line)); border-radius: 10px; background: var(--color-field, #100d24); }
+.guidedReviewBoundary p { margin: 0; }
+.guidedReviewBoundary b,
+.guidedReviewBoundary small { display: block; }
+.guidedReviewBoundary small { margin-top: 3px; color: var(--color-text-muted, var(--muted)); font-size: 12px; line-height: 1.5; }
+
+@media (max-width: 900px) {
+  .contextWorkbenchLayout { grid-template-columns: 1fr; }
+  .contextDocumentList { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--color-border, var(--line)); }
+  .contextDocumentList button { min-width: 230px; border-right: 1px solid var(--color-border, var(--line)); border-bottom: 0; }
+  .guidedReviewHead { flex-direction: column; }
+  .sensitivityControl { width: 100%; }
+  .sensitivityControl label { flex: 1; }
+}
+
+@container (max-width: 700px) {
+  .guidedReviewHead { flex-direction: column; }
+  .sensitivityControl { width: 100%; }
+  .sensitivityControl label { flex: 1; }
+}
+
+@container (max-width: 640px) {
+  .contextWorkbenchLayout { grid-template-columns: 1fr; }
+  .contextDocumentList { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--color-border, var(--line)); }
+  .contextDocumentList button { min-width: 230px; border-right: 1px solid var(--color-border, var(--line)); border-bottom: 0; }
+}
+
+@media (max-width: 600px) {
+  .contextWorkbench > header,
+  .stageBody > header,
+  .contextActions { flex-direction: column; }
+  .contextCount { align-self: flex-start; }
+  .contextEditor { padding: 14px; }
+  .contextFields { grid-template-columns: 1fr; }
+  .contextWideField { grid-column: auto; }
+  .contextActions .quietPrimary,
+  .draftReviewSelection .startValidation { width: 100%; }
+  .contextInferenceAction,
+  .contextInferenceReview > header,
+  .contextInferenceReview li > div { align-items: stretch; flex-direction: column; }
+  .contextInferenceButton { width: 100%; }
+  .contextInferenceReview > header strong { align-self: flex-start; }
+  .contextInferenceReview li span { text-align: left; }
+  .guidedStages > li { grid-template-columns: 38px minmax(0, 1fr); gap: 11px; }
+  .stageNumber { width: 36px; height: 36px; }
+  .guidedStages > li::before { left: 18px; top: 50px; }
+  .sensitivityControl span { min-width: 0; padding-inline: 7px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .contextDocumentList button,
+  .sensitivityControl span { transition: none; }
+}

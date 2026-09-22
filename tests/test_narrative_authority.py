@@ -778,6 +778,12 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
             }
             if table_name == "character_trait_candidates":
                 expected_columns.remove("authority_tier")
+            if table_name == "document_narrative_context_revisions":
+                expected_columns -= {
+                    "inference_reasoning",
+                    "inference_evidence",
+                    "inference_usage",
+                }
             assert migrated_columns == expected_columns
         engine.dispose()
 

@@ -10,7 +10,9 @@ export function createImportFilePlan<TFile>(
 ): ImportFilePlan<TFile>[] {
   return Array.from(files, (file) => ({
     file,
-    documentRole: "chapter" as const,
+    // A filename is not enough evidence to call every import story canon or a
+    // chapter. Keep the safe neutral role until the creator confirms context.
+    documentRole: "reference" as const,
   }));
 }
 

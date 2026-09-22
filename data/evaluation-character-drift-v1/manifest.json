@@ -7,7 +7,7 @@
   "blind_test": false,
   "developer_visible": true,
   "dev_case_count": 16,
-  "dev_sha256": "1deb4e6fd97b373076078aa537e32ca8cb7925c9c99f8a5ac45414c82914503b",
+  "dev_sha256": "52df46bc64abe8adaf7db7ba3457435b5bfe3960e098f611a22a83e966d53cee",
   "holdout_status": "not_created",
   "limitations": "用于协议和边界回归，不代表开放文本、真实剧情策划语料或生产准确率。"
 }

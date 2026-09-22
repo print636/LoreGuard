@@ -44,6 +44,8 @@ type CharacterWorkspaceProps = {
   documentCount: number;
   completedRunCount: number;
   projectLoading: boolean;
+  baselineContextReady: boolean;
+  baselineContextDetail: string;
   routeSearch: string;
   onRouteChange: (search: string, replace?: boolean) => void;
   onNavigateWorkspace: (view: WorkspaceView) => void;
@@ -82,6 +84,8 @@ export default function CharacterWorkspace({
   documentCount,
   completedRunCount,
   projectLoading,
+  baselineContextReady,
+  baselineContextDetail,
   routeSearch,
   onRouteChange,
   onNavigateWorkspace,
@@ -389,6 +393,14 @@ export default function CharacterWorkspace({
 
       {projectLoading ? (
         <div className="characterWorkspaceLoading" aria-busy="true">正在读取项目资料…</div>
+      ) : documentCount > 0 && !baselineContextReady ? (
+        <div className="characterPrerequisite">
+          <h2>先确认正式资料的上下文</h2>
+          <p>{baselineContextDetail}</p>
+          <button type="button" onClick={() => onNavigateWorkspace("projects")}>
+            前往确认资料
+          </button>
+        </div>
       ) : readinessView ? (
         <div className="characterPrerequisite">
           <h2>{readinessView.title}</h2>

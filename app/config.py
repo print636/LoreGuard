@@ -37,6 +37,20 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
     enable_model_extraction: bool = False
+    # Dedicated hard ceilings for explicit document-context suggestions. The
+    # bounded call is user-triggered and never confirms narrative authority.
+    narrative_context_inference_timeout_seconds: float = Field(
+        default=20.0, gt=0, le=30.0
+    )
+    narrative_context_inference_total_deadline_seconds: float = Field(
+        default=25.0, gt=0, le=45.0
+    )
+    narrative_context_inference_max_completion_tokens: int = Field(
+        default=1_200, ge=256, le=2_000
+    )
+    narrative_context_inference_max_response_bytes: int = Field(
+        default=32_000, ge=1_024, le=64_000
+    )
     # Evidence embeddings are an independent, opt-in capability.  Do not fall
     # back to the chat/extraction credential or model: deployments commonly
     # route the two APIs to different providers and trust boundaries.

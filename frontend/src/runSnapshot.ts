@@ -5,6 +5,15 @@ export type RunInputSnapshot = {
   document_role: string;
   story_scope: string;
   content_sha256: string;
+  batch_role?: "target" | "background" | string;
+  narrative_context?: {
+    context_revision?: number;
+    resolution_state?: string;
+    publication_status?: string;
+    scope_sha256?: string;
+  };
+  narrative_context_sha256?: string;
+  narrative_context_payload_sha256?: string;
   char_count?: number;
   ordinal?: number;
 };

@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
@@ -72,10 +72,17 @@ from .narrative_context import (
     payload_sha256,
     scope_relation,
 )
+from .narrative_context_inference import (
+    MAX_INFERENCE_INPUT_CHARS,
+    NarrativeContextInferenceInputError,
+    NarrativeContextInferenceOutputError,
+    infer_narrative_context,
+)
 from .projections import project_graph, project_timeline, record_sort_key
 from .provider import (
     OpenAICompatibleProvider,
     ProviderError,
+    RetryPolicy,
     safe_thinking_configuration,
     sanitize_request_id,
 )
@@ -225,6 +232,28 @@ class CharacterTraitDecisionIn(BaseModel):
     comment: str = Field(default="", max_length=2_000)
 
 
+class AnalysisRunIn(BaseModel):
+    """Optional review-batch selector; an omitted body keeps legacy behavior."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["draft_review", "baseline_build", "full_review"] = (
+        "full_review"
+    )
+    target_document_ids: list[str] | None = Field(
+        default=None, max_length=256
+    )
+    sensitivity: Literal[
+        "conservative", "balanced", "exploratory"
+    ] = "balanced"
+
+
+class NarrativeContextInferenceIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+
+
 ClarificationCategory = Literal[
     "scope_unknown",
     "missing_causal_bridge",
@@ -268,6 +297,255 @@ def _run_in_workspace(db, run_id: str, workspace_id: str) -> AnalysisRunRow | No
     )
 
 
+def _review_batch_intent(payload: AnalysisRunIn) -> dict:
+    requested = payload.target_document_ids
+    if requested is not None:
+        normalized = [value.strip() for value in requested]
+        if any(not value or len(value) > 36 for value in normalized):
+            raise HTTPException(422, "target_document_ids 包含无效文档 ID")
+        if len(set(normalized)) != len(normalized):
+            raise HTTPException(422, "target_document_ids 不能重复")
+        requested = sorted(normalized)
+    if payload.mode != "draft_review" and requested:
+        raise HTTPException(
+            422, "target_document_ids 仅适用于 draft_review 模式"
+        )
+    if payload.mode == "draft_review" and requested == []:
+        raise HTTPException(
+            422, "draft_review 的显式 target_document_ids 不能为空"
+        )
+    return {
+        "mode": payload.mode,
+        "sensitivity": payload.sensitivity,
+        "requested_target_document_ids": requested,
+    }
+
+
+def _review_batch_selection(
+    db,
+    *,
+    project_id: str,
+    payload: AnalysisRunIn,
+) -> tuple[list[DocumentRow], dict[str, str], dict]:
+    """Select a closed target/background set from server-owned metadata."""
+
+    intent = _review_batch_intent(payload)
+    documents = list(
+        db.scalars(
+            select(DocumentRow)
+            .where(
+                DocumentRow.project_id == project_id,
+                DocumentRow.active.is_(True),
+            )
+            .order_by(DocumentRow.created_at, DocumentRow.id)
+        ).all()
+    )
+    if not documents:
+        raise HTTPException(400, "项目没有可分析文档")
+
+    if payload.mode == "full_review":
+        roles = {row.id: "target" for row in documents}
+        coverage = {
+            **intent,
+            "selected_document_ids": [row.id for row in documents],
+            "target_document_ids": [row.id for row in documents],
+            "background_document_ids": [],
+            "excluded_documents": [],
+        }
+        return documents, roles, coverage
+
+    contexts = {
+        row.document_id: row
+        for row in db.scalars(
+            select(DocumentContextRow).where(
+                DocumentContextRow.document_id.in_([row.id for row in documents])
+            )
+        ).all()
+    }
+    revisions = latest_context_revisions(db, [row.id for row in documents])
+    document_by_id = {row.id: row for row in documents}
+    metadata: dict[str, tuple[str, dict]] = {}
+    for document in documents:
+        legacy = contexts.get(document.id)
+        role = legacy.document_role if legacy else DEFAULT_DOCUMENT_ROLE
+        story_scope = legacy.story_scope if legacy else DEFAULT_STORY_SCOPE
+        metadata[document.id] = (
+            role,
+            context_snapshot_payload(
+                revisions.get(document.id),
+                document_role=role,
+                story_scope=story_scope,
+            ),
+        )
+
+    excluded: list[dict[str, str]] = []
+    excluded_ids: set[str] = set()
+    target_selection_exclusions: list[dict[str, str]] = []
+
+    def exclude(document: DocumentRow, reason: str) -> None:
+        if document.id in excluded_ids:
+            return
+        excluded_ids.add(document.id)
+        excluded.append(
+            {
+                "document_id": document.id,
+                "document_name": document.name,
+                "reason": reason,
+            }
+        )
+
+    targets: list[DocumentRow] = []
+    if payload.mode == "draft_review":
+        requested = intent["requested_target_document_ids"]
+        if requested is not None:
+            # The same generic 404 covers foreign-workspace, foreign-project,
+            # inactive, and unknown identifiers without disclosing existence.
+            if any(document_id not in document_by_id for document_id in requested):
+                raise HTTPException(404, "目标文档不存在")
+            candidates = [document_by_id[document_id] for document_id in requested]
+            blocking: list[dict[str, str]] = []
+            for document in candidates:
+                role, narrative = metadata[document.id]
+                if role != "chapter":
+                    blocking.append(
+                        {
+                            "document_id": document.id,
+                            "document_name": document.name,
+                            "reason": "target_must_be_chapter",
+                        }
+                    )
+                elif narrative.get("resolution_state") != "confirmed":
+                    blocking.append(
+                        {
+                            "document_id": document.id,
+                            "document_name": document.name,
+                            "reason": "narrative_context_unconfirmed",
+                        }
+                    )
+                elif narrative.get("publication_status") not in {
+                    "draft",
+                    "in_review",
+                }:
+                    blocking.append(
+                        {
+                            "document_id": document.id,
+                            "document_name": document.name,
+                            "reason": "not_draft_or_in_review",
+                        }
+                    )
+                else:
+                    targets.append(document)
+            if blocking:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "invalid_draft_review_targets",
+                        "message": "显式目标必须是已确认的草稿或审阅中文档",
+                        "blocking_documents": blocking,
+                    },
+                )
+        else:
+            for document in documents:
+                role, narrative = metadata[document.id]
+                publication = narrative.get("publication_status")
+                if publication not in {"draft", "in_review"}:
+                    continue
+                if role != "chapter":
+                    target_selection_exclusions.append(
+                        {
+                            "document_id": document.id,
+                            "document_name": document.name,
+                            "reason": "target_must_be_chapter",
+                        }
+                    )
+                    continue
+                if narrative.get("resolution_state") != "confirmed":
+                    exclude(document, "narrative_context_unconfirmed")
+                    continue
+                targets.append(document)
+        if not targets:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "no_eligible_draft_targets",
+                    "message": "没有已确认的草稿或审阅中文档可作为审查目标",
+                    "excluded_documents": [
+                        *excluded,
+                        *target_selection_exclusions,
+                    ],
+                },
+            )
+
+    target_ids = {row.id for row in targets}
+    backgrounds: list[DocumentRow] = []
+    for document in documents:
+        if document.id in target_ids:
+            continue
+        role, narrative = metadata[document.id]
+        if narrative.get("resolution_state") != "confirmed":
+            exclude(document, "narrative_context_unconfirmed")
+            continue
+        if narrative.get("publication_status") == "retired":
+            exclude(document, "retired_document")
+            continue
+        if (
+            payload.mode == "baseline_build"
+            and narrative.get("publication_status") in {"draft", "in_review"}
+        ):
+            exclude(document, "draft_excluded_from_baseline")
+            continue
+        is_authority = role in {"canon", "character_profile"}
+        is_published_history = (
+            narrative.get("publication_status") == "published"
+        )
+        if not (is_authority or is_published_history):
+            exclude(document, "not_authority_or_published_history")
+            continue
+        if targets and not any(
+            scope_relation(
+                narrative.get("scope", {}),
+                metadata[target.id][1].get("scope", {}),
+                first_resolution=str(narrative.get("resolution_state", "")),
+                second_resolution=str(
+                    metadata[target.id][1].get("resolution_state", "")
+                ),
+            )
+            == "compatible"
+            for target in targets
+        ):
+            exclude(document, "narrative_scope_incompatible")
+            continue
+        backgrounds.append(document)
+
+    selected = [
+        row for row in documents if row.id in target_ids or row in backgrounds
+    ]
+    if payload.mode == "baseline_build" and not selected:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "no_eligible_baseline_inputs",
+                "message": "没有已确认的设定、角色资料或已发布历史可建立基线",
+                "excluded_documents": excluded,
+            },
+        )
+    roles = {
+        row.id: ("target" if row.id in target_ids else "background")
+        for row in selected
+    }
+    coverage = {
+        **intent,
+        "selected_document_ids": [row.id for row in selected],
+        "target_document_ids": [row.id for row in selected if roles[row.id] == "target"],
+        "background_document_ids": [
+            row.id for row in selected if roles[row.id] == "background"
+        ],
+        "excluded_documents": excluded,
+        "target_selection_exclusions": target_selection_exclusions,
+    }
+    return selected, roles, coverage
+
+
 def _issue_in_workspace(db, issue_id: str, workspace_id: str) -> IssueRow | None:
     return db.scalar(
         select(IssueRow)
@@ -285,8 +563,32 @@ def serialize_run(row: AnalysisRunRow, db=None) -> dict:
     payload["error"] = safe_persisted_analysis_error(row.error)
     prices_configured = settings.model_input_price_per_million is not None and settings.model_output_price_per_million is not None
     payload["estimated_cost_usd"] = row.estimated_cost_usd if prices_configured else None
+    coverage = row.batch_coverage if isinstance(row.batch_coverage, dict) else {}
+    payload["review_batch"] = {
+        "mode": row.batch_mode or "full_review",
+        "sensitivity": row.sensitivity or "balanced",
+        "target_document_ids": list(coverage.get("target_document_ids", [])),
+        "background_document_ids": list(
+            coverage.get("background_document_ids", [])
+        ),
+        "excluded_documents": list(coverage.get("excluded_documents", [])),
+        "target_selection_exclusions": list(
+            coverage.get("target_selection_exclusions", [])
+        ),
+    }
     if db is not None:
         payload["input_documents"] = run_input_metadata(db, row.id)
+        if not coverage and payload["input_documents"]:
+            payload["review_batch"]["target_document_ids"] = [
+                item["document_id"]
+                for item in payload["input_documents"]
+                if item.get("batch_role", "target") == "target"
+            ]
+            payload["review_batch"]["background_document_ids"] = [
+                item["document_id"]
+                for item in payload["input_documents"]
+                if item.get("batch_role") == "background"
+            ]
         diagnostic = db.get(AnalysisDiagnosticRow, row.id)
         usage_accounting = (
             diagnostic.payload.get("usage_accounting")
@@ -367,7 +669,7 @@ def serialize_document(row: DocumentRow, include_content: bool = True, db=None) 
 def serialize_narrative_context_revision(
     row: DocumentNarrativeContextRevisionRow,
 ) -> dict:
-    return {
+    payload = {
         "id": row.id,
         "project_id": row.project_id,
         "document_id": row.document_id,
@@ -381,6 +683,28 @@ def serialize_narrative_context_revision(
         "inference_confidence": row.inference_confidence,
         "created_at": row.created_at,
     }
+    if row.origin == "model_inferred":
+        payload["inference"] = {
+            "confidence": row.inference_confidence,
+            "reasoning": row.inference_reasoning or "",
+            "evidence": (
+                row.inference_evidence
+                if isinstance(row.inference_evidence, list)
+                else []
+            ),
+            "usage": (
+                row.inference_usage
+                if isinstance(row.inference_usage, dict)
+                else {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                }
+            ),
+        }
+    else:
+        payload["inference"] = None
+    return payload
 
 
 def serialize_character_trait_candidate(row: CharacterTraitCandidateRow) -> dict:
@@ -666,12 +990,40 @@ def _create_run_or_load_winner(
 
 def _accepted_run_payload(db, run: AnalysisRunRow, *, created: bool) -> dict:
     execution = db.get(AnalysisRunExecutionRow, run.id)
+    coverage = run.batch_coverage if isinstance(run.batch_coverage, dict) else {}
+    if coverage:
+        target_ids = list(coverage.get("target_document_ids", []))
+        background_ids = list(coverage.get("background_document_ids", []))
+    else:
+        frozen = run_input_metadata(db, run.id)
+        target_ids = [
+            item["document_id"]
+            for item in frozen
+            if item.get("batch_role", "target") == "target"
+        ]
+        background_ids = [
+            item["document_id"]
+            for item in frozen
+            if item.get("batch_role") == "background"
+        ]
     return {
         "id": run.id,
         "project_id": run.project_id,
         "status": run.status,
         "retried_from": execution.retried_from_run_id if execution else None,
         "deduplicated": not created,
+        "review_batch": {
+            "mode": run.batch_mode or "full_review",
+            "sensitivity": run.sensitivity or "balanced",
+            "target_document_ids": target_ids,
+            "background_document_ids": background_ids,
+            "excluded_documents": list(
+                coverage.get("excluded_documents", [])
+            ),
+            "target_selection_exclusions": list(
+                coverage.get("target_selection_exclusions", [])
+            ),
+        },
     }
 
 
@@ -681,6 +1033,7 @@ def _require_idempotency_operation(
     *,
     retried_from_run_id: str | None,
     recheck_baseline_run_id: str | None = None,
+    review_batch_intent: dict | None = None,
 ) -> None:
     """Reject reuse of a project-scoped key for a different user intent."""
     execution = db.get(AnalysisRunExecutionRow, run.id)
@@ -691,9 +1044,21 @@ def _require_idempotency_operation(
         )
     )
     actual_baseline = comparison.baseline_run_id if comparison else None
+    coverage = run.batch_coverage if isinstance(run.batch_coverage, dict) else {}
+    actual_intent = {
+        "mode": run.batch_mode or "full_review",
+        "sensitivity": run.sensitivity or "balanced",
+        "requested_target_document_ids": coverage.get(
+            "requested_target_document_ids"
+        ),
+    }
     if (
         actual_source == retried_from_run_id
         and actual_baseline == recheck_baseline_run_id
+        and (
+            review_batch_intent is None
+            or actual_intent == review_batch_intent
+        )
     ):
         return
     raise HTTPException(
@@ -1297,6 +1662,291 @@ def get_document_narrative_context(
         }
 
 
+def _narrative_context_inference_provider() -> OpenAICompatibleProvider:
+    completion_caps = [
+        settings.narrative_context_inference_max_completion_tokens
+    ]
+    if settings.provider_max_completion_tokens is not None:
+        completion_caps.append(settings.provider_max_completion_tokens)
+    response_caps = [settings.narrative_context_inference_max_response_bytes]
+    if settings.provider_max_response_bytes is not None:
+        response_caps.append(settings.provider_max_response_bytes)
+    deadline_caps = [
+        settings.narrative_context_inference_total_deadline_seconds
+    ]
+    if settings.provider_total_deadline_seconds is not None:
+        deadline_caps.append(settings.provider_total_deadline_seconds)
+    total_deadline = min(deadline_caps)
+    bounded = settings.model_copy(
+        update={
+            # A local capability switch is required by the generic gateway;
+            # it does not enable the extraction pipeline or mutate globals.
+            "enable_model_extraction": True,
+            "provider_timeout_seconds": min(
+                settings.provider_timeout_seconds,
+                settings.narrative_context_inference_timeout_seconds,
+                total_deadline,
+            ),
+            "provider_total_deadline_seconds": total_deadline,
+            "provider_max_attempts": 1,
+            "provider_max_completion_tokens": min(completion_caps),
+            "provider_max_response_bytes": min(response_caps),
+        }
+    )
+    return OpenAICompatibleProvider(
+        bounded,
+        retry_policy=RetryPolicy(
+            max_attempts=1,
+            base_delay_seconds=0,
+            jitter_ratio=0,
+        ),
+    )
+
+
+def _narrative_context_inference_provider_error(exc: ProviderError) -> HTTPException:
+    category = exc.category
+    if category == "not_configured":
+        return HTTPException(
+            503,
+            detail={
+                "code": "context_inference_not_configured",
+                "message": "模型尚未配置，请先在服务端配置可用的模型密钥",
+            },
+        )
+    if category == "rate_limit":
+        return HTTPException(
+            429,
+            detail={
+                "code": "context_inference_rate_limited",
+                "message": "模型服务当前限流，请稍后重试",
+            },
+        )
+    if category in {"connect_timeout", "read_timeout", "transport"}:
+        return HTTPException(
+            504,
+            detail={
+                "code": "context_inference_timeout",
+                "message": "模型服务暂时不可用或响应超时，请稍后重试",
+            },
+        )
+    if category in {"unauthorized", "forbidden"}:
+        return HTTPException(
+            503,
+            detail={
+                "code": "context_inference_credentials_rejected",
+                "message": "模型凭据不可用，请检查服务端模型配置",
+            },
+        )
+    return HTTPException(
+        502,
+        detail={
+            "code": "context_inference_provider_error",
+            "message": "模型未能生成上下文建议，请稍后重试",
+        },
+    )
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/documents/{document_id}"
+    "/narrative-context/inference",
+    status_code=201,
+)
+def infer_document_narrative_context(
+    project_id: str,
+    document_id: str,
+    payload: NarrativeContextInferenceIn,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    """Suggest context from one immutable active body; never confirm authority."""
+
+    # Phase 1 is read-only and closes before any network activity.
+    with SessionLocal() as db:
+        project = _project_in_workspace(db, project_id, context.workspace_id)
+        if project is None:
+            raise HTTPException(404, "项目不存在")
+        document = db.scalar(
+            select(DocumentRow).where(
+                DocumentRow.id == document_id,
+                DocumentRow.project_id == project_id,
+                DocumentRow.active.is_(True),
+            )
+        )
+        if document is None:
+            raise HTTPException(404, "文档不存在")
+        latest = latest_context_revisions(db, [document_id]).get(document_id)
+        actual_revision = latest.revision if latest is not None else 0
+        if payload.expected_revision != actual_revision:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "narrative_context_revision_conflict",
+                    "message": "叙事上下文已被更新，请刷新后重试",
+                    "actual_revision": actual_revision,
+                },
+            )
+        if latest is not None and latest.resolution_state == "confirmed":
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "context_inference_already_confirmed",
+                    "message": "资料上下文已由用户确认；如需修改，请使用人工修订而非 AI 建议覆盖",
+                    "actual_revision": actual_revision,
+                },
+            )
+        frozen = {
+            "version": document.version,
+            "name": document.name,
+            "content": document.content,
+            "content_sha256": document_content_sha256(document.content),
+        }
+
+    if len(frozen["content"]) > MAX_INFERENCE_INPUT_CHARS:
+        raise HTTPException(
+            413,
+            detail={
+                "code": "context_inference_input_too_large",
+                "message": "文档过长，暂不适合自动识别，请先手动设置资料上下文",
+                "max_chars": MAX_INFERENCE_INPUT_CHARS,
+            },
+        )
+    provider = _narrative_context_inference_provider()
+    try:
+        suggestion = infer_narrative_context(
+            document_id=document_id,
+            document_name=str(frozen["name"]),
+            content=str(frozen["content"]),
+            provider=provider,
+        )
+    except NarrativeContextInferenceInputError:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "context_inference_input_invalid",
+                "message": "文档内容为空或无法在安全上限内分析",
+            },
+        ) from None
+    except NarrativeContextInferenceOutputError:
+        raise HTTPException(
+            502,
+            detail={
+                "code": "context_inference_invalid_output",
+                "message": "模型返回的建议缺少有效结构或原文证据，请重试或手动设置",
+            },
+        ) from None
+    except ProviderError as exc:
+        raise _narrative_context_inference_provider_error(exc) from None
+
+    evidence_payload = [
+        {
+            **span.model_dump(mode="json"),
+            "supported_fields": support["supported_fields"],
+        }
+        for span, support in zip(
+            suggestion.evidence, suggestion.evidence_support, strict=True
+        )
+    ]
+
+    # Phase 3 obtains locks only after the provider call and revalidates every
+    # frozen identity before one atomic role/context write.
+    with SessionLocal() as db:
+        project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if project is None:
+            raise HTTPException(404, "项目不存在")
+        current = db.scalar(
+            select(DocumentRow)
+            .where(
+                DocumentRow.id == document_id,
+                DocumentRow.project_id == project_id,
+                DocumentRow.active.is_(True),
+            )
+            .with_for_update()
+        )
+        if (
+            current is None
+            or current.version != frozen["version"]
+            or current.name != frozen["name"]
+            or document_content_sha256(current.content) != frozen["content_sha256"]
+        ):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "context_inference_document_changed",
+                    "message": "模型分析期间文档已更新，本次建议未保存，请重新识别",
+                },
+            )
+        latest = latest_context_revisions(db, [document_id]).get(document_id)
+        actual_revision = latest.revision if latest is not None else 0
+        if payload.expected_revision != actual_revision:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "narrative_context_revision_conflict",
+                    "message": "模型分析期间叙事上下文已更新，本次建议未保存",
+                    "actual_revision": actual_revision,
+                },
+            )
+        legacy = db.get(DocumentContextRow, document_id)
+        if legacy is None:
+            legacy = DocumentContextRow(
+                document_id=document_id,
+                document_role=suggestion.document_role,
+                story_scope=DEFAULT_STORY_SCOPE,
+            )
+            db.add(legacy)
+        else:
+            legacy.document_role = suggestion.document_role
+        try:
+            row = add_context_revision(
+                db,
+                project_id=project_id,
+                document_id=document_id,
+                document_role=suggestion.document_role,
+                resolution_state="inferred",
+                publication_status=suggestion.publication_status,
+                scope=suggestion.scope,
+                origin="model_inferred",
+                created_by_user_id=context.user_id,
+                expected_revision=payload.expected_revision,
+                inference_confidence=suggestion.confidence,
+                inference_reasoning=suggestion.reasoning,
+                inference_evidence=evidence_payload,
+                inference_usage=suggestion.usage,
+            )
+            db.commit()
+        except NarrativeContextRevisionConflict as exc:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "narrative_context_revision_conflict",
+                    "message": "模型分析期间叙事上下文已更新，本次建议未保存",
+                    "actual_revision": exc.actual_revision,
+                },
+            ) from None
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "narrative_context_revision_conflict",
+                    "message": "模型分析期间叙事上下文已更新，本次建议未保存",
+                },
+            ) from None
+        return {
+            "document_id": document_id,
+            "document_role": suggestion.document_role,
+            "suggestion": serialize_narrative_context_revision(row),
+            "usage": suggestion.usage,
+        }
+
+
 @app.post(
     "/api/v1/projects/{project_id}/documents/{document_id}/narrative-context/revisions",
     status_code=201,
@@ -1327,8 +1977,20 @@ def create_document_narrative_context_revision(
         if document is None:
             raise HTTPException(404, "文档不存在")
         legacy = db.get(DocumentContextRow, document_id)
-        role = legacy.document_role if legacy else DEFAULT_DOCUMENT_ROLE
+        role = (
+            payload.document_role
+            or (legacy.document_role if legacy else DEFAULT_DOCUMENT_ROLE)
+        )
         try:
+            if legacy is None:
+                legacy = DocumentContextRow(
+                    document_id=document_id,
+                    document_role=role,
+                    story_scope=DEFAULT_STORY_SCOPE,
+                )
+                db.add(legacy)
+            else:
+                legacy.document_role = role
             row = add_context_revision(
                 db,
                 project_id=project_id,
@@ -1361,7 +2023,10 @@ def create_document_narrative_context_revision(
                     "message": "叙事上下文已被更新，请刷新后重试",
                 },
             ) from None
-        return serialize_narrative_context_revision(row)
+        return {
+            **serialize_narrative_context_revision(row),
+            "document_role": role,
+        }
 
 
 @app.post("/api/v1/projects/{project_id}/documents/text", status_code=201)
@@ -1665,6 +2330,7 @@ def list_characters(
             .where(
                 AnalysisRunRow.project_id == project_id,
                 AnalysisRunRow.status == "completed",
+                AnalysisRunRow.batch_mode == "baseline_build",
             )
             .order_by(
                 AnalysisRunRow.completed_at.desc(),
@@ -1673,20 +2339,45 @@ def list_characters(
             )
             .limit(1)
         )
-        rows = list(
-            db.scalars(
-                select(CharacterTraitCandidateRow)
-                .join(
-                    AnalysisRunRow,
-                    AnalysisRunRow.id == CharacterTraitCandidateRow.source_run_id,
+        if latest_completed_run is None:
+            # Compatibility for projects that created their character baseline
+            # before Guided Review Batch existed.  A completed draft_review is
+            # never a baseline, and the fallback is permanently disabled as
+            # soon as the project has any completed baseline_build.
+            latest_completed_run = db.scalar(
+                select(AnalysisRunRow)
+                .where(
+                    AnalysisRunRow.project_id == project_id,
+                    AnalysisRunRow.status == "completed",
+                    or_(
+                        AnalysisRunRow.batch_mode == "full_review",
+                        AnalysisRunRow.batch_mode.is_(None),
+                    ),
                 )
-                .where(CharacterTraitCandidateRow.project_id == project_id)
-                .where(AnalysisRunRow.status == "completed")
                 .order_by(
-                    CharacterTraitCandidateRow.character_key,
-                    CharacterTraitCandidateRow.created_at,
+                    AnalysisRunRow.completed_at.desc(),
+                    AnalysisRunRow.created_at.desc(),
+                    AnalysisRunRow.id.desc(),
                 )
-            ).all()
+                .limit(1)
+            )
+        rows = (
+            list(
+                db.scalars(
+                    select(CharacterTraitCandidateRow)
+                    .where(
+                        CharacterTraitCandidateRow.project_id == project_id,
+                        CharacterTraitCandidateRow.source_run_id
+                        == latest_completed_run.id,
+                    )
+                    .order_by(
+                        CharacterTraitCandidateRow.character_key,
+                        CharacterTraitCandidateRow.created_at,
+                    )
+                ).all()
+            )
+            if latest_completed_run is not None
+            else []
         )
         grouped: dict[str, dict] = {}
         for row in rows:
@@ -2227,11 +2918,14 @@ def list_character_drift_issues(
 @app.post("/api/v1/projects/{project_id}/analysis-runs", status_code=202)
 def start_analysis(
     project_id: str,
+    payload: AnalysisRunIn | None = None,
     idempotency_key_header: Annotated[
         str | None, Header(alias="Idempotency-Key", max_length=128)
     ] = None,
     context: AuthContext = Depends(require_csrf),
 ) -> dict:
+    request = payload or AnalysisRunIn()
+    intent = _review_batch_intent(request)
     idempotency_key = _normalize_idempotency_key(idempotency_key_header)
     with SessionLocal() as db:
         project = db.scalar(
@@ -2247,21 +2941,25 @@ def start_analysis(
         existing = _idempotent_run(db, project_id, idempotency_key)
         if existing is not None:
             _require_idempotency_operation(
-                db, existing, retried_from_run_id=None
+                db,
+                existing,
+                retried_from_run_id=None,
+                review_batch_intent=intent,
             )
             return _accepted_run_payload(db, existing, created=False)
-        documents = db.scalars(
-            select(DocumentRow)
-            .where(DocumentRow.project_id == project_id, DocumentRow.active.is_(True))
-            .order_by(DocumentRow.created_at, DocumentRow.id)
-        ).all()
-        if not documents:
-            raise HTTPException(400, "项目没有可分析文档")
+        documents, batch_roles, coverage = _review_batch_selection(
+            db,
+            project_id=project_id,
+            payload=request,
+        )
         enforce_daily_model_budget(db, context.workspace_id)
         run = AnalysisRunRow(
             project_id=project_id,
             requested_by_user_id=context.user_id,
             idempotency_key=idempotency_key,
+            batch_mode=request.mode,
+            sensitivity=request.sensitivity,
+            batch_coverage=coverage,
         )
         try:
             run, created = _create_run_or_load_winner(
@@ -2269,7 +2967,10 @@ def start_analysis(
                 run,
                 idempotency_key,
                 lambda created_run: capture_run_inputs(
-                    db, created_run, list(documents)
+                    db,
+                    created_run,
+                    list(documents),
+                    batch_roles=batch_roles,
                 ),
             )
         except CharacterTraitSnapshotLimitExceeded:
@@ -2281,7 +2982,12 @@ def start_analysis(
                     "message": "已确认角色档案数量超过单次分析上限",
                 },
             ) from None
-        _require_idempotency_operation(db, run, retried_from_run_id=None)
+        _require_idempotency_operation(
+            db,
+            run,
+            retried_from_run_id=None,
+            review_batch_intent=intent,
+        )
         payload = _accepted_run_payload(db, run, created=created)
         run_id = run.id
     if created:
@@ -2408,6 +3114,11 @@ def retry_run(
             project_id=old.project_id,
             requested_by_user_id=context.user_id,
             idempotency_key=idempotency_key,
+            batch_mode=old.batch_mode or "full_review",
+            sensitivity=old.sensitivity or "balanced",
+            batch_coverage=json.loads(
+                json.dumps(old.batch_coverage or {}, ensure_ascii=False)
+            ),
         )
         row, created = _create_run_or_load_winner(
             db,
@@ -2480,24 +3191,64 @@ def start_recheck(
         )
         if not baseline_inputs:
             raise HTTPException(409, MISSING_SNAPSHOT_ERROR)
-        documents = list(
-            db.scalars(
-                select(DocumentRow)
-                .where(
-                    DocumentRow.project_id == baseline.project_id,
-                    DocumentRow.active.is_(True),
+        batch_mode = baseline.batch_mode or "full_review"
+        sensitivity = baseline.sensitivity or "balanced"
+        target_document_ids: list[str] | None = None
+        if batch_mode == "draft_review":
+            baseline_metadata = run_input_metadata(db, baseline_run_id)
+            logical_target_names = {
+                str(item["document_name"]).casefold()
+                for item in baseline_metadata
+                if item.get("batch_role") == "target"
+            }
+            if not logical_target_names:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "missing_draft_review_targets",
+                        "message": "基准运行缺少可复检的冻结目标",
+                    },
                 )
-                .order_by(DocumentRow.created_at, DocumentRow.id)
-            ).all()
+            current_targets = list(
+                db.scalars(
+                    select(DocumentRow)
+                    .where(
+                        DocumentRow.project_id == baseline.project_id,
+                        DocumentRow.active.is_(True),
+                        func.lower(DocumentRow.name).in_(logical_target_names),
+                    )
+                    .order_by(DocumentRow.created_at, DocumentRow.id)
+                ).all()
+            )
+            if {row.name.casefold() for row in current_targets} != logical_target_names:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "logical_target_missing",
+                        "message": "草稿目标的当前活动版本缺失，无法复检",
+                    },
+                )
+            target_document_ids = [row.id for row in current_targets]
+        recheck_request = AnalysisRunIn(
+            mode=batch_mode,
+            sensitivity=sensitivity,
+            target_document_ids=target_document_ids,
         )
-        if not documents:
-            raise HTTPException(400, "项目没有可复检文档")
+        documents, batch_roles, coverage = _review_batch_selection(
+            db,
+            project_id=baseline.project_id,
+            payload=recheck_request,
+        )
+        coverage["recheck_baseline_run_id"] = baseline_run_id
         try:
             baseline_signature = frozen_run_source_signature(
                 db, baseline_run_id
             )
             current_signature = current_project_source_signature(
-                db, baseline.project_id, documents
+                db,
+                baseline.project_id,
+                documents,
+                batch_roles=batch_roles,
             )
         except CharacterTraitSnapshotLimitExceeded:
             raise HTTPException(
@@ -2520,10 +3271,18 @@ def start_recheck(
             project_id=baseline.project_id,
             requested_by_user_id=context.user_id,
             idempotency_key=idempotency_key,
+            batch_mode=batch_mode,
+            sensitivity=sensitivity,
+            batch_coverage=coverage,
         )
 
         def prepare_recheck(created_run: AnalysisRunRow) -> None:
-            capture_run_inputs(db, created_run, documents)
+            capture_run_inputs(
+                db,
+                created_run,
+                documents,
+                batch_roles=batch_roles,
+            )
             db.flush()
             target_inputs = list(
                 db.scalars(

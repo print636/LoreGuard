@@ -323,11 +323,11 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
                     }}
                     disabled={entryPending}
                   />
-                  <small className="fieldHelp">支持 {supportedUploadLabel}；可一次选择多份文件。</small>
+                  <small className="fieldHelp">支持 {supportedUploadLabel}；可一次选择多份文件。默认按参考材料导入，进入工作台后仍需确认发布状态与故事位置。</small>
                 </label>
               )}
               {entryMode === "import" && entryFiles.length > 0 && (
-                <ul className="quickFileRoles" aria-label="逐文件设置文档类型">
+                <ul className="quickFileRoles" aria-label="逐文件初步设置资料类型">
                   {entryFiles.map((entry, index) => (
                     <li key={`${entry.file.name}-${entry.file.size}-${entry.file.lastModified}-${index}`}>
                       <span title={entry.file.name}>{entry.file.name}</span>

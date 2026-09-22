@@ -8,6 +8,7 @@ import "./workspace-shell.css";
 import "./revision.css";
 import "./product-shell.css";
 import "./features/characters/character-workspace.css";
+import "./features/workflow/guided-review.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

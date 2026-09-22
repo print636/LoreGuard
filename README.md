@@ -4,6 +4,25 @@ LoreGuard is an evidence-first narrative consistency review platform for game wr
 
 See [README.zh-CN.md](README.zh-CN.md) for the full guide. Credentials are read only from server-side environment variables and must never be committed.
 
+## Guided review workflow
+
+The recommended path is `baseline_build` -> human confirmation of character-profile candidates -> `draft_review`:
+
+1. Import documents and confirm each document's role, publication status and narrative scope. An explicit AI inference request may propose these fields with source evidence, but the server always stores it as `origin=model_inferred`, `resolution_state=inferred`, and unresolved authority. It never auto-confirms or promotes model output.
+2. Run `baseline_build` to freeze only confirmed canon, character profiles and published history as background. Draft, unconfirmed and retired inputs are excluded with visible reasons. If the default-off character-consistency stage is enabled, it may produce candidates; a human must confirm or reject them.
+3. Run `draft_review` with confirmed draft or in-review chapters as targets. The server—not the client—derives compatible confirmed background, and freezes `target`/`background` roles with document versions and context snapshots. Background-only findings are not presented as draft issues.
+
+Context inference is single-document and limited to 30,000 characters and 2,000 lines; larger inputs require manual context assignment. It is not a story rewrite, bulk classifier, authority decision, or production-accuracy claim. See the [V1 workflow and API contract](docs/guided-review-batch-v1.md) and the [full Chinese guide](README.zh-CN.md).
+
+Relevant API entry points are:
+
+- `POST /api/v1/projects/{project_id}/documents/{document_id}/narrative-context/inference` with `expected_revision` for a model suggestion only;
+- `POST /api/v1/projects/{project_id}/documents/{document_id}/narrative-context/revisions` for the human-reviewed revision;
+- `POST /api/v1/projects/{project_id}/analysis-runs` with `mode=baseline_build|draft_review|full_review`, optional draft targets and a sensitivity level;
+- `GET /api/v1/analysis-runs/{run_id}` to inspect `review_batch` coverage and frozen `input_documents[].batch_role`.
+
+An omitted analysis body or `{}` retains the legacy `full_review` behavior for existing clients. Retry preserves the frozen batch; recheck advances only the logical draft targets to their current active versions and re-derives the background.
+
 Quick start:
 
 ```bash

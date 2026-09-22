@@ -85,6 +85,12 @@ class NarrativeContextInput(BaseModel):
 
 class NarrativeContextRevisionInput(NarrativeContextInput):
     expected_revision: int = Field(ge=0)
+    # Optional so every existing confirmation payload remains valid.  A user
+    # may correct an initially misclassified import in the same optimistic
+    # transaction that confirms its authority metadata.
+    document_role: Literal[
+        "chapter", "canon", "character_profile", "reference"
+    ] | None = None
 
 
 def canonical_json(value: object) -> str:
@@ -224,6 +230,9 @@ def add_context_revision(
     created_by_user_id: str | None,
     expected_revision: int | None = None,
     inference_confidence: float | None = None,
+    inference_reasoning: str | None = None,
+    inference_evidence: list[dict[str, Any]] | None = None,
+    inference_usage: dict[str, int] | None = None,
 ) -> DocumentNarrativeContextRevisionRow:
     latest = db.scalar(
         select(DocumentNarrativeContextRevisionRow)
@@ -253,6 +262,9 @@ def add_context_revision(
         scope_payload=scope_payload,
         scope_sha256=payload_sha256(scope_payload),
         inference_confidence=inference_confidence,
+        inference_reasoning=inference_reasoning,
+        inference_evidence=inference_evidence,
+        inference_usage=inference_usage,
         created_by_user_id=created_by_user_id,
     )
     db.add(row)

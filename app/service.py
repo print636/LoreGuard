@@ -783,9 +783,20 @@ def _capture_confirmed_traits(
 
 
 def capture_run_inputs(
-    db, run: AnalysisRunRow, documents: list[DocumentRow]
+    db,
+    run: AnalysisRunRow,
+    documents: list[DocumentRow],
+    *,
+    batch_roles: dict[str, str] | None = None,
 ) -> list[AnalysisRunInputRow]:
     """Freeze current document bodies in the caller's creation transaction."""
+    resolved_batch_roles = batch_roles or {}
+    invalid_roles = set(resolved_batch_roles.values()) - {"target", "background"}
+    unknown_documents = set(resolved_batch_roles) - {
+        document.id for document in documents
+    }
+    if invalid_roles or unknown_documents:
+        raise ValueError("invalid analysis input batch role mapping")
     document_contexts = {
         row.document_id: row
         for row in db.scalars(
@@ -817,6 +828,7 @@ def capture_run_inputs(
                     context.document_role if context else DEFAULT_DOCUMENT_ROLE
                 ),
                 story_scope=context.story_scope if context else DEFAULT_STORY_SCOPE,
+                batch_role=resolved_batch_roles.get(document.id, "target"),
             )
         )
     narrative_contexts = _snapshot_narrative_contexts(
@@ -880,6 +892,9 @@ def copy_run_inputs(
                     context.document_role if context else DEFAULT_DOCUMENT_ROLE
                 ),
                 story_scope=context.story_scope if context else DEFAULT_STORY_SCOPE,
+                batch_role=(
+                    context.batch_role if context else "target"
+                ),
             )
         )
         narrative = source_narrative_context.get(source_row.id)
@@ -978,6 +993,11 @@ def run_input_metadata(db, run_id: str) -> list[dict]:
                 contexts[row.id].story_scope
                 if row.id in contexts
                 else DEFAULT_STORY_SCOPE
+            ),
+            "batch_role": (
+                contexts[row.id].batch_role
+                if row.id in contexts
+                else "target"
             ),
             "context_explicit": row.id in contexts,
             "narrative_context": (
@@ -1096,6 +1116,7 @@ def frozen_run_source_signature(db, run_id: str) -> str:
                     "content_sha256": row["content_sha256"],
                     "document_role": row["document_role"],
                     "story_scope": row["story_scope"],
+                    "batch_role": row["batch_role"],
                     "narrative_context_sha256": row[
                         "narrative_context_sha256"
                     ],
@@ -1110,8 +1131,13 @@ def frozen_run_source_signature(db, run_id: str) -> str:
 
 
 def current_project_source_signature(
-    db, project_id: str, documents: list[DocumentRow]
+    db,
+    project_id: str,
+    documents: list[DocumentRow],
+    *,
+    batch_roles: dict[str, str] | None = None,
 ) -> str:
+    resolved_batch_roles = batch_roles or {}
     contexts = {
         row.document_id: row
         for row in db.scalars(
@@ -1142,6 +1168,7 @@ def current_project_source_signature(
                 "content_sha256": document_content_sha256(document.content),
                 "document_role": role,
                 "story_scope": story_scope,
+                "batch_role": resolved_batch_roles.get(document.id, "target"),
                 "narrative_context_sha256": narrative_context_semantic_sha256(
                     context_payload
                 ),
@@ -1938,6 +1965,16 @@ def _load_verified_snapshot(db, run_id: str) -> tuple[list[DocumentInput], list[
     run = db.get(AnalysisRunRow, run_id)
     if run is None:
         raise RuntimeError("RUN_INPUT_SNAPSHOT_CORRUPT: analysis run is missing")
+    batch_mode = run.batch_mode or "full_review"
+    sensitivity = run.sensitivity or "balanced"
+    if batch_mode not in {"draft_review", "baseline_build", "full_review"}:
+        raise RuntimeError(
+            "RUN_INPUT_SNAPSHOT_CORRUPT: review batch mode is invalid"
+        )
+    if sensitivity not in {"conservative", "balanced", "exploratory"}:
+        raise RuntimeError(
+            "RUN_INPUT_SNAPSHOT_CORRUPT: review batch sensitivity is invalid"
+        )
     trait_rows = list(
         db.scalars(
             select(AnalysisRunCharacterTraitInputRow)
@@ -1964,8 +2001,15 @@ def _load_verified_snapshot(db, run_id: str) -> tuple[list[DocumentInput], list[
             )
     documents: list[DocumentInput] = []
     metadata: list[dict] = []
+    frozen_batch_roles: list[str] = []
     for row in rows:
         context = contexts.get(row.id)
+        batch_role = context.batch_role if context else "target"
+        if batch_role not in {"target", "background"}:
+            raise RuntimeError(
+                "RUN_INPUT_SNAPSHOT_CORRUPT: input batch role is invalid"
+            )
+        frozen_batch_roles.append(batch_role)
         actual_hash = document_content_sha256(row.content)
         if actual_hash != row.content_sha256:
             raise RuntimeError(
@@ -2013,6 +2057,7 @@ def _load_verified_snapshot(db, run_id: str) -> tuple[list[DocumentInput], list[
                     context.document_role if context else DEFAULT_DOCUMENT_ROLE
                 ),
                 "story_scope": context.story_scope if context else DEFAULT_STORY_SCOPE,
+                "batch_role": batch_role,
                 "context_explicit": context is not None,
                 "narrative_context": narrative_payload,
                 "narrative_context_sha256": narrative_hash,
@@ -2026,7 +2071,81 @@ def _load_verified_snapshot(db, run_id: str) -> tuple[list[DocumentInput], list[
                 "ordinal": row.ordinal,
             }
         )
+    if batch_mode == "draft_review" and "target" not in frozen_batch_roles:
+        raise RuntimeError(
+            "RUN_INPUT_SNAPSHOT_CORRUPT: draft review target is missing"
+        )
+    if batch_mode == "baseline_build" and (
+        not frozen_batch_roles or "target" in frozen_batch_roles
+    ):
+        raise RuntimeError(
+            "RUN_INPUT_SNAPSHOT_CORRUPT: baseline inputs must be background"
+        )
     return documents, metadata
+
+
+def _enforce_draft_issue_boundary(
+    result,
+    *,
+    batch_mode: str,
+    input_metadata: list[dict],
+    documents: list[DocumentInput],
+) -> None:
+    """Keep a draft report scoped to findings that actually touch its targets.
+
+    Background material is deliberately available to extraction and retrieval,
+    but a pre-existing background/background inconsistency is not a defect in
+    the newly submitted draft.  Suppressed findings remain visible as an
+    aggregate diagnostic so the boundary cannot silently hide its operation.
+    """
+
+    target_ids = {
+        str(row.get("document_id"))
+        for row in input_metadata
+        if row.get("batch_role") == "target"
+    }
+    batch_diagnostic = {
+        "mode": batch_mode,
+        "target_document_ids": sorted(target_ids),
+        "background_document_ids": sorted(
+            str(row.get("document_id"))
+            for row in input_metadata
+            if row.get("batch_role") == "background"
+        ),
+        "suppressed_background_only_issues": 0,
+    }
+    if batch_mode != "draft_review":
+        result.diagnostics["review_batch"] = batch_diagnostic
+        return
+    kept = [
+        issue
+        for issue in result.issues
+        if any(span.document_id in target_ids for span in issue.evidence)
+    ]
+    suppressed = len(result.issues) - len(kept)
+    result.issues = kept
+    batch_diagnostic["suppressed_background_only_issues"] = suppressed
+    result.diagnostics["review_batch"] = batch_diagnostic
+    # Provenance is an integrity map over the final report and must therefore
+    # be rebuilt after enforcing the target boundary.
+    result.diagnostics["provenance"] = build_result_provenance(
+        result.directives,
+        result.issues,
+        documents,
+    )
+
+
+def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
+    """Create an immutable per-run sensitivity view without mutating globals."""
+
+    sensitivity = run.sensitivity if run is not None else "balanced"
+    if sensitivity not in {"conservative", "balanced", "exploratory"}:
+        raise RuntimeError(
+            "RUN_INPUT_SNAPSHOT_CORRUPT: review batch sensitivity is invalid"
+        )
+    return settings.model_copy(
+        update={"character_consistency_sensitivity": sensitivity}
+    )
 
 
 def execute_analysis(
@@ -2105,6 +2224,9 @@ def execute_analysis(
                 else 0
             )
             run = db.get(AnalysisRunRow, run_id)
+            character_stage_settings = _character_stage_settings_for_run(
+                settings, run
+            )
             character_stage_result = None
             character_stage_db = CharacterConsistencyDatabase(
                 SessionLocal,
@@ -2125,9 +2247,9 @@ def execute_analysis(
                 if run is None:
                     raise ValueError("analysis run is unavailable")
                 character_stage_result = CharacterConsistencyStage(
-                    settings=settings,
+                    settings=character_stage_settings,
                     provider=_CharacterConsistencyAccountingProvider(
-                        settings,
+                        character_stage_settings,
                         character_usage_tracker,
                     ),
                     checkpoint=lambda: _checkpoint(
@@ -2398,6 +2520,13 @@ def execute_analysis(
                     ),
                 )
                 _checkpoint(run_id, token, heartbeat)
+
+            _enforce_draft_issue_boundary(
+                result,
+                batch_mode=(run.batch_mode if run is not None else "full_review"),
+                input_metadata=input_metadata,
+                documents=documents,
+            )
 
             if settings.enable_issue_evidence_review:
                 _checkpoint(run_id, token, heartbeat)

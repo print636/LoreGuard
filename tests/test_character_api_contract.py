@@ -7,7 +7,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.character_traits import upsert_character_trait_candidate
-from app.db import AnalysisRunInputRow, AnalysisRunRow, SessionLocal
+from app.db import (
+    AnalysisDiagnosticRow,
+    AnalysisRunInputRow,
+    AnalysisRunRow,
+    SessionLocal,
+)
 from app.main import app, write_limiter
 
 
@@ -36,7 +41,12 @@ def _project_and_document(client: TestClient) -> tuple[dict, dict]:
     return project, document_response.json()
 
 
-def _completed_run(client: TestClient, project_id: str) -> dict:
+def _completed_run(
+    client: TestClient,
+    project_id: str,
+    *,
+    batch_mode: str = "baseline_build",
+) -> dict:
     with patch("app.main.dispatch_analysis"):
         response = client.post(f"/api/v1/projects/{project_id}/analysis-runs")
     assert response.status_code == 202, response.text
@@ -44,6 +54,7 @@ def _completed_run(client: TestClient, project_id: str) -> dict:
         run = db.get(AnalysisRunRow, response.json()["id"])
         assert run is not None
         run.status = "completed"
+        run.batch_mode = batch_mode
         db.commit()
     return response.json()
 
@@ -139,6 +150,94 @@ def test_character_roster_envelope_distinguishes_readiness_states():
         assert not_generated.json()["readiness"] == "not_generated"
         assert not_generated.json()["source_run_id"] == run["id"]
         assert not_generated.json()["model_coverage"] == "unknown"
+
+
+def test_character_roster_legacy_fallback_then_baseline_cutover_is_run_scoped():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        legacy = _completed_run(
+            client, project["id"], batch_mode="full_review"
+        )
+        with SessionLocal() as db:
+            db.add(
+                AnalysisDiagnosticRow(
+                    run_id=legacy["id"],
+                    payload={
+                        "character_consistency": {
+                            "outcome": "completed",
+                            "reason_code": "completed",
+                        }
+                    },
+                )
+            )
+            db.commit()
+        candidate_id = _candidate(project["id"], legacy["id"])
+        confirmed = client.post(
+            _decision_path(project["id"], candidate_id),
+            json={"decision": "confirm", "expected_revision": 0},
+        )
+        assert confirmed.status_code == 201, confirmed.text
+
+        legacy_roster = client.get(
+            f"/api/v1/projects/{project['id']}/characters"
+        )
+        assert legacy_roster.status_code == 200, legacy_roster.text
+        assert legacy_roster.json()["source_run_id"] == legacy["id"]
+        assert legacy_roster.json()["readiness"] == "ready"
+        assert legacy_roster.json()["items"][0]["confirmed_trait_count"] == 1
+
+        first_draft = _completed_run(
+            client, project["id"], batch_mode="draft_review"
+        )
+        with SessionLocal() as db:
+            db.add(
+                AnalysisDiagnosticRow(
+                    run_id=first_draft["id"],
+                    payload={
+                        "character_consistency": {
+                            "outcome": "skipped",
+                            "reason_code": "no_eligible_frozen_documents",
+                        }
+                    },
+                )
+            )
+            db.commit()
+
+        after_first_draft = client.get(
+            f"/api/v1/projects/{project['id']}/characters"
+        )
+        assert after_first_draft.json()["source_run_id"] == legacy["id"]
+        assert after_first_draft.json()["readiness"] == "ready"
+
+        baseline = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            db.add(
+                AnalysisDiagnosticRow(
+                    run_id=baseline["id"],
+                    payload={
+                        "character_consistency": {
+                            "outcome": "partial",
+                            "reason_code": "chunk_limit",
+                        }
+                    },
+                )
+            )
+            db.commit()
+
+        later_draft = _completed_run(
+            client, project["id"], batch_mode="draft_review"
+        )
+        roster = client.get(f"/api/v1/projects/{project['id']}/characters")
+
+    assert roster.status_code == 200, roster.text
+    body = roster.json()
+    assert body["source_run_id"] == baseline["id"]
+    assert body["source_run_id"] != legacy["id"]
+    assert body["source_run_id"] != later_draft["id"]
+    assert body["model_coverage"] == "partial"
+    assert body["readiness"] == "not_generated"
+    assert body["items"] == []
+    assert body["total"] == 0
 
 
 def test_replaced_source_marks_pending_candidate_stale_and_blocks_confirmation():

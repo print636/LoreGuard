@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  describeModelStatus, describeRepairStatus, describeReviewAgentStatus,
+  describeCombinedReviewStatus, describeModelStatus, describeRepairStatus,
+  describeReviewAgentStatus,
 } from '../src/modelStatus.ts';
 
 const complete = {enabled:true, configured:true, total_chunks:2, attempted_chunks:2,
@@ -51,6 +52,39 @@ function withAgent(overrides={}) {
     ...overrides,
   };
 }
+
+test('combined review coverage requires the character stage to complete on frozen input', () => {
+  const completeCharacter = {
+    enabled:true, outcome:'completed', reason_code:'completed',
+    snapshot_bound:true, material_coverage:'full',
+  };
+  assert.equal(
+    describeCombinedReviewStatus(complete, completeCharacter).coverage,
+    'full',
+  );
+  assert.match(
+    describeCombinedReviewStatus(complete, completeCharacter).label,
+    /角色审查完整/,
+  );
+
+  for (const character of [
+    {enabled:true, outcome:'partial', reason_code:'bounded_partial', snapshot_bound:true},
+    {enabled:true, outcome:'degraded', reason_code:'model_stage_unavailable', snapshot_bound:true},
+    {enabled:true, outcome:'skipped', reason_code:'run_token_budget', snapshot_bound:true},
+    {enabled:false, outcome:'disabled', reason_code:'feature_disabled', snapshot_bound:true},
+  ]) {
+    const result = describeCombinedReviewStatus(complete, character);
+    assert.notEqual(result.coverage, 'full');
+    assert.match(result.label, /角色审查/);
+    assert.match(result.emptyCaveat, /不能证明没有角色/);
+  }
+});
+
+test('missing character diagnostics cannot produce a clean zero-result message', () => {
+  const result = describeCombinedReviewStatus(complete, undefined);
+  assert.equal(result.coverage, 'unknown');
+  assert.match(result.emptyCaveat, /角色审查执行状态未知/);
+});
 
 test('missing and legacy counters do not imply baseline execution', () => {
   for (const value of [undefined, {used:true, mode:'完整模型增强'}]) {

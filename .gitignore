@@ -15,5 +15,6 @@ frontend/node_modules/
 frontend/dist/
 artifacts/**
 !artifacts/.gitkeep
+.artifacts/
 .DS_Store
 Thumbs.db

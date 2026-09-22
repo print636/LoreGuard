@@ -70,6 +70,14 @@ export type ModelDiagnostics = {
 
 export type ModelCoverage = 'full' | 'partial' | 'limited' | 'unknown';
 
+export type CharacterConsistencyDiagnostics = {
+  enabled?: boolean;
+  outcome?: string;
+  reason_code?: string;
+  snapshot_bound?: boolean;
+  material_coverage?: string;
+};
+
 export type ModelStatusView = {
   coverage: ModelCoverage;
   label: string;
@@ -605,5 +613,71 @@ export function describeModelStatus(model?: ModelDiagnostics): ModelStatusView {
     coverage: 'limited', label: '模型完全降级：仅完成有限预检',
     detail: reasonDetail || '本次没有分块完成模型语义抽取，仅运行确定性基线。', counts,
     emptyCaveat: '本次仅完成有限预检，当前结果不能证明没有其他问题。',
+  };
+}
+
+export function describeCombinedReviewStatus(
+  model?: ModelDiagnostics,
+  characterConsistency?: CharacterConsistencyDiagnostics,
+): ModelStatusView {
+  const base = describeModelStatus(model);
+  if (!characterConsistency || typeof characterConsistency.outcome !== 'string') {
+    return {
+      coverage: 'unknown',
+      label: 'AI 与角色审查覆盖未知',
+      detail: '缺少角色一致性阶段的结构化执行记录；即使通用语义抽取完成，也不能声称角色审查已完成。',
+      counts: base.counts,
+      emptyCaveat: '角色审查执行状态未知，当前结果不能证明没有角色设定或行为漂移问题。',
+    };
+  }
+  if (
+    characterConsistency.outcome === 'completed' &&
+    characterConsistency.snapshot_bound === true
+  ) {
+    if (base.coverage === 'full') {
+      return {
+        ...base,
+        label: 'AI 语义与角色审查完整',
+        detail: `${base.detail} 角色一致性阶段也已基于冻结输入完整执行。`,
+      };
+    }
+    return {
+      ...base,
+      detail: `${base.detail} 角色一致性阶段已完成，但不会提升通用语义抽取的覆盖等级。`,
+    };
+  }
+
+  const reason = characterConsistency.reason_code
+    ? `（${characterConsistency.reason_code}）`
+    : '';
+  if (characterConsistency.outcome === 'partial') {
+    return {
+      coverage: base.coverage === 'unknown' ? 'unknown' : 'partial',
+      label: '角色审查覆盖不完整',
+      detail: `角色一致性阶段只处理了部分冻结材料${reason}；未覆盖内容不能视为没有问题。`,
+      counts: base.counts,
+      emptyCaveat: '角色审查仅部分完成，当前结果不能证明没有角色设定或行为漂移问题。',
+    };
+  }
+  if (['disabled', 'skipped', 'degraded'].includes(characterConsistency.outcome)) {
+    const label = characterConsistency.outcome === 'disabled'
+      ? '角色审查未启用'
+      : characterConsistency.outcome === 'skipped'
+        ? '角色审查未执行'
+        : '角色审查未完成';
+    return {
+      coverage: base.coverage === 'unknown' ? 'unknown' : 'partial',
+      label,
+      detail: `${label}${reason}；通用规则或语义结果不能替代角色一致性覆盖。`,
+      counts: base.counts,
+      emptyCaveat: `${label}，当前结果不能证明没有角色设定或行为漂移问题。`,
+    };
+  }
+  return {
+    coverage: 'unknown',
+    label: '角色审查执行状态未知',
+    detail: `无法识别角色一致性阶段状态${reason}；不会据此显示干净通过。`,
+    counts: base.counts,
+    emptyCaveat: '角色审查执行状态未知，当前结果不能证明没有角色设定或行为漂移问题。',
   };
 }

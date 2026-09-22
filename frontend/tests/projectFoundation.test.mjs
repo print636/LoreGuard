@@ -25,14 +25,14 @@ test("backend timestamps without a timezone are interpreted as UTC", () => {
   );
 });
 
-test("multi-file import defaults safely to chapter and preserves per-file roles", () => {
+test("multi-file import defaults safely to reference and preserves per-file roles", () => {
   const files = [{ name: "world.docx" }, { name: "chapter.docx" }];
   const initial = createImportFilePlan(files);
-  assert.deepEqual(initial.map((entry) => entry.documentRole), ["chapter", "chapter"]);
+  assert.deepEqual(initial.map((entry) => entry.documentRole), ["reference", "reference"]);
 
   const updated = updateImportFileRole(initial, 0, "canon");
-  assert.deepEqual(updated.map((entry) => entry.documentRole), ["canon", "chapter"]);
-  assert.deepEqual(initial.map((entry) => entry.documentRole), ["chapter", "chapter"]);
+  assert.deepEqual(updated.map((entry) => entry.documentRole), ["canon", "reference"]);
+  assert.deepEqual(initial.map((entry) => entry.documentRole), ["reference", "reference"]);
 });
 
 test("project center actions lead to the precise next view", () => {
