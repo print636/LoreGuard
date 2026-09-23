@@ -27,6 +27,7 @@ Relevant API entry points are:
 - `POST /api/v1/projects/{project_id}/documents/{document_id}/narrative-context/revisions` for the human-reviewed revision;
 - `POST /api/v1/projects/{project_id}/analysis-runs` with `mode=baseline_build|draft_review|full_review`, optional draft targets and a sensitivity level;
 - `GET /api/v1/analysis-runs/{run_id}` to inspect `review_batch` coverage and frozen `input_documents[].batch_role`.
+- `GET /api/v1/analysis-runs/{run_id}/export.md` to download a completed run's evidence-first Markdown report with current feedback labels. The export uses all issues, regardless of the browser's current filters, and is workspace-scoped.
 
 An omitted analysis body or `{}` retains the legacy `full_review` behavior for existing clients. Retry preserves the frozen batch; recheck advances only the logical draft targets to their current active versions and re-derives the background.
 

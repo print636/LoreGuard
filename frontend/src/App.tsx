@@ -75,6 +75,7 @@ import {
 } from "./issueEvidenceReview";
 import {
   ApiError,
+  apiFetch,
   apiJson,
   apiJsonIdempotent,
   apiUrl,
@@ -418,6 +419,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [feedbackPending, setFeedbackPending] = useState<
     Record<string, boolean>
   >({});
+  const [exportPending, setExportPending] = useState(false);
+  const [exportStatus, setExportStatus] = useState("");
   const [diagnostics, setDiagnostics] = useState<Diagnostics>({});
   const [clarifications, setClarifications] = useState<ClarificationView[]>([]);
   const [graph, setGraph] = useState<GraphResponse | null>(null);
@@ -1134,6 +1137,40 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       setFeedbackPending((current) => ({ ...current, [id]: false }));
     }
   }
+  async function exportMarkdownReport() {
+    if (!run || runInfo?.status !== "completed" || exportPending) return;
+    setExportPending(true);
+    setExportStatus("正在准备报告…");
+    try {
+      const response = await apiFetch(
+        `/api/v1/analysis-runs/${run}/export.md`,
+        { headers: { Accept: "text/markdown" } },
+      );
+      if (!response.ok) {
+        const explanation = response.status === 404
+          ? "运行不存在或无权访问"
+          : response.status === 409
+            ? "运行尚未完成，请稍后重试"
+            : `服务器返回 HTTP ${response.status}`;
+        throw new Error(explanation);
+      }
+      const blob = await response.blob();
+      if (!blob.size) throw new Error("服务器返回了空文件");
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `LoreGuard-report-${run}.md`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setExportStatus("报告已下载，包含本次全部问题及最新审阅状态。");
+    } catch (error) {
+      setExportStatus(`导出失败：${error instanceof Error ? error.message : "请稍后重试"}`);
+    } finally {
+      setExportPending(false);
+    }
+  }
   function selectDiffFrom(id: string) {
     setDiffFrom(id);
     setDocumentDiff(null);
@@ -1270,6 +1307,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setIssueStatusFilter(routed.status);
     setFocusedIssue(routed.issueId);
   }, [activeView, routeSearch]);
+
+  useEffect(() => {
+    setExportStatus("");
+  }, [run]);
 
   useEffect(() => {
     if (activeView !== "report" || !focusedIssue) return;
@@ -2427,6 +2468,16 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </h2>
                   </div>
                   <div className="reportFilters" aria-label="报告筛选">
+                    {runInfo?.status === "completed" && (
+                      <button
+                        className="revisionEntry reportExportButton"
+                        type="button"
+                        disabled={exportPending}
+                        onClick={exportMarkdownReport}
+                      >
+                        {exportPending ? "正在导出…" : "导出 Markdown 报告"}
+                      </button>
+                    )}
                     {runInfo?.status === "completed" && runSnapshotDocuments(runInfo).length > 0 && (
                       <a
                         className="revisionEntry"
@@ -2482,6 +2533,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                         <option value="resolved">已解决</option>
                       </select>
                     </label>
+                    {exportStatus && (
+                      <span className="reportExportStatus" role="status">
+                        {exportStatus}
+                      </span>
+                    )}
                   </div>
                 </div>
                 {issues.length === 0 && !busy && (

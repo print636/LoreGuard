@@ -1071,6 +1071,17 @@ class ApiFlowTests(unittest.TestCase):
             audit = client.get(f"/api/v1/issues/{issues[0]['id']}/feedback").json()
             self.assertEqual("resolved", audit["latest"]["label"])
             self.assertEqual(2, len(audit["history"]))
+            exported = client.get(f"/api/v1/analysis-runs/{run['id']}/export.md")
+            self.assertEqual(200, exported.status_code, exported.text)
+            self.assertIn("text/markdown", exported.headers["content-type"])
+            self.assertIn("attachment;", exported.headers["content-disposition"])
+            self.assertEqual("private, no-store", exported.headers["cache-control"])
+            self.assertIn("API smoke", exported.text)
+            self.assertIn("chapter\\.md", exported.text)
+            self.assertIn("审阅状态：已解决", exported.text)
+            self.assertIn("已统一设定", exported.text)
+            self.assertIn(issues[0]["title"], exported.text)
+            self.assertIn("原文证据", exported.text)
 
 
 if __name__ == "__main__":

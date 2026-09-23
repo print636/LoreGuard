@@ -177,6 +177,7 @@ class WorkspaceIsolationTests(unittest.TestCase):
                 f"/api/v1/projects/{project_id}/analysis-runs",
                 f"/api/v1/analysis-runs/{completed_id}",
                 f"/api/v1/analysis-runs/{completed_id}/issues",
+                f"/api/v1/analysis-runs/{completed_id}/export.md",
                 f"/api/v1/analysis-runs/{completed_id}/records",
                 f"/api/v1/analysis-runs/{completed_id}/clarifications",
                 f"/api/v1/analysis-runs/{completed_id}/graph",
@@ -194,6 +195,11 @@ class WorkspaceIsolationTests(unittest.TestCase):
                 with self.subTest(cross_path=path):
                     response = other.get(path)
                     self.assertEqual(404, response.status_code, response.text)
+
+            self.assertEqual(
+                409,
+                owner.get(f"/api/v1/analysis-runs/{failed_id}/export.md").status_code,
+            )
 
             cross_write_paths = [
                 f"/api/v1/analysis-runs/{running_id}/cancel",

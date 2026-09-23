@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -227,6 +228,21 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
     await page.reload();
     await expect(page).toHaveURL(selectedIssueUrl);
     await expect(issueCards.first()).toHaveClass(/focusedIssue/);
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "导出 Markdown 报告" }).click(),
+    ]);
+    expect(download.suggestedFilename()).toBe(
+      `LoreGuard-report-${replayedRunId}.md`,
+    );
+    const markdown = await readFile(await download.path(), "utf8");
+    expect(markdown).toContain(projectName);
+    expect(markdown).toContain("world\\.docx");
+    expect(markdown).toContain("chapter\\.docx");
+    expect(markdown).toContain("原文证据");
+    expect(markdown).toContain("林澈的发色是银色。");
+    expect(markdown).toContain("林澈的发色是黑色。");
+    await expect(page.locator(".reportExportStatus")).toContainText("报告已下载");
 
     await page.getByRole("button", { name: "运行审计" }).first().click();
     await page

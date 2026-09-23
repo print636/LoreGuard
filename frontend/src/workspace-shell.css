@@ -458,6 +458,11 @@ body {
 .routeProblem > div { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
 
 .reportFilters { display: flex; flex-wrap: wrap; gap: 10px; }
+.mainCanvas .issues > .sectionHead { display: grid; align-items: start; gap: 14px; }
+.mainCanvas .issues > .sectionHead h2 { margin-bottom: 0; }
+.mainCanvas .issues > .sectionHead .reportFilters { align-items: end; }
+.reportExportButton { min-height: 40px; }
+.reportExportStatus { flex-basis: 100%; color: var(--text-2); font-size: 12px; line-height: 1.5; }
 .reportFilters label { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
 .reportFilters select { min-width: 142px; min-height: 40px; margin: 0; }
 .issuePermalink { min-height: 36px; margin: 0 0 10px; padding: 6px 11px; color: var(--cyan); font-size: 10px; }
@@ -751,6 +756,7 @@ footer {
   .scanBoundaries { grid-template-columns: 1fr; }
   .scanBoundaries section + section { border-top: 1px solid var(--line); border-left: 0; }
   .reportFilters { width: 100%; }
+  .reportExportButton { min-height: 44px; }
   .reportFilters label { flex: 1 1 140px; }
   .reportFilters select { width: 100%; min-height: 44px; }
   .routeProblem { margin: 16px auto; padding: 20px; }
@@ -763,6 +769,10 @@ footer {
 }
 
 @media (max-width: 430px) {
+  .mainCanvas .issues > .sectionHead h2 {
+    font-size: clamp(19px, 5.6vw, 24px);
+    white-space: nowrap;
+  }
   .brandSeal { width: 32px; height: 32px; }
   .topBar .brand > span:last-child { display: none; }
   .topActions .topRunButton { min-width: 88px; padding-inline: 8px; font-size: 11px; }

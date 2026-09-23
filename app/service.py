@@ -1336,7 +1336,7 @@ def analysis_mode(result) -> tuple[str, bool]:
         if empty_responses:
             return "模型返回空结果，无法证明完整覆盖", True
         return (
-            "模型增强（部分分块已降级）"
+            "模型增强（部分结果已降级）"
             if partial_fallback
             else "完整模型增强",
             partial_fallback,

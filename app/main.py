@@ -99,6 +99,7 @@ from .provider import (
     sanitize_request_id,
 )
 from .rate_limit import SlidingWindowLimiter, WriteRateLimitMiddleware
+from .report_export import render_markdown_report
 from .runtime_provenance import safe_runtime_provenance
 from .run_comparison import (
     MATCHER_VERSION,
@@ -3801,6 +3802,76 @@ def get_issues(
             raise HTTPException(404, "分析任务不存在")
         rows = db.scalars(select(IssueRow).where(IssueRow.run_id == run_id)).all()
         return [_serialize_issue(row) for row in rows]
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/export.md")
+def export_markdown_report(
+    run_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> Response:
+    with SessionLocal() as db:
+        run = _run_in_workspace(db, run_id, context.workspace_id)
+        if run is None:
+            raise HTTPException(404, "分析任务不存在")
+        if run.status != "completed":
+            raise HTTPException(409, f"仅已完成任务可导出报告：{run.status}")
+        project = db.get(ProjectRow, run.project_id)
+        issues = [
+            _serialize_issue(row)
+            for row in db.scalars(
+                select(IssueRow).where(IssueRow.run_id == run_id).order_by(IssueRow.id)
+            ).all()
+        ]
+        issue_ids = [issue["id"] for issue in issues]
+        latest_feedback: dict[str, dict] = {}
+        if issue_ids:
+            feedback_rows = db.scalars(
+                select(FeedbackRow)
+                .where(FeedbackRow.issue_id.in_(issue_ids))
+                .order_by(FeedbackRow.created_at.desc(), FeedbackRow.id.desc())
+            ).all()
+            for row in feedback_rows:
+                latest_feedback.setdefault(
+                    row.issue_id, {"label": row.label, "comment": row.comment}
+                )
+        clarification_rows = db.scalars(
+            select(AnalysisRecordRow)
+            .where(
+                AnalysisRecordRow.run_id == run_id,
+                AnalysisRecordRow.kind.in_(("clarification", "open_question")),
+            )
+            .order_by(AnalysisRecordRow.id)
+        ).all()
+        clarifications = [
+            {
+                "kind": row.kind,
+                "text": (row.attrs or {}).get(
+                    "question" if row.kind == "open_question" else "summary", ""
+                ),
+                "evidence": row.evidence,
+            }
+            for row in clarification_rows
+        ]
+        diagnostic = db.get(AnalysisDiagnosticRow, run_id)
+        markdown = render_markdown_report(
+            project_name=project.name if project else "未知项目",
+            run_id=run.id,
+            completed_at=run.completed_at,
+            input_documents=run_input_metadata(db, run_id),
+            issues=issues,
+            latest_feedback=latest_feedback,
+            clarifications=clarifications,
+            diagnostics=diagnostic.payload if diagnostic else None,
+        )
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="LoreGuard-report-{run_id}.md"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/records")

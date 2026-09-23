@@ -80,7 +80,7 @@ class ModelExecutionTests(unittest.TestCase):
         self.assertEqual(1, status["invalid_records"])
         self.assertEqual(0, status["failed_chunks"])
         result.warnings.clear()
-        self.assertEqual(("模型增强（部分分块已降级）", True), analysis_mode(result))
+        self.assertEqual(("模型增强（部分结果已降级）", True), analysis_mode(result))
         complete, _, _ = self.run_pipeline([{"records": [{
             "kind": "fact", "subject": "林澈", "predicate": "身份", "value": "领航员",
             "source_line_start": 1, "source_line_end": 1,

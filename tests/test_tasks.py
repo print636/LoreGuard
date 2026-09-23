@@ -28,7 +28,7 @@ class CeleryTaskTests(unittest.TestCase):
         failed = result(succeeded_chunks=0, failed_chunks=1)
         baseline = result(enabled=False, configured=False, succeeded_chunks=0)
         self.assertEqual(("完整模型增强", False), analysis_mode(complete))
-        self.assertEqual(("模型增强（部分分块已降级）", True), analysis_mode(partial))
+        self.assertEqual(("模型增强（部分结果已降级）", True), analysis_mode(partial))
         self.assertEqual(("确定性基线（模型未参与或已降级）", True), analysis_mode(failed))
         self.assertEqual(("确定性基线", False), analysis_mode(baseline))
         self.assertEqual(
@@ -64,11 +64,11 @@ class CeleryTaskTests(unittest.TestCase):
             repair_post_invalid=1,
         )
         self.assertEqual(
-            ("模型增强（部分分块已降级）", True), analysis_mode(unresolved)
+            ("模型增强（部分结果已降级）", True), analysis_mode(unresolved)
         )
         # Missing final-disposition fields use the legacy invalid_records rule.
         self.assertEqual(
-            ("模型增强（部分分块已降级）", True),
+            ("模型增强（部分结果已降级）", True),
             analysis_mode(result(invalid_records=1)),
         )
         inconsistent = result(
