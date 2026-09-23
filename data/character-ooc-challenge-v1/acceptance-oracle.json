@@ -1,0 +1,104 @@
+{
+  "schema_version": "character-continuity-live-oracle-v2",
+  "dataset_boundary": {
+    "developer_visible": true,
+    "blind_holdout": false,
+    "production_quality_claim": false,
+    "open_text_generalization_claim": false
+  },
+  "confirm_candidates": [
+    {
+      "case_id": "nanzhi_unexplained_social_shift",
+      "character_key": "南枝",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 5,
+      "value_contains": "陌生人主动攀谈",
+      "polarity": "negative",
+      "stability": "core"
+    },
+    {
+      "case_id": "yuli_training_bridge",
+      "character_key": "郁礼",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 9,
+      "value_contains": "害怕面对陌生听众",
+      "polarity": "negative",
+      "stability": "core"
+    },
+    {
+      "case_id": "cenzhu_emergency_interrupt",
+      "character_key": "岑烛",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 13,
+      "value_contains": "厉声打断队友",
+      "trait_polarity_options": [
+        {"trait_key": "interruption_restraint", "polarity": "positive"},
+        {"trait_key": "interruption_behavior", "polarity": "negative"}
+      ],
+      "stability": "core"
+    }
+  ],
+  "expected_cases": [
+    {
+      "case_id": "nanzhi_unexplained_social_shift",
+      "character_key": "南枝",
+      "dimension": "core_personality",
+      "prepare_reason": "two_independent_behaviors",
+      "review_outcome": "completed",
+      "final_outcome": "conflict",
+      "promote_reason": "model_contradicts",
+      "review_verdict": "contradicts",
+      "visible": true,
+      "min_matched_observation_count": 2,
+      "max_matched_observation_count": 3,
+      "expected_citation_roles": ["B", "C"],
+      "visible_issue": {
+        "subtype": "core_trait_drift",
+        "judgement": "contradicts",
+        "required_evidence": [
+          {"document_name": "02-character-profiles.md", "line": 5}
+        ],
+        "required_any_evidence": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 4},
+          {"document_name": "04-draft-event-v1.1.md", "line": 5}
+        ],
+        "required_any_evidence_min_matches": 2,
+        "allowed_evidence": [
+          {"document_name": "02-character-profiles.md", "line_start": 5, "line_end": 5},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 4, "line_end": 4},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 5, "line_end": 5}
+        ]
+      }
+    },
+    {
+      "case_id": "yuli_training_bridge",
+      "character_key": "郁礼",
+      "dimension": "core_personality",
+      "prepare_reason": "two_independent_behaviors",
+      "review_outcome": "completed",
+      "final_outcome": "no_issue",
+      "promote_reason": "model_explained",
+      "review_verdict": "explained",
+      "visible": false,
+      "min_matched_observation_count": 2,
+      "max_matched_observation_count": 3,
+      "expected_citation_roles": ["B", "C", "G"]
+    },
+    {
+      "case_id": "cenzhu_emergency_interrupt",
+      "character_key": "岑烛",
+      "dimension": "core_personality",
+      "prepare_reason": "single_behavior_is_not_drift",
+      "review_outcome": "not_run",
+      "final_outcome": "needs_confirmation",
+      "promote_reason": "single_behavior_is_not_drift",
+      "review_verdict": null,
+      "visible": false,
+      "matched_observation_count": 1,
+      "expected_citation_roles": []
+    }
+  ]
+}

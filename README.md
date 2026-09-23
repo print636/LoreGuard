@@ -85,6 +85,12 @@ real-model checkpoint: three independent HTTP workflows passed all 12 frozen
 gates after candidate-confirmation and evidence-kind hardening. This is not a
 blind test, an open-text generalization result, or a production-quality claim. See the
 [sanitized checkpoint](docs/character-consistency-live-checkpoint-20260922.md).
+An additional [OOC challenge](docs/character-ooc-challenge-checkpoint-20260923.md)
+uses a different original version-event story. Its first full diagnostic did
+not pass: all three formal character candidates were confirmed, but baseline
+and draft coverage were partial, one intended conflict was missed, one growth
+case remained unverifiable, and the single emergency behavior was not falsely
+promoted. It is a developer-visible failure diagnostic, not a quality gain.
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a

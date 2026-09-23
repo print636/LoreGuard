@@ -29,7 +29,11 @@ if str(ROOT) not in sys.path:
 from app.character_trait_extraction import stable_trait_identity
 
 
-DEMO = ROOT / "data" / "character-continuity-demo"
+FIXTURES = {
+    "demo": ROOT / "data" / "character-continuity-demo",
+    "ooc-v1": ROOT / "data" / "character-ooc-challenge-v1",
+}
+DEMO = FIXTURES["demo"]
 BASELINE_FILES = (
     ("01-world-setting.md", "canon"),
     ("02-character-profiles.md", "character_profile"),
@@ -38,6 +42,19 @@ BASELINE_FILES = (
 DRAFT_FILE = "04-draft-event-v1.1.md"
 ORACLE_FILE = "acceptance-oracle.json"
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+DIAGNOSTIC_RECORD_REASONS = frozenset({
+    "evidence_range", "evidence_mismatch", "character_support",
+    "key_object_required", "key_object_support", "statement_support",
+    "source_formal", "source_history", "schema_validation", "record_validation",
+})
+
+
+def _dataset_label() -> str:
+    return (
+        "original-developer-visible-demo"
+        if DEMO == FIXTURES["demo"]
+        else DEMO.name
+    )
 
 
 class AcceptanceFailure(RuntimeError):
@@ -157,12 +174,15 @@ def _upload(
     )
 
 
-def _start_run(client: httpx.Client, project_id: str) -> str:
+def _start_run(
+    client: httpx.Client, project_id: str, *, mode: str | None = None
+) -> str:
     payload = _request(
         client,
         "POST",
         f"/api/v1/projects/{project_id}/analysis-runs",
         headers={"Idempotency-Key": f"character-live-{uuid4().hex}"},
+        json={"mode": mode} if mode is not None else {},
     )
     run_id = payload.get("id")
     if not isinstance(run_id, str) or not run_id:
@@ -221,6 +241,29 @@ def _validate_oracle_payload(payload: object) -> dict[str, Any]:
         or not all(isinstance(value, str) and value for value in selector_ids)
     ):
         raise RuntimeError("acceptance oracle case ids are invalid or inconsistent")
+    for selector in selectors:
+        if not isinstance(selector, dict):
+            raise RuntimeError("acceptance oracle selector is invalid")
+        variants = selector.get("trait_polarity_options")
+        if variants is None:
+            continue
+        if (
+            "polarity" in selector
+            or not isinstance(variants, list)
+            or not variants
+            or any(
+                not isinstance(row, dict)
+                or set(row) != {"trait_key", "polarity"}
+                or not isinstance(row["trait_key"], str)
+                or not row["trait_key"]
+                or not isinstance(row["polarity"], str)
+                or row["polarity"] not in {"positive", "negative"}
+                for row in variants
+            )
+            or len({(row["trait_key"], row["polarity"]) for row in variants})
+            != len(variants)
+        ):
+            raise RuntimeError("acceptance oracle trait polarity variants are invalid")
     for row in expected:
         if not isinstance(row, dict):
             raise RuntimeError("acceptance oracle case must be an object")
@@ -274,6 +317,13 @@ def _matches_selector(candidate: dict[str, Any], selector: dict[str, Any]) -> bo
         or candidate.get("trait_type") != selector.get("trait_type")
         or candidate.get("origin") != "explicit_setting"
         or candidate.get("reviewable") is not True
+    ):
+        return False
+    variants = selector.get("trait_polarity_options")
+    if variants is not None and not any(
+        candidate.get("trait_key") == row.get("trait_key")
+        and candidate.get("polarity") == row.get("polarity")
+        for row in variants
     ):
         return False
     for field in ("polarity", "stability"):
@@ -922,7 +972,8 @@ def _emit_report(report: dict[str, Any], output_json: str | None) -> None:
     if output_json:
         path = _resolve_output_json(output_json)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(rendered + "\n", encoding="utf-8")
+        with path.open("x", encoding="utf-8") as output:
+            output.write(rendered + "\n")
     print(rendered)
 
 
@@ -951,7 +1002,7 @@ def _failure_report(failure: dict[str, Any]) -> dict[str, Any]:
         hashes = {}
     return {
         "schema_version": "character-continuity-live-dev-v2",
-        "dataset": "original-developer-visible-demo",
+        "dataset": _dataset_label(),
         "claims": {
             "blind_holdout": False,
             "production_quality": False,
@@ -1049,6 +1100,28 @@ def _baseline_admission(summary: dict[str, Any]) -> dict[str, Any]:
             "reason_counts": summary.get("reason_counts", {}),
         },
     }
+
+
+def _diagnostic_partial_baseline_allowed(summary: dict[str, Any]) -> bool:
+    """Permit observation only, never a passing full-workflow gate."""
+    usage = summary.get("stage_usage")
+    usage = usage if isinstance(usage, dict) else {}
+    counts = summary.get("reason_counts")
+    counts = counts if isinstance(counts, dict) else {}
+    planned = summary.get("planned_chunks")
+    processed = summary.get("processed_chunks")
+    return (
+        summary.get("status") == "completed"
+        and summary.get("stage_outcome") == "partial"
+        and summary.get("material_coverage") == "partial"
+        and type(planned) is int
+        and planned > 0
+        and processed == planned
+        and type(usage.get("attempted_calls")) is int
+        and usage["attempted_calls"] > 0
+        and bool(counts)
+        and set(counts) <= DIAGNOSTIC_RECORD_REASONS
+    )
 
 
 def _candidate_review_exact(review: dict[str, Any]) -> bool:
@@ -1151,6 +1224,8 @@ def _execute_trial(
     *,
     trial_number: int,
     timeout_seconds: float,
+    guided_review: bool = False,
+    diagnostic_continue_partial: bool = False,
 ) -> dict[str, Any]:
     project = _request(
         client,
@@ -1158,7 +1233,8 @@ def _execute_trial(
         "/api/v1/projects",
         json={
             "name": (
-                f"浮光列车·角色连续性真实验收·T{trial_number}·"
+                f"{'浮光列车' if DEMO == FIXTURES['demo'] else DEMO.name}"
+                f"·角色连续性真实验收·T{trial_number}·"
                 f"{uuid4().hex[:8]}"
             ),
             "description": "原创 DEV 演示集；非盲测、非开放文本质量结论",
@@ -1175,7 +1251,11 @@ def _execute_trial(
             ordinal=10,
             published=True,
         )
-    baseline_id = _start_run(client, project_id)
+    baseline_id = _start_run(
+        client,
+        project_id,
+        **({"mode": "baseline_build"} if guided_review else {}),
+    )
     baseline_run = _wait_run(
         client,
         baseline_id,
@@ -1183,7 +1263,10 @@ def _execute_trial(
     )
     baseline = _run_summary(client, project_id, baseline_run)
     admission = _baseline_admission(baseline)
-    if admission["admitted"] is not True:
+    if admission["admitted"] is not True and not (
+        diagnostic_continue_partial
+        and _diagnostic_partial_baseline_allowed(baseline)
+    ):
         raise AcceptanceFailure(
             "baseline_admission_failed",
             safe_payload={
@@ -1222,7 +1305,11 @@ def _execute_trial(
         ordinal=11,
         published=False,
     )
-    draft_id = _start_run(client, project_id)
+    draft_id = _start_run(
+        client,
+        project_id,
+        **({"mode": "draft_review"} if guided_review else {}),
+    )
     draft_run = _wait_run(
         client,
         draft_id,
@@ -1238,13 +1325,24 @@ def _execute_trial(
         "trial": trial_number,
         "project_id": project_id,
         "baseline": baseline,
+        "baseline_admission": admission,
         "candidate_review": candidate_review,
         "draft": draft,
         "oracle": oracle_result,
     }
 
 
+def _model_available_for_session(client: httpx.Client, health: dict[str, Any]) -> bool:
+    model = health.get("model")
+    if isinstance(model, dict) and model.get("configured") is True:
+        return True
+    profile = _request(client, "GET", "/api/v1/account/model-provider")
+    return profile.get("configured") is True or profile.get("service_default_available") is True
+
+
 def run(args: argparse.Namespace) -> int:
+    global DEMO
+    DEMO = FIXTURES[args.fixture]
     missing = [name for name, _ in BASELINE_FILES if not (DEMO / name).is_file()]
     if not (DEMO / DRAFT_FILE).is_file():
         missing.append(DRAFT_FILE)
@@ -1265,8 +1363,17 @@ def run(args: argparse.Namespace) -> int:
         timeout=httpx.Timeout(30.0),
     ) as client:
         health = _request(client, "GET", "/health")
-        model = health.get("model")
-        if not isinstance(model, dict) or model.get("configured") is not True:
+        capabilities = health.get("runtime_provenance", {}).get("capabilities", {})
+        if capabilities.get("character_consistency") is not True:
+            raise AcceptanceFailure(
+                "character_consistency_disabled",
+                safe_payload={
+                    "code": "character_consistency_disabled",
+                    "stage": "runner_preflight",
+                    "details": {},
+                },
+            )
+        if not _model_available_for_session(client, health):
             raise AcceptanceFailure(
                 "model_not_configured",
                 safe_payload={
@@ -1281,6 +1388,11 @@ def run(args: argparse.Namespace) -> int:
                 oracle,
                 trial_number=index,
                 timeout_seconds=args.run_timeout_seconds,
+                guided_review=args.fixture == "ooc-v1",
+                diagnostic_continue_partial=(
+                    args.fixture == "ooc-v1"
+                    and args.diagnostic_continue_partial_baseline
+                ),
             )
             for index in range(1, args.trials + 1)
         ]
@@ -1288,13 +1400,15 @@ def run(args: argparse.Namespace) -> int:
     gates = _evaluate_gates(trials)
     report = {
         "schema_version": "character-continuity-live-dev-v2",
-        "dataset": "original-developer-visible-demo",
+        "dataset": _dataset_label(),
         "claims": {
             "blind_holdout": False,
             "production_quality": False,
             "open_text_generalization": False,
             "semantic_coverage": False,
-            "independent_full_workflow_trials": True,
+            "independent_full_workflow_trials": gates[
+                "at_least_three_independent_full_workflow_trials"
+            ],
         },
         "runtime_provenance": health.get("runtime_provenance"),
         "dataset_sha256": _dataset_hashes(),
@@ -1308,6 +1422,12 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--fixture", choices=tuple(FIXTURES), default="demo")
+    parser.add_argument(
+        "--diagnostic-continue-partial-baseline",
+        action="store_true",
+        help="OOC DEV only: continue after record-level partial baseline; full gate stays false",
+    )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--trials", type=int, default=3, choices=range(1, 6))
     parser.add_argument("--run-timeout-seconds", type=float, default=1800.0)
