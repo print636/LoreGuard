@@ -10,6 +10,7 @@ from app.provider import (
     ProviderError,
     ProviderRetryExhausted,
     RetryPolicy,
+    sanitize_request_id,
 )
 from scripts.check_provider import check_provider
 
@@ -97,7 +98,7 @@ class ProviderProbeTests(unittest.TestCase):
         with self.assertRaises(ProviderRetryExhausted) as caught:
             self.provider(handler).complete("s", "u")
         self.assertNotIn("unit-test-private-value", str(caught.exception))
-        self.assertEqual("usage_shape", caught.exception.category)
+        self.assertEqual("credential_reflected", caught.exception.category)
 
     def test_unexpected_json_is_not_success(self):
         handler = lambda _: httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
@@ -465,7 +466,7 @@ class ProviderHardeningTests(unittest.TestCase):
             provider.complete("s", "u")
 
         self.assertEqual("forbidden", caught.exception.category)
-        self.assertEqual("safe-error-request", caught.exception.request_id)
+        self.assertIsNone(caught.exception.request_id)
         self.assertEqual(0, stream.yielded)
         self.assertTrue(stream.closed)
         self.assertEqual(0, caught.exception.telemetry.received_bytes)
@@ -629,7 +630,7 @@ class ProviderHardeningTests(unittest.TestCase):
                 self.assertIn(f"HTTP {status}", str(caught.exception))
                 self.assertNotIn("anonymous body", str(caught.exception))
 
-    def test_correlation_id_is_allowlisted_sanitized_and_propagated(self):
+    def test_upstream_correlation_ids_are_never_propagated(self):
         provider = self.provider(lambda _: httpx.Response(
             403,
             text="private response body",
@@ -642,9 +643,9 @@ class ProviderHardeningTests(unittest.TestCase):
         with self.assertRaises(ProviderError) as caught:
             provider.complete("s", "u")
         error = caught.exception
-        self.assertEqual("request-safe_123", error.request_id)
-        self.assertEqual("request-safe_123", error.telemetry.request_id)
-        self.assertEqual("request-safe_123", error.telemetry.attempts[0].request_id)
+        self.assertIsNone(error.request_id)
+        self.assertIsNone(error.telemetry.request_id)
+        self.assertIsNone(error.telemetry.attempts[0].request_id)
         serialized = json.dumps(error.telemetry.model_dump())
         for forbidden in (
             "private response body",
@@ -661,7 +662,7 @@ class ProviderHardeningTests(unittest.TestCase):
         ))
         with self.assertRaises(ProviderError) as caught:
             provider.complete("s", "u")
-        self.assertEqual("trace-safe/456", caught.exception.request_id)
+        self.assertIsNone(caught.exception.request_id)
         self.assertNotIn(malicious, json.dumps(caught.exception.telemetry.model_dump()))
 
         provider = self.provider(lambda _: httpx.Response(403))
@@ -669,6 +670,137 @@ class ProviderHardeningTests(unittest.TestCase):
             provider.complete("s", "u")
         self.assertIsNone(caught.exception.request_id)
         self.assertIsNone(caught.exception.telemetry.request_id)
+
+    def test_reflected_api_key_is_rejected_without_content_or_header_leak(self):
+        api_key = self.settings().openai_api_key
+        reflected = f"trace-{api_key}"
+        provider = self.provider(
+            lambda _: httpx.Response(
+                200,
+                headers={"x-request-id": reflected},
+                json={"choices": [{"message": {"content": api_key}}]},
+            )
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("system", "user")
+
+        self.assertEqual("credential_reflected", caught.exception.category)
+        self.assertIsNone(caught.exception.request_id)
+        self.assertNotIn(api_key, repr(caught.exception))
+        self.assertNotIn(
+            api_key, json.dumps(caught.exception.telemetry.model_dump())
+        )
+        self.assertIsNone(sanitize_request_id(reflected))
+
+    def test_json_escaped_reflected_api_key_is_also_rejected(self):
+        api_key = 'sk-quote"\\backslash-canary'
+        provider = self.provider(
+            lambda _: httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": api_key}}]},
+            ),
+            settings=self.settings(openai_api_key=api_key),
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("system", "user")
+
+        self.assertEqual("credential_reflected", caught.exception.category)
+        self.assertNotIn(api_key, repr(caught.exception))
+        self.assertNotIn(
+            api_key, json.dumps(caught.exception.telemetry.model_dump())
+        )
+
+    def test_unicode_escaped_reflected_api_key_is_rejected_after_json_parse(self):
+        api_key = "sk-unicode-escape-canary"
+        escaped_key = "".join(f"\\u{ord(character):04x}" for character in api_key)
+        nested_content = '{"subject":"' + escaped_key + '"}'
+        raw_body = json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {"content": nested_content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+            },
+            separators=(",", ":"),
+        ).encode("ascii")
+        self.assertNotIn(api_key.encode("ascii"), raw_body)
+        provider = self.provider(
+            lambda _: httpx.Response(200, content=raw_body),
+            settings=self.settings(openai_api_key=api_key),
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("system", "user")
+
+        self.assertEqual("credential_reflected", caught.exception.category)
+        self.assertNotIn(api_key, repr(caught.exception))
+        self.assertNotIn(
+            api_key, json.dumps(caught.exception.telemetry.model_dump())
+        )
+
+    def test_unicode_escaped_credential_in_nested_json_scalar_is_rejected(self):
+        api_key = "sk-nested-json-scalar-canary"
+        escaped_key = "".join(f"\\u{ord(character):04x}" for character in api_key)
+        nested_scalar = '"' + escaped_key + '"'
+        raw_body = json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {"content": nested_scalar},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+            },
+            separators=(",", ":"),
+        ).encode("ascii")
+        self.assertNotIn(api_key.encode("ascii"), raw_body)
+        provider = self.provider(
+            lambda _: httpx.Response(200, content=raw_body),
+            settings=self.settings(openai_api_key=api_key),
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("system", "user")
+
+        self.assertEqual("credential_reflected", caught.exception.category)
+        self.assertNotIn(api_key, repr(caught.exception))
+        self.assertNotIn(
+            api_key, json.dumps(caught.exception.telemetry.model_dump())
+        )
+
+    def test_duplicate_key_completion_cannot_materialize_escaped_credential(self):
+        api_key = "sk-duplicate-key-canary"
+        escaped_key = "".join(f"\\u{ord(character):04x}" for character in api_key)
+        nested_content = '{"value":"safe","value":"' + escaped_key + '"}'
+        raw_body = json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {"content": nested_content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+            },
+            separators=(",", ":"),
+        ).encode("ascii")
+        self.assertNotIn(api_key.encode("ascii"), raw_body)
+        provider = self.provider(
+            lambda _: httpx.Response(200, content=raw_body),
+            settings=self.settings(openai_api_key=api_key),
+        )
+
+        with self.assertRaises(ProviderRetryExhausted) as caught:
+            provider.complete("system", "user")
+
+        self.assertEqual("content_json", caught.exception.category)
+        self.assertNotIn(api_key, repr(caught.exception))
 
     def test_success_and_failure_expose_content_free_telemetry(self):
         provider = self.provider(lambda _: self.success())

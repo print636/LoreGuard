@@ -39,6 +39,7 @@ _PROVIDER_TELEMETRY_CATEGORIES = {
     "read_timeout",
     "transport",
     "response_too_large",
+    "credential_reflected",
     "tool_response_json",
     "tool_response_shape",
     "tool_response_finish_reason",
@@ -63,7 +64,6 @@ _PROVIDER_PURPOSES = frozenset(
     {"extract", "repair", "agent", "evidence_review", "investigator"}
 )
 
-_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _SAFE_AGENT_HASH = re.compile(r"^[a-f0-9]{64}$")
 _SAFE_AGENT_DOC_REF = re.compile(r"^[A-Za-z0-9._-]{1,16}$")
 _SAFE_AGENT_FIELD = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -172,7 +172,7 @@ def _optional_agent_line_number(value: Any) -> int | None:
 
 
 def _optional_request_id(value: Any) -> str | None:
-    return value if isinstance(value, str) and _SAFE_REQUEST_ID.fullmatch(value) else None
+    return None
 
 
 def _safe_protocol_diagnostic(value: Any) -> dict[str, Any] | None:

@@ -2,14 +2,82 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 
+_SENSITIVE_SETTING_INPUTS = frozenset(
+    {
+        "auth_secret_key",
+        "openai_api_key",
+        "embedding_api_key",
+        "account_model_keyring_json",
+        # Connection URLs can contain userinfo even though production
+        # documentation recommends secret indirection.
+        "database_url",
+        "redis_url",
+    }
+)
+
+
+def _redact_sensitive_settings_input(value):
+    if isinstance(value, dict):
+        return {
+            key: (
+                None
+                if str(key).lower() in _SENSITIVE_SETTING_INPUTS
+                else _redact_sensitive_settings_input(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive_settings_input(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_sensitive_settings_input(item) for item in value)
+    return value
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Settings validation can fail before structured logging and redaction are
+    # available (for example, while importing the API or Celery worker).  Keep
+    # Pydantic from embedding raw environment values in the exception text:
+    # several fields below intentionally carry credentials or key material.
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+    def __init__(self, **values):
+        """Redact secret inputs even from explicit ``ValidationError.errors``.
+
+        ``hide_input_in_errors`` secures the normal string/repr logging path,
+        but Pydantic deliberately retains raw values in ``errors()``. Some
+        startup wrappers serialize that structure, so rebuild failures with
+        secret fields removed while preserving locations and error types.
+        """
+
+        try:
+            super().__init__(**values)
+        except ValidationError as exc:
+            sanitized = []
+            for raw in exc.errors():
+                item = dict(raw)
+                location = item.get("loc") or ()
+                first = str(location[0]).lower() if location else ""
+                item["input"] = (
+                    None
+                    if first in _SENSITIVE_SETTING_INPUTS
+                    else _redact_sensitive_settings_input(item.get("input"))
+                )
+                sanitized.append(item)
+            raise ValidationError.from_exception_data(
+                exc.title,
+                sanitized,
+                hide_input=True,
+            ) from None
 
     # Optional immutable revision embedded in API/worker runtime provenance.
     # Real evaluation gates require the full commit SHA and fail closed when it
@@ -33,9 +101,41 @@ class Settings(BaseSettings):
         "http://localhost:8000,http://127.0.0.1:8000,"
         "http://localhost:8080,http://127.0.0.1:8080"
     )
-    openai_api_key: str = ""
+    openai_api_key: str = Field(default="", repr=False, max_length=4_096)
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
+    # Account-owned chat credentials use an encryption trust root independent
+    # from AUTH_SECRET_KEY.  Production requires an explicit keyring; local
+    # deployments may generate the dedicated key file on first use.
+    account_model_active_key_id: str = Field(default="local-v1", max_length=64)
+    account_model_keyring_json: str = Field(default="", repr=False, max_length=32_768)
+    account_model_keyring_file: str = Field(default="", max_length=2_048)
+    account_model_local_key_path: str = Field(
+        default="data/account-model-master.key", max_length=2_048
+    )
+    # Comma-separated exact HTTPS origins. The normalized OPENAI_BASE_URL
+    # origin is also admitted for backwards-compatible local deployments.
+    account_model_allowed_origins: str = Field(default="", max_length=16_384)
+    # Internal, request-edge snapshot populated when an account credential is
+    # resolved.  It prevents a run-local OPENAI_BASE_URL from implicitly
+    # adding its own origin to the administrator's allowlist.  This value is
+    # deliberately excluded from serialized settings and is not a secret.
+    provider_transport_allowed_origins: str = Field(
+        default="", max_length=16_384, exclude=True, repr=False
+    )
+    # Opaque, non-secret worker guard context. Account resolution populates
+    # these fields so every actual chat request can re-check revocation after
+    # the initial decrypt. They are excluded from settings serialization.
+    provider_runtime_config_id: str = Field(
+        default="", max_length=128, exclude=True, repr=False
+    )
+    provider_runtime_user_id: str = Field(
+        default="", max_length=128, exclude=True, repr=False
+    )
+    provider_runtime_revision: int = Field(default=0, ge=0, exclude=True, repr=False)
+    provider_runtime_endpoint_sha256: str = Field(
+        default="", max_length=64, exclude=True, repr=False
+    )
     enable_model_extraction: bool = False
     # Dedicated hard ceilings for explicit document-context suggestions. The
     # bounded call is user-triggered and never confirms narrative authority.
@@ -175,7 +275,7 @@ class Settings(BaseSettings):
         default=12, ge=1, le=12
     )
     character_signal_timeout_seconds: float = Field(
-        default=20.0, gt=0, le=30.0
+        default=30.0, gt=0, le=30.0
     )
     character_signal_max_attempts: int = Field(default=2, ge=1, le=4)
     # Logical full-package generations are separate from transport retries.
@@ -183,7 +283,7 @@ class Settings(BaseSettings):
     # rejects the first complete response.
     character_signal_package_max_attempts: int = Field(default=2, ge=1, le=2)
     character_signal_total_deadline_seconds: float = Field(
-        default=30.0, gt=0, le=60.0
+        default=60.0, gt=0, le=60.0
     )
     # One logical signal extraction may generate at most two complete packages.
     # This budget spans that whole regeneration cycle; it is independent from
@@ -206,11 +306,11 @@ class Settings(BaseSettings):
         default=4_000, ge=256, le=8_000
     )
     character_drift_timeout_seconds: float = Field(
-        default=20.0, gt=0, le=30.0
+        default=30.0, gt=0, le=30.0
     )
     character_drift_max_attempts: int = Field(default=2, ge=1, le=4)
     character_drift_total_deadline_seconds: float = Field(
-        default=30.0, gt=0, le=60.0
+        default=60.0, gt=0, le=60.0
     )
     character_drift_max_completion_tokens: int = Field(
         default=1_000, ge=64, le=1_500
@@ -279,10 +379,37 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 30
     rate_limit_window_seconds: float = 60
 
+    @field_validator("openai_api_key", "embedding_api_key")
+    @classmethod
+    def validate_authorization_header_secret(cls, value: str) -> str:
+        """Accept only visible ASCII that is safe in an HTTP header value.
+
+        httpx includes the rejected header value in the representation of some
+        encoding exceptions. Rejecting Unicode, whitespace, and controls while
+        settings are loaded keeps credentials out of that failure path.
+        """
+
+        if value and any(not 0x21 <= ord(character) <= 0x7E for character in value):
+            raise ValueError("provider API key must use header-safe ASCII")
+        return value
+
     @field_validator("provider_thinking_mode", mode="before")
     @classmethod
     def normalize_empty_provider_thinking_mode(cls, value):
         """Compose's unset interpolation is an empty string, meaning no opt-in."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator(
+        "provider_total_deadline_seconds",
+        "provider_max_completion_tokens",
+        mode="before",
+    )
+    @classmethod
+    def normalize_empty_optional_provider_limits(cls, value):
+        """Allow Compose to pass an explicit empty optional limit."""
+
         if isinstance(value, str) and not value.strip():
             return None
         return value
@@ -449,6 +576,14 @@ class Settings(BaseSettings):
             if database_scheme != "postgresql+psycopg":
                 raise ValueError(
                     "production DATABASE_URL must use postgresql+psycopg"
+                )
+            if not self.account_model_active_key_id.strip() or not (
+                self.account_model_keyring_json.strip()
+                or self.account_model_keyring_file.strip()
+            ):
+                raise ValueError(
+                    "production account-model credentials require an explicit "
+                    "active key id and keyring"
                 )
         # Parse eagerly so a typo cannot silently broaden or break browser
         # credential handling after the process has started.

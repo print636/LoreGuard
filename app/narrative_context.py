@@ -233,6 +233,8 @@ def add_context_revision(
     inference_reasoning: str | None = None,
     inference_evidence: list[dict[str, Any]] | None = None,
     inference_usage: dict[str, int] | None = None,
+    inference_provider_config_id: str | None = None,
+    inference_provider_identity: dict[str, Any] | None = None,
 ) -> DocumentNarrativeContextRevisionRow:
     latest = db.scalar(
         select(DocumentNarrativeContextRevisionRow)
@@ -265,6 +267,8 @@ def add_context_revision(
         inference_reasoning=inference_reasoning,
         inference_evidence=inference_evidence,
         inference_usage=inference_usage,
+        inference_provider_config_id=inference_provider_config_id,
+        inference_provider_identity=inference_provider_identity,
         created_by_user_id=created_by_user_id,
     )
     db.add(row)

@@ -15,6 +15,15 @@ os.environ["DATABASE_URL"] = (
     f"sqlite:///{_TEST_WORKSPACE.replace(os.sep, '/')}/tests.db"
 )
 os.environ["OPENAI_API_KEY"] = ""
+os.environ["OPENAI_BASE_URL"] = "https://api.openai.com/v1"
+os.environ["OPENAI_MODEL"] = "gpt-4o-mini"
+os.environ["ACCOUNT_MODEL_ACTIVE_KEY_ID"] = "pytest-v1"
+os.environ["ACCOUNT_MODEL_KEYRING_JSON"] = ""
+os.environ["ACCOUNT_MODEL_KEYRING_FILE"] = ""
+os.environ["ACCOUNT_MODEL_LOCAL_KEY_PATH"] = (
+    f"{_TEST_WORKSPACE.replace(os.sep, '/')}/account-model-keyring.json"
+)
+os.environ["ACCOUNT_MODEL_ALLOWED_ORIGINS"] = "https://api.openai.com"
 os.environ["ENABLE_MODEL_EXTRACTION"] = "false"
 os.environ["ENABLE_REVIEW_AGENT"] = "false"
 os.environ["ENABLE_EMBEDDINGS"] = "false"

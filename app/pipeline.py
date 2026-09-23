@@ -89,11 +89,30 @@ class RuleChecker:
 class AnalysisPipeline:
     """Stable orchestration boundary for replacing extraction and checking layers."""
 
-    def __init__(self, extractor: NarrativeExtractor | None = None, checker: ConsistencyChecker | None = None, normalizer=None, retriever=None):
+    # The worker uses this explicit capability marker when tests or downstream
+    # integrations replace the orchestration boundary with a zero-argument
+    # stub.  Production must pass run-local settings so account credentials do
+    # not fall back to process-global configuration.
+    accepts_run_local_settings = True
+
+    def __init__(
+        self,
+        extractor: NarrativeExtractor | None = None,
+        checker: ConsistencyChecker | None = None,
+        normalizer=None,
+        retriever=None,
+        settings=None,
+    ):
+        from .config import get_settings
+        from .provider import OpenAICompatibleProvider
+
+        self.settings = settings or get_settings()
         if extractor is None:
             from .model_extractor import ModelEnhancedExtractor
 
-            extractor = ModelEnhancedExtractor()
+            extractor = ModelEnhancedExtractor(
+                provider=OpenAICompatibleProvider(self.settings)
+            )
         self.extractor = extractor
         self.checker = checker or RuleChecker()
         if normalizer is None:
@@ -172,9 +191,7 @@ class AnalysisPipeline:
             self.extractor.begin_run(checkpoint=checkpoint)
         from .aliases import canonicalize_entities
         from .chunking import chunk_document
-        from .config import get_settings
-
-        settings = get_settings()
+        settings = self.settings
         chunk_started = perf_counter()
         document_chunk_counts = []
         for document in documents:

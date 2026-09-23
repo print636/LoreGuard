@@ -54,6 +54,32 @@ async function chooseDocx(
   await expect(page.locator(".uploadSelection")).toContainText(name);
 }
 
+async function confirmPublishedDocument(
+  page: Page,
+  name: string,
+  role: "canon" | "chapter",
+): Promise<void> {
+  const workbench = page.locator(".contextWorkbench");
+  const documentButton = workbench
+    .locator(".contextDocumentList button")
+    .filter({ hasText: name });
+  await expect(documentButton).toHaveCount(1);
+  await documentButton.click();
+  await expect(
+    workbench.getByRole("combobox", { name: /^资料类型/ }),
+  ).toHaveValue(role);
+  await workbench
+    .getByRole("combobox", { name: /^发布状态/ })
+    .selectOption("published");
+  await workbench
+    .getByRole("checkbox", { name: /我已核对这份资料的身份与故事位置/ })
+    .check();
+  await workbench
+    .getByRole("button", { name: "保存并确认", exact: true })
+    .click();
+  await expect(documentButton).toContainText("已人工确认");
+}
+
 test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ page }) => {
   const projectName = `Playwright 接线恢复验收 ${Date.now()}`;
   const browserApiOrigins = new Set<string>();
@@ -65,8 +91,10 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
   });
 
   await page.goto("/provider");
-  await expect(page).toHaveURL(/\/provider$/);
-  await expect(page.locator(".providerConnection")).toBeVisible();
+  await expect(page).toHaveURL(/\/app\/settings\/model$/);
+  await expect(
+    page.getByRole("heading", { name: "模型与密钥", exact: true }),
+  ).toBeVisible();
 
   await page.goto("/");
   expect(new URL(page.url()).origin).toBe("http://127.0.0.1:8080");
@@ -100,6 +128,12 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
   await page.getByRole("button", { name: "上传 1 个文件" }).click();
   await expect(page.getByRole("cell", { name: "chapter.docx" })).toBeVisible();
 
+  await confirmPublishedDocument(page, "world.docx", "canon");
+  await confirmPublishedDocument(page, "chapter.docx", "chapter");
+  await expect(page.locator(".contextWorkbench .contextCount")).toHaveText(
+    "2/2 已确认",
+  );
+
   let workerPaused = false;
   let eventRequests = 0;
   let replayedRunId = "";
@@ -112,8 +146,12 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
     runCreateRequests += 1;
     const headers = route.request().headers();
     expect(headers["idempotency-key"]).toBeTruthy();
+    expect(route.request().postDataJSON()).toEqual({
+      mode: "baseline_build",
+      sensitivity: "balanced",
+    });
     const primary = await route.fetch();
-    const replay = await page.request.post(route.request().url(), { headers });
+    const replay = await route.fetch();
     expect(replay.status()).toBe(202);
     const primaryPayload = await primary.json();
     const replayPayload = await replay.json();
@@ -132,7 +170,13 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
     compose("pause", "worker");
     workerPaused = true;
     await page.getByRole("button", { name: "文稿校验", exact: true }).click();
-    const startButton = page.getByRole("button", { name: "开始校验", exact: true });
+    await expect(
+      page.getByText("2 份正式资料已确认，可建立角色基线。", { exact: true }),
+    ).toBeVisible();
+    const startButton = page.getByRole("button", {
+      name: "建立角色基线",
+      exact: true,
+    });
     await expect(startButton).toHaveCount(1);
     await startButton.evaluate((button: HTMLButtonElement) => {
       button.click();

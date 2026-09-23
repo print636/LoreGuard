@@ -16,6 +16,12 @@ values are:
   a path or wildcard, such as `https://loreguard.example.com`;
 - `AUTH_SECRET_KEY`: a unique, high-entropy, server-only value of at least 32
   characters, unrelated to any model-provider key;
+- `ACCOUNT_MODEL_ACTIVE_KEY_ID` and `ACCOUNT_MODEL_KEYRING_FILE`: a dedicated
+  AES-256-GCM account-provider keyring file outside the repository, mounted by
+  Compose as the same read-only secret in API and worker and never derived from
+  `AUTH_SECRET_KEY`;
+- `ACCOUNT_MODEL_ALLOWED_ORIGINS`: comma-separated exact public HTTPS provider
+  origins. Paths, wildcards, IP literals, localhost and `.local` are rejected;
 - `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`: independent
   production database credentials, not the development `loreguard/loreguard`
   credential;
@@ -76,7 +82,11 @@ or expose API/Prometheus directly merely to work around proxy configuration.
 2. Rehearse Alembic upgrade and rollback against the same PostgreSQL major
    version and a sanitized copy of production-scale data.
 3. Put provider keys and auth/database secrets in a restricted secret store or
-   server-only env file; rotate them after any suspected disclosure.
+   server-only env file. Keep the account-provider encryption keyring in the
+   separate restricted file referenced by `ACCOUNT_MODEL_KEYRING_FILE`; rotate
+   credentials after any suspected disclosure. Follow the staged procedure in
+   [Account model Provider](account-model-provider.md); removing an old master
+   key before queued runs drain makes those encrypted credentials unavailable.
 4. Restrict SSH and host firewall access, patch images and the host, and pin or
    review image updates according to the deployment policy.
 5. Keep Prometheus and operational endpoints on a private monitoring boundary.

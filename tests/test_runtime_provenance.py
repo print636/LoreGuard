@@ -81,10 +81,10 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     ] == 2
     assert result["character_consistency_limits"][
         "signal_total_deadline_seconds"
-    ] == 30
+    ] == 60
     assert result["character_consistency_limits"][
         "drift_total_deadline_seconds"
-    ] == 30
+    ] == 60
     assert re.fullmatch(r"[a-f0-9]{64}", result["rag"]["profile_fingerprint"])
     assert re.fullmatch(r"[a-f0-9]{64}", result["rag"]["chunker_fingerprint"])
     assert "test-only-secret" not in serialized

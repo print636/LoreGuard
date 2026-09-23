@@ -605,5 +605,5 @@ def test_context_inference_migration_is_additive_from_review_batch_head():
             revision = connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
             ).scalar_one()
-        assert revision == "0012_context_inference"
+            assert revision == "0013_account_model_provider"
         engine.dispose()

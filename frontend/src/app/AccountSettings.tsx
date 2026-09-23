@@ -50,6 +50,15 @@ function ShieldIcon() {
   );
 }
 
+function KeyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="8.5" cy="12" r="4.5" />
+      <path d="M13 12h8M18 12v3M15.5 12v2" />
+    </svg>
+  );
+}
+
 function EyeIcon({ crossed }: { crossed: boolean }) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -257,7 +266,7 @@ export default function AccountSettings({
             <ShieldIcon /><span>账户安全</span>
           </a>
           <a href="/app/settings/model" onClick={followSpaLink}>
-            <span className="navStatusMark" aria-hidden="true" /><span>模型连接</span>
+            <KeyIcon /><span>模型与密钥</span>
           </a>
         </nav>
         <div className="sidebarAccount">

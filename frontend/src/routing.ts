@@ -1,5 +1,100 @@
 import { useCallback, useEffect, useState } from "react";
 
+const HISTORY_INDEX_KEY = "__loreguardHistoryIndex";
+
+type BrowserNavigationBlocker = () => boolean;
+
+const browserNavigationBlockers = new Set<BrowserNavigationBlocker>();
+let currentHistoryIndex: number | null = null;
+let restoringHistoryIndex: number | null = null;
+let dispatchingProgrammaticNavigation = false;
+
+function historyIndex(value: unknown): number | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = (value as Record<string, unknown>)[HISTORY_INDEX_KEY];
+  return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
+    ? candidate
+    : null;
+}
+
+function historyState(value: unknown, index: number): Record<string, unknown> {
+  const base = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+  return { ...base, [HISTORY_INDEX_KEY]: index };
+}
+
+function navigationAllowed(): boolean {
+  for (const blocker of browserNavigationBlockers) {
+    try {
+      if (!blocker()) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Mark the current same-document history entry so a cancelled back/forward
+ * traversal can return to it without replacing the URL or remounting the page.
+ */
+export function initializeBrowserNavigation(): number {
+  const existing = historyIndex(window.history.state);
+  if (existing !== null) {
+    currentHistoryIndex = existing;
+    return existing;
+  }
+  const initial = currentHistoryIndex ?? 0;
+  window.history.replaceState(historyState(window.history.state, initial), "");
+  currentHistoryIndex = initial;
+  return initial;
+}
+
+/** Register a synchronous confirmation boundary for native browser traversal. */
+export function registerBrowserNavigationBlocker(
+  blocker: BrowserNavigationBlocker,
+): () => void {
+  browserNavigationBlockers.add(blocker);
+  return () => browserNavigationBlockers.delete(blocker);
+}
+
+/**
+ * Return true when RootApp may render the location selected by a popstate.
+ * A rejected native traversal is reversed with history.go; its compensating
+ * popstate is recognized by index and never asks the user a second time.
+ */
+export function handleBrowserPopState(event: PopStateEvent): boolean {
+  const targetIndex = historyIndex(event.state ?? window.history.state);
+  if (dispatchingProgrammaticNavigation) {
+    if (targetIndex !== null) currentHistoryIndex = targetIndex;
+    return true;
+  }
+  if (
+    restoringHistoryIndex !== null &&
+    targetIndex === restoringHistoryIndex
+  ) {
+    currentHistoryIndex = targetIndex;
+    restoringHistoryIndex = null;
+    return true;
+  }
+  if (restoringHistoryIndex !== null && targetIndex !== null) {
+    window.history.go(restoringHistoryIndex - targetIndex);
+    return false;
+  }
+
+  const activeIndex = currentHistoryIndex ?? initializeBrowserNavigation();
+  if (targetIndex === null || targetIndex === activeIndex) return true;
+  if (browserNavigationBlockers.size === 0 || navigationAllowed()) {
+    currentHistoryIndex = targetIndex;
+    return true;
+  }
+
+  restoringHistoryIndex = activeIndex;
+  window.history.go(activeIndex - targetIndex);
+  return false;
+}
+
 export const workspaceViews = [
   "check",
   "projects",
@@ -32,6 +127,8 @@ export type ProductRoute =
   | { kind: "register" }
   | { kind: "projects" }
   | { kind: "settings-account" }
+  | { kind: "settings-model" }
+  | { kind: "legacy-model-settings" }
   | { kind: "workspace"; projectId: string | null; runId: string | null }
   | { kind: "root" }
   | { kind: "not-found" };
@@ -42,7 +139,7 @@ export function shouldResetProductScroll(
 ): boolean {
   return (
     (previous === "login" || previous === "register") &&
-    (next === "projects" || next === "settings-account" || next === "workspace")
+    (next === "projects" || next === "settings-account" || next === "settings-model" || next === "workspace")
   );
 }
 
@@ -52,13 +149,12 @@ export function productRouteFromPath(pathname: string): ProductRoute {
   if (normalized === "/login") return { kind: "login" };
   if (normalized === "/register") return { kind: "register" };
   if (normalized === "/app") return { kind: "projects" };
+  if (normalized === "/provider") return { kind: "legacy-model-settings" };
   if (normalized === "/revision") {
     return { kind: "workspace", projectId: null, runId: null };
   }
   if (normalized === "/app/settings/account") return { kind: "settings-account" };
-  if (normalized === "/app/settings/model") {
-    return { kind: "workspace", projectId: null, runId: null };
-  }
+  if (normalized === "/app/settings/model") return { kind: "settings-model" };
   if (
     /^\/app\/projects\/[^/]+\/(?:check|documents|characters|compare|visuals|runs|report|revise)$/.test(
       normalized,
@@ -195,7 +291,7 @@ export function workspacePath(
   projectId?: string | null,
   runId?: string | null,
 ): string {
-  if (view === "provider" && projectId) return "/app/settings/model";
+  if (view === "provider") return "/app/settings/model";
   if (view === "revision" && !projectId) return "/check";
   if (!projectId) return `/${view}`;
   const encodedId = encodeURIComponent(projectId);
@@ -233,9 +329,20 @@ export function safeReturnTo(value: string | null | undefined): string {
 }
 
 export function browserNavigate(path: string, options?: { replace?: boolean }): void {
+  const activeIndex = currentHistoryIndex ?? initializeBrowserNavigation();
   const method = options?.replace ? "replaceState" : "pushState";
-  window.history[method](null, "", path);
-  window.dispatchEvent(new PopStateEvent("popstate"));
+  const nextIndex = options?.replace ? activeIndex : activeIndex + 1;
+  restoringHistoryIndex = null;
+  window.history[method](historyState(window.history.state, nextIndex), "", path);
+  currentHistoryIndex = nextIndex;
+  dispatchingProgrammaticNavigation = true;
+  try {
+    window.dispatchEvent(
+      new PopStateEvent("popstate", { state: window.history.state }),
+    );
+  } finally {
+    dispatchingProgrammaticNavigation = false;
+  }
 }
 
 export function useWorkspaceRoute(): [

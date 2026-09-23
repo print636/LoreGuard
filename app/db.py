@@ -17,6 +17,7 @@ from sqlalchemy import (
     Integer,
     Index,
     JSON,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -104,6 +105,78 @@ class AuthSessionRow(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AccountProviderConfigRow(Base):
+    """One immutable account-owned chat-provider revision.
+
+    Provider semantics never change after insertion.  Encryption envelopes may
+    be rewrapped during master-key rotation, and revoked rows are scrubbed in
+    place so historical foreign keys remain useful without retaining secrets.
+    """
+
+    __tablename__ = "account_provider_configs"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "revision", name="uq_account_provider_config_revision"
+        ),
+        CheckConstraint("revision > 0", name="ck_account_provider_config_revision"),
+        CheckConstraint(
+            "state IN ('usable', 'superseded', 'revoked', 'scrubbed')",
+            name="ck_account_provider_config_state",
+        ),
+        CheckConstraint(
+            "length(endpoint_sha256) = 64",
+            name="ck_account_provider_config_endpoint_hash",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    base_url: Mapped[str] = mapped_column(String(2048))
+    model_name: Mapped[str] = mapped_column(String(255))
+    endpoint_sha256: Mapped[str] = mapped_column(String(64))
+    secret_ciphertext: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    secret_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    encryption_key_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    secret_schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    state: Mapped[str] = mapped_column(String(24), default="usable", index=True)
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    secret_rewrapped_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_test_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    last_test_category: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    last_test_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class AccountProviderBindingRow(Base):
+    """Current provider pointer and optimistic-lock revision for one account."""
+
+    __tablename__ = "account_provider_bindings"
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    current_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("account_provider_configs.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+    )
+    lock_version: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
 class ProjectRow(Base):
@@ -238,6 +311,14 @@ class DocumentNarrativeContextRevisionRow(Base):
     inference_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     inference_evidence: Mapped[list | None] = mapped_column(JSON, nullable=True)
     inference_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    inference_provider_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("account_provider_configs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    inference_provider_identity: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True
+    )
     created_by_user_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -272,6 +353,12 @@ class AnalysisRunRow(Base):
     requested_by_user_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    provider_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("account_provider_configs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    provider_identity: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # The batch contract is frozen on the run itself.  Legacy callers and
     # migrated rows keep the historical all-active-document behaviour through
     # the ``full_review`` default.

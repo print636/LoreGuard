@@ -45,6 +45,10 @@ import {
 } from "./runSnapshot";
 import { describeRunUsage, type RunUsageInfo } from "./runUsage";
 import {
+  describeRunModelExecution,
+  type RunModelExecutionView,
+} from "./runModelExecution";
+import {
   dispatchFailureRecovery,
   resolveRunSelection,
   terminalRunPath,
@@ -55,11 +59,13 @@ import {
   supportedUploadLabel,
 } from "./uploadFormats";
 import {
-  describeProviderCheck,
-  describeProviderHealth,
   unknownProviderConnection,
   type ProviderConnectionView,
 } from "./providerConnection";
+import {
+  describeAccountProviderConnection,
+  parseAccountModelProvider,
+} from "./app/modelProviderSettings";
 import IssueEvidenceReview from "./components/IssueEvidenceReview";
 import { revisionSearch } from "./revisionWorkflow";
 import {
@@ -178,6 +184,14 @@ type RunInfo = RunUsageInfo & {
     sensitivity: "conservative" | "balanced" | "exploratory" | string;
     target_document_ids?: string[];
   } | null;
+  model_execution?: unknown;
+};
+type AcceptedRunInfo = {
+  id: string;
+  project_id: string;
+  status: string;
+  retried_from?: string | null;
+  model_execution?: unknown;
 };
 type Project = {
   id: string;
@@ -347,6 +361,21 @@ const feedbackNames: Record<string, string> = {
   resolved: "已解决",
 };
 
+function RunModelExecutionNote({
+  view,
+  compact = false,
+}: {
+  view: RunModelExecutionView;
+  compact?: boolean;
+}) {
+  return (
+    <span className={`runModelExecution ${view.tone} ${compact ? "compact" : ""}`}>
+      <strong>{view.label}</strong>
+      <small>{view.detail}</small>
+    </span>
+  );
+}
+
 type AppProps = {
   identity: SessionIdentity;
   onLoggedOut: () => void;
@@ -379,6 +408,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     useState<IssueStatusFilter>("all");
   const [busy, setBusy] = useState(false);
   const [runInfo, setRunInfo] = useState<RunInfo | null>(null);
+  const [acceptedModelExecution, setAcceptedModelExecution] =
+    useState<unknown>(null);
   const [action, setAction] = useState("");
   const [feedbacks, setFeedbacks] = useState<
     Record<string, FeedbackState | null>
@@ -406,7 +437,6 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [providerConnection, setProviderConnection] =
     useState<ProviderConnectionView>(unknownProviderConnection);
-  const [providerChecking, setProviderChecking] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [routeProblem, setRouteProblem] = useState<{
     projectId: string;
@@ -466,6 +496,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     [diagnostics.ai_evidence_review, issueReviewCount],
   );
   const selectedRunUsage = useMemo(() => describeRunUsage(runInfo), [runInfo]);
+  const selectedRunModelExecution = useMemo(
+    () =>
+      describeRunModelExecution(
+        runInfo?.model_execution ?? acceptedModelExecution,
+        runInfo?.status ?? (acceptedModelExecution ? "queued" : null),
+      ),
+    [runInfo, acceptedModelExecution],
+  );
   const selectedProject = projects.find((row) => row.id === project);
   const activeDocuments = useMemo(
     () => docs.filter((row) => row.active),
@@ -480,6 +518,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setAction("");
     setRun("");
     setRunInfo(null);
+    setAcceptedModelExecution(null);
     setProgress(0);
     setIssues([]);
     setClarifications([]);
@@ -502,7 +541,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   async function loadProviderHealth() {
     try {
       setProviderConnection(
-        describeProviderHealth(await apiJson("/health")),
+        describeAccountProviderConnection(
+          parseAccountModelProvider(
+            await apiJson("/api/v1/account/model-provider"),
+          ),
+        ),
       );
     } catch {
       setProviderConnection({
@@ -512,31 +555,6 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         detail: "LoreGuard API 暂时不可用；页面没有发起模型调用。",
         suggestions: ["确认 API 服务正常运行后刷新页面。"],
       });
-    }
-  }
-  async function checkProviderConnection() {
-    try {
-      setProviderChecking(true);
-      setProviderConnection({
-        ...providerConnection,
-        tone: "neutral",
-        label: "正在测试模型连接",
-        detail: "正在发起一次最小 JSON 调用，可能消耗少量 Token。",
-      });
-      const payload = await apiJson("/api/v1/model/provider-check", {
-        method: "POST",
-      });
-      setProviderConnection(describeProviderCheck(payload));
-    } catch {
-      setProviderConnection({
-        ...unknownProviderConnection,
-        tone: "error",
-        label: "无法完成模型连接测试",
-        detail: "LoreGuard API 没有返回可用的安全检查结果。",
-        suggestions: ["确认 API 服务正常运行后重试。"],
-      });
-    } finally {
-      setProviderChecking(false);
     }
   }
   async function refreshProjects() {
@@ -777,6 +795,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     if (epoch !== viewEpochRef.current) return;
     setRun(info.id);
     setRunInfo(info);
+    setAcceptedModelExecution(null);
     setProgress(info.status === "completed" ? 100 : 0);
     setMessage(info.error || `历史任务：${info.status}`);
     setIssues([]);
@@ -835,10 +854,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setVisualError("");
     setFocusedIssue(null);
     setRunInfo(null);
+    setAcceptedModelExecution(null);
     setProgress(0);
     setMessage("任务已提交（若服务器启用模型，可能消耗 Token）");
     try {
-      const created = await apiJsonIdempotent<RunInfo>(
+      const created = await apiJsonIdempotent<AcceptedRunInfo>(
         `/api/v1/projects/${id}/analysis-runs`,
         request
           ? {
@@ -850,9 +870,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       );
       if (epoch !== viewEpochRef.current) return;
       setRun(created.id);
+      setAcceptedModelExecution(created.model_execution ?? null);
       terminalHandledRef.current.delete(created.id);
       loadedRouteRef.current = `${id}:${created.id}`;
       browserNavigate(workspacePath("audit", id, created.id));
+      setMessage(
+        `任务已提交：${describeRunModelExecution(created.model_execution, created.status).label}`,
+      );
       subscribe(created.id, id, epoch);
       try {
         const status = await apiJson<RunInfo>(
@@ -1041,19 +1065,20 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       runMutationRef.current = true;
       const projectId = runInfo.project_id;
       const epoch = ++viewEpochRef.current;
-      const created = await apiJsonIdempotent<RunInfo>(
+      const created = await apiJsonIdempotent<AcceptedRunInfo>(
         `/api/v1/analysis-runs/${run}/retry`,
         { method: "POST" },
       );
       if (epoch !== viewEpochRef.current) return;
       setRun(created.id);
       setRunInfo(null);
+      setAcceptedModelExecution(created.model_execution ?? null);
       setBusy(true);
       terminalHandledRef.current.delete(created.id);
       loadedRouteRef.current = `${projectId}:${created.id}`;
       browserNavigate(workspacePath("audit", projectId, created.id));
       setMessage(
-        `重试已提交，继承运行 ${shortIdentifier(created.retried_from || run)} 的冻结输入（若服务器启用模型，可能消耗 Token）`,
+        `重试已提交，继承运行 ${shortIdentifier(created.retried_from || run)} 的冻结输入；${describeRunModelExecution(created.model_execution, created.status).label}`,
       );
       subscribe(created.id, projectId, epoch);
       try {
@@ -1408,7 +1433,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             >
               <i aria-hidden="true" />
               <span>
-                <small>模型连接</small>
+                <small>模型与密钥</small>
                 <b>{providerConnection.label}</b>
               </span>
             </button>
@@ -1467,81 +1492,6 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   返回项目中心
                 </button>
               </div>
-            </section>
-          )}
-
-          {!routeProblem && activeView === "provider" && (
-            <section
-              className={`providerConnection ${providerConnection.tone}`}
-              aria-live="polite"
-            >
-              <div className="providerConnectionHead">
-                <div>
-                  <p className="eyebrow">MODEL CONNECTION</p>
-                  <h2>{providerConnection.label}</h2>
-                  <p>{providerConnection.detail}</p>
-                </div>
-                <button
-                  className="providerCheckButton"
-                  disabled={providerChecking}
-                  onClick={() => void checkProviderConnection()}
-                >
-                  {providerChecking ? "测试中…" : "测试模型连接（少量 Token）"}
-                </button>
-              </div>
-              <div className="providerMetrics">
-                <div>
-                  <small>服务端配置</small>
-                  <b>
-                    {providerConnection.configured === true
-                      ? "已配置"
-                      : providerConnection.configured === false
-                        ? "未配置"
-                        : "未知"}
-                  </b>
-                </div>
-                <div>
-                  <small>JSON 合同</small>
-                  <b>
-                    {providerConnection.jsonContractOk === true
-                      ? "通过"
-                      : providerConnection.jsonContractOk === false
-                        ? "未通过"
-                        : "未执行"}
-                  </b>
-                </div>
-                <div>
-                  <small>安全分类</small>
-                  <b>{providerConnection.categoryLabel}</b>
-                </div>
-                <div>
-                  <small>本次延迟</small>
-                  <b>{providerConnection.latencyLabel}</b>
-                </div>
-                <div>
-                  <small>本次 Token</small>
-                  <b>{providerConnection.tokensLabel}</b>
-                </div>
-              </div>
-              {providerConnection.suggestions.length > 0 && (
-                <ul className="providerSuggestions">
-                  {providerConnection.suggestions.map((suggestion, index) => (
-                    <li key={index}>{suggestion}</li>
-                  ))}
-                </ul>
-              )}
-              <details className="providerSetup">
-                <summary>如何安全配置模型？</summary>
-                <p>
-                  为避免凭据进入浏览器、数据库或页面响应，本页不提供 API Key
-                  输入框。请只在服务端未提交的 <code>.env</code> 中设置{" "}
-                  <code>ENABLE_MODEL_EXTRACTION=true</code>、
-                  <code>OPENAI_BASE_URL</code>、<code>OPENAI_API_KEY</code> 和{" "}
-                  <code>OPENAI_MODEL</code>，保存后重启 API 与 Celery
-                  worker。连接测试不会显示 endpoint、Key、Prompt
-                  或模型原始响应。
-                </p>
-              </details>
             </section>
           )}
 
@@ -1777,6 +1727,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                           ) : (
                             runs.map((row) => {
                               const usage = describeRunUsage(row);
+                              const modelExecution =
+                                describeRunModelExecution(
+                                  row.model_execution,
+                                  row.status,
+                                );
                               return (
                                 <tr key={row.id}>
                                   <td>
@@ -1837,6 +1792,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                                     {usage.detail && (
                                       <small>{usage.detail}</small>
                                     )}
+                                    <RunModelExecutionNote
+                                      view={modelExecution}
+                                      compact
+                                    />
                                   </td>
                                   <td>
                                     <button
@@ -2084,6 +2043,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                           {retryLineage(runInfo)}
                         </small>
                       )}
+                      <RunModelExecutionNote
+                        view={selectedRunModelExecution}
+                        compact
+                      />
                     </div>
                   </div>
                   {runSnapshotDocuments(runInfo).length ? (
@@ -2155,6 +2118,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     )}
                     {selectedRunUsage.cost}
                   </small>
+                  <RunModelExecutionNote
+                    view={selectedRunModelExecution}
+                    compact
+                  />
                 </div>
               </section>
             </>
@@ -2725,6 +2692,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               <small>模型 Token</small>
               <b>{selectedRunUsage.tokens}</b>
               <span>{selectedRunUsage.cost}</span>
+              {(runInfo !== null || acceptedModelExecution !== null) && (
+                <RunModelExecutionNote
+                  view={selectedRunModelExecution}
+                  compact
+                />
+              )}
             </div>
           </section>
           <div className="railPreviewScroll">

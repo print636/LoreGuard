@@ -21,11 +21,17 @@ import {
   relativeProjectDate,
 } from "./projectPresentation";
 import { apiErrorDetail, type SessionIdentity } from "./session";
+import {
+  modelProviderSourceLabel,
+  parseAccountModelProvider,
+} from "./modelProviderSettings";
+import { describeRunModelExecution } from "../runModelExecution";
 
 type RunSummary = {
   id: string;
   status: string;
   created_at: string;
+  model_execution?: unknown;
 };
 
 type ProjectSummary = {
@@ -69,6 +75,15 @@ function ShieldIcon() {
   );
 }
 
+function KeyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="8.5" cy="12" r="4.5" />
+      <path d="M13 12h8M18 12v3M15.5 12v2" />
+    </svg>
+  );
+}
+
 function statusLabel(status: string | undefined): string {
   const labels: Record<string, string> = {
     queued: "等待中",
@@ -103,6 +118,9 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
   const [sort, setSort] = useState<"recent" | "name">("recent");
   const [samplePending, setSamplePending] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
+  const [modelSource, setModelSource] = useState(
+    "正在读取模型状态",
+  );
   const [entryMode, setEntryMode] = useState<"create" | "import" | null>(null);
   const [entryName, setEntryName] = useState("");
   const [entryFiles, setEntryFiles] = useState<ImportFilePlan[]>([]);
@@ -122,8 +140,20 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
     }
   }
 
+  async function loadModelSource() {
+    try {
+      const profile = parseAccountModelProvider(
+        await apiJson("/api/v1/account/model-provider"),
+      );
+      setModelSource(modelProviderSourceLabel(profile));
+    } catch {
+      setModelSource("模型状态未知");
+    }
+  }
+
   useEffect(() => {
     void loadProjects();
+    void loadModelSource();
   }, []);
 
   const visibleProjects = useMemo(() => {
@@ -234,8 +264,8 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
           <button className="active" type="button" aria-current="page" onClick={() => browserNavigate("/app")}>
             <ProjectIcon /><span>项目</span>
           </button>
-          <button type="button" onClick={() => browserNavigate("/provider")}>
-            <span className="navStatusMark" aria-hidden="true" /><span>模型连接</span>
+          <button type="button" onClick={() => browserNavigate("/app/settings/model")}>
+            <KeyIcon /><span className="sidebarNavCopy"><span>模型与密钥</span><small>{modelSource}</small></span>
           </button>
           {identity.mode === "required" && (
             <button type="button" onClick={() => browserNavigate("/app/settings/account")}>
@@ -407,12 +437,18 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
             <ul className="projectList">
               {visibleProjects.map((project) => {
                 const nextAction = projectNextAction(project);
+                const latestModelExecution = project.latest_run
+                  ? describeRunModelExecution(
+                      project.latest_run.model_execution,
+                      project.latest_run.status,
+                    )
+                  : null;
                 return (
                 <li key={project.id}>
                   <a className="projectRow" href={nextAction.path} onClick={followSpaLink}>
                     <span className="projectRowIdentity"><ProjectIcon /><span><strong>{project.name}</strong><small>{project.description || "尚未添加项目说明"}</small></span></span>
                     <span><small>文档</small><b>{project.active_document_count}</b></span>
-                    <span><small>最近运行</small><b>{statusLabel(project.latest_run?.status)}</b></span>
+                    <span><small>最近运行</small><b>{statusLabel(project.latest_run?.status)}</b>{latestModelExecution && <small className={`projectRunSource ${latestModelExecution.tone}`}>{latestModelExecution.label}</small>}</span>
                     <span><small>创建时间</small><b>{relativeProjectDate(project.created_at)}</b></span>
                     <span className="projectRowAction"><small>下一步</small><b>{nextAction.label}</b></span>
                     <svg className="rowChevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>

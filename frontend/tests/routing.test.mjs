@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  browserNavigate,
+  handleBrowserPopState,
+  initializeBrowserNavigation,
   productRouteFromPath,
+  registerBrowserNavigationBlocker,
   reportRouteStateFromSearch,
   reportSearch,
   safeReturnTo,
@@ -20,6 +24,9 @@ test("each workspace view has a stable deep-link path", () => {
     if (view === "revision") {
       assert.equal(workspacePath(view), "/check");
       assert.equal(workspaceViewFromPath("/revision"), "check");
+    } else if (view === "provider") {
+      assert.equal(workspacePath(view), "/app/settings/model");
+      assert.equal(workspaceViewFromPath("/app/settings/model"), "provider");
     } else {
       assert.equal(workspacePath(view), `/${view}`);
       assert.equal(workspaceViewFromPath(`/${view}`), view);
@@ -55,6 +62,8 @@ test("product routes distinguish authentication, project center, and workspaces"
     runId: "r-2",
   });
   assert.equal(productRouteFromPath("/app/settings/account").kind, "settings-account");
+  assert.equal(productRouteFromPath("/app/settings/model").kind, "settings-model");
+  assert.equal(productRouteFromPath("/provider").kind, "legacy-model-settings");
   assert.equal(productRouteFromPath("/missing").kind, "not-found");
 });
 
@@ -65,6 +74,7 @@ test("nested project routes preserve project context across old workspace views"
   assert.equal(workspaceViewFromPath("/app/projects/p-1/compare"), "diff");
   assert.equal(workspacePath("report", "p-1"), "/app/projects/p-1/report");
   assert.equal(workspacePath("provider", "p-1"), "/app/settings/model");
+  assert.equal(workspacePath("provider"), "/app/settings/model");
   assert.equal(workspacePath("characters", "p-1"), "/app/projects/p-1/characters");
   assert.equal(workspaceRunIdFromPath("/app/projects/p-1/runs/run%202/report"), "run 2");
   assert.equal(
@@ -163,6 +173,117 @@ test("leaving authentication resets scroll only when entering product work", () 
   assert.equal(shouldResetProductScroll("register", "projects"), true);
   assert.equal(shouldResetProductScroll("login", "workspace"), true);
   assert.equal(shouldResetProductScroll("login", "settings-account"), true);
+  assert.equal(shouldResetProductScroll("login", "settings-model"), true);
   assert.equal(shouldResetProductScroll("projects", "workspace"), false);
   assert.equal(shouldResetProductScroll("login", "register"), false);
+});
+
+test("native back and forward can be cancelled without losing the active history entry", () => {
+  const originalWindow = globalThis.window;
+  const originalPopStateEvent = globalThis.PopStateEvent;
+  const goCalls = [];
+  const location = {
+    pathname: "/app",
+    search: "",
+    hash: "",
+    href: "https://loreguard.local/app",
+  };
+  const applyUrl = (value) => {
+    if (value === undefined) return;
+    const url = new URL(String(value), location.href);
+    location.pathname = url.pathname;
+    location.search = url.search;
+    location.hash = url.hash;
+    location.href = url.href;
+  };
+  const fakeWindow = new EventTarget();
+  fakeWindow.location = location;
+  fakeWindow.history = {
+    state: null,
+    replaceState(state, _title, url) {
+      this.state = state;
+      applyUrl(url);
+    },
+    pushState(state, _title, url) {
+      this.state = state;
+      applyUrl(url);
+    },
+    go(delta) {
+      goCalls.push(delta);
+    },
+  };
+  class FakePopStateEvent extends Event {
+    constructor(type, init = {}) {
+      super(type);
+      this.state = init.state ?? null;
+    }
+  }
+
+  globalThis.window = fakeWindow;
+  globalThis.PopStateEvent = FakePopStateEvent;
+  try {
+    initializeBrowserNavigation();
+    const projectState = fakeWindow.history.state;
+    browserNavigate("/app/settings/model");
+    const settingsState = fakeWindow.history.state;
+
+    let confirmations = 0;
+    const releaseCancel = registerBrowserNavigationBlocker(() => {
+      confirmations += 1;
+      return false;
+    });
+    applyUrl("/app");
+    fakeWindow.history.state = projectState;
+    assert.equal(
+      handleBrowserPopState(new FakePopStateEvent("popstate", { state: projectState })),
+      false,
+    );
+    assert.deepEqual(goCalls, [1]);
+    assert.equal(confirmations, 1);
+
+    applyUrl("/app/settings/model");
+    fakeWindow.history.state = settingsState;
+    assert.equal(
+      handleBrowserPopState(new FakePopStateEvent("popstate", { state: settingsState })),
+      true,
+    );
+    assert.equal(confirmations, 1, "the compensating popstate must not prompt twice");
+    releaseCancel();
+
+    const releaseAccept = registerBrowserNavigationBlocker(() => {
+      confirmations += 1;
+      return true;
+    });
+    applyUrl("/app");
+    fakeWindow.history.state = projectState;
+    assert.equal(
+      handleBrowserPopState(new FakePopStateEvent("popstate", { state: projectState })),
+      true,
+    );
+    assert.equal(confirmations, 2);
+    releaseAccept();
+
+    const releaseForwardCancel = registerBrowserNavigationBlocker(() => {
+      confirmations += 1;
+      return false;
+    });
+    applyUrl("/app/settings/model");
+    fakeWindow.history.state = settingsState;
+    assert.equal(
+      handleBrowserPopState(new FakePopStateEvent("popstate", { state: settingsState })),
+      false,
+    );
+    assert.deepEqual(goCalls, [1, -1]);
+    applyUrl("/app");
+    fakeWindow.history.state = projectState;
+    assert.equal(
+      handleBrowserPopState(new FakePopStateEvent("popstate", { state: projectState })),
+      true,
+    );
+    assert.equal(confirmations, 3);
+    releaseForwardCancel();
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.PopStateEvent = originalPopStateEvent;
+  }
 });

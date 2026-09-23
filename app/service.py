@@ -12,6 +12,7 @@ from uuid import uuid4
 from sqlalchemy import and_, delete, exists, func, or_, select, update
 
 from .config import get_settings
+from .account_provider import runtime_for_analysis_run
 from .db import (
     AnalysisDiagnosticRow,
     AnalysisRecordRow,
@@ -2175,6 +2176,13 @@ def execute_analysis(
         _checkpoint(run_id, token, heartbeat)
         with SessionLocal() as db:
             documents, input_metadata = _load_verified_snapshot(db, run_id)
+            run = db.get(AnalysisRunRow, run_id)
+            if run is None:
+                raise ValueError("analysis run is unavailable")
+            provider_runtime = runtime_for_analysis_run(
+                db, run, base_settings=get_settings()
+            )
+            settings = provider_runtime.settings
             previous_diagnostic = db.get(AnalysisDiagnosticRow, run_id)
             if previous_diagnostic and isinstance(previous_diagnostic.payload, dict):
                 candidate_usage = previous_diagnostic.payload.get("usage_accounting")
@@ -2183,7 +2191,13 @@ def execute_analysis(
                     candidate_usage if isinstance(candidate_usage, dict) else None,
                     terminal_status="running",
                 )
-            pipeline = AnalysisPipeline()
+            if getattr(AnalysisPipeline, "accepts_run_local_settings", False):
+                pipeline = AnalysisPipeline(settings=settings)
+            else:
+                # Preserve the documented injectable orchestration boundary
+                # for zero-argument test/adaptor pipelines. The real pipeline
+                # always takes the guarded branch above.
+                pipeline = AnalysisPipeline()
 
             def on_stage(stage: str, progress: int, message: str) -> None:
                 _checkpoint(run_id, token, heartbeat)
@@ -2194,9 +2208,25 @@ def execute_analysis(
                 on_stage=on_stage,
                 checkpoint=lambda: _checkpoint(run_id, token, heartbeat),
             )
+            result.diagnostics["account_provider_execution"] = {
+                "identity": provider_runtime.identity,
+                "available": provider_runtime.available,
+                "unavailable_reason": (
+                    provider_runtime.unavailable_reason
+                    if provider_runtime.unavailable_reason
+                    in {
+                        None,
+                        "not_configured",
+                        "credential_revoked",
+                        "credential_unavailable",
+                        "identity_mismatch",
+                        "endpoint_rejected",
+                    }
+                    else "provider_unavailable"
+                ),
+            }
             _checkpoint(run_id, token, heartbeat)
             review_result = None
-            settings = get_settings()
             baseline_reported_tokens = (
                 result.prompt_tokens + result.completion_tokens
             )
@@ -2223,7 +2253,6 @@ def execute_analysis(
                 if previous_usage is not None
                 else 0
             )
-            run = db.get(AnalysisRunRow, run_id)
             character_stage_settings = _character_stage_settings_for_run(
                 settings, run
             )

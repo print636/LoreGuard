@@ -237,7 +237,8 @@ class ModelExecutionTests(unittest.TestCase):
             extractor=ModelEnhancedExtractor(SecretTelemetryProvider())
         ).run([DocumentInput("doc", "chapter.md", "林澈的身份是领航员。")])
         serialized = json.dumps(safe.diagnostics["model"])
-        self.assertIn("request-safe_789", serialized)
+        self.assertIn('"request_id": null', serialized)
+        self.assertNotIn("request-safe_789", serialized)
         for secret in (
             "secret.invalid", "Authorization", "private-key",
             "private prompt", "private response",

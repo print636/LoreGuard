@@ -2,7 +2,14 @@
 
 LoreGuard is an evidence-first narrative consistency review platform for game writers and narrative designers. It extracts versioned facts and events from authorized story material, detects deterministic continuity conflicts, and optionally augments its baseline extractor with a validated OpenAI-compatible provider. Provider failures fall back to the baseline; model and baseline records are deduplicated and bound to source lines. A separate default-off Evidence Investigator uses provider-native function calls to search and read authorized snapshots before submitting one untrusted candidate or abstaining; deterministic promotion remains the only path from that candidate to an issue.
 
-See [README.zh-CN.md](README.zh-CN.md) for the full guide. Credentials are read only from server-side environment variables and must never be committed.
+See [README.zh-CN.md](README.zh-CN.md) for the full guide. Deployment
+credentials are read only from server-side environment variables or
+mounted secret files and must never be committed.
+
+Authenticated accounts may instead save one OpenAI-compatible chat Provider.
+Those API keys are AES-256-GCM encrypted, never echoed, and analysis runs freeze
+a non-secret provider revision before Celery dispatch. See the
+[BYOK V1 security and rotation contract](docs/account-model-provider.md).
 
 ## Guided review workflow
 

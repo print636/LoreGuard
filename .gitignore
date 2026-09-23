@@ -8,6 +8,8 @@ __pycache__/
 *.db
 *.sqlite
 *.sqlite3
+data/account-model-master.key
+data/account-model-keys/
 .pytest_cache/
 .coverage
 htmlcov/

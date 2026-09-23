@@ -16,6 +16,15 @@ services:
       AUTH_COOKIE_SAMESITE: lax
       CORS_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?Set one exact public HTTPS origin, for example https://loreguard.example.com}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the production PostgreSQL SQLAlchemy URL}
+      ACCOUNT_MODEL_ACTIVE_KEY_ID: ${ACCOUNT_MODEL_ACTIVE_KEY_ID:?Set the active account-model key ID}
+      ACCOUNT_MODEL_KEYRING_JSON: ""
+      ACCOUNT_MODEL_KEYRING_FILE: /run/secrets/account_model_keyring
+      ACCOUNT_MODEL_ALLOWED_ORIGINS: ${ACCOUNT_MODEL_ALLOWED_ORIGINS:?Set exact HTTPS provider origins}
+    secrets:
+      - account_model_keyring
+    # Production uses the read-only secret above; remove the development
+    # writable key volume inherited from the base Compose file.
+    volumes: !reset []
     # `ports` in the development file is a unique-list field, so !reset is
     # required; writing `ports: []` would leave 8000 published after merging.
     ports: !reset []
@@ -45,6 +54,13 @@ services:
       AUTH_COOKIE_SAMESITE: lax
       CORS_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?Set one exact public HTTPS origin, for example https://loreguard.example.com}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the production PostgreSQL SQLAlchemy URL}
+      ACCOUNT_MODEL_ACTIVE_KEY_ID: ${ACCOUNT_MODEL_ACTIVE_KEY_ID:?Set the active account-model key ID}
+      ACCOUNT_MODEL_KEYRING_JSON: ""
+      ACCOUNT_MODEL_KEYRING_FILE: /run/secrets/account_model_keyring
+      ACCOUNT_MODEL_ALLOWED_ORIGINS: ${ACCOUNT_MODEL_ALLOWED_ORIGINS:?Set exact HTTPS provider origins}
+    secrets:
+      - account_model_keyring
+    volumes: !reset []
     restart: unless-stopped
     init: true
     security_opt:
@@ -73,3 +89,7 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+
+secrets:
+  account_model_keyring:
+    file: ${ACCOUNT_MODEL_KEYRING_FILE:?Set the host path to the account-model keyring JSON file}

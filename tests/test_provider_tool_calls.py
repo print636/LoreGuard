@@ -465,6 +465,117 @@ class ProviderNativeToolCallingTests(unittest.TestCase):
                 self.assertIs(type(caught.exception), ProviderError)
                 self.assertEqual(category, caught.exception.category)
 
+    def test_unicode_escaped_credential_in_tool_arguments_is_rejected(self):
+        api_key = "sk-tool-unicode-canary"
+        escaped_key = "".join(f"\\u{ord(character):04x}" for character in api_key)
+        inner_arguments = (
+            '{"document_ref":"' + escaped_key + '","line":7}'
+        )
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [call(arguments=inner_arguments)],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 4},
+        }
+        raw_body = json.dumps(payload, separators=(",", ":")).encode("ascii")
+        self.assertNotIn(api_key.encode("ascii"), raw_body)
+        provider = self.provider(
+            lambda _: httpx.Response(200, content=raw_body),
+            settings=self.settings(openai_api_key=api_key),
+        )
+
+        with self.assertRaises(ProviderToolCallError) as caught:
+            provider.complete_with_tools("s", "u", tools=[tool()])
+
+        self.assertEqual("credential_reflected", caught.exception.category)
+        self.assertNotIn(api_key, repr(caught.exception))
+        self.assertNotIn(
+            api_key, json.dumps(caught.exception.telemetry.model_dump())
+        )
+
+    def test_unicode_escaped_credential_in_tool_argument_json_scalar_is_rejected(self):
+        api_key = "sk-tool-scalar-canary"
+        escaped_key = "".join(f"\\u{ord(character):04x}" for character in api_key)
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            call(
+                                arguments=json.dumps(
+                                    {
+                                        "document_ref": '"' + escaped_key + '"',
+                                        "line": 7,
+                                    },
+                                    separators=(",", ":"),
+                                )
+                            )
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 4},
+        }
+        raw_body = json.dumps(payload, separators=(",", ":")).encode("ascii")
+        self.assertNotIn(api_key.encode("ascii"), raw_body)
+        provider = self.provider(
+            lambda _: httpx.Response(200, content=raw_body),
+            settings=self.settings(openai_api_key=api_key),
+        )
+
+        with self.assertRaises(ProviderToolCallError) as caught:
+            provider.complete_with_tools("s", "u", tools=[tool()])
+
+        self.assertEqual("credential_reflected", caught.exception.category)
+        self.assertNotIn(api_key, repr(caught.exception))
+        self.assertNotIn(
+            api_key, json.dumps(caught.exception.telemetry.model_dump())
+        )
+
+    def test_duplicate_key_json_text_in_tool_argument_cannot_hide_credential(self):
+        api_key = "sk-tool-duplicate-canary"
+        escaped_key = "".join(f"\\u{ord(character):04x}" for character in api_key)
+        nested = '{"value":"safe","value":"' + escaped_key + '"}'
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            call(
+                                arguments=json.dumps(
+                                    {"document_ref": nested, "line": 7},
+                                    separators=(",", ":"),
+                                )
+                            )
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 4},
+        }
+        raw_body = json.dumps(payload, separators=(",", ":")).encode("ascii")
+        self.assertNotIn(api_key.encode("ascii"), raw_body)
+        provider = self.provider(
+            lambda _: httpx.Response(200, content=raw_body),
+            settings=self.settings(openai_api_key=api_key),
+        )
+
+        with self.assertRaises(ProviderToolCallError) as caught:
+            provider.complete_with_tools("s", "u", tools=[tool()])
+
+        self.assertEqual("credential_reflected", caught.exception.category)
+        self.assertNotIn(api_key, repr(caught.exception))
+
     def test_invalid_local_contracts_make_no_upstream_request(self):
         calls = 0
 

@@ -18,3 +18,7 @@ node_modules
 coverage
 htmlcov
 *.log
+# Account-provider encryption roots are runtime-only secrets. Git ignore rules
+# do not protect Docker build contexts or historical image layers.
+data/account-model-master.key
+data/account-model-keys/

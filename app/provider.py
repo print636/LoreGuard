@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import random
@@ -12,7 +13,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Literal, TypeVar
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .config import Settings, get_settings
 
@@ -31,15 +32,16 @@ _ABSOLUTE_MAX_TOOL_ARGUMENT_BYTES = 256 * 1_024
 # tighter ceiling.  Successful response transport and decompression must still
 # have a hard memory bound, especially when an upstream enables compression.
 _ABSOLUTE_MAX_PROVIDER_RESPONSE_BYTES = 16 * 1_024 * 1_024
+_MAX_CREDENTIAL_SCAN_NODES = 100_000
+_MAX_CREDENTIAL_SCAN_CHARS = 2 * _ABSOLUTE_MAX_PROVIDER_RESPONSE_BYTES
 
 _ParsedResponse = TypeVar("_ParsedResponse")
 
 
 def sanitize_request_id(value: Any) -> str | None:
-    """Return one safe correlation token, never an arbitrary header value."""
-    if not isinstance(value, str) or not _REQUEST_ID_PATTERN.fullmatch(value):
-        return None
-    return value
+    """Discard correlation headers controlled by the credential-seeing upstream."""
+
+    return None
 
 
 def safe_thinking_configuration(settings: Any) -> dict[str, Any]:
@@ -66,6 +68,11 @@ class ProviderAttemptTelemetry(BaseModel):
         default=None, max_length=128, pattern=_REQUEST_ID_PATTERN.pattern
     )
 
+    @field_validator("request_id", mode="before")
+    @classmethod
+    def discard_upstream_request_id(cls, value: Any) -> None:
+        return None
+
 
 class ProviderCallTelemetry(BaseModel):
     """Safe aggregate metrics for one logical provider call."""
@@ -83,6 +90,11 @@ class ProviderCallTelemetry(BaseModel):
         default=None, max_length=128, pattern=_REQUEST_ID_PATTERN.pattern
     )
     attempts: list[ProviderAttemptTelemetry] = Field(default_factory=list)
+
+    @field_validator("request_id", mode="before")
+    @classmethod
+    def discard_upstream_request_id(cls, value: Any) -> None:
+        return None
 
 
 class ModelResult(BaseModel):
@@ -462,14 +474,78 @@ class OpenAICompatibleProvider:
         tool_contract: bool = False,
     ) -> tuple[_ParsedResponse, int, int, ProviderCallTelemetry]:
         attempts: list[ProviderAttemptTelemetry] = []
+        try:
+            # Reapply the exact-origin SSRF boundary at the final transport
+            # edge. Account configurations are validated when saved, but a
+            # database mutation or stale worker must not bypass request-time
+            # enforcement.
+            from .provider_credentials import (
+                ProviderEndpointRejected,
+                allowed_provider_origins,
+                provider_endpoint_sha256,
+                validate_provider_request_url,
+            )
+
+            frozen_origins = self.settings.provider_transport_allowed_origins
+            request_origins = (
+                tuple(item for item in frozen_origins.split(",") if item)
+                if frozen_origins
+                else allowed_provider_origins(self.settings)
+            )
+            checked_base_url = validate_provider_request_url(
+                self.settings.openai_base_url,
+                allowed_origins=request_origins,
+            )
+            frozen_endpoint_sha256 = (
+                self.settings.provider_runtime_endpoint_sha256
+            )
+            if self.settings.provider_runtime_config_id and (
+                len(frozen_endpoint_sha256) != 64
+                or not hmac.compare_digest(
+                    provider_endpoint_sha256(checked_base_url),
+                    frozen_endpoint_sha256,
+                )
+            ):
+                raise ProviderEndpointRejected(
+                    "provider endpoint fingerprint does not match"
+                )
+        except ProviderEndpointRejected:
+            telemetry = self._call_telemetry(
+                call_started, input_chars, "endpoint_rejected", attempts
+            )
+            self.last_telemetry = telemetry
+            raise ProviderError(
+                "模型服务地址未通过安全校验（category=endpoint_rejected）",
+                category="endpoint_rejected",
+                elapsed_ms=telemetry.elapsed_ms,
+                telemetry=telemetry,
+            ) from None
+        api_key = self.settings.openai_api_key
+        if not api_key or any(
+            not 0x21 <= ord(character) <= 0x7E for character in api_key
+        ):
+            telemetry = self._call_telemetry(
+                call_started, input_chars, "credential_invalid", attempts
+            )
+            self.last_telemetry = telemetry
+            raise ProviderError(
+                "模型凭据格式无效（category=credential_invalid）",
+                category="credential_invalid",
+                elapsed_ms=telemetry.elapsed_ms,
+                telemetry=telemetry,
+            ) from None
         headers = {
-            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             # Advertise only the transfer coding that the bounded success-body
             # reader implements. Identity remains acceptable by HTTP default.
             "Accept-Encoding": "gzip",
         }
-        endpoint = f"{self.settings.openai_base_url.rstrip('/')}/chat/completions"
+        credential_markers = {
+            api_key.encode("ascii"),
+            json.dumps(api_key, ensure_ascii=True)[1:-1].encode("ascii"),
+        }
+        endpoint = f"{checked_base_url.rstrip('/')}/chat/completions"
         deadline = (
             call_started + self.settings.provider_total_deadline_seconds
             if self.settings.provider_total_deadline_seconds is not None
@@ -486,6 +562,15 @@ class OpenAICompatibleProvider:
                 if deadline is not None and self.monotonic() >= deadline:
                     break
 
+                # Check immediately before every physical attempt, not merely
+                # once per logical call. A delete during retry backoff must
+                # stop the next HTTP request even though this Provider still
+                # holds the previously decrypted plaintext in memory.
+                self._assert_account_credential_authorized(
+                    call_started=call_started,
+                    input_chars=input_chars,
+                    attempts=attempts,
+                )
                 attempt_started = self.monotonic()
                 response_chars = 0
                 received_bytes = 0
@@ -543,12 +628,42 @@ class OpenAICompatibleProvider:
                             if failure is None:
                                 assert raw_body is not None
                                 response_chars = self._response_chars(raw_body)
-                                (
-                                    parsed_response,
-                                    prompt_tokens,
-                                    completion_tokens,
-                                    failure,
-                                ) = response_parser(raw_body, attempt_no)
+                                if any(
+                                    marker and marker in raw_body
+                                    for marker in credential_markers
+                                ):
+                                    # A credential-seeing upstream must not be
+                                    # able to turn the Authorization value into
+                                    # model content that downstream stages may
+                                    # persist as a narrative record.
+                                    failure = _Failure(
+                                        "credential_reflected", attempt_no
+                                    )
+                                else:
+                                    (
+                                        parsed_response,
+                                        prompt_tokens,
+                                        completion_tokens,
+                                        failure,
+                                    ) = response_parser(raw_body, attempt_no)
+                                    if (
+                                        failure is None
+                                        and parsed_response is not None
+                                        and self._parsed_contains_credential(
+                                            parsed_response, api_key
+                                        )
+                                    ):
+                                        # Raw-byte screening alone is not
+                                        # sufficient: a JSON response can
+                                        # spell an ASCII credential with
+                                        # ``\u00xx`` escapes.  Check the
+                                        # decoded, caller-visible result too,
+                                        # before it can enter a model result,
+                                        # tool arguments, or diagnostics.
+                                        parsed_response = None
+                                        failure = _Failure(
+                                            "credential_reflected", attempt_no
+                                        )
 
                         # Error responses are intentionally never consumed. A
                         # successful oversized stream is closed by the bounded
@@ -593,6 +708,10 @@ class OpenAICompatibleProvider:
                     failure = _Failure("response_decompression", attempt_no)
                 except httpx.RequestError:
                     failure = _Failure("transport", attempt_no, retryable=True)
+                except UnicodeError:
+                    # Defensive fallback for alternate transports/header
+                    # behavior. Never retain or interpolate the bad value.
+                    failure = _Failure("credential_invalid", attempt_no)
 
                 # Every branch above either returned or recorded a safe failure.
                 assert failure is not None
@@ -657,6 +776,43 @@ class OpenAICompatibleProvider:
             telemetry=telemetry,
             request_id=failure.request_id,
         )
+
+    def _assert_account_credential_authorized(
+        self,
+        *,
+        call_started: float,
+        input_chars: int,
+        attempts: list[ProviderAttemptTelemetry],
+    ) -> None:
+        if not self.settings.provider_runtime_config_id:
+            return
+        from .provider_access_guard import (
+            ProviderCredentialRevoked,
+            assert_account_provider_still_authorized,
+        )
+
+        try:
+            assert_account_provider_still_authorized(
+                config_id=self.settings.provider_runtime_config_id,
+                user_id=self.settings.provider_runtime_user_id,
+                revision=self.settings.provider_runtime_revision,
+                endpoint_sha256=self.settings.provider_runtime_endpoint_sha256,
+                model_name=self.settings.openai_model,
+            )
+        except ProviderCredentialRevoked:
+            telemetry = self._call_telemetry(
+                call_started,
+                input_chars,
+                "credential_revoked",
+                attempts,
+            )
+            self.last_telemetry = telemetry
+            raise ProviderError(
+                "账户模型凭据已撤销（category=credential_revoked）",
+                category="credential_revoked",
+                elapsed_ms=telemetry.elapsed_ms,
+                telemetry=telemetry,
+            ) from None
 
     def _parse_completion_response(
         self, raw_body: bytes, attempt_no: int
@@ -967,6 +1123,103 @@ class OpenAICompatibleProvider:
         )
 
     @classmethod
+    def _parsed_contains_credential(
+        cls,
+        value: Any,
+        credential: str,
+        *,
+        depth: int = 0,
+        budget: dict[str, int] | None = None,
+    ) -> bool:
+        """Reject a credential reflected into any caller-visible result.
+
+        Provider response JSON is bounded before parsing and tool arguments
+        are already restricted to JSON values with a maximum nesting depth.
+        This second trust-boundary check deliberately examines only parsed
+        data that could be returned to or persisted by callers; it never
+        includes the matched value in an error or telemetry payload.
+        """
+
+        if budget is None:
+            budget = {
+                "nodes": _MAX_CREDENTIAL_SCAN_NODES,
+                "chars": _MAX_CREDENTIAL_SCAN_CHARS,
+            }
+        budget["nodes"] -= 1
+        if depth > 34 or budget["nodes"] < 0:
+            # Unexpected depth is safer to reject than to leave unchecked.
+            return True
+        if isinstance(value, str):
+            budget["chars"] -= len(value)
+            if (
+                len(value) > _ABSOLUTE_MAX_PROVIDER_RESPONSE_BYTES
+                or budget["chars"] < 0
+            ):
+                return True
+            if credential in value:
+                return True
+            # Ordinary completions are themselves JSON text.  The outer
+            # response parser intentionally returns that text to callers, so
+            # inspect its decoded object as well; otherwise an upstream could
+            # hide a credential behind inner ``\u00xx`` escapes that only the
+            # downstream extractor materializes.
+            stripped = value.lstrip()
+            if stripped.startswith(("{", "[", '"')):
+                try:
+                    nested = cls._strict_json_loads(value)
+                except (TypeError, ValueError, UnicodeError, RecursionError):
+                    # Some legacy downstream consumers use Python's ordinary
+                    # JSON decoder. Match that effective decode as a second
+                    # scan path so duplicate-key or non-finite JSON cannot
+                    # conceal an escaped credential that a later consumer
+                    # would materialize. If neither decoder accepts the text,
+                    # it cannot be materialized by those JSON consumers.
+                    try:
+                        nested = json.loads(value)
+                    except (TypeError, ValueError, UnicodeError, RecursionError):
+                        return False
+                return cls._parsed_contains_credential(
+                    nested,
+                    credential,
+                    depth=depth + 1,
+                    budget=budget,
+                )
+            return False
+        if isinstance(value, ProviderToolCall):
+            return (
+                cls._parsed_contains_credential(
+                    value.id, credential, depth=depth + 1, budget=budget
+                )
+                or cls._parsed_contains_credential(
+                    value.name, credential, depth=depth + 1, budget=budget
+                )
+                or cls._parsed_contains_credential(
+                    value.arguments,
+                    credential,
+                    depth=depth + 1,
+                    budget=budget,
+                )
+            )
+        if isinstance(value, (list, tuple)):
+            return any(
+                cls._parsed_contains_credential(
+                    item, credential, depth=depth + 1, budget=budget
+                )
+                for item in value
+            )
+        if isinstance(value, dict):
+            return any(
+                cls._parsed_contains_credential(
+                    key, credential, depth=depth + 1, budget=budget
+                )
+                or cls._parsed_contains_credential(
+                    item, credential, depth=depth + 1, budget=budget
+                )
+                for key, item in value.items()
+            )
+        return False
+
+    @classmethod
     def _is_json_value(cls, value: Any, *, depth: int = 0) -> bool:
         if depth > 32:
             return False
@@ -1236,8 +1489,8 @@ class OpenAICompatibleProvider:
                 "truncated", attempt_no
             )
         try:
-            json.loads(text)
-        except (json.JSONDecodeError, TypeError):
+            OpenAICompatibleProvider._strict_json_loads(text)
+        except (TypeError, ValueError, UnicodeError, RecursionError):
             return text, prompt_tokens, completion_tokens, _Failure(
                 "content_json", attempt_no
             )
@@ -1302,12 +1555,8 @@ class OpenAICompatibleProvider:
 
     @staticmethod
     def _request_id(response: httpx.Response) -> str | None:
-        # httpx headers are case-insensitive. Only these four values are ever
-        # observed; the rest of the upstream header collection is discarded.
-        for name in _REQUEST_ID_HEADERS:
-            value = sanitize_request_id(response.headers.get(name))
-            if value is not None:
-                return value
+        # Correlation headers are upstream-controlled after it has observed
+        # the account key. Drop them instead of exposing a credential oracle.
         return None
 
     def _retry_delay(

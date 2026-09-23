@@ -28,7 +28,14 @@ from .auth import (
     require_csrf,
     router as auth_router,
 )
+from .account_provider import (
+    NO_STORE_HEADERS as ACCOUNT_PROVIDER_NO_STORE_HEADERS,
+    account_provider_runtime,
+    bind_account_provider_to_run,
+    router as account_provider_router,
+)
 from .db import (
+    AccountProviderConfigRow,
     AnalysisDiagnosticRow,
     AnalysisRecordRow,
     AnalysisRunCharacterTraitInputRow,
@@ -50,6 +57,11 @@ from .db import (
     RunEventRow,
     SessionLocal,
     init_db,
+)
+from .provider_credentials import (
+    ProviderCredentialError,
+    ProviderEndpointRejected,
+    validate_provider_security_configuration,
 )
 from .character_traits import (
     normalize_character_key,
@@ -115,12 +127,15 @@ from .time_utils import utc_now_naive
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    validate_provider_security_configuration(settings)
     init_db()
     yield
 
 
 app = FastAPI(title="LoreGuard API", version="0.1.0", lifespan=lifespan)
 settings = get_settings()
+
+
 write_limiter = SlidingWindowLimiter(settings.rate_limit_per_minute, settings.rate_limit_window_seconds)
 app.add_middleware(WriteRateLimitMiddleware, limiter=write_limiter)
 app.add_middleware(
@@ -135,7 +150,21 @@ app.add_middleware(
     allow_headers=["Accept", "Content-Type", "X-CSRF-Token", "Idempotency-Key"],
     expose_headers=["X-CSRF-Token"],
 )
+
+
+# Register this last so Starlette places it outside origin and rate-limit
+# middleware. Even an early 403/429 on this secret-adjacent path must be marked
+# non-cacheable.
+@app.middleware("http")
+async def account_provider_no_store(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/v1/account/model-provider"):
+        response.headers.update(ACCOUNT_PROVIDER_NO_STORE_HEADERS)
+    return response
+
+
 app.include_router(auth_router)
+app.include_router(account_provider_router)
 
 
 class SpaStaticFiles(StaticFiles):
@@ -558,11 +587,124 @@ def _issue_in_workspace(db, issue_id: str, workspace_id: str) -> IssueRow | None
     )
 
 
+def _diagnostic_provider_execution_status(value: object) -> str | None:
+    """Classify only explicit, content-free provider execution evidence.
+
+    Do not recursively inspect arbitrary diagnostic JSON. The two paths below
+    are persisted by server-side allowlists and contain counters/status enums,
+    never prompts, responses, endpoints, or credentials.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    succeeded = False
+    failed = False
+
+    model = value.get("model")
+    if isinstance(model, dict):
+        calls = model.get("provider_calls")
+        if isinstance(calls, list):
+            for call in calls[:1_000]:
+                if not isinstance(call, dict):
+                    continue
+                if call.get("status") == "success":
+                    succeeded = True
+                elif call.get("status") == "failure":
+                    failed = True
+        attempted_chunks = model.get("attempted_chunks")
+        succeeded_chunks = model.get("succeeded_chunks")
+        failed_chunks = model.get("failed_chunks")
+        if all(
+            type(counter) is int and 0 <= counter <= 1_000_000
+            for counter in (attempted_chunks, succeeded_chunks, failed_chunks)
+        ) and attempted_chunks > 0:
+            if succeeded_chunks > 0:
+                succeeded = True
+            elif failed_chunks > 0:
+                failed = True
+
+    usage = value.get("usage_accounting")
+    if isinstance(usage, dict):
+        calls = usage.get("provider_calls")
+        if isinstance(calls, list):
+            for call in calls[:1_000]:
+                if not isinstance(call, dict):
+                    continue
+                if call.get("status") == "success":
+                    succeeded = True
+                elif call.get("status") == "failure":
+                    failed = True
+
+    if succeeded:
+        return "used"
+    if failed:
+        return "provider_failed"
+    return None
+
+
+def _safe_run_provider_execution(
+    row: AnalysisRunRow,
+    diagnostic_payload: object = None,
+) -> dict:
+    source = "deterministic_only"
+    revision = None
+    model = None
+    endpoint_hash = None
+    configured = False
+    identity = row.provider_identity if isinstance(row.provider_identity, dict) else {}
+    if identity.get("source") in {
+        "account_byok",
+        "service_default",
+        "service_default_legacy",
+        "deterministic_only",
+    }:
+        source = identity["source"]
+    if type(identity.get("config_revision")) is int and identity["config_revision"] > 0:
+        revision = identity["config_revision"]
+    if isinstance(identity.get("model_alias"), str):
+        model = identity["model_alias"][:255]
+    candidate_hash = identity.get("endpoint_configuration_sha256")
+    if isinstance(candidate_hash, str) and re.fullmatch(r"[a-f0-9]{64}", candidate_hash):
+        endpoint_hash = candidate_hash
+    configured = identity.get("configured") is True
+    if row.status in {"queued", "running"}:
+        actual_status = "planned"
+    elif (row.prompt_tokens or 0) + (row.completion_tokens or 0) > 0:
+        actual_status = "used"
+    else:
+        # A terminal run can fail before any provider request is attempted
+        # (dispatch, snapshot verification, rule execution, persistence, ...).
+        # With no reported usage or durable provider-call diagnostic, claiming
+        # `provider_failed` would turn an unrelated task failure into a false
+        # model incident.  Stay conservative until such evidence is persisted.
+        actual_status = (
+            _diagnostic_provider_execution_status(diagnostic_payload)
+            or "not_used"
+        )
+    return {
+        "planned_source": source,
+        "profile_revision": revision,
+        "model": model,
+        "endpoint_configuration_sha256": endpoint_hash,
+        "configured": configured,
+        "status": actual_status,
+    }
+
+
 def serialize_run(row: AnalysisRunRow, db=None) -> dict:
     payload = {key: getattr(row, key) for key in ("id", "project_id", "status", "created_at", "started_at", "completed_at", "input_chars", "prompt_tokens", "completion_tokens", "error")}
     payload["error"] = safe_persisted_analysis_error(row.error)
     prices_configured = settings.model_input_price_per_million is not None and settings.model_output_price_per_million is not None
     payload["estimated_cost_usd"] = row.estimated_cost_usd if prices_configured else None
+    diagnostic = db.get(AnalysisDiagnosticRow, row.id) if db is not None else None
+    diagnostic_payload = (
+        diagnostic.payload
+        if diagnostic is not None and isinstance(diagnostic.payload, dict)
+        else None
+    )
+    payload["model_execution"] = _safe_run_provider_execution(
+        row, diagnostic_payload
+    )
     coverage = row.batch_coverage if isinstance(row.batch_coverage, dict) else {}
     payload["review_batch"] = {
         "mode": row.batch_mode or "full_review",
@@ -589,7 +731,6 @@ def serialize_run(row: AnalysisRunRow, db=None) -> dict:
                 for item in payload["input_documents"]
                 if item.get("batch_role") == "background"
             ]
-        diagnostic = db.get(AnalysisDiagnosticRow, row.id)
         usage_accounting = (
             diagnostic.payload.get("usage_accounting")
             if diagnostic and isinstance(diagnostic.payload, dict)
@@ -684,6 +825,11 @@ def serialize_narrative_context_revision(
         "created_at": row.created_at,
     }
     if row.origin == "model_inferred":
+        inference_provider = (
+            row.inference_provider_identity
+            if isinstance(row.inference_provider_identity, dict)
+            else {}
+        )
         payload["inference"] = {
             "confidence": row.inference_confidence,
             "reasoning": row.inference_reasoning or "",
@@ -701,6 +847,41 @@ def serialize_narrative_context_revision(
                     "total_tokens": 0,
                 }
             ),
+            "provider": {
+                "source": (
+                    inference_provider.get("source")
+                    if inference_provider.get("source")
+                    in {
+                        "account_byok",
+                        "service_default",
+                        "service_default_legacy",
+                        "deterministic_only",
+                    }
+                    else None
+                ),
+                "profile_revision": (
+                    inference_provider.get("config_revision")
+                    if type(inference_provider.get("config_revision")) is int
+                    else None
+                ),
+                "model": (
+                    inference_provider.get("model_alias")[:255]
+                    if isinstance(inference_provider.get("model_alias"), str)
+                    else None
+                ),
+                "endpoint_configuration_sha256": (
+                    inference_provider.get("endpoint_configuration_sha256")
+                    if isinstance(
+                        inference_provider.get("endpoint_configuration_sha256"),
+                        str,
+                    )
+                    and re.fullmatch(
+                        r"[a-f0-9]{64}",
+                        inference_provider["endpoint_configuration_sha256"],
+                    )
+                    else None
+                ),
+            },
         }
     else:
         payload["inference"] = None
@@ -1012,6 +1193,7 @@ def _accepted_run_payload(db, run: AnalysisRunRow, *, created: bool) -> dict:
         "status": run.status,
         "retried_from": execution.retried_from_run_id if execution else None,
         "deduplicated": not created,
+        "model_execution": _safe_run_provider_execution(run),
         "review_batch": {
             "mode": run.batch_mode or "full_review",
             "sensitivity": run.sensitivity or "balanced",
@@ -1120,19 +1302,30 @@ def _dispatch_created_run(run_id: str) -> None:
         # transport-ambiguous dispatch.  Do not overwrite that durable state.
 
 
-def enforce_daily_model_budget(db, workspace_id: str | None = None) -> None:
+def enforce_daily_model_budget(
+    db,
+    workspace_id: str | None = None,
+    *,
+    model_available: bool | None = None,
+) -> None:
     """Reject model-backed work after the local daily usage threshold.
 
     This is intentionally a single-database check, not a distributed quota
     reservation.  The per-run gate remains the hard fallback for concurrent
     local jobs.
     """
-    model_requested = (
+    capability_requested = (
         settings.enable_model_extraction
         or settings.enable_evidence_investigator
         or settings.enable_issue_evidence_review
         or settings.enable_character_consistency
-    ) and bool(settings.openai_api_key.strip())
+    )
+    credential_available = (
+        bool(settings.openai_api_key.strip())
+        if model_available is None
+        else model_available
+    )
+    model_requested = capability_requested and credential_available
     if not model_requested:
         return
     now = utc_now_naive()
@@ -1382,11 +1575,15 @@ def _provider_check_metrics(
 
 @app.post("/api/v1/model/provider-check")
 def check_model_provider(
-    _context: AuthContext = Depends(require_csrf),
+    context: AuthContext = Depends(require_csrf),
 ) -> dict:
     """Run an explicit, minimal provider preflight and return safe diagnostics."""
-    provider = OpenAICompatibleProvider(settings)
-    thinking = safe_thinking_configuration(settings)
+    with SessionLocal() as db:
+        runtime = account_provider_runtime(
+            db, user_id=context.user_id, base_settings=settings
+        )
+    provider = OpenAICompatibleProvider(runtime.settings)
+    thinking = safe_thinking_configuration(runtime.settings)
     if not provider.configured:
         category = "not_configured"
         return {
@@ -1662,29 +1859,32 @@ def get_document_narrative_context(
         }
 
 
-def _narrative_context_inference_provider() -> OpenAICompatibleProvider:
+def _narrative_context_inference_provider(
+    provider_settings=None,
+) -> OpenAICompatibleProvider:
+    source_settings = provider_settings or settings
     completion_caps = [
-        settings.narrative_context_inference_max_completion_tokens
+        source_settings.narrative_context_inference_max_completion_tokens
     ]
-    if settings.provider_max_completion_tokens is not None:
-        completion_caps.append(settings.provider_max_completion_tokens)
-    response_caps = [settings.narrative_context_inference_max_response_bytes]
-    if settings.provider_max_response_bytes is not None:
-        response_caps.append(settings.provider_max_response_bytes)
+    if source_settings.provider_max_completion_tokens is not None:
+        completion_caps.append(source_settings.provider_max_completion_tokens)
+    response_caps = [source_settings.narrative_context_inference_max_response_bytes]
+    if source_settings.provider_max_response_bytes is not None:
+        response_caps.append(source_settings.provider_max_response_bytes)
     deadline_caps = [
-        settings.narrative_context_inference_total_deadline_seconds
+        source_settings.narrative_context_inference_total_deadline_seconds
     ]
-    if settings.provider_total_deadline_seconds is not None:
-        deadline_caps.append(settings.provider_total_deadline_seconds)
+    if source_settings.provider_total_deadline_seconds is not None:
+        deadline_caps.append(source_settings.provider_total_deadline_seconds)
     total_deadline = min(deadline_caps)
-    bounded = settings.model_copy(
+    bounded = source_settings.model_copy(
         update={
             # A local capability switch is required by the generic gateway;
             # it does not enable the extraction pipeline or mutate globals.
             "enable_model_extraction": True,
             "provider_timeout_seconds": min(
-                settings.provider_timeout_seconds,
-                settings.narrative_context_inference_timeout_seconds,
+                source_settings.provider_timeout_seconds,
+                source_settings.narrative_context_inference_timeout_seconds,
                 total_deadline,
             ),
             "provider_total_deadline_seconds": total_deadline,
@@ -1710,7 +1910,7 @@ def _narrative_context_inference_provider_error(exc: ProviderError) -> HTTPExcep
             503,
             detail={
                 "code": "context_inference_not_configured",
-                "message": "模型尚未配置，请先在服务端配置可用的模型密钥",
+                "message": "模型尚未配置，请先保存可用的账户模型配置",
             },
         )
     if category == "rate_limit":
@@ -1734,7 +1934,7 @@ def _narrative_context_inference_provider_error(exc: ProviderError) -> HTTPExcep
             503,
             detail={
                 "code": "context_inference_credentials_rejected",
-                "message": "模型凭据不可用，请检查服务端模型配置",
+                "message": "模型凭据不可用，请检查账户模型配置",
             },
         )
     return HTTPException(
@@ -1793,6 +1993,18 @@ def infer_document_narrative_context(
                     "actual_revision": actual_revision,
                 },
             )
+        try:
+            provider_runtime = account_provider_runtime(
+                db, user_id=context.user_id, base_settings=settings
+            )
+        except (ProviderCredentialError, ProviderEndpointRejected):
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "context_inference_provider_unavailable",
+                    "message": "账户模型配置暂不可用，请重新保存后重试",
+                },
+            ) from None
         frozen = {
             "version": document.version,
             "name": document.name,
@@ -1809,7 +2021,7 @@ def infer_document_narrative_context(
                 "max_chars": MAX_INFERENCE_INPUT_CHARS,
             },
         )
-    provider = _narrative_context_inference_provider()
+    provider = _narrative_context_inference_provider(provider_runtime.settings)
     try:
         suggestion = infer_narrative_context(
             document_id=document_id,
@@ -1892,6 +2104,22 @@ def infer_document_narrative_context(
                     "actual_revision": actual_revision,
                 },
             )
+        if provider_runtime.config_id is not None:
+            provider_config = db.get(
+                AccountProviderConfigRow, provider_runtime.config_id
+            )
+            if (
+                provider_config is None
+                or provider_config.user_id != context.user_id
+                or provider_config.state not in {"usable", "superseded"}
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "context_inference_provider_changed",
+                        "message": "模型分析期间账户密钥已删除，本次建议未保存",
+                    },
+                )
         legacy = db.get(DocumentContextRow, document_id)
         if legacy is None:
             legacy = DocumentContextRow(
@@ -1918,6 +2146,8 @@ def infer_document_narrative_context(
                 inference_reasoning=suggestion.reasoning,
                 inference_evidence=evidence_payload,
                 inference_usage=suggestion.usage,
+                inference_provider_config_id=provider_runtime.config_id,
+                inference_provider_identity=provider_runtime.identity,
             )
             db.commit()
         except NarrativeContextRevisionConflict as exc:
@@ -2952,7 +3182,14 @@ def start_analysis(
             project_id=project_id,
             payload=request,
         )
-        enforce_daily_model_budget(db, context.workspace_id)
+        provider_runtime = account_provider_runtime(
+            db, user_id=context.user_id, base_settings=settings
+        )
+        enforce_daily_model_budget(
+            db,
+            context.workspace_id,
+            model_available=provider_runtime.available,
+        )
         run = AnalysisRunRow(
             project_id=project_id,
             requested_by_user_id=context.user_id,
@@ -2960,6 +3197,9 @@ def start_analysis(
             batch_mode=request.mode,
             sensitivity=request.sensitivity,
             batch_coverage=coverage,
+        )
+        bind_account_provider_to_run(
+            db, run, user_id=context.user_id, base_settings=settings
         )
         try:
             run, created = _create_run_or_load_winner(
@@ -3109,7 +3349,14 @@ def retry_run(
         )
         if not snapshot_count:
             raise HTTPException(409, MISSING_SNAPSHOT_ERROR)
-        enforce_daily_model_budget(db, context.workspace_id)
+        provider_runtime = account_provider_runtime(
+            db, user_id=context.user_id, base_settings=settings
+        )
+        enforce_daily_model_budget(
+            db,
+            context.workspace_id,
+            model_available=provider_runtime.available,
+        )
         row = AnalysisRunRow(
             project_id=old.project_id,
             requested_by_user_id=context.user_id,
@@ -3119,6 +3366,9 @@ def retry_run(
             batch_coverage=json.loads(
                 json.dumps(old.batch_coverage or {}, ensure_ascii=False)
             ),
+        )
+        bind_account_provider_to_run(
+            db, row, user_id=context.user_id, base_settings=settings
         )
         row, created = _create_run_or_load_winner(
             db,
@@ -3266,7 +3516,14 @@ def start_recheck(
                     "message": "当前活动文档与基准运行的冻结输入相同，请先保存新版本",
                 },
             )
-        enforce_daily_model_budget(db, context.workspace_id)
+        provider_runtime = account_provider_runtime(
+            db, user_id=context.user_id, base_settings=settings
+        )
+        enforce_daily_model_budget(
+            db,
+            context.workspace_id,
+            model_available=provider_runtime.available,
+        )
         row = AnalysisRunRow(
             project_id=baseline.project_id,
             requested_by_user_id=context.user_id,
@@ -3274,6 +3531,9 @@ def start_recheck(
             batch_mode=batch_mode,
             sensitivity=sensitivity,
             batch_coverage=coverage,
+        )
+        bind_account_provider_to_run(
+            db, row, user_id=context.user_id, base_settings=settings
         )
 
         def prepare_recheck(created_run: AnalysisRunRow) -> None:

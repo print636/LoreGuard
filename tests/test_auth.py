@@ -104,6 +104,11 @@ class AuthConfigurationTests(unittest.TestCase):
             auth_cookie_secure=True,
             cors_allowed_origins="https://loreguard.example",
             database_url=database_url,
+            account_model_active_key_id="prod-v1",
+            account_model_keyring_json=(
+                '{"keys":{"prod-v1":'
+                '"a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s="}}'
+            ),
         )
         self.assertEqual(database_url, configured.database_url)
 

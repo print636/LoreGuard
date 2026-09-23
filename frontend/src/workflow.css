@@ -180,6 +180,47 @@
   color: #d8c988;
 }
 
+.runModelExecution {
+  display: grid;
+  gap: 3px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  white-space: normal;
+}
+
+.runModelExecution strong,
+.runModelExecution small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.runModelExecution strong {
+  color: var(--lavender);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.runModelExecution small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.runModelExecution.used strong { color: var(--success); }
+.runModelExecution.not-used strong,
+.runModelExecution.unknown strong { color: var(--warning); }
+.runModelExecution.failed strong { color: var(--danger); }
+.runModelExecution.compact { max-width: 320px; }
+
+.summary .runModelExecution strong {
+  color: var(--lavender);
+  font-size: 12px;
+}
+
+.summary .runModelExecution small { color: var(--muted); }
+
 .snapshotCards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));

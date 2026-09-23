@@ -234,7 +234,7 @@ class ApiFlowTests(unittest.TestCase):
         self.assertEqual(403, payload["http_status"])
         self.assertTrue(payload["reachable"])
         self.assertFalse(payload["authorized"])
-        self.assertEqual("cf-safe-ray", payload["request_id"])
+        self.assertIsNone(payload["request_id"])
         self.assertEqual(expected_thinking, payload["thinking"])
         self.assertEqual(0, payload["latency_ms"])
         self.assertEqual(

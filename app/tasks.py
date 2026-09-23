@@ -2,9 +2,11 @@ from celery import Celery
 
 from .config import get_settings
 from .domain import AnalysisCancelled
+from .provider_credentials import validate_provider_security_configuration
 from .service import WorkerLeaseBusy, execute_analysis
 
 settings = get_settings()
+validate_provider_security_configuration(settings)
 celery_app = Celery("loreguard", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.update(task_track_started=True, task_acks_late=True)
 

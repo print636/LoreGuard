@@ -783,6 +783,8 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
                     "inference_reasoning",
                     "inference_evidence",
                     "inference_usage",
+                    "inference_provider_config_id",
+                    "inference_provider_identity",
                 }
             assert migrated_columns == expected_columns
         engine.dispose()

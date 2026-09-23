@@ -89,6 +89,14 @@ overlay 的必填配置、合并校验和运维责任见
 [`docs/production-deployment.md`](docs/production-deployment.md)，认证边界见
 [`docs/auth-security-contract.md`](docs/auth-security-contract.md)。
 
+登录后可在 `/app/settings/model` 保存本人使用的 OpenAI-compatible 聊天
+Provider。API Key 由服务端以独立 AES-256-GCM 主密钥加密，页面只显示固定掩码；
+分析任务会在入队时冻结不含密钥和地址的配置 revision，Celery 消息仍只传
+`run_id`。生产部署必须为 API 与 worker 配置同一 keyring 和精确 HTTPS origin
+白名单。删除配置会擦除该账户全部历史密文，并阻止后续模型请求继续使用已撤销
+凭据。接口、轮换顺序、SSRF 与并发边界见
+[`docs/account-model-provider.md`](docs/account-model-provider.md)。
+
 默认不需要模型 API，确定性基线可以独立完成全流程。配置 OpenAI-compatible Provider 后，分析流水线会在基线抽取之上调用模型，使用 Pydantic 校验结构化结果，并按文档行号绑定证据：
 
 ```bash
@@ -102,7 +110,7 @@ set PER_RUN_TOKEN_BUDGET=100000
 set DAILY_TOKEN_BUDGET=100000
 ```
 
-模型 Key 只从服务端环境变量或本地未提交的 `.env` 读取。各条远程模型路径都须显式启用，全部开关默认均为 `false`：
+聊天模型 Key 可以由登录账户在“模型与密钥”页保存，也可以在匿名本地模式中使用未提交的 `.env` 服务默认配置；账户 Key 只提交到服务端并以 AES-256-GCM 加密，浏览器不会再次读取原值。Embedding/RAG 凭据仍只从部署环境读取。各条远程模型路径都须显式启用，全部开关默认均为 `false`：
 
 | 能力 | 开关与调用边界 |
 |---|---|
@@ -117,13 +125,13 @@ set DAILY_TOKEN_BUDGET=100000
 
 角色一致性链路的 v26 检查点已在原创、开发者可见样例上完成 3 次独立真实模型 HTTP 全流程检查，候选确认、证据类型校准和定向查漏收紧后的 12 项门槛全部通过。这不是人工盲测、开放文本泛化或生产质量证明。构建边界、指标与复现方式见 [`docs/character-consistency-live-checkpoint-20260922.md`](docs/character-consistency-live-checkpoint-20260922.md)。
 
-首页“模型连接”卡只是被动读取配置状态，不会自动请求模型；只有用户点击“测试模型连接”时，才会额外发起一次可能消耗少量 Token 的最小聊天请求。请勿把 Key 写入源码、前端、README 或提交记录。`PROVIDER_THINKING_MODE` 默认不配置，因此通用 OpenAI-compatible 请求不会携带 `thinking`；只有显式设置为 `disabled` 或 `enabled` 时才发送顶层 `thinking={"type": ...}`。Compose 会把该配置同时传入 API 与 worker，空白值统一归一为 `None`。主模型抽取支持 `fact`、`event`、`knows`、`claims_knows`、`item`、`uses`、`world_rule` 与 `world_assert`。超时、429、5xx、空响应、非法 JSON、字段校验失败或证据行号越界时，系统会记录非敏感警告并降级到 `BaselineExtractor`；基线与模型结果会去重合并。默认单次请求最多尝试 2 次、每次 30 秒；某分块终态失败后停止当前文档剩余模型分块，一个文档出现终态失败后开启本次运行熔断，后续文档直接走全文基线，避免兼容服务异常时串行等待数分钟。运行事件和诊断会明确区分“完整模型增强”“模型增强（部分分块已降级）”“确定性基线（模型未参与或已降级）”与主动关闭模型的“确定性基线”，结果正确时也不会掩盖模型失败。
+项目中心和工作台中的模型状态只被动读取配置，不会自动请求模型；只有用户在“模型与密钥”页手动执行最小连接测试时，才会额外发起一次可能消耗少量 Token 的聊天请求。请勿把 Key 写入源码、README 或提交记录。`PROVIDER_THINKING_MODE` 默认不配置，因此通用 OpenAI-compatible 请求不会携带 `thinking`；只有显式设置为 `disabled` 或 `enabled` 时才发送顶层 `thinking={"type": ...}`。Compose 会把该配置同时传入 API 与 worker，空白值统一归一为 `None`。主模型抽取支持 `fact`、`event`、`knows`、`claims_knows`、`item`、`uses`、`world_rule` 与 `world_assert`。超时、429、5xx、空响应、非法 JSON、字段校验失败或证据行号越界时，系统会记录非敏感警告并降级到 `BaselineExtractor`；基线与模型结果会去重合并。默认单次请求最多尝试 2 次、每次 30 秒；某分块终态失败后停止当前文档剩余模型分块，一个文档出现终态失败后开启本次运行熔断，后续文档直接走全文基线，避免兼容服务异常时串行等待数分钟。运行事件和诊断会明确区分“完整模型增强”“模型增强（部分分块已降级）”“确定性基线（模型未参与或已降级）”与主动关闭模型的“确定性基线”，结果正确时也不会掩盖模型失败。
 
 模型逐分块调用前会用保守 Token 估算与本次已用额度执行门控；兼容 Provider 不返回 usage 时也按保守估算扣减内部预算。超出单次额度后停止后续模型分块，但全文基线仍会继续。每日额度在创建或重试分析时检查，当前是本地单数据库的非原子配额；多实例生产环境仍需 Redis 或事务式配额服务。写接口另有单进程滑动窗口限流，429 响应包含 `Retry-After`。
 
 模型模式以持久化的结构化执行记录判定，不依赖警告文字。页面会显示逻辑调用成功、失败、跳过和拒绝记录数；任何分块被跳过或记录被拒绝都不能算完整成功。旧运行缺少这些计数时显示“覆盖情况未知”。`python scripts/check_provider.py` 可经生产调用路径测试当前配置，只输出安全状态、耗时与 Token，不输出密钥或上游响应正文。
 
-“测试模型连接”的页面结果仅显示配置状态、JSON 合同、错误分类、延迟、Token 和固定建议，不显示 endpoint、Key、Prompt 或模型原始响应。浏览器不提供 Key 输入框，也不使用浏览器存储保存凭据：请只在本地未提交的 `.env` 中配置上述能力开关以及 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL` 和独立的 embedding 配置，修改后同时重启 API 和 Celery worker。
+“模型与密钥”页提供账户级 Base URL、模型名和 API Key 输入，但不会把 Key 写入 URL、Web Storage 或响应；保存后只显示固定掩码。连接测试结果仅显示配置状态、JSON 合同、错误分类、延迟、Token 和固定建议，不显示 Key、Prompt 或模型原始响应。部署管理员仍需在未提交的环境文件中配置能力开关、允许的 Provider origins 和独立 embedding 配置；详细安全与轮换边界见 [`docs/account-model-provider.md`](docs/account-model-provider.md)。
 
 受限 Agent 第一阶段使用 LangGraph 1.2.11 `StateGraph` 编排，仅在显式设置 `ENABLE_REVIEW_AGENT=true` 时启用，默认关闭。模型每轮返回应用层 JSON 动作 `READ_SPAN`、`PATCH_RECORDS` 或 `ABSTAIN`；这不是、也未冒充 Provider 原生 `tool_calls` / function calling。服务端绑定冻结文档和证据范围、校验 span 与补丁，并只持久化不含 Prompt、原始响应、证据正文、Key 或 endpoint 的安全 trace。固定的 modality/source_scope/certainty 标签 repair pass 是另一条非 Agent 路径，不能混称为 Agent。
 

@@ -614,6 +614,9 @@ body {
 .railSummary span { margin-top: 3px; overflow-wrap: anywhere; color: var(--muted); font-size: 8px; }
 .railSummary .railToken { grid-column: 1 / -1; }
 .railSummary .railToken b { color: var(--cyan); }
+.railSummary .runModelExecution { margin-top: 8px; padding-top: 7px; }
+.railSummary .runModelExecution strong { font-size: 10px; }
+.railSummary .runModelExecution small { font-size: 9px; line-height: 1.45; }
 
 .railSectionHead { margin-bottom: 9px; }
 .railSectionHead h3 { margin: 0; font-size: 14px; }

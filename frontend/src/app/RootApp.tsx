@@ -2,6 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { ApiError, apiJson, SESSION_EXPIRED_EVENT } from "../api/client";
 import {
   browserNavigate,
+  handleBrowserPopState,
+  initializeBrowserNavigation,
   productRouteFromPath,
   safeReturnTo,
   shouldResetProductScroll,
@@ -12,6 +14,7 @@ import ProjectCenter from "./ProjectCenter";
 import { apiErrorDetail, type SessionIdentity } from "./session";
 
 const WorkspaceApp = lazy(() => import("../App"));
+const ModelSettings = lazy(() => import("./ModelSettings"));
 
 type StartupState =
   | { status: "checking"; identity: null }
@@ -49,7 +52,11 @@ export default function RootApp() {
   }, []);
 
   useEffect(() => {
-    const handleLocation = () => setLocationKey(currentLocation());
+    initializeBrowserNavigation();
+    const handleLocation = (event: PopStateEvent) => {
+      if (!handleBrowserPopState(event)) return;
+      setLocationKey(currentLocation());
+    };
     const handleExpired = () => {
       setStartup({ status: "signed-out", identity: null });
     };
@@ -72,6 +79,9 @@ export default function RootApp() {
         route.kind === "settings-account"
       ) {
         browserNavigate("/app", { replace: true });
+      }
+      if (route.kind === "legacy-model-settings") {
+        browserNavigate("/app/settings/model", { replace: true });
       }
       return;
     }
@@ -142,6 +152,21 @@ export default function RootApp() {
       return <main className="startupPage productPage" aria-busy="true"><p>正在返回项目中心…</p></main>;
     }
     return <AccountSettings identity={startup.identity} onLoggedOut={() => setStartup({ status: "signed-out", identity: null })} />;
+  }
+
+  if (route.kind === "settings-model") {
+    return (
+      <Suspense fallback={<main className="startupPage productPage" aria-busy="true"><p>正在打开模型与密钥设置…</p></main>}>
+        <ModelSettings
+          identity={startup.identity}
+          onLoggedOut={() => setStartup({ status: "signed-out", identity: null })}
+        />
+      </Suspense>
+    );
+  }
+
+  if (route.kind === "legacy-model-settings") {
+    return <main className="startupPage productPage" aria-busy="true"><p>正在前往模型与密钥设置…</p></main>;
   }
 
   if (route.kind === "workspace") {

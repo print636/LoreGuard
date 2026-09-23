@@ -2389,6 +2389,7 @@ def test_signal_provider_retries_only_retryable_transport_failure():
     configured = settings(
         provider_max_attempts=1,
         character_signal_max_attempts=2,
+        character_signal_timeout_seconds=20,
         character_signal_total_deadline_seconds=25,
     )
     base_provider = OpenAICompatibleProvider(
@@ -2567,7 +2568,7 @@ def test_targeted_binding_failure_can_recover_only_with_clean_complete_package()
 def test_signal_regeneration_respects_one_total_logical_deadline():
     provider = SequenceProvider('{"unexpected":[]}')
     extractor = CharacterSignalExtractor(provider, settings=settings())
-    ticks = iter((0.0, 0.0, 31.0))
+    ticks = iter((0.0, 0.0, 61.0))
     extractor._monotonic = lambda: next(ticks)
 
     result = extractor.extract(
@@ -2728,6 +2729,7 @@ def test_drift_provider_retries_transport_then_returns_review():
     configured = settings(
         provider_max_attempts=1,
         character_drift_max_attempts=2,
+        character_drift_timeout_seconds=20,
         character_drift_total_deadline_seconds=24,
     )
     reviewer = CharacterConsistencyReviewer(
@@ -2947,10 +2949,17 @@ def test_default_flag_is_off_and_limits_are_internally_bounded():
         > defaults.character_consistency_stage_token_budget
     )
     assert defaults.character_signal_token_budget == 22_000
+    # Two attempts must not share the former 30s envelope: after one 20s read
+    # timeout the retry had less than 10s and was predictably weaker. These
+    # remain hard per-call/total ceilings rather than unbounded waiting.
+    assert defaults.character_signal_timeout_seconds == 30
+    assert defaults.character_signal_total_deadline_seconds == 60
     assert defaults.character_signal_max_attempts == 2
     assert defaults.character_signal_package_max_attempts == 2
     assert defaults.character_signal_targeted_max_targets_per_chunk == 12
     assert defaults.character_drift_max_attempts == 2
+    assert defaults.character_drift_timeout_seconds == 30
+    assert defaults.character_drift_total_deadline_seconds == 60
     with pytest.raises(ValueError):
         settings(character_signal_max_attempts=0)
     with pytest.raises(ValueError):

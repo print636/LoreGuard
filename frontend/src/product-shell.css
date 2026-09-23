@@ -48,6 +48,9 @@ body.loreguard-workspace { overflow: hidden; }
   font: inherit;
 }
 
+.productPage button,
+.productPage a { touch-action: manipulation; }
+
 .productPage button {
   min-height: 44px;
   color: var(--color-text-secondary);
@@ -288,6 +291,7 @@ body.loreguard-workspace { overflow: hidden; }
 .projectRow svg,
 .productSidebar nav svg,
 .securityState svg,
+.modelCredentialState svg,
 .sectionGlyph svg,
 .sessionDeviceIcon svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
@@ -322,6 +326,8 @@ body.loreguard-workspace { overflow: hidden; }
 .productSidebar nav :is(a, button):hover { color: var(--color-text); border-color: var(--color-lavender); background: var(--color-surface-raised); }
 .productSidebar nav :is(a, button).active { color: var(--color-text); border-color: var(--color-border); background: var(--color-subtle); }
 .navStatusMark { width: 8px; height: 8px; margin-left: 7px; border-radius: 50%; background: var(--color-success); box-shadow: 0 0 0 4px var(--color-cyan-subtle); }
+.sidebarNavCopy { display: grid; min-width: 0; gap: 1px; }
+.sidebarNavCopy small { overflow: hidden; color: var(--color-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 
 .sidebarAccount { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: var(--space-2); align-items: center; margin-top: auto; padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
 .sidebarAccount > span:nth-child(2) { min-width: 0; display: grid; }
@@ -334,9 +340,10 @@ body.loreguard-workspace { overflow: hidden; }
 .accountAvatar { width: 36px; height: 36px; display: grid; place-items: center; color: var(--color-on-primary); border-radius: 50%; background: var(--color-lavender); font-weight: 700; }
 
 .accountSettingsMain { width: 100%; max-width: 1120px; margin: 0 auto; padding: var(--space-7) clamp(24px, 4vw, 64px) 80px; }
+.accountSettingsMain:focus { outline: 0; box-shadow: inset 3px 0 var(--color-focus); }
 .accountSettingsHeader { position: static; display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-5); height: auto; padding: 0 0 var(--space-5); border-bottom: 1px solid var(--color-border); background: transparent; box-shadow: none; backdrop-filter: none; letter-spacing: normal; }
 .accountSettingsHeader > div { display: block; }
-.accountSettingsHeader h1 { margin: 0; font: 700 36px/1.25 "Noto Serif SC", "Source Han Serif SC", serif; }
+.accountSettingsHeader h1 { margin: 0; font: 700 36px/1.25 "Noto Serif SC", "Source Han Serif SC", serif; text-wrap: balance; }
 .accountSettingsHeader p { margin: var(--space-2) 0 0; color: var(--color-text-secondary); }
 .securityState { display: inline-flex; align-items: center; gap: var(--space-2); min-height: 40px; padding: 8px 12px; color: var(--color-success); border: 1px solid color-mix(in srgb, var(--color-success) 28%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--color-success) 7%, transparent); font-size: 13px; white-space: nowrap; }
 .securityLedger { margin-top: var(--space-6); border-top: 1px solid var(--color-border-strong); }
@@ -379,6 +386,58 @@ body.loreguard-workspace { overflow: hidden; }
 .sessionsEmpty p { margin: var(--space-2) 0 var(--space-4); }
 .unavailableSecuritySection { padding-block: var(--space-5); }
 .unavailableSecuritySection > header { grid-column: 1 / -1; max-width: 660px; }
+
+.modelCredentialState { display: inline-flex; align-items: center; gap: var(--space-2); min-height: 40px; padding: 8px 12px; border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-subtle); color: var(--color-text-secondary); font-size: 13px; white-space: nowrap; }
+.modelCredentialState.ready { color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 32%, transparent); background: color-mix(in srgb, var(--color-success) 7%, transparent); }
+.modelCredentialState.warning { color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 32%, transparent); background: color-mix(in srgb, var(--color-warning) 7%, transparent); }
+.modelSettingsLedger { margin-top: var(--space-5); }
+.modelOperationError { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-top: var(--space-5); margin-bottom: 0; }
+.modelOperationError p { margin: var(--space-1) 0 0; color: var(--color-text-secondary); }
+.modelOperationError button { flex: 0 0 auto; }
+.modelStatusMessage { margin-top: var(--space-5); margin-bottom: 0; }
+.modelSettingsSkeleton { display: grid; gap: var(--space-2); }
+.modelSettingsSkeleton i { display: block; height: 46px; border: 1px solid var(--color-border); border-radius: 8px; background: linear-gradient(100deg, var(--color-field) 20%, var(--color-subtle) 45%, var(--color-field) 70%); background-size: 220% 100%; animation: productShimmer 1.3s linear infinite; }
+.modelConfigSummary { margin: 0; border-top: 1px solid var(--color-border); }
+.modelConfigSummary > div { display: grid; grid-template-columns: minmax(140px, 180px) minmax(0, 1fr); gap: var(--space-4); padding: var(--space-3) 0; border-bottom: 1px solid var(--color-border); }
+.modelConfigSummary dt { color: var(--color-text-muted); }
+.modelConfigSummary dd { min-width: 0; margin: 0; color: var(--color-text); overflow-wrap: anywhere; }
+.modelConfigSummary code,
+.savedKeyControl strong { color: var(--color-cyan); font: 600 13px/1.5 "Cascadia Code", "Microsoft YaHei UI", monospace; letter-spacing: .08em; }
+.secretBoundary { display: grid; gap: var(--space-1); margin: var(--space-4) 0 0; padding: var(--space-3) var(--space-4); border-left: 3px solid var(--color-cyan); background: var(--color-cyan-subtle); }
+.secretBoundary span { color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
+.modelProviderForm { display: grid; gap: var(--space-4); width: min(100%, 620px); }
+.savedKeyControl { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); min-height: 82px; padding: var(--space-3) var(--space-4); border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-field); }
+.savedKeyControl > div { display: grid; min-width: 0; gap: 2px; }
+.savedKeyControl > div > span { color: var(--color-text); font-weight: 600; }
+.savedKeyControl small { color: var(--color-text-muted); }
+.savedKeyControl button { flex: 0 0 auto; }
+.cancelKeyReplacement { justify-self: start; margin-top: calc(var(--space-1) * -1); }
+.modelFormActions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); padding-top: var(--space-2); }
+.modelFormActions .quietPrimary { min-width: 152px; }
+.modelFormActions span { color: var(--color-warning); font-size: 13px; }
+.modelTestBody { display: grid; gap: var(--space-4); }
+.modelTestToolbar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
+.modelTestToolbar span { color: var(--color-text-muted); font-size: 13px; }
+.modelTestBoundary { margin: 0; padding: var(--space-3) var(--space-4); color: var(--color-text-secondary); border: 1px solid color-mix(in srgb, var(--color-warning) 32%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--color-warning) 7%, transparent); line-height: 1.7; }
+.modelTestBoundary strong { display: block; color: var(--color-warning); }
+.modelTestResult { display: grid; gap: var(--space-4); padding: var(--space-4); border: 1px solid var(--color-border-strong); border-left-width: 3px; border-radius: 10px; background: var(--color-field); }
+.modelTestResult.ready { border-left-color: var(--color-success); }
+.modelTestResult.warning { border-left-color: var(--color-warning); }
+.modelTestResult.error { border-left-color: var(--color-danger); }
+.modelTestResult > div:first-child { display: grid; gap: var(--space-1); }
+.modelTestResult > div:first-child span,
+.modelTestResult > p { color: var(--color-text-secondary); line-height: 1.6; }
+.modelTestResult dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); margin: 0; }
+.modelTestResult dl div { min-width: 0; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-page); }
+.modelTestResult dt { color: var(--color-text-muted); font-size: 12px; }
+.modelTestResult dd { margin: var(--space-1) 0 0; color: var(--color-text); font: 600 13px/1.5 "Cascadia Code", "Microsoft YaHei UI", monospace; overflow-wrap: anywhere; }
+.modelTestResult > p { margin: 0; }
+.modelTestEmpty { padding: var(--space-5); color: var(--color-text-secondary); border: 1px dashed var(--color-border-strong); text-align: center; }
+.modelTestEmpty p { margin: var(--space-2) 0 0; }
+.modelDangerSection .sectionGlyph { color: var(--color-danger); }
+.modelDeleteConfirmation { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4); border: 1px solid var(--color-danger); border-radius: 10px; background: var(--color-danger-subtle); }
+.modelDeleteConfirmation p { max-width: 54em; margin: var(--space-1) 0 0; color: var(--color-text-secondary); line-height: 1.6; }
+.modelDeleteConfirmation > span { display: flex; flex: 0 0 auto; gap: var(--space-2); }
 
 .projectCenterMain { width: 100%; max-width: 1440px; margin: 0 auto; padding: var(--space-7) clamp(24px, 4vw, 64px) 72px; }
 .projectCenterHeader { position: static; display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-5); height: auto; padding: 0 0 var(--space-5); border-bottom: 1px solid var(--color-border); background: transparent; box-shadow: none; backdrop-filter: none; letter-spacing: normal; }
@@ -437,6 +496,11 @@ body.loreguard-workspace { overflow: hidden; }
 .projectRow > span > small { color: var(--color-text-muted); }
 .projectRow > span:not(.projectRowIdentity) { display: grid; gap: var(--space-1); }
 .projectRow > span > b { color: var(--color-text-secondary); font-size: 14px; }
+.projectRow .projectRunSource { color: var(--color-text-muted); font-size: 12px; line-height: 1.4; }
+.projectRow .projectRunSource.used { color: var(--color-success); }
+.projectRow .projectRunSource.failed { color: var(--color-danger); }
+.projectRow .projectRunSource.not-used,
+.projectRow .projectRunSource.unknown { color: var(--color-warning); }
 .projectRow .projectRowAction b { color: var(--color-cyan); }
 .rowChevron { color: var(--color-text-muted); }
 
@@ -541,6 +605,9 @@ body.loreguard-workspace { overflow: hidden; }
   .sessionList > li { align-items: start; }
   .revokeConfirmation { align-items: stretch; flex-direction: column; }
   .revokeConfirmation > span { flex-wrap: wrap; }
+  .modelTestResult dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .modelDeleteConfirmation { align-items: stretch; flex-direction: column; }
+  .modelDeleteConfirmation > span { flex-wrap: wrap; }
 }
 
 @media (max-width: 430px) {
@@ -552,6 +619,17 @@ body.loreguard-workspace { overflow: hidden; }
   .sortField select { width: 100%; }
   .accountSettingsHeader { flex-direction: column; }
   .securityState { width: 100%; justify-content: center; }
+  .modelCredentialState { width: 100%; justify-content: center; white-space: normal; }
+  .modelOperationError { align-items: stretch; flex-direction: column; }
+  .modelConfigSummary > div { grid-template-columns: 1fr; gap: var(--space-1); }
+  .savedKeyControl { align-items: stretch; flex-direction: column; }
+  .savedKeyControl button { width: 100%; }
+  .modelFormActions { align-items: stretch; flex-direction: column; }
+  .modelFormActions button { width: 100%; }
+  .modelTestToolbar { align-items: stretch; flex-direction: column; }
+  .modelTestToolbar button { width: 100%; }
+  .modelTestResult dl { grid-template-columns: 1fr; }
+  .modelDeleteConfirmation > span { display: grid; grid-template-columns: 1fr 1fr; }
   .sessionToolbar { align-items: stretch; flex-direction: column; }
   .sessionList > li { grid-template-columns: 40px minmax(0, 1fr); }
   .sessionList > li > .dangerTextAction,

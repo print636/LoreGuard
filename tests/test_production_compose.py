@@ -21,6 +21,11 @@ PRODUCTION_ENV = {
         "postgresql+psycopg://loreguard_test_user:"
         "test-only-database-password@postgres:5432/loreguard_test"
     ),
+    "ACCOUNT_MODEL_ACTIVE_KEY_ID": "production-v1",
+    "ACCOUNT_MODEL_KEYRING_FILE": str(
+        ROOT / "tests" / "fixtures" / "account-model-keyring.test.json"
+    ),
+    "ACCOUNT_MODEL_ALLOWED_ORIGINS": "https://api.example.test",
 }
 
 
@@ -84,6 +89,34 @@ def test_rendered_production_config_is_required_auth_and_loopback_only():
         assert environment["AUTH_SECRET_KEY"] == PRODUCTION_ENV["AUTH_SECRET_KEY"]
         assert environment["CORS_ALLOWED_ORIGINS"] == PRODUCTION_ENV["PUBLIC_ORIGIN"]
         assert environment["DATABASE_URL"] == PRODUCTION_ENV["DATABASE_URL"]
+        assert environment["ACCOUNT_MODEL_ACTIVE_KEY_ID"] == PRODUCTION_ENV[
+            "ACCOUNT_MODEL_ACTIVE_KEY_ID"
+        ]
+        assert environment["ACCOUNT_MODEL_KEYRING_JSON"] == ""
+        assert environment["ACCOUNT_MODEL_KEYRING_FILE"] == (
+            "/run/secrets/account_model_keyring"
+        )
+        assert environment["ACCOUNT_MODEL_ALLOWED_ORIGINS"] == PRODUCTION_ENV[
+            "ACCOUNT_MODEL_ALLOWED_ORIGINS"
+        ]
+        assert services[service_name]["secrets"] == [
+            {
+                "source": "account_model_keyring",
+                "target": "/run/secrets/account_model_keyring",
+            }
+        ]
+        assert "volumes" not in services[service_name]
+
+    keyring = config["secrets"]["account_model_keyring"]
+    assert Path(keyring["file"]) == Path(PRODUCTION_ENV["ACCOUNT_MODEL_KEYRING_FILE"])
+    for name, service in services.items():
+        if name in {"api", "worker"}:
+            continue
+        sources = {
+            item if isinstance(item, str) else item.get("source")
+            for item in service.get("secrets", [])
+        }
+        assert "account_model_keyring" not in sources
 
     assert "ports" not in services["api"]
     # Profiled services are omitted unless explicitly selected.
