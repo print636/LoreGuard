@@ -124,7 +124,7 @@ set DAILY_TOKEN_BUDGET=100000
 
 默认单次运行预算为 100,000 Token，其中角色一致性阶段自身仍受 60,000 Token 上限约束；运行诊断会同时记录阶段配置上限、进入阶段时的剩余运行预算和二者取小后的实际阶段预算。定向查漏按单个角色特质分别调用，某个目标为空或失败不会吞掉其他目标，但任一未处理目标都会使材料覆盖明确标为 `partial`。
 
-角色一致性链路的 v26 检查点已在原创、开发者可见样例上完成 3 次独立真实模型 HTTP 全流程检查，候选确认、证据类型校准和定向查漏收紧后的 12 项门槛全部通过。这不是人工盲测、开放文本泛化或生产质量证明。构建边界、指标与复现方式见 [`docs/character-consistency-live-checkpoint-20260922.md`](docs/character-consistency-live-checkpoint-20260922.md)。
+角色一致性链路的 v26 历史检查点曾在原创、开发者可见样例上完成 3 次独立真实模型 HTTP 全流程检查，但后续对象身份与角色归属规则变更后不能继承旧成绩。当前源码构建的最新三轮严格 Demo 只通过 **1/3**：另外两轮新稿覆盖不完整，出现定向复核预算耗尽及模型记录校验拒收；前一构建在另一套冻结世界观的正式候选比较轴选择处仍失败。验收环境临时使用角色阶段 10 万、每日 600 万 Token 上限，产品默认未改变。这不是人工盲测、开放文本泛化或生产质量证明；详见 [`docs/character-ooc-challenge-checkpoint-20260923.md`](docs/character-ooc-challenge-checkpoint-20260923.md)。v26 的历史边界与复现方式见 [`docs/character-consistency-live-checkpoint-20260922.md`](docs/character-consistency-live-checkpoint-20260922.md)。
 
 项目中心和工作台中的模型状态只被动读取配置，不会自动请求模型；只有用户在“模型与密钥”页手动执行最小连接测试时，才会额外发起一次可能消耗少量 Token 的聊天请求。请勿把 Key 写入源码、README 或提交记录。`PROVIDER_THINKING_MODE` 默认不配置，因此通用 OpenAI-compatible 请求不会携带 `thinking`；只有显式设置为 `disabled` 或 `enabled` 时才发送顶层 `thinking={"type": ...}`。Compose 会把该配置同时传入 API 与 worker，空白值统一归一为 `None`。主模型抽取支持 `fact`、`event`、`knows`、`claims_knows`、`item`、`uses`、`world_rule` 与 `world_assert`。超时、429、5xx、空响应、非法 JSON、字段校验失败或证据行号越界时，系统会记录非敏感警告并降级到 `BaselineExtractor`；基线与模型结果会去重合并。默认单次请求最多尝试 2 次、每次 30 秒；某分块终态失败后停止当前文档剩余模型分块，一个文档出现终态失败后开启本次运行熔断，后续文档直接走全文基线，避免兼容服务异常时串行等待数分钟。运行事件和诊断会明确区分“完整模型增强”“模型增强（部分分块已降级）”“确定性基线（模型未参与或已降级）”与主动关闭模型的“确定性基线”，结果正确时也不会掩盖模型失败。
 

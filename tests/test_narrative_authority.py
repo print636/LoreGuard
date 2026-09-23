@@ -450,6 +450,108 @@ def test_candidate_decision_is_idempotent_and_uses_revision_cas():
             assert snapshot is not None
             assert snapshot.payload["origin"] == "explicit_setting"
             assert snapshot.payload["contexts"] == ["日常 饮食"]
+            assert "comparison_key" not in snapshot.payload
+            assert snapshot.payload_sha256 == payload_sha256(snapshot.payload)
+
+
+def test_run_freezes_stored_object_comparison_keys_and_retry_copies_hashes():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈喜欢蜜瓜。\n林澈喜欢葡萄。"
+        )
+        source = _start_frozen_run(client, project["id"], status="completed")
+        with SessionLocal() as db:
+            source_input = db.scalar(
+                select(AnalysisRunInputRow).where(
+                    AnalysisRunInputRow.run_id == source["id"]
+                )
+            )
+            assert source_input is not None
+            grape_evidence = [
+                {
+                    "input_id": source_input.id,
+                    "document_id": source_input.document_id,
+                    "document_name": source_input.document_name,
+                    "document_version": source_input.document_version,
+                    "content_sha256": source_input.content_sha256,
+                    "line_start": 2,
+                    "line_end": 2,
+                    "text": "林澈喜欢葡萄。",
+                }
+            ]
+        melon_id = _create_candidate(
+            project["id"], source["id"],
+            trait_key="食物偏好",
+            comparison_key="preference:蜜瓜",
+        )
+        grape_id = _create_candidate(
+            project["id"], source["id"],
+            trait_key="食物偏好",
+            comparison_key="preference:葡萄",
+            value="喜欢葡萄",
+            evidence=grape_evidence,
+        )
+        assert melon_id != grape_id
+        _confirm_candidate(client, project["id"], melon_id)
+        _confirm_candidate(client, project["id"], grape_id)
+
+        frozen = _start_frozen_run(client, project["id"], status="failed")
+        frozen = client.get(f"/api/v1/analysis-runs/{frozen['id']}").json()
+        with SessionLocal() as db:
+            candidates = {
+                candidate_id: db.get(CharacterTraitCandidateRow, candidate_id)
+                for candidate_id in (melon_id, grape_id)
+            }
+            assert {row.comparison_key for row in candidates.values()} == {
+                "preference:蜜瓜",
+                "preference:葡萄",
+            }
+            snapshots = list(
+                db.scalars(
+                    select(AnalysisRunCharacterTraitInputRow)
+                    .where(AnalysisRunCharacterTraitInputRow.run_id == frozen["id"])
+                    .order_by(AnalysisRunCharacterTraitInputRow.ordinal)
+                ).all()
+            )
+            assert len(snapshots) == 2
+            assert {row.payload["trait_key"] for row in snapshots} == {"食物偏好"}
+            assert {row.payload["comparison_key"] for row in snapshots} == {
+                "preference:蜜瓜",
+                "preference:葡萄",
+            }
+            frozen_rows = [
+                (row.candidate_id, row.payload.copy(), row.payload_sha256)
+                for row in snapshots
+            ]
+            assert all(
+                row.payload_sha256 == payload_sha256(row.payload)
+                for row in snapshots
+            )
+            candidates[melon_id].comparison_key = "preference:荔枝"
+            db.commit()
+
+        with patch("app.main.dispatch_analysis"):
+            retry = client.post(f"/api/v1/analysis-runs/{frozen['id']}/retry")
+        assert retry.status_code == 202, retry.text
+        retried = client.get(f"/api/v1/analysis-runs/{retry.json()['id']}").json()
+        assert (
+            retried["character_profile_snapshot_sha256"]
+            == frozen["character_profile_snapshot_sha256"]
+        )
+        with SessionLocal() as db:
+            copied = list(
+                db.scalars(
+                    select(AnalysisRunCharacterTraitInputRow)
+                    .where(
+                        AnalysisRunCharacterTraitInputRow.run_id == retry.json()["id"]
+                    )
+                    .order_by(AnalysisRunCharacterTraitInputRow.ordinal)
+                ).all()
+            )
+            assert [
+                (row.candidate_id, row.payload, row.payload_sha256)
+                for row in copied
+            ] == frozen_rows
 
 
 def test_drift_issues_filter_character_before_pagination():
@@ -535,6 +637,39 @@ def test_candidate_evidence_and_supersession_fail_closed_across_projects():
                 )
 
 
+def test_candidate_comparison_key_is_validated_before_persistence():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        source = _start_frozen_run(client, project["id"], status="completed")
+        with SessionLocal() as db:
+            snapshot = db.scalar(
+                select(AnalysisRunInputRow).where(
+                    AnalysisRunInputRow.run_id == source["id"]
+                )
+            )
+            assert snapshot is not None
+            for invalid_key in (
+                "preference:蜜 瓜",
+                "value:蜜瓜",
+                "preference:蜜瓜\u202e",
+                "preference:" + "a" * 190,
+            ):
+                with pytest.raises(ValueError):
+                    upsert_character_trait_candidate(
+                        db,
+                        project_id=project["id"],
+                        source_run_id=source["id"],
+                        candidate=_candidate_payload(
+                            snapshot, comparison_key=invalid_key
+                        ),
+                    )
+            assert db.scalar(
+                select(CharacterTraitCandidateRow).where(
+                    CharacterTraitCandidateRow.source_run_id == source["id"]
+                )
+            ) is None
+
+
 def test_supersession_requires_same_confirmed_identity_and_known_overlap():
     with TestClient(app) as client:
         project, _ = _project_and_document(client)
@@ -549,7 +684,8 @@ def test_supersession_requires_same_confirmed_identity_and_known_overlap():
             },
         }
         original_id = _create_candidate(
-            project["id"], source["id"], scope=original_scope
+            project["id"], source["id"], scope=original_scope,
+            comparison_key="preference:蜜瓜",
         )
         _confirm_candidate(client, project["id"], original_id)
 
@@ -583,6 +719,7 @@ def test_supersession_requires_same_confirmed_identity_and_known_overlap():
                         snapshot,
                         value="不再喜欢蜜瓜",
                         polarity="negative",
+                        comparison_key="preference:蜜瓜",
                         supersedes_candidate_id=original_id,
                         scope={
                             "schema_version": 1,
@@ -601,6 +738,7 @@ def test_supersession_requires_same_confirmed_identity_and_known_overlap():
             source["id"],
             value="不再喜欢蜜瓜",
             polarity="negative",
+            comparison_key="preference:蜜瓜",
             supersedes_candidate_id=original_id,
             scope=original_scope,
         )
@@ -637,7 +775,9 @@ def test_retry_copies_exact_confirmed_profile_after_live_supersession():
     with TestClient(app) as client:
         project, _ = _project_and_document(client)
         source = _start_frozen_run(client, project["id"], status="completed")
-        original_id = _create_candidate(project["id"], source["id"])
+        original_id = _create_candidate(
+            project["id"], source["id"], comparison_key="preference:蜜瓜"
+        )
         _confirm_candidate(client, project["id"], original_id)
 
         failed = _start_frozen_run(client, project["id"], status="failed")
@@ -649,6 +789,7 @@ def test_retry_copies_exact_confirmed_profile_after_live_supersession():
             source["id"],
             value="不再喜欢蜜瓜",
             polarity="negative",
+            comparison_key="preference:蜜瓜",
             supersedes_candidate_id=original_id,
         )
         _confirm_candidate(client, project["id"], replacement_id)
@@ -665,6 +806,39 @@ def test_retry_copies_exact_confirmed_profile_after_live_supersession():
             retried["character_profile_snapshot_sha256"]
             == frozen["character_profile_snapshot_sha256"]
         )
+
+
+@pytest.mark.parametrize("legacy_key", [None, "preference:蜜瓜\u202e"])
+def test_legacy_object_profile_can_be_explicitly_superseded_with_a_stored_key(
+    legacy_key: str | None,
+):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        source = _start_frozen_run(client, project["id"], status="completed")
+        legacy_id = _create_candidate(project["id"], source["id"])
+        if legacy_key is not None:
+            with SessionLocal() as db:
+                legacy = db.get(CharacterTraitCandidateRow, legacy_id)
+                assert legacy is not None
+                legacy.comparison_key = legacy_key
+                db.commit()
+        _confirm_candidate(client, project["id"], legacy_id)
+        replacement_id = _create_candidate(
+            project["id"], source["id"],
+            value="不再喜欢蜜瓜",
+            polarity="negative",
+            comparison_key="preference:蜜瓜",
+            supersedes_candidate_id=legacy_id,
+        )
+        _confirm_candidate(client, project["id"], replacement_id)
+        with SessionLocal() as db:
+            legacy = db.get(CharacterTraitCandidateRow, legacy_id)
+            replacement = db.get(CharacterTraitCandidateRow, replacement_id)
+            assert legacy is not None and legacy.comparison_key == legacy_key
+            assert legacy.review_state == "superseded"
+            assert replacement is not None
+            assert replacement.comparison_key == "preference:蜜瓜"
+            assert replacement.review_state == "confirmed"
 
 
 def test_running_source_requires_explicit_internal_opt_in():
@@ -777,7 +951,7 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
                 column.name for column in Base.metadata.tables[table_name].columns
             }
             if table_name == "character_trait_candidates":
-                expected_columns.remove("authority_tier")
+                expected_columns -= {"authority_tier", "comparison_key"}
             if table_name == "document_narrative_context_revisions":
                 expected_columns -= {
                     "inference_reasoning",
@@ -798,7 +972,7 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
         } == {
             column.name
             for column in Base.metadata.tables["character_trait_candidates"].columns
-        }
+        } - {"comparison_key"}
         engine.dispose()
 
         command.downgrade(config, "0008_document_concurrency")

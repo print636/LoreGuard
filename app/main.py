@@ -64,10 +64,13 @@ from .provider_credentials import (
     validate_provider_security_configuration,
 )
 from .character_traits import (
+    _OBJECT_BEARING_TRAIT_DIMENSIONS,
+    _validated_comparison_key,
     normalize_character_key,
+    upsert_character_trait_candidate,
     validate_character_trait_supersession,
 )
-from .character_trait_extraction import trait_keys_compatible
+from .character_trait_extraction import stable_trait_identity, trait_keys_compatible
 from .document_diff import build_document_diff
 from .docx_import import DocxImportError, extract_docx_text
 from .domain import CertaintyLevel, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
@@ -260,6 +263,13 @@ class CharacterTraitDecisionIn(BaseModel):
     decision: Literal["confirm", "reject"]
     expected_revision: int = Field(ge=0)
     comment: str = Field(default="", max_length=2_000)
+
+
+class CharacterTraitSupersessionLinkIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    supersedes_candidate_id: str = Field(min_length=1, max_length=36)
+    expected_revision: int = Field(ge=0)
 
 
 class AnalysisRunIn(BaseModel):
@@ -898,6 +908,7 @@ def serialize_character_trait_candidate(row: CharacterTraitCandidateRow) -> dict
         "character_display_name": row.character_display_name,
         "trait_type": row.trait_type,
         "trait_key": row.trait_key,
+        "comparison_key": row.comparison_key,
         "value": row.value,
         "polarity": row.polarity,
         "stability": row.stability,
@@ -2515,6 +2526,48 @@ def _release_ranges_overlap(
     return max(first_start, second_start) <= min(first_end, second_end)
 
 
+def _confirmation_trait_identity_matches(
+    first: CharacterTraitCandidateRow, second: CharacterTraitCandidateRow
+) -> bool:
+    if first.trait_type in _OBJECT_BEARING_TRAIT_DIMENSIONS:
+        try:
+            first_key = _validated_comparison_key(
+                first.comparison_key, trait_type=first.trait_type
+            )
+            second_key = _validated_comparison_key(
+                second.comparison_key, trait_type=second.trait_type
+            )
+        except ValueError:
+            first_key = second_key = None
+        if first_key is not None and second_key is not None:
+            return first_key == second_key and (
+                first.trait_type == "preference"
+                or stable_trait_identity(first.trait_type, first.trait_key)
+                == stable_trait_identity(second.trait_type, second.trait_key)
+            )
+    # Historical candidates have no stored object identity. Preserve their
+    # conservative label matching rather than inferring one from value text.
+    return trait_keys_compatible(
+        dimension=first.trait_type,
+        baseline_key=second.trait_key,
+        observation_key=first.trait_key,
+    )
+
+
+def _requires_legacy_preference_supersession(
+    candidate: CharacterTraitCandidateRow, confirmed: CharacterTraitCandidateRow
+) -> bool:
+    if candidate.trait_type != "preference" or confirmed.comparison_key is not None:
+        return False
+    try:
+        return (
+            _validated_comparison_key(candidate.comparison_key, trait_type="preference")
+            is not None
+        )
+    except ValueError:
+        return False
+
+
 def _character_coverage_for_run(
     db, run: AnalysisRunRow | None
 ) -> tuple[str, str | None]:
@@ -2835,6 +2888,145 @@ def get_character_profile_candidate(
 
 
 @app.post(
+    "/api/v1/projects/{project_id}/characters/{character_key}/profile-candidates/{candidate_id}/supersession-links",
+    status_code=201,
+)
+def link_legacy_preference_candidate(
+    project_id: str,
+    character_key: str,
+    candidate_id: str,
+    payload: CharacterTraitSupersessionLinkIn,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    """Let the author name the exact confirmed legacy row to replace."""
+
+    try:
+        normalized = normalize_character_key(character_key)
+    except ValueError:
+        raise HTTPException(404, "角色候选不存在") from None
+    with SessionLocal() as db:
+        project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if project is None:
+            raise HTTPException(404, "项目不存在")
+        row = _candidate_in_workspace(
+            db,
+            project_id=project_id,
+            candidate_id=candidate_id,
+            character_key=normalized,
+            workspace_id=context.workspace_id,
+            for_update=True,
+        )
+        if row is None:
+            raise HTTPException(404, "角色候选不存在")
+        if row.review_state != "pending" or row.lock_version != payload.expected_revision:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_revision_conflict",
+                    "message": "角色特征候选已被审核，请刷新后重试",
+                    "actual_revision": row.lock_version,
+                    "review_state": row.review_state,
+                },
+            )
+        try:
+            keyed_preference = (
+                row.trait_type == "preference"
+                and _validated_comparison_key(
+                    row.comparison_key, trait_type="preference"
+                ) is not None
+            )
+        except ValueError:
+            keyed_preference = False
+        if not keyed_preference or row.supersedes_candidate_id is not None:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_supersession_conflict",
+                    "message": "只能为待审核的有对象偏好候选选择旧特征",
+                },
+            )
+        source_is_current, stale_reason = _candidate_source_is_current(db, row)
+        if not source_is_current:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_candidate_stale",
+                    "message": stale_reason,
+                },
+            )
+        superseded = db.scalar(
+            select(CharacterTraitCandidateRow)
+            .where(
+                CharacterTraitCandidateRow.id == payload.supersedes_candidate_id,
+                CharacterTraitCandidateRow.project_id == project_id,
+            )
+            .with_for_update()
+        )
+        if superseded is None or superseded.comparison_key is not None:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_supersession_conflict",
+                    "message": "待替代的旧角色特征不符合要求",
+                },
+            )
+        try:
+            linked, created = upsert_character_trait_candidate(
+                db,
+                project_id=project_id,
+                source_run_id=row.source_run_id,
+                candidate={
+                    "character_key": row.character_key,
+                    "character_display_name": row.character_display_name,
+                    "trait_type": row.trait_type,
+                    "trait_key": row.trait_key,
+                    "comparison_key": row.comparison_key,
+                    "value": row.value,
+                    "polarity": row.polarity,
+                    "stability": row.stability,
+                    "contexts": row.contexts,
+                    "origin": row.origin,
+                    "authority_tier": row.authority_tier,
+                    "confidence": row.confidence,
+                    "scope": row.scope_payload,
+                    "valid_from_release_ordinal": row.valid_from_release_ordinal,
+                    "valid_until_release_ordinal": row.valid_until_release_ordinal,
+                    "evidence": row.evidence,
+                    "generator_version": row.generator_version,
+                    "provenance": row.provenance,
+                    "supersedes_candidate_id": payload.supersedes_candidate_id,
+                },
+            )
+            db.commit()
+        except ValueError:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_supersession_conflict",
+                    "message": "待替代的旧角色特征不符合要求",
+                },
+            ) from None
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_revision_conflict",
+                    "message": "角色特征候选已发生变化，请刷新后重试",
+                },
+            ) from None
+        db.refresh(linked)
+        return {"candidate": serialize_character_trait_candidate(linked), "created": created}
+
+
+@app.post(
     "/api/v1/projects/{project_id}/characters/{character_key}/profile-candidates/{candidate_id}/decisions",
     status_code=201,
 )
@@ -2937,13 +3129,13 @@ def decide_character_profile_candidate(
             conflicts = [
                 other
                 for other in confirmed
-                if trait_keys_compatible(
-                    dimension=row.trait_type,
-                    baseline_key=other.trait_key,
-                    observation_key=row.trait_key,
-                )
+                if _confirmation_trait_identity_matches(row, other)
                 if other.id != row.supersedes_candidate_id
-                and other.value != row.value
+                and (
+                    other.value != row.value
+                    or other.polarity != row.polarity
+                    or _requires_legacy_preference_supersession(row, other)
+                )
                 and _release_ranges_overlap(row, other)
                 and scope_relation(
                     row.scope_payload,
@@ -2958,7 +3150,7 @@ def decide_character_profile_candidate(
                     409,
                     detail={
                         "code": "character_trait_confirmation_conflict",
-                        "message": "同一作用域内已有不同的已确认角色特征",
+                        "message": "同一作用域内已有冲突的已确认角色特征",
                     },
                 )
             if row.supersedes_candidate_id:
@@ -2979,6 +3171,9 @@ def decide_character_profile_candidate(
                         character_key=row.character_key,
                         trait_type=row.trait_type,
                         trait_key=row.trait_key,
+                        comparison_key=row.comparison_key,
+                        origin=row.origin,
+                        authority_tier=row.authority_tier,
                         scope=row.scope_payload,
                         valid_from_release_ordinal=(
                             row.valid_from_release_ordinal

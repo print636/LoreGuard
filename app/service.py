@@ -32,6 +32,7 @@ from .db import (
 from .character_traits import (
     CHARACTER_TRAIT_SCHEMA_VERSION,
     MAX_CONFIRMED_TRAITS_PER_RUN,
+    candidate_snapshot_comparison_key,
     candidate_snapshot_payload,
     latest_confirm_reviews,
 )
@@ -684,6 +685,7 @@ def _historical_trait_snapshot_payload(candidate, review) -> dict[str, Any]:
         "character_display_name": candidate.character_display_name,
         "trait_type": candidate.trait_type,
         "trait_key": candidate.trait_key,
+        **candidate_snapshot_comparison_key(candidate),
         "value": candidate.value,
         "polarity": candidate.polarity,
         "stability": candidate.stability,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
 from types import SimpleNamespace
@@ -14,20 +15,27 @@ from sqlalchemy import select
 from app.character_consistency_stage import (
     CharacterConsistencyStage,
     _FrozenDocument,
+    _baseline_shadowed_at_scope,
+    _observation_matches_baseline,
     _explicit_support_kind,
     _find_support_evidence,
     _safe_case_trace,
     _safe_baseline_hint,
     _safe_server_context,
     _select_authoritative_baselines,
+    _signal_matches_target,
+    _target_has_sufficient_recall_evidence,
+    _target_with_existing_evidence_ranges,
     _targeted_completion_reserve,
     _trait_applies_to_release,
 )
-from app.character_drift import ConfirmedTraitSnapshot
+from app.character_drift import CHARACTER_REVIEW_SYSTEM_PROMPT, ConfirmedTraitSnapshot
 from app.character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
+    CharacterSignal,
     CharacterSignalChunk,
+    CharacterSignalTarget,
 )
 from app.config import Settings
 from app.db import (
@@ -280,6 +288,7 @@ def _run_stage(
     provider: QueueProvider,
     *,
     checkpoint=None,
+    remaining_run_tokens: int = 20_000,
     **setting_overrides,
 ):
     with SessionLocal() as db:
@@ -296,7 +305,7 @@ def _run_stage(
             project_id=run.project_id,
             documents=documents,
             metadata=metadata,
-            remaining_run_tokens=20_000,
+            remaining_run_tokens=remaining_run_tokens,
         )
         run.status = "completed"
         db.commit()
@@ -332,6 +341,127 @@ def _record(
 
 def _response(*records: dict) -> str:
     return json.dumps({"records": list(records)}, ensure_ascii=False)
+
+
+def test_same_line_distinct_preference_objects_reach_stage_candidates():
+    profile_line = "林澈喜欢蜜瓜，也喜欢葡萄。"
+    melon = _record(
+        evidence=profile_line,
+        polarity="positive",
+        kind="explicit_declaration",
+        trait_key="food_preference",
+        statement="林澈喜欢蜜瓜",
+    )
+    grape = {
+        **_record(
+            evidence=profile_line,
+            polarity="positive",
+            kind="explicit_declaration",
+            trait_key="food_preference",
+            statement="林澈喜欢葡萄",
+        ),
+        "key_object": "葡萄",
+    }
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"同线不同对象-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client,
+            project["id"],
+            name="profile.md",
+            role="character_profile",
+            content=profile_line,
+            narrative_context=_context(publication="published"),
+        )
+        run_id = _new_run(client, project["id"])
+        result = _run_stage(run_id, QueueProvider(_response(melon, grape)))
+
+        with SessionLocal() as db:
+            candidates = list(
+                db.scalars(
+                    select(CharacterTraitCandidateRow).where(
+                        CharacterTraitCandidateRow.source_run_id == run_id
+                    )
+                ).all()
+            )
+
+    assert result.diagnostics["outcome"] == "completed"
+    assert result.diagnostics["counts"]["signal_count"] == 2
+    assert result.diagnostics["counts"]["pending_candidate_count"] == 2
+    assert {candidate.comparison_key for candidate in candidates} == {
+        "preference:蜜瓜",
+        "preference:葡萄",
+    }
+
+
+def test_case_trace_uses_frozen_objects_for_shared_preference_label():
+    profile_line = "林澈喜欢蜜瓜，也喜欢葡萄。"
+    draft_line = "林澈仍然喜欢蜜瓜，也仍然喜欢葡萄。"
+    melon = _record(
+        evidence=profile_line,
+        polarity="positive",
+        kind="explicit_declaration",
+        trait_key="food_preference",
+        statement="林澈喜欢蜜瓜",
+    )
+    grape = {**melon, "statement": "林澈喜欢葡萄", "key_object": "葡萄"}
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"同标签诊断对象-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client,
+            project["id"],
+            name="profile.md",
+            role="character_profile",
+            content=profile_line,
+            narrative_context=_context(publication="published"),
+        )
+        seed = _new_run(client, project["id"])
+        _run_stage(seed, QueueProvider(_response(melon, grape)))
+        confirmed_candidate_ids = _confirm_all_candidates(client, project["id"], seed)
+        assert len(confirmed_candidate_ids) == 2
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content=draft_line,
+            narrative_context=_context(publication="draft"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(
+                _response(melon, grape),
+                _response(
+                    {**melon, "evidence": draft_line},
+                    {**grape, "evidence": draft_line},
+                ),
+            ),
+        )
+
+    trace = result.diagnostics["case_trace"]
+    assert len(trace) == 2
+    assert {row["comparison_key"] for row in trace} == {
+        "preference:蜜瓜",
+        "preference:葡萄",
+    }
+    assert {row["confirmed_candidate_id_sha256"] for row in trace} == {
+        hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()
+        for candidate_id in confirmed_candidate_ids
+    }
+    assert not any(candidate_id in repr(trace) for candidate_id in confirmed_candidate_ids)
+    assert all(row["matched_observation_count"] == 1 for row in trace)
+    assert {
+        row["comparison_key"]: row["matched_observation_refs"][0][
+            "key_object_sha256"
+        ]
+        for row in trace
+    } == {
+        f"preference:{name}": hashlib.sha256(name.encode("utf-8")).hexdigest()
+        for name in ("蜜瓜", "葡萄")
+    }
 
 
 def _confirm_only_candidate(client: TestClient, project_id: str, run_id: str) -> str:
@@ -756,8 +886,22 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
                 "character_key": "林澈",
                 "dimension": "preference",
                 "comparison_key": "preference:蜜瓜",
+                "confirmed_candidate_id_sha256": hashlib.sha256(
+                    candidate_id.encode("utf-8")
+                ).hexdigest(),
                 "matched_observation_count": 1,
-                    "prepare_reason": "reported_opposed_preference",
+                "matched_observation_refs": [{
+                    "document_name": "draft.md",
+                    "line_start": 1,
+                    "line_end": 1,
+                    "observation_kind": "preference_expression",
+                    "polarity": "negative",
+                    "key_object_sha256": hashlib.sha256(
+                        "蜜瓜".encode("utf-8")
+                    ).hexdigest(),
+                }],
+                "matched_observation_refs_truncated": False,
+                "prepare_reason": "reported_opposed_preference",
                 "review_outcome": "completed",
                 "review_verdict": "contradicts",
                 "citation_roles": ["B", "C"],
@@ -766,6 +910,83 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
                 "promote_reason": "model_contradicts",
             }
         ]
+
+
+def test_qualified_preference_from_confirmed_profile_reaches_review_without_identity_rewrite():
+    profile_line = "林澈一直喜欢冰镇蜜瓜，这是他的稳定偏好。"
+    draft_line = "林澈当着众人的面说：“我一直最讨厌蜜瓜，闻到味道就想离开。”"
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"限定对象补桥-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="profile.md", role="character_profile",
+            content=profile_line, narrative_context=_context(publication="published"),
+        )
+        seed = _new_run(client, project["id"])
+        _run_stage(
+            seed,
+            QueueProvider(
+                _response(
+                    {
+                        **_record(
+                            evidence=profile_line,
+                            polarity="positive",
+                            kind="explicit_declaration",
+                            trait_key="melon_preference",
+                        ),
+                        "key_object": "冰镇蜜瓜",
+                    }
+                )
+            ),
+        )
+        _confirm_only_candidate(client, project["id"], seed)
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content=draft_line, narrative_context=_context(publication="draft"),
+        )
+        provider = QueueProvider(
+            _response(
+                {
+                    **_record(
+                        evidence=profile_line,
+                        polarity="positive",
+                        kind="explicit_declaration",
+                        trait_key="melon_preference",
+                    ),
+                    "key_object": "冰镇蜜瓜",
+                }
+            ),
+            _response(
+                _record(
+                    evidence=draft_line,
+                    polarity="negative",
+                    kind="preference_expression",
+                    trait_key="melon_preference",
+                )
+            ),
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "草稿对蜜瓜作出普遍反向偏好声明，覆盖冰镇蜜瓜。",
+                    "citations": ["B01", "C01"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        result = _run_stage(_new_run(client, project["id"]), provider)
+
+    assert result.diagnostics["outcome"] == "completed"
+    assert result.diagnostics["counts"]["targeted_pass_scheduled_count"] == 0
+    assert len(provider.calls) == 3
+    assert "局部体验、不同食品或范围不清" in CHARACTER_REVIEW_SYSTEM_PROMPT
+    trace = result.diagnostics["case_trace"][0]
+    assert '"comparison_key":"preference:冰镇蜜瓜"' in provider.calls[1][1]
+    assert trace["matched_observation_count"] == 1
+    assert trace["review_verdict"] == "contradicts"
+    assert trace["final_outcome"] == "conflict"
+    assert len(result.issues) == 1
 
 
 def test_nonempty_preference_behavior_gets_one_excluding_verification_pass():
@@ -999,6 +1220,168 @@ def test_primary_invalid_packages_fail_closed_and_mark_material_partial():
         assert result.diagnostics["reason_counts"]["schema_validation"] == 2
         assert result.diagnostics["usage"]["attempted_calls"] == 2
         assert result.diagnostics["counts"]["pending_candidate_count"] == 0
+
+
+def test_isolated_character_profile_keeps_other_character_after_failed_section():
+    profile = (
+        "# 角色档案\n"
+        "## 林澈\n"
+        "林澈喜欢蜜瓜。\n"
+        "## 祁雾\n"
+        "祁雾说话直来直往，这是她的核心性格。"
+    )
+    good_line = "祁雾说话直来直往，这是她的核心性格。"
+    malformed = _response({})
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"角色档案隔离-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client,
+            project["id"],
+            name="profile.md",
+            role="character_profile",
+            content=profile,
+            narrative_context=_context(publication="published"),
+        )
+        provider = QueueProvider(
+            malformed,
+            malformed,
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence=good_line,
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="core_personality",
+                    trait_key="directness",
+                    statement="说话直来直往",
+                    line=5,
+                )
+            ),
+        )
+        run_id = _new_run(client, project["id"])
+        result = _run_stage(run_id, provider)
+
+        assert len(provider.calls) == 3
+        assert "林澈喜欢蜜瓜" in provider.calls[0][1]
+        assert "祁雾说话直来直往" not in provider.calls[0][1]
+        assert "祁雾说话直来直往" in provider.calls[2][1]
+        assert result.diagnostics["material_coverage"] == "partial"
+        assert result.diagnostics["counts"]["pending_candidate_count"] == 1
+        with SessionLocal() as db:
+            candidates = list(
+                db.scalars(
+                    select(CharacterTraitCandidateRow).where(
+                        CharacterTraitCandidateRow.source_run_id
+                        == run_id
+                    )
+                ).all()
+            )
+        assert len(candidates) == 1
+        assert candidates[0].character_display_name == "祁雾"
+
+
+def test_many_profile_sections_reserve_one_chunk_for_draft_extraction():
+    profile = "# 角色档案\n" + "\n".join(
+        f"## 角色{index:02}\n角色{index:02}喜欢蜜瓜。"
+        for index in range(25)
+    )
+    draft_line = "角色00讨厌蜜瓜。"
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"长档案保留草稿-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client,
+            project["id"],
+            name="profile.md",
+            role="character_profile",
+            content=profile,
+            narrative_context=_context(publication="published"),
+        )
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content=draft_line,
+            narrative_context=_context(publication="draft"),
+        )
+        provider = QueueProvider(
+            _response(
+                _record(
+                    character="角色00",
+                    evidence=draft_line,
+                    polarity="negative",
+                    kind="explicit_declaration",
+                )
+            ),
+            *([_response()] * 23),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            provider,
+            remaining_run_tokens=100_000,
+            character_consistency_stage_token_budget=100_000,
+            character_signal_max_completion_tokens=64,
+        )
+
+    assert len(provider.calls) == 24
+    assert draft_line in provider.calls[0][1]
+    assert result.diagnostics["counts"]["planned_chunks"] == 26
+    assert result.diagnostics["counts"]["processed_chunks"] == 24
+    assert result.diagnostics["counts"]["draft_observation_count"] == 1
+    assert result.diagnostics["reason_counts"]["chunk_limit"] == 2
+    assert result.diagnostics["material_coverage"] == "partial"
+
+
+def test_chunk_cap_reserves_each_draft_and_uncapped_run_keeps_source_order():
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"多草稿块调度-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client,
+            project["id"],
+            name="profile.md",
+            role="character_profile",
+            content="林澈喜欢蜜瓜。",
+            narrative_context=_context(publication="published"),
+        )
+        for name, content in (
+            ("draft-east.md", "林澈进入东线。"),
+            ("draft-west.md", "林澈进入西线。"),
+        ):
+            _create_document(
+                client,
+                project["id"],
+                name=name,
+                role="chapter",
+                content=content,
+                narrative_context=_context(publication="draft"),
+            )
+
+        capped_provider = QueueProvider(_response(), _response())
+        capped = _run_stage(
+            _new_run(client, project["id"]),
+            capped_provider,
+            character_consistency_max_chunks_per_run=2,
+        )
+        assert "林澈进入东线" in capped_provider.calls[0][1]
+        assert "林澈进入西线" in capped_provider.calls[1][1]
+        assert capped.diagnostics["reason_counts"]["chunk_limit"] == 1
+        assert capped.diagnostics["material_coverage"] == "partial"
+
+        uncapped_provider = QueueProvider(_response(), _response(), _response())
+        uncapped = _run_stage(
+            _new_run(client, project["id"]), uncapped_provider
+        )
+        assert "林澈喜欢蜜瓜" in uncapped_provider.calls[0][1]
+        assert "林澈进入东线" in uncapped_provider.calls[1][1]
+        assert "林澈进入西线" in uncapped_provider.calls[2][1]
+        assert uncapped.diagnostics["counts"]["processed_chunks"] == 3
+        assert "chunk_limit" not in uncapped.diagnostics["reason_counts"]
 
 
 def test_primary_ignored_duplicate_is_auditable_without_marking_stage_partial():
@@ -1927,7 +2310,8 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
         )
         seed = _new_run(client, project["id"])
         _run_stage(seed, QueueProvider(_response(*profile_records)))
-        assert len(_confirm_all_candidates(client, project["id"], seed)) == 3
+        confirmed_candidate_ids = _confirm_all_candidates(client, project["id"], seed)
+        assert len(confirmed_candidate_ids) == 3
         _create_document(
             client,
             project["id"],
@@ -1969,11 +2353,27 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
         trace = result.diagnostics["case_trace"]
         assert len(trace) == 3
         by_character = {row["character_key"]: row for row in trace}
+        assert {row["confirmed_candidate_id_sha256"] for row in trace} == {
+            hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()
+            for candidate_id in confirmed_candidate_ids
+        }
         assert by_character["林澈"] == {
             "character_key": "林澈",
             "dimension": "core_personality",
             "comparison_key": "core_personality:社交主动性",
+            "confirmed_candidate_id_sha256": by_character["林澈"][
+                "confirmed_candidate_id_sha256"
+            ],
             "matched_observation_count": 1,
+            "matched_observation_refs": [{
+                "document_name": "draft.md",
+                "line_start": 1,
+                "line_end": 1,
+                "observation_kind": "action",
+                "polarity": "positive",
+                "key_object_sha256": None,
+            }],
+            "matched_observation_refs_truncated": False,
             "prepare_reason": "single_behavior_is_not_drift",
             "review_outcome": "not_run",
             "review_verdict": None,
@@ -1984,13 +2384,24 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
         }
         assert by_character["苏弦"]["prepare_reason"] == "no_opposition"
         assert by_character["苏弦"]["final_outcome"] == "no_issue"
+        assert by_character["苏弦"]["matched_observation_refs"] == [{
+            "document_name": "draft.md",
+            "line_start": 2,
+            "line_end": 2,
+            "observation_kind": "preference_expression",
+            "polarity": "positive",
+            "key_object_sha256": hashlib.sha256(
+                "蜜瓜".encode("utf-8")
+            ).hexdigest(),
+        }]
         assert by_character["祁雾"]["matched_observation_count"] == 0
+        assert by_character["祁雾"]["matched_observation_refs"] == []
         assert by_character["祁雾"]["prepare_reason"] == "no_matching_observation"
         assert by_character["祁雾"]["final_outcome"] == "unverifiable"
         serialized = json.dumps(trace, ensure_ascii=False)
         assert "evidence" not in serialized
         assert "statement" not in serialized
-        assert "document" not in serialized
+        assert "document_id" not in serialized
         for marker in ("机密原文甲", "机密原文乙", "机密原文丙", "机密草稿丁", "机密草稿戊"):
             assert marker not in serialized
 
@@ -2015,6 +2426,94 @@ def test_case_trace_redacts_url_and_credential_shaped_identifiers():
     assert secret not in serialized
     assert trace["character_key"].startswith("redacted_")
     assert trace["comparison_key"].startswith("redacted_")
+
+
+@pytest.mark.parametrize(
+    "frozen_key",
+    (None, "preference:https://private.invalid/object", "preference:wrong:axis"),
+)
+def test_case_trace_legacy_fallback_rejects_missing_or_unsafe_frozen_key(frozen_key):
+    baseline = _confirmed_trait(trait_key="food_preference")
+    entry = (
+        _snapshot_stub("legacy", frozen_key),
+        baseline,
+        NarrativeScopeV1(),
+        "林澈",
+    )
+    trace = _safe_case_trace(
+        character_key="林澈",
+        baseline=baseline,
+        baseline_entry=entry,
+        matched_observation_count=0,
+        prepare_reason="no_matching_observation",
+        review=None,
+        final_outcome="unverifiable",
+        visible=False,
+        promote_reason="no_matching_observation",
+    )
+
+    assert trace["comparison_key"] == "preference:foodpreference"
+    assert trace["confirmed_candidate_id_sha256"] is None
+    assert "private.invalid" not in json.dumps(trace, ensure_ascii=False)
+
+
+def test_case_trace_observation_provenance_is_bounded_and_content_free():
+    observations = tuple(
+        CharacterSignal(
+            id=f"cs_{index:032x}",
+            character="林澈",
+            dimension="preference",
+            trait_key="melon_preference",
+            statement="机密模型陈述不可出现在诊断中",
+            polarity="negative",
+            stability="stable",
+            observation_kind="preference_expression",
+            key_object="蜜瓜",
+            source_kind="draft",
+            evidence=EvidenceSpan(
+                document_id=f"secret-input-{index}",
+                document_name=(
+                    "sk-1234567890abcdef.md" if index == 0 else "draft.md"
+                ),
+                line_start=index + 1,
+                line_end=index + 1,
+                text="机密证据原文不可出现在诊断中",
+            ),
+        )
+        for index in range(13)
+    )
+    trace = _safe_case_trace(
+        character_key="林澈",
+        baseline=_confirmed_trait(),
+        matched_observation_count=len(observations),
+        matched_observations=observations,
+        prepare_reason="reported_opposed_preference",
+        review=None,
+        final_outcome="needs_confirmation",
+        visible=False,
+        promote_reason="review_unavailable",
+    )
+
+    refs = trace["matched_observation_refs"]
+    assert trace["matched_observation_count"] == 13
+    assert len(refs) == 12
+    assert trace["matched_observation_refs_truncated"] is True
+    assert refs[0] == {
+        "document_name": refs[0]["document_name"],
+        "line_start": 1,
+        "line_end": 1,
+        "observation_kind": "preference_expression",
+        "polarity": "negative",
+        "key_object_sha256": hashlib.sha256("蜜瓜".encode("utf-8")).hexdigest(),
+    }
+    assert refs[0]["document_name"].startswith("redacted_")
+    assert refs[1]["document_name"] == "draft.md"
+    serialized = json.dumps(trace, ensure_ascii=False)
+    for marker in (
+        "sk-1234567890abcdef", "机密模型陈述", "机密证据原文",
+        "secret-input", '"key_object":',
+    ):
+        assert marker not in serialized
 
 
 def _confirmed_trait(
@@ -2050,6 +2549,17 @@ def _confirmed_trait(
     )
 
 
+def _snapshot_stub(candidate_id: str, comparison_key: str | None = None):
+    return SimpleNamespace(
+        candidate_id=candidate_id,
+        payload=(
+            {"comparison_key": comparison_key}
+            if comparison_key is not None
+            else {}
+        ),
+    )
+
+
 def test_safe_server_context_is_bounded_content_free_and_marks_truncation():
     scope = NarrativeScopeV1()
     source = _FrozenDocument(
@@ -2072,7 +2582,9 @@ def test_safe_server_context_is_bounded_content_free_and_marks_truncation():
     )
     entries = [
         (
-            SimpleNamespace(candidate_id=f"candidate-{index:02}"),
+            _snapshot_stub(
+                f"candidate-{index:02}", f"preference:trait_{index:02}"
+            ),
             _confirmed_trait(
                 character=f"角色{index:02}",
                 trait_key=f"trait_{index:02}",
@@ -2084,7 +2596,7 @@ def test_safe_server_context_is_bounded_content_free_and_marks_truncation():
     ]
     entries.append(
         (
-            SimpleNamespace(candidate_id="candidate-secret"),
+            _snapshot_stub("candidate-secret"),
             _confirmed_trait(
                 character="泄露测试",
                 trait_key="https://example.invalid/?api_key=credential-placeholder",
@@ -2164,7 +2676,7 @@ def test_safe_server_context_only_exposes_scope_and_release_valid_keys():
     )
     entries = [
         (
-            SimpleNamespace(candidate_id="active"),
+            _snapshot_stub("active", "preference:active_key"),
             _confirmed_trait(
                 trait_key="active_key",
                 valid_from=1,
@@ -2174,7 +2686,7 @@ def test_safe_server_context_only_exposes_scope_and_release_valid_keys():
             "林澈",
         ),
         (
-            SimpleNamespace(candidate_id="expired"),
+            _snapshot_stub("expired", "preference:expired_key"),
             _confirmed_trait(
                 trait_key="expired_key",
                 valid_from=1,
@@ -2184,7 +2696,7 @@ def test_safe_server_context_only_exposes_scope_and_release_valid_keys():
             "林澈",
         ),
         (
-            SimpleNamespace(candidate_id="sibling"),
+            _snapshot_stub("sibling", "preference:sibling_key"),
             _confirmed_trait(
                 trait_key="sibling_key",
                 valid_from=1,
@@ -2221,13 +2733,13 @@ def test_release_bounds_and_authority_are_enforced_before_drift_review():
 
     scope = NarrativeScopeV1()
     formal = (
-        SimpleNamespace(candidate_id="formal"),
+        _snapshot_stub("formal", "preference:蜜瓜"),
         _confirmed_trait(authority="formal_record"),
         scope,
         "林澈",
     )
     canon = (
-        SimpleNamespace(candidate_id="canon"),
+        _snapshot_stub("canon", "preference:蜜瓜"),
         _confirmed_trait(authority="core_canon"),
         scope,
         "林澈",
@@ -2235,6 +2747,650 @@ def test_release_bounds_and_authority_are_enforced_before_drift_review():
     selected, shadowed = _select_authoritative_baselines([formal, canon])
     assert shadowed == 1
     assert [row[1].authority_tier for row in selected] == ["core_canon"]
+
+
+def test_explicit_character_profile_shadows_conflicting_published_history():
+    scope = NarrativeScopeV1()
+    profile = (
+        _snapshot_stub("profile", "preference:蜜瓜"),
+        _confirmed_trait().model_copy(
+            update={"id": "ct_profile", "origin": "explicit_setting"}
+        ),
+        scope,
+        "林澈",
+    )
+    history = (
+        _snapshot_stub("history", "preference:蜜瓜"),
+        _confirmed_trait().model_copy(
+            update={
+                "id": "ct_history",
+                "origin": "confirmed_history_inference",
+                "statement": "林澈讨厌蜜瓜",
+                "polarity": "negative",
+            }
+        ),
+        scope,
+        "林澈",
+    )
+
+    selected, shadowed = _select_authoritative_baselines([history, profile])
+
+    assert [row[0].candidate_id for row in selected] == ["profile"]
+    assert shadowed == 1
+    # Two explicit settings need author resolution; one cannot silently
+    # replace the other merely because they have the same authority tier.
+    second_profile = (
+        _snapshot_stub("other-profile", "preference:蜜瓜"),
+        profile[1].model_copy(update={"id": "ct_other_profile"}),
+        scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines([profile, second_profile])
+    assert [row[0].candidate_id for row in selected] == [
+        "profile",
+        "other-profile",
+    ]
+    assert shadowed == 0
+
+
+def test_object_bearing_baselines_require_an_explicit_same_object_axis():
+    scope = NarrativeScopeV1()
+    history = (
+        _snapshot_stub("history", "preference:葡萄"),
+        _confirmed_trait(trait_key="food_preference").model_copy(
+            update={
+                "origin": "confirmed_history_inference",
+                "statement": "林澈喜欢葡萄",
+                "evidence": (
+                    EvidenceSpan(
+                        document_id="history", document_name="history.md",
+                        line_start=1, line_end=1, text="林澈喜欢葡萄。"
+                    ),
+                ),
+            }
+        ),
+        scope,
+        "林澈",
+    )
+    profile = (
+        _snapshot_stub("profile", "preference:蜜瓜"),
+        _confirmed_trait(trait_key="food_preference"),
+        scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines([history, profile])
+    assert selected == [history, profile]
+    assert shadowed == 0
+    assert not _baseline_shadowed_at_scope(history, selected, scope)
+
+    explicit_history = (
+        history[0],
+        history[1].model_copy(update={"trait_key": "食物偏好:葡萄"}),
+        scope,
+        "林澈",
+    )
+    explicit_profile = (
+        profile[0],
+        profile[1].model_copy(update={"trait_key": "食物偏好:蜜瓜"}),
+        scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines(
+        [explicit_history, explicit_profile]
+    )
+    assert selected == [explicit_history, explicit_profile]
+    assert shadowed == 0
+    legacy_history = (
+        _snapshot_stub("legacy-history"),
+        history[1].model_copy(update={"trait_key": "食物偏好:蜜瓜"}),
+        scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines(
+        [legacy_history, explicit_profile]
+    )
+    assert selected == [legacy_history, explicit_profile]
+    assert shadowed == 0
+
+    def observation(key_object: str, signal_id: str) -> CharacterSignal:
+        return CharacterSignal(
+            id=f"cs_{signal_id * 32}",
+            character="林澈",
+            dimension="preference",
+            trait_key="food_preference",
+            statement=f"林澈喜欢{key_object}",
+            polarity="positive",
+            stability="stable",
+            observation_kind="explicit_declaration",
+            key_object=key_object,
+            source_kind="draft",
+            evidence=EvidenceSpan(
+                document_id="draft", document_name="draft.md",
+                line_start=1, line_end=1, text=f"林澈喜欢{key_object}。"
+            ),
+        )
+
+    grape = observation("葡萄", "a")
+    melon = observation("蜜瓜", "b")
+    target = CharacterSignalTarget(
+        character="林澈",
+        dimension="preference",
+        trait_key="food_preference",
+        comparison_key="preference:蜜瓜",
+        baseline_polarity="negative",
+        requested_polarity="positive",
+        baseline_hint="喜欢蜜瓜",
+    )
+    assert not _signal_matches_target(grape, target)
+    assert _signal_matches_target(melon, target)
+    assert _observation_matches_baseline(profile, grape) is False
+    assert _observation_matches_baseline(profile, melon) is True
+    assert _observation_matches_baseline(legacy_history, melon) is None
+
+
+def test_qualified_preference_bridge_is_only_for_opposed_draft_review_gates():
+    scope = NarrativeScopeV1()
+    frozen = (
+        _snapshot_stub("qualified-profile", "preference:冰镇蜜瓜"),
+        _confirmed_trait(trait_key="melon_preference"),
+        scope,
+        "林澈",
+    )
+    legacy = (
+        _snapshot_stub("legacy-profile"),
+        frozen[1],
+        scope,
+        "林澈",
+    )
+    target = CharacterSignalTarget(
+        character="林澈",
+        dimension="preference",
+        trait_key="melon_preference",
+        comparison_key="preference:冰镇蜜瓜",
+        baseline_polarity="positive",
+        requested_polarity="negative",
+        baseline_hint="林澈喜欢冰镇蜜瓜",
+    )
+    direct = CharacterSignal(
+        id="cs_" + "b" * 32,
+        character="林澈",
+        dimension="preference",
+        trait_key="melon_preference",
+        statement="林澈一直讨厌蜜瓜",
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        key_object="蜜瓜",
+        source_kind="draft",
+        evidence=EvidenceSpan(
+            document_id="draft", document_name="draft.md",
+            line_start=8, line_end=8, text="林澈一直讨厌蜜瓜。",
+        ),
+    )
+    grape = direct.model_copy(
+        update={
+            "key_object": "葡萄",
+            "evidence": direct.evidence.model_copy(update={"text": "林澈一直讨厌葡萄。"}),
+        }
+    )
+    flavored_candy = direct.model_copy(
+        update={
+            "evidence": direct.evidence.model_copy(update={"text": "林澈一直讨厌蜜瓜味糖。"}),
+        }
+    )
+    one_off = direct.model_copy(
+        update={
+            "observation_kind": "action",
+            "evidence": direct.evidence.model_copy(update={"text": "林澈拒绝吃蜜瓜。"}),
+        }
+    )
+
+    assert _signal_matches_target(direct, target)
+    assert _target_has_sufficient_recall_evidence(target, (direct,))
+    assert _target_with_existing_evidence_ranges(
+        target, (direct,)
+    ).existing_evidence_ranges == ((8, 8),)
+    assert _observation_matches_baseline(frozen, direct) is True
+    assert _observation_matches_baseline(legacy, direct) is None
+    for unrelated in (grape, flavored_candy, one_off):
+        assert not _signal_matches_target(unrelated, target)
+        assert not _target_has_sufficient_recall_evidence(target, (unrelated,))
+        assert _observation_matches_baseline(frozen, unrelated) is False
+
+
+@pytest.mark.parametrize("dimension", ("value", "behavior_boundary", "current_state"))
+def test_same_object_different_nonpreference_axes_keep_both_hints_and_never_cross_review(
+    dimension: str,
+):
+    scope = NarrativeScopeV1()
+    trust = (
+        _snapshot_stub("trust", f"{dimension}:同伴"),
+        _confirmed_trait(
+            authority="formal_record", dimension=dimension, trait_key="companion_trust"
+        ).model_copy(update={"statement": "林澈信任同伴"}),
+        scope,
+        "林澈",
+    )
+    protect = (
+        _snapshot_stub("protect", f"{dimension}:同伴"),
+        _confirmed_trait(
+            authority="core_canon", dimension=dimension, trait_key="companion_protection"
+        ).model_copy(update={"statement": "林澈会保护同伴"}),
+        scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines([trust, protect])
+    assert selected == [trust, protect]
+    assert shadowed == 0
+
+    draft = _FrozenDocument(
+        input_id="draft-input",
+        document=DocumentInput("draft", "draft.md", "林澈不再保护同伴。", "chapter"),
+        document_version=1,
+        content_sha256="0" * 64,
+        ordinal=0,
+        source_kind="draft",
+        source_reason="draft",
+        scope=scope,
+        resolution_state="confirmed",
+        publication_status="draft",
+        authority_tier="draft",
+    )
+    hint = _safe_server_context(draft, baselines=selected)
+    assert hint.eligible_traits == hint.included_traits == 2
+    assert {target.trait_key for target in hint.targets} == {
+        "companion_trust",
+        "companion_protection",
+    }
+
+    observation = CharacterSignal(
+        id="cs_" + "f" * 32,
+        character="林澈",
+        dimension=dimension,
+        trait_key="companion_protection",
+        statement="林澈不再保护同伴",
+        polarity="negative",
+        stability="stable",
+        observation_kind="explicit_declaration",
+        key_object="同伴",
+        source_kind="draft",
+        evidence=EvidenceSpan(
+            document_id="draft", document_name="draft.md",
+            line_start=1, line_end=1, text="林澈不再保护同伴。"
+        ),
+    )
+    assert _observation_matches_baseline(trust, observation) is False
+    assert _observation_matches_baseline(protect, observation) is True
+    assert not _signal_matches_target(
+        observation, next(target for target in hint.targets if target.trait_key == "companion_trust")
+    )
+    assert _signal_matches_target(
+        observation, next(target for target in hint.targets if target.trait_key == "companion_protection")
+    )
+
+
+def test_oversized_frozen_object_key_degrades_hint_without_stage_exception():
+    scope = NarrativeScopeV1()
+    frozen_key = "preference:" + "x" * (161 - len("preference:"))
+    assert len(frozen_key) == 161
+    entry = (
+        _snapshot_stub("profile", frozen_key),
+        _confirmed_trait(),
+        scope,
+        "林澈",
+    )
+    draft = _FrozenDocument(
+        input_id="draft-input",
+        document=DocumentInput(
+            id="draft", name="draft.md", content="林澈喜欢蜜瓜。", role="chapter"
+        ),
+        document_version=1,
+        content_sha256="0" * 64,
+        ordinal=0,
+        source_kind="draft",
+        source_reason="draft",
+        scope=scope,
+        resolution_state="confirmed",
+        publication_status="draft",
+        authority_tier="draft",
+    )
+    hint = _safe_server_context(draft, baselines=[entry])
+    assert hint.targets == ()
+    assert hint.ambiguous_traits == 1
+    assert json.loads(hint.payload)["confirmed_traits_coverage"]["state"] == "partial"
+
+
+def test_same_comparison_axis_opposite_polarity_disables_targeted_hint():
+    scope = NarrativeScopeV1()
+    first = (
+        SimpleNamespace(candidate_id="first"),
+        _confirmed_trait(dimension="core_personality", trait_key="公开讲话"),
+        scope,
+        "林澈",
+    )
+    second = (
+        SimpleNamespace(candidate_id="second"),
+        _confirmed_trait(dimension="core_personality", trait_key="公开讲话能力").model_copy(
+            update={"id": "ct_second", "polarity": "negative"}
+        ),
+        scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines([first, second])
+    assert shadowed == 0
+    assert selected == [first, second]
+    draft = _FrozenDocument(
+        input_id="draft-input",
+        document=DocumentInput(
+            id="draft", name="draft.md", content="林澈公开讲话。", role="chapter"
+        ),
+        document_version=1,
+        content_sha256="0" * 64,
+        ordinal=0,
+        source_kind="draft",
+        source_reason="draft",
+        scope=scope,
+        resolution_state="confirmed",
+        publication_status="draft",
+        authority_tier="draft",
+    )
+    hint = _safe_server_context(draft, baselines=selected)
+    assert hint.targets == ()
+    assert hint.ambiguous_traits == 1
+    assert json.loads(hint.payload)["confirmed_traits_coverage"]["state"] == "partial"
+
+    same_polarity = (
+        second[0],
+        second[1].model_copy(update={"polarity": "positive"}),
+        scope,
+        "林澈",
+    )
+    repeated = _safe_server_context(draft, baselines=[first, same_polarity])
+    assert repeated.ambiguous_traits == 0
+    assert len(repeated.targets) == 1
+
+
+def test_profile_shadow_requires_overlapping_release_compatible_scope_and_axis():
+    scope = NarrativeScopeV1.model_validate(
+        {
+            "timeline_key": "main",
+            "branch": {"path": ["east"], "exclusive_group": "route"},
+        }
+    )
+    sibling_scope = NarrativeScopeV1.model_validate(
+        {
+            "timeline_key": "main",
+            "branch": {"path": ["west"], "exclusive_group": "route"},
+        }
+    )
+    profile = (
+        _snapshot_stub("profile", "preference:蜜瓜"),
+        _confirmed_trait(valid_from=5, valid_until=10),
+        scope,
+        "林澈",
+    )
+    history = _confirmed_trait().model_copy(
+        update={"origin": "confirmed_history_inference"}
+    )
+    entries = [
+        profile,
+        (
+            _snapshot_stub("earlier-release", "preference:蜜瓜"),
+            history.model_copy(
+                update={
+                    "id": "ct_earlier_release",
+                    "valid_from_release_ordinal": 1,
+                    "valid_until_release_ordinal": 4,
+                }
+            ),
+            scope,
+            "林澈",
+        ),
+        (
+            _snapshot_stub("sibling-branch", "preference:蜜瓜"),
+            history.model_copy(update={"id": "ct_sibling_branch"}),
+            sibling_scope,
+            "林澈",
+        ),
+        (
+            _snapshot_stub("different-axis", "preference:航路抉择"),
+            history.model_copy(
+                update={"id": "ct_different_axis", "trait_key": "航路抉择"}
+            ),
+            scope,
+            "林澈",
+        ),
+    ]
+
+    selected, shadowed = _select_authoritative_baselines(entries)
+
+    assert [row[0].candidate_id for row in selected] == [
+        "profile",
+        "earlier-release",
+        "sibling-branch",
+        "different-axis",
+    ]
+    assert shadowed == 0
+
+
+def test_profile_shadow_uses_draft_release_without_erasing_earlier_history():
+    scope = NarrativeScopeV1()
+    history = (
+        _snapshot_stub("history", "preference:蜜瓜"),
+        _confirmed_trait(valid_from=1, valid_until=10).model_copy(
+            update={"origin": "confirmed_history_inference", "polarity": "negative"}
+        ),
+        scope,
+        "林澈",
+    )
+    profile = (
+        _snapshot_stub("profile", "preference:蜜瓜"),
+        _confirmed_trait(valid_from=5, valid_until=10),
+        scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines([history, profile])
+    assert selected == [history, profile]
+    assert shadowed == 0
+
+    early = NarrativeScopeV1.model_validate(
+        {"release": {"key": "v3", "ordinal": 3}}
+    )
+    later = NarrativeScopeV1.model_validate(
+        {"release": {"key": "v7", "ordinal": 7}}
+    )
+    assert not _baseline_shadowed_at_scope(history, selected, early)
+    assert _baseline_shadowed_at_scope(history, selected, later)
+    assert not _baseline_shadowed_at_scope(history, selected, scope)
+
+    def hint_at(target: NarrativeScopeV1) -> list[str]:
+        source = _FrozenDocument(
+            input_id="draft-input",
+            document=DocumentInput(
+                id="draft", name="draft.md", content="林澈吃了蜜瓜。", role="chapter"
+            ),
+            document_version=1,
+            content_sha256="0" * 64,
+            ordinal=0,
+            source_kind="draft",
+            source_reason="draft",
+            scope=target,
+            resolution_state="confirmed",
+            publication_status="draft",
+            authority_tier="draft",
+        )
+        return [
+            item.baseline_polarity
+            for item in _safe_server_context(source, baselines=selected).targets
+        ]
+
+    assert hint_at(early) == ["negative"]
+    assert hint_at(later) == ["positive"]
+    assert hint_at(scope) == []
+
+
+def test_profile_shadow_only_covers_its_branch_and_activity():
+    global_scope = NarrativeScopeV1()
+    east_scope = NarrativeScopeV1.model_validate(
+        {"branch": {"path": ["east"], "exclusive_group": "route"}}
+    )
+    west_scope = NarrativeScopeV1.model_validate(
+        {"branch": {"path": ["west"], "exclusive_group": "route"}}
+    )
+    event_scope = NarrativeScopeV1.model_validate(
+        {"branch": {"path": ["east"], "exclusive_group": "route"},
+         "activity_key": "festival"}
+    )
+    history = (
+        _snapshot_stub("history", "preference:蜜瓜"),
+        _confirmed_trait().model_copy(update={"origin": "confirmed_history_inference"}),
+        global_scope,
+        "林澈",
+    )
+    profile = (
+        _snapshot_stub("profile", "preference:蜜瓜"),
+        _confirmed_trait(),
+        event_scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines([history, profile])
+    assert selected == [history, profile]
+    assert shadowed == 0
+    assert _baseline_shadowed_at_scope(history, selected, event_scope)
+    assert not _baseline_shadowed_at_scope(history, selected, east_scope)
+    assert not _baseline_shadowed_at_scope(history, selected, west_scope)
+    assert not _baseline_shadowed_at_scope(history, selected, global_scope)
+
+
+def test_contextual_profile_does_not_erase_history_in_another_context():
+    scope = NarrativeScopeV1()
+    history = (
+        SimpleNamespace(candidate_id="history"),
+        _confirmed_trait(dimension="contextual_behavior", trait_key="公开讲话").model_copy(
+            update={"origin": "confirmed_history_inference", "contexts": ("公开场合",)}
+        ),
+        scope,
+        "林澈",
+    )
+    profile = (
+        SimpleNamespace(candidate_id="profile"),
+        _confirmed_trait(dimension="contextual_behavior", trait_key="公开讲话").model_copy(
+            update={"contexts": ("私下谈话",)}
+        ),
+        scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines([history, profile])
+    assert selected == [history, profile]
+    assert shadowed == 0
+    assert not _baseline_shadowed_at_scope(
+        history, selected, scope, observation_context="公开场合"
+    )
+    assert not _baseline_shadowed_at_scope(
+        history, selected, scope, observation_context="私下谈话"
+    )
+    draft = _FrozenDocument(
+        input_id="draft-input",
+        document=DocumentInput(
+            id="draft", name="draft.md", content="林澈向众人说话。", role="chapter"
+        ),
+        document_version=1,
+        content_sha256="0" * 64,
+        ordinal=0,
+        source_kind="draft",
+        source_reason="draft",
+        scope=scope,
+        resolution_state="confirmed",
+        publication_status="draft",
+        authority_tier="draft",
+    )
+    hint = _safe_server_context(draft, baselines=selected)
+    assert hint.targets == ()
+    assert hint.ambiguous_traits == 1
+    assert not hint.truncated
+    assert json.loads(hint.payload)["confirmed_traits_coverage"] == {
+        "state": "partial",
+        "included": 0,
+        "eligible": 1,
+    }
+    covering_profile = (
+        profile[0],
+        profile[1].model_copy(update={"contexts": ("公开场合", "私下谈话")}),
+        scope,
+        "林澈",
+    )
+    assert _baseline_shadowed_at_scope(
+        history, [history, covering_profile], scope, observation_context="公开场合"
+    )
+    mixed_history = (
+        history[0],
+        history[1].model_copy(update={"contexts": ("公开场合", "私下谈话")}),
+        scope,
+        "林澈",
+    )
+    public_profile = (
+        profile[0],
+        profile[1].model_copy(update={"contexts": ("公开场合",)}),
+        scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines(
+        [mixed_history, public_profile]
+    )
+    assert shadowed == 0
+    assert _baseline_shadowed_at_scope(
+        mixed_history, selected, scope, observation_context="公开场合"
+    )
+    assert not _baseline_shadowed_at_scope(
+        mixed_history, selected, scope, observation_context="私下谈话"
+    )
+
+
+def test_shadowed_history_trait_still_supplies_published_growth_evidence():
+    scope = NarrativeScopeV1()
+    profile = _confirmed_trait(
+        dimension="core_personality", trait_key="公开讲解意愿"
+    )
+    history = profile.model_copy(
+        update={"id": "ct_history_growth", "origin": "confirmed_history_inference"}
+    )
+    selected, shadowed = _select_authoritative_baselines(
+        [
+            (SimpleNamespace(candidate_id="profile"), profile, scope, "林澈"),
+            (SimpleNamespace(candidate_id="history"), history, scope, "林澈"),
+        ]
+    )
+    assert [row[0].candidate_id for row in selected] == ["profile"]
+    assert shadowed == 1
+
+    published_history = _FrozenDocument(
+        input_id="input-history",
+        document=DocumentInput(
+            id="history",
+            name="history.md",
+            content="训练后林澈逐渐改变了待人方式。",
+            role="chapter",
+        ),
+        document_version=1,
+        content_sha256="0" * 64,
+        ordinal=1,
+        source_kind="published_history",
+        source_reason="history",
+        scope=scope,
+        resolution_state="confirmed",
+        publication_status="published",
+        authority_tier="formal_record",
+    )
+    support = _find_support_evidence(
+        baseline=profile,
+        baseline_scope=scope,
+        draft_scopes=(scope,),
+        documents=[published_history],
+        limit=8,
+    )
+    assert len(support) == 1
+    assert support[0].kind == "causal_bridge"
+    assert support[0].evidence.document_id == "history"
 
 
 def test_snapshot_uuid_and_history_origin_are_explicitly_adapted_and_unknown_fails_closed():

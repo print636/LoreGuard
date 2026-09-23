@@ -1,3 +1,4 @@
+import hashlib
 from copy import deepcopy
 
 import pytest
@@ -16,6 +17,8 @@ from scripts.run_character_consistency_live import (
     _resolve_output_json,
     _review_explicit_candidates,
     _safe_unexpected_failure,
+    _safe_case_trace_summary,
+    _safe_trace_observation_refs,
     _safe_visible_issue,
     _validate_oracle_payload,
 )
@@ -46,6 +49,75 @@ def test_qi_disguise_fixture_contains_two_independent_behaviors():
     assert "镜面身份仍在生效" in second_behavior
     assert "立即结束伪装" in resolution
     assert first_behavior != second_behavior
+
+
+def test_safe_case_trace_summary_keeps_only_bounded_source_provenance():
+    row = {
+        "character_key": "林澈",
+        "dimension": "preference",
+        "comparison_key": "preference:蜜瓜",
+        "matched_observation_count": 15,
+        "matched_observation_refs_truncated": True,
+        "matched_observation_refs": [
+            {
+                "document_name": "draft.md",
+                "line_start": index + 1,
+                "line_end": index + 1,
+                "observation_kind": "preference_expression",
+                "polarity": "negative",
+                "key_object_sha256": hashlib.sha256(
+                    "蜜瓜".encode("utf-8")
+                ).hexdigest(),
+                "text": "机密原文不应进入报告",
+            }
+            for index in range(13)
+        ] + [{
+            "document_name": "sk-1234567890abcdef.md",
+            "line_start": 14,
+            "line_end": 14,
+            "observation_kind": "action",
+            "polarity": "negative",
+            "key_object_sha256": "not-a-digest",
+        }],
+        "raw_model_response": "机密模型答复不应进入报告",
+    }
+
+    safe = _safe_case_trace_summary(row)
+    assert len(safe["matched_observation_refs"]) == 12
+    assert safe["matched_observation_refs_truncated"] is True
+    assert safe["matched_observation_refs"][0] == {
+        "document_name": "draft.md",
+        "line_start": 1,
+        "line_end": 1,
+        "observation_kind": "preference_expression",
+        "polarity": "negative",
+        "key_object_sha256": hashlib.sha256("蜜瓜".encode("utf-8")).hexdigest(),
+    }
+    serialized = str(safe)
+    assert "机密原文" not in serialized
+    assert "机密模型答复" not in serialized
+    assert "sk-1234567890abcdef" not in serialized
+
+
+def test_safe_trace_observation_refs_rejects_untrusted_fields_and_types():
+    valid = {
+        "document_name": "draft.md",
+        "line_start": 9,
+        "line_end": 10,
+        "observation_kind": "action",
+        "polarity": "negative",
+        "key_object_sha256": None,
+    }
+    assert _safe_trace_observation_refs([
+        {**valid, "document_name": "C:\\secrets\\draft.md"},
+        {**valid, "document_name": "sk-1234567890abcdef.md"},
+        {**valid, "line_start": True},
+        {**valid, "line_end": 8},
+        {**valid, "observation_kind": ["action"]},
+        {**valid, "polarity": "unknown"},
+        {**valid, "key_object_sha256": "not-a-digest"},
+        {**valid, "text": "secret source text"},
+    ]) == [valid]
 
 
 def test_oracle_candidate_selector_requires_semantics_source_and_type():
@@ -336,6 +408,176 @@ def test_safe_visible_issue_does_not_copy_trait_or_evidence_text():
             "line_end": 8,
         }
     ]
+
+
+def test_visible_issues_join_distinct_frozen_objects_by_candidate_digest():
+    candidate_ids = (
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+    )
+    names = ("蜜瓜", "葡萄")
+    trace = [
+        _safe_case_trace_summary({
+            "character_key": "林澈",
+            "dimension": "preference",
+            "comparison_key": f"preference:{name}",
+            "confirmed_candidate_id_sha256": hashlib.sha256(
+                candidate_id.encode("utf-8")
+            ).hexdigest(),
+        })
+        for candidate_id, name in zip(candidate_ids, names)
+    ]
+    issue_metadata = {
+        "character_key": "林澈",
+        "dimension": "preference",
+        "trait_key": "food_preference",
+        "subtype": "stable_preference_conflict",
+        "judgement": "contradicts",
+    }
+    issues = [
+        _safe_visible_issue(
+            {"metadata": {**issue_metadata, "confirmed_candidate_id": candidate_id}},
+            case_trace=trace,
+        )
+        for candidate_id in candidate_ids
+    ]
+
+    assert [row["comparison_key_sha256"] for row in issues] == [
+        hashlib.sha256(f"preference:{name}".encode("utf-8")).hexdigest()
+        for name in names
+    ]
+    assert issues[0]["comparison_key_sha256"] != issues[1]["comparison_key_sha256"]
+    without_trait_key = {**issue_metadata, "confirmed_candidate_id": candidate_ids[0]}
+    del without_trait_key["trait_key"]
+    assert _safe_visible_issue(
+        {"metadata": without_trait_key},
+        case_trace=trace,
+    )["comparison_key_sha256"] == issues[0]["comparison_key_sha256"]
+    for candidate_id, issue in zip(candidate_ids, issues):
+        assert issue["confirmed_candidate_id_sha256"] == hashlib.sha256(
+            candidate_id.encode("utf-8")
+        ).hexdigest()
+        assert candidate_id not in repr(issue)
+        assert "food_preference" not in repr(issue)
+
+    runtime = {
+        "melon": {
+            **_comparison_identity(dimension="preference", trait_key="food_preference"),
+            "confirmed_candidate_id_sha256": issues[0][
+                "confirmed_candidate_id_sha256"
+            ],
+        },
+        "grape": {
+            **_comparison_identity(dimension="preference", trait_key="food_preference"),
+            "confirmed_candidate_id_sha256": issues[1][
+                "confirmed_candidate_id_sha256"
+            ],
+        },
+    }
+    assert live_acceptance._runtime_identity(
+        {"case_id": "melon", "character_key": "林澈", "dimension": "preference"},
+        runtime,
+        trace,
+    ) == ("林澈", "preference", issues[0]["comparison_key_sha256"])
+    assert live_acceptance._runtime_identity(
+        {"case_id": "grape", "character_key": "林澈", "dimension": "preference"},
+        runtime,
+        trace,
+    ) == ("林澈", "preference", issues[1]["comparison_key_sha256"])
+
+    duplicated = [*trace, trace[0]]
+    assert _safe_visible_issue(
+        {"metadata": {**issue_metadata, "confirmed_candidate_id": candidate_ids[0]}},
+        case_trace=duplicated,
+    )["comparison_key_sha256"] is None
+    assert live_acceptance._runtime_identity(
+        {"case_id": "melon", "character_key": "林澈", "dimension": "preference"},
+        runtime,
+        duplicated,
+    ) is None
+    assert _safe_visible_issue(
+        {"metadata": {**issue_metadata, "confirmed_candidate_id": "33333333-3333-4333-8333-333333333333"}},
+        case_trace=trace,
+    )["comparison_key_sha256"] is None
+    assert _safe_visible_issue(
+        {"metadata": {
+            **issue_metadata,
+            "dimension": "value",
+            "confirmed_candidate_id": candidate_ids[0],
+        }},
+        case_trace=trace,
+    )["comparison_key_sha256"] is None
+
+
+def test_visible_issue_legacy_axis_fallback_requires_unique_trace():
+    metadata = {
+        "character_key": "林澈",
+        "dimension": "preference",
+        "trait_key": "食物偏好:蜜瓜",
+        "confirmed_candidate_id": "11111111-1111-4111-8111-111111111111",
+    }
+    legacy_trace = [_safe_case_trace_summary({
+        "character_key": "林澈",
+        "dimension": "preference",
+        "comparison_key": "preference:蜜瓜",
+    })]
+    expected_hash = hashlib.sha256("preference:蜜瓜".encode("utf-8")).hexdigest()
+    assert _safe_visible_issue(
+        {"metadata": metadata}, case_trace=legacy_trace
+    )["comparison_key_sha256"] == expected_hash
+    assert _safe_visible_issue(
+        {"metadata": metadata}, case_trace=legacy_trace * 2
+    )["comparison_key_sha256"] is None
+    malformed_binding = [_safe_case_trace_summary({
+        "character_key": "林澈",
+        "dimension": "preference",
+        "comparison_key": "preference:蜜瓜",
+        "confirmed_candidate_id_sha256": "invalid",
+    })]
+    assert _safe_visible_issue(
+        {"metadata": metadata}, case_trace=malformed_binding
+    )["comparison_key_sha256"] is None
+
+
+def test_run_summary_reports_frozen_issue_axis_without_object_text(monkeypatch):
+    candidate_id = "11111111-1111-4111-8111-111111111111"
+    frozen_key = "preference:蜜瓜"
+    def fake_request(_client, method, path, **_kwargs):
+        assert method == "GET"
+        if path.endswith("/diagnostics"):
+            return {"character_consistency": {"case_trace": [{
+                "character_key": "林澈",
+                "dimension": "preference",
+                "comparison_key": frozen_key,
+                "confirmed_candidate_id_sha256": hashlib.sha256(
+                    candidate_id.encode("utf-8")
+                ).hexdigest(),
+            }]}}
+        assert path.endswith("/drift-issues")
+        return {"items": [{
+            "run_id": "run-1",
+            "metadata": {
+                "character_key": "林澈",
+                "dimension": "preference",
+                "trait_key": "food_preference",
+                "confirmed_candidate_id": candidate_id,
+                "judgement": "contradicts",
+            },
+            "evidence": [{
+                "document_name": "draft.md", "line_start": 1, "line_end": 1,
+                "text": "机密草稿原文",
+            }],
+        }]}
+
+    monkeypatch.setattr(live_acceptance, "_request", fake_request)
+    report = live_acceptance._run_summary(None, "project-1", {"id": "run-1"})
+    issue = report["visible_issue_cases"][0]
+    assert issue["comparison_key_sha256"] == hashlib.sha256(
+        frozen_key.encode("utf-8")
+    ).hexdigest()
+    assert frozen_key not in repr(report)
+    assert candidate_id not in repr(report)
+    assert "机密草稿原文" not in repr(report)
 
 
 def _semantic_visible_issue(*, judgement="contradicts"):

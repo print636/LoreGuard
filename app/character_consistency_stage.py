@@ -7,6 +7,7 @@ import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -30,6 +31,7 @@ from .character_trait_extraction import (
     CharacterSignalTarget,
     PendingTraitCandidate,
     build_pending_trait_candidates,
+    preference_modifier_bridge,
     safe_pronoun_evidence_range,
     stable_trait_identity,
     trait_keys_compatible,
@@ -40,7 +42,7 @@ from .character_traits import (
     normalize_character_key,
     upsert_character_trait_candidate,
 )
-from .chunking import chunk_document
+from .chunking import chunk_character_profile_document, chunk_document
 from .config import Settings, get_settings
 from .db import (
     AnalysisRunCharacterTraitInputRow,
@@ -83,6 +85,10 @@ _TEMPORARY_CHARACTER_STATE_OR_BEHAVIOR = re.compile(
     r"讨厌|信任|敌对|合作|服从)"
 )
 _MAX_CONFIRMED_TRAITS_IN_SERVER_CONTEXT = 12
+_MAX_CASE_TRACE_OBSERVATION_REFS = 12
+_OBJECT_BEARING_TRAIT_DIMENSIONS = frozenset(
+    {"preference", "value", "behavior_boundary", "current_state"}
+)
 _CONTEXT_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _CONTEXT_SECRET_OR_URL = re.compile(
     r"(?:[a-z][a-z0-9+.-]{1,15}://|www\.)|"
@@ -180,15 +186,19 @@ class _SafeServerContext:
     payload: str
     eligible_traits: int = 0
     included_traits: int = 0
+    ambiguous_traits: int = 0
     targets: tuple[CharacterSignalTarget, ...] = ()
 
     @property
     def truncated(self) -> bool:
-        return self.included_traits < self.eligible_traits
+        return self.included_traits + self.ambiguous_traits < self.eligible_traits
 
     @property
     def omitted_traits(self) -> int:
-        return max(0, self.eligible_traits - self.included_traits)
+        return max(
+            0,
+            self.eligible_traits - self.included_traits - self.ambiguous_traits,
+        )
 
 
 class CharacterConsistencyStage:
@@ -271,16 +281,48 @@ class CharacterConsistencyStage:
 
         planned_chunks: list[tuple[_FrozenDocument, object]] = []
         for source in sorted(eligible, key=lambda row: row.ordinal):
-            for chunk in chunk_document(
-                source.document,
-                settings.character_signal_max_chunk_chars,
-                overlap_lines=0,
+            if (
+                source.source_kind == "formal_character_profile"
+                and source.document.role == "character_profile"
             ):
+                chunks = chunk_character_profile_document(
+                    source.document, settings.character_signal_max_chunk_chars
+                )
+            else:
+                chunks = chunk_document(
+                    source.document,
+                    settings.character_signal_max_chunk_chars,
+                    overlap_lines=0,
+                )
+            for chunk in chunks:
                 planned_chunks.append((source, chunk))
         partial = len(planned_chunks) > settings.character_consistency_max_chunks_per_run
-        selected_chunks = planned_chunks[
-            : settings.character_consistency_max_chunks_per_run
-        ]
+        chunk_cap = settings.character_consistency_max_chunks_per_run
+        if partial and any(source.source_kind == "draft" for source, _ in planned_chunks):
+            # Reserve the first chunk of each draft before filling remaining
+            # slots in source order. Process those drafts first so an overlong
+            # profile cannot consume the shared stage budget before review.
+            reserved: list[int] = []
+            seen_drafts: set[str] = set()
+            for index, (source, _) in enumerate(planned_chunks):
+                if (
+                    source.source_kind != "draft"
+                    or source.document.id in seen_drafts
+                ):
+                    continue
+                reserved.append(index)
+                seen_drafts.add(source.document.id)
+                if len(reserved) == chunk_cap:
+                    break
+            reserved_set = set(reserved)
+            fill = [
+                index
+                for index in range(len(planned_chunks))
+                if index not in reserved_set
+            ][: chunk_cap - len(reserved)]
+            selected_chunks = [planned_chunks[index] for index in (*reserved, *fill)]
+        else:
+            selected_chunks = planned_chunks[:chunk_cap]
         if partial:
             reason_counts["chunk_limit"] += (
                 len(planned_chunks) - len(selected_chunks)
@@ -289,6 +331,7 @@ class CharacterConsistencyStage:
         server_contexts: dict[str, _SafeServerContext] = {}
         context_eligible_traits = 0
         context_included_traits = 0
+        ambiguous_hint_traits = 0
         context_truncated_documents = 0
         for source, _ in selected_chunks:
             if source.document.id in server_contexts:
@@ -297,6 +340,12 @@ class CharacterConsistencyStage:
             server_contexts[source.document.id] = context
             context_eligible_traits += context.eligible_traits
             context_included_traits += context.included_traits
+            ambiguous_hint_traits += context.ambiguous_traits
+            if context.ambiguous_traits:
+                partial = True
+                reason_counts["confirmed_trait_hint_ambiguous"] += (
+                    context.ambiguous_traits
+                )
             if context.truncated:
                 partial = True
                 context_truncated_documents += 1
@@ -713,23 +762,33 @@ class CharacterConsistencyStage:
             : settings.character_consistency_max_candidates_per_run
         ]:
             self.checkpoint()
+            baseline_entry = (
+                baseline_row, baseline, baseline_scope, character_key
+            )
             matches: list[CharacterSignal] = []
             draft_scopes: list[NarrativeScopeV1] = []
             for observation in resolved_drafts.get(character_key, ()):
-                if (
-                    observation.dimension != baseline.dimension
-                    or not trait_keys_compatible(
-                        dimension=baseline.dimension,
-                        baseline_key=baseline.trait_key,
-                        observation_key=observation.trait_key,
-                        observation_object=observation.key_object,
-                    )
-                ):
+                axis_match = _observation_matches_baseline(
+                    baseline_entry, observation
+                )
+                if axis_match is None:
+                    partial = True
+                    reason_counts["object_baseline_identity_unavailable"] += 1
+                    continue
+                if not axis_match:
                     continue
                 source = frozen_by_document.get(observation.evidence.document_id)
                 if source is None or source.scope is None:
                     drift_scope_skipped += 1
                     reason_counts["drift_scope_unknown"] += 1
+                    continue
+                if _baseline_shadowed_at_scope(
+                    baseline_entry,
+                    baselines,
+                    source.scope,
+                    observation_context=observation.context,
+                ):
+                    reason_counts["lower_authority_draft_scope_shadowed"] += 1
                     continue
                 release_applicability = _trait_applies_to_release(
                     baseline, source.scope
@@ -767,7 +826,9 @@ class CharacterConsistencyStage:
                     _safe_case_trace(
                         character_key=character_key,
                         baseline=baseline,
+                        baseline_entry=baseline_entry,
                         matched_observation_count=0,
+                        matched_observations=(),
                         prepare_reason="no_matching_observation",
                         review=None,
                         final_outcome="unverifiable",
@@ -842,7 +903,9 @@ class CharacterConsistencyStage:
                 _safe_case_trace(
                     character_key=character_key,
                     baseline=baseline,
+                    baseline_entry=baseline_entry,
                     matched_observation_count=len(prepared.matching_observations),
+                    matched_observations=prepared.matching_observations,
                     prepare_reason=prepared.reason,
                     review=review,
                     final_outcome=promoted.outcome,
@@ -911,6 +974,7 @@ class CharacterConsistencyStage:
             confirmed_trait_count=len(baselines),
             context_eligible_trait_count=context_eligible_traits,
             context_included_trait_count=context_included_traits,
+            ambiguous_hint_trait_count=ambiguous_hint_traits,
             context_truncated_document_count=context_truncated_documents,
             targeted_eligible_target_count=targeted_eligible_targets,
             targeted_selected_target_count=targeted_selected_targets,
@@ -1184,6 +1248,27 @@ def _character_appears_in_chunk(character: str, content: str) -> bool:
 def _signal_matches_target(
     signal: CharacterSignal, target: CharacterSignalTarget
 ) -> bool:
+    if target.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS:
+        return (
+            _key(signal.character) == _key(target.character)
+            and signal.dimension == target.dimension
+            and (
+                target.dimension == "preference"
+                or stable_trait_identity(signal.dimension, signal.trait_key)
+                == stable_trait_identity(target.dimension, target.trait_key)
+            )
+            and bool(signal.key_object.strip())
+            and (
+                stable_trait_identity(
+                    signal.dimension, signal.trait_key, signal.key_object
+                ) == target.comparison_key
+                or preference_modifier_bridge(
+                    baseline_comparison_key=target.comparison_key,
+                    baseline_polarity=target.baseline_polarity,
+                    observation=signal,
+                )
+            )
+        )
     return (
         _key(signal.character) == _key(target.character)
         and signal.dimension == target.dimension
@@ -1375,11 +1460,11 @@ def _safe_server_context(
 ) -> _SafeServerContext:
     """Build a bounded, content-free alignment hint for draft extraction.
 
-    Only immutable identifiers needed to reuse an exact ``trait_key`` cross
-    the model boundary.  In particular, baseline values, contexts, evidence,
-    source names, URLs and any provider configuration are never serialized.
-    Scope and release validity are enforced server-side before a key is offered
-    to the model; the scope payload itself is deliberately not sent.
+    Only immutable identifiers needed to reuse a comparison axis cross the
+    model boundary. An object-bearing comparison key may disclose its short
+    object anchor; baseline statements, contexts, evidence, source names,
+    URLs and provider configuration are never serialized. Scope and release
+    validity are enforced server-side; the scope payload is not sent.
     """
 
     base_payload: dict[str, Any] = {
@@ -1388,9 +1473,8 @@ def _safe_server_context(
     if source.source_kind != "draft" or source.scope is None:
         return _SafeServerContext(payload=_compact_context_json(base_payload))
 
-    applicable: list[tuple[str, str, str, str, str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for _, baseline, baseline_scope, character_key in sorted(
+    eligible_entries: list[BaselineEntry] = []
+    for entry in sorted(
         baselines,
         key=lambda item: (
             item[3],
@@ -1399,7 +1483,10 @@ def _safe_server_context(
             item[0].candidate_id,
         ),
     ):
+        _, baseline, baseline_scope, character_key = entry
         if _trait_applies_to_release(baseline, source.scope) is not True:
+            continue
+        if _baseline_shadowed_at_scope(entry, baselines, source.scope):
             continue
         if scope_relation(
             baseline_scope,
@@ -1408,14 +1495,46 @@ def _safe_server_context(
             second_resolution=source.resolution_state,
         ) != "compatible":
             continue
-        identity = (character_key, baseline.dimension, baseline.trait_key)
+        eligible_entries.append(entry)
+
+    # Contexts deliberately stay off the model boundary. If one comparison
+    # key has conflicting polarity, or different behavioral contexts, its
+    # first sorted row is not a safe extraction hint for this draft.
+    hint_variants: dict[
+        tuple[str, str, str, str], set[tuple[tuple[str, ...], str]]
+    ] = defaultdict(set)
+    unverified_object_keys: set[tuple[str, str, str, str]] = set()
+    for entry in eligible_entries:
+        _, baseline, _, character_key = entry
+        identity = _baseline_hint_identity(entry)
+        if baseline.dimension == "contextual_behavior":
+            contexts = tuple(
+                sorted(value.strip() for value in baseline.contexts if value.strip())
+            )
+        else:
+            contexts = ()
+        if (
+            baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS
+            and not _frozen_comparison_identity(entry)
+        ):
+            unverified_object_keys.add(identity)
+        hint_variants[identity].add((contexts, baseline.polarity))
+    ambiguous_hint_keys = {
+        identity for identity, variants in hint_variants.items() if len(variants) > 1
+    } | unverified_object_keys
+
+    applicable: list[tuple[str, str, str, str, str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for entry in eligible_entries:
+        _, baseline, _, character_key = entry
+        identity = _baseline_hint_identity(entry)
         if identity in seen:
             continue
         seen.add(identity)
-        comparison_key = stable_trait_identity(
-            baseline.dimension,
-            baseline.trait_key,
-        )
+        if identity in ambiguous_hint_keys:
+            applicable.append(("", "", "", "", "", ""))
+            continue
+        comparison_key = identity[2]
         labels = (
             baseline.character,
             baseline.dimension,
@@ -1499,6 +1618,7 @@ def _safe_server_context(
                 payload=serialized,
                 eligible_traits=eligible_count,
                 included_traits=len(items),
+                ambiguous_traits=len(ambiguous_hint_keys),
                 targets=targets,
             )
         if not items:
@@ -1521,6 +1641,7 @@ def _safe_server_context(
                 payload=fallback_payload,
                 eligible_traits=eligible_count,
                 included_traits=0,
+                ambiguous_traits=len(ambiguous_hint_keys),
             )
         items.pop()
 
@@ -1692,28 +1813,236 @@ def _trait_applies_to_release(
     return True
 
 
-def _release_ranges_overlap(
-    first: ConfirmedTraitSnapshot, second: ConfirmedTraitSnapshot
+def _release_range_covers(
+    higher: ConfirmedTraitSnapshot, lower: ConfirmedTraitSnapshot
 ) -> bool:
-    first_start = first.valid_from_release_ordinal or 0
-    second_start = second.valid_from_release_ordinal or 0
-    first_end = (
-        first.valid_until_release_ordinal
-        if first.valid_until_release_ordinal is not None
+    """Only discard a lower baseline when no release can still need it."""
+
+    higher_start = higher.valid_from_release_ordinal or 0
+    lower_start = lower.valid_from_release_ordinal or 0
+    higher_end = (
+        higher.valid_until_release_ordinal
+        if higher.valid_until_release_ordinal is not None
         else 2_147_483_647
     )
-    second_end = (
-        second.valid_until_release_ordinal
-        if second.valid_until_release_ordinal is not None
+    lower_end = (
+        lower.valid_until_release_ordinal
+        if lower.valid_until_release_ordinal is not None
         else 2_147_483_647
     )
-    return max(first_start, second_start) <= min(first_end, second_end)
+    return higher_start <= lower_start and higher_end >= lower_end
+
+
+def _scope_covers(higher: NarrativeScopeV1, lower: NarrativeScopeV1) -> bool:
+    """A branch or activity-specific setting cannot erase global history."""
+
+    if higher.timeline_key != lower.timeline_key:
+        return False
+    if higher.activity_key is not None and higher.activity_key != lower.activity_key:
+        return False
+    if higher.branch is None:
+        return True
+    if lower.branch is None:
+        return False
+    if (
+        higher.branch.exclusive_group is not None
+        and higher.branch.exclusive_group != lower.branch.exclusive_group
+    ):
+        return False
+    return tuple(lower.branch.path[: len(higher.branch.path)]) == tuple(
+        higher.branch.path
+    )
+
+
+def _higher_authority_on_axis(
+    lower: BaselineEntry, higher: BaselineEntry
+) -> bool:
+    _, baseline, _, character_key = lower
+    _, other, _, other_character_key = higher
+    return (
+        (
+            other.authority_tier == "core_canon"
+            or (
+                baseline.authority_tier == "formal_record"
+                and baseline.origin == "confirmed_history_inference"
+                and other.authority_tier == "formal_record"
+                and other.origin == "explicit_setting"
+            )
+        )
+        and other_character_key == character_key
+        and other.dimension == baseline.dimension
+        and _same_shadow_axis(lower, higher)
+    )
+
+
+def _same_shadow_axis(
+    lower: BaselineEntry, higher: BaselineEntry
+) -> bool:
+    """Require a stable identity before removing a confirmed baseline."""
+
+    lower_baseline = lower[1]
+    higher_baseline = higher[1]
+    if lower_baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS:
+        frozen_key = _frozen_comparison_identity(lower)
+        return (
+            bool(frozen_key)
+            and frozen_key == _frozen_comparison_identity(higher)
+            and (
+                lower_baseline.dimension == "preference"
+                or stable_trait_identity(
+                    lower_baseline.dimension, lower_baseline.trait_key
+                ) == stable_trait_identity(
+                    higher_baseline.dimension, higher_baseline.trait_key
+                )
+            )
+        )
+    return stable_trait_identity(
+        lower_baseline.dimension, lower_baseline.trait_key
+    ) == stable_trait_identity(higher_baseline.dimension, higher_baseline.trait_key)
+
+
+def _observation_matches_baseline(
+    entry: BaselineEntry, observation: CharacterSignal
+) -> bool | None:
+    baseline = entry[1]
+    if observation.dimension != baseline.dimension:
+        return False
+    if baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS:
+        frozen_key = _frozen_comparison_identity(entry)
+        if not frozen_key:
+            return None
+        if (
+            baseline.dimension != "preference"
+            and stable_trait_identity(baseline.dimension, baseline.trait_key)
+            != stable_trait_identity(observation.dimension, observation.trait_key)
+        ):
+            return False
+        return bool(observation.key_object.strip()) and (
+            stable_trait_identity(
+                observation.dimension, observation.trait_key, observation.key_object
+            ) == frozen_key
+            or preference_modifier_bridge(
+                baseline_comparison_key=frozen_key,
+                baseline_polarity=baseline.polarity,
+                observation=observation,
+            )
+        )
+    return trait_keys_compatible(
+        dimension=baseline.dimension,
+        baseline_key=baseline.trait_key,
+        observation_key=observation.trait_key,
+        observation_object=observation.key_object,
+    )
+
+
+def _frozen_comparison_identity(entry: BaselineEntry) -> str:
+    """Read only a validated, hash-bound comparison key from the run snapshot."""
+
+    row, baseline, _, _ = entry
+    payload = getattr(row, "payload", None)
+    if not isinstance(payload, dict):
+        return ""
+    value = payload.get("comparison_key")
+    if not _safe_context_label(value) or len(value) > 160:
+        return ""
+    prefix = f"{baseline.dimension}:"
+    if not value.startswith(prefix):
+        return ""
+    anchor = value[len(prefix) :]
+    if (
+        not anchor
+        or ":" in anchor
+        or _key(anchor) != anchor
+        or _CONTEXT_CONTROL.search(anchor)
+    ):
+        return ""
+    return value
+
+
+def _baseline_hint_identity(
+    entry: BaselineEntry,
+) -> tuple[str, str, str, str]:
+    _, baseline, _, character_key = entry
+    frozen_key = (
+        _frozen_comparison_identity(entry)
+        if baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS
+        else ""
+    )
+    return (
+        character_key,
+        baseline.dimension,
+        frozen_key or stable_trait_identity(baseline.dimension, baseline.trait_key),
+        (
+            stable_trait_identity(baseline.dimension, baseline.trait_key)
+            if frozen_key and baseline.dimension != "preference"
+            else ""
+        ),
+    )
+
+
+def _context_coverage(
+    lower: ConfirmedTraitSnapshot,
+    higher: ConfirmedTraitSnapshot,
+    *,
+    observation_context: str | None = None,
+) -> bool:
+    if lower.dimension != "contextual_behavior":
+        return True
+    lower_contexts = {value.strip() for value in lower.contexts if value.strip()}
+    higher_contexts = {value.strip() for value in higher.contexts if value.strip()}
+    if not lower_contexts or not higher_contexts:
+        return False
+    if observation_context is not None:
+        target = observation_context.strip()
+        return bool(target) and target in lower_contexts and target in higher_contexts
+    return lower_contexts <= higher_contexts
+
+
+def _baseline_shadowed_at_scope(
+    entry: BaselineEntry,
+    baselines: list[BaselineEntry] | tuple[BaselineEntry, ...],
+    target_scope: NarrativeScopeV1,
+    *,
+    observation_context: str | None = None,
+) -> bool:
+    """Resolve authority for one draft's known release and scope."""
+
+    _, baseline, baseline_scope, _ = entry
+    if baseline.authority_tier == "core_canon":
+        return False
+    if _trait_applies_to_release(baseline, target_scope) is not True:
+        return False
+    if scope_relation(
+        baseline_scope,
+        target_scope,
+        first_resolution="confirmed",
+        second_resolution="confirmed",
+    ) != "compatible":
+        return False
+    for other_entry in baselines:
+        _, other, other_scope, _ = other_entry
+        if (
+            _higher_authority_on_axis(entry, other_entry)
+            and _trait_applies_to_release(other, target_scope) is True
+            and _scope_covers(other_scope, target_scope)
+            and _context_coverage(
+                baseline, other, observation_context=observation_context
+            )
+        ):
+            return True
+    return False
 
 
 def _select_authoritative_baselines(
     baselines: list[BaselineEntry],
 ) -> tuple[list[BaselineEntry], int]:
-    """Suppress lower-authority records only when a compatible canon governs it."""
+    """Keep the strongest applicable baseline on a character's trait axis.
+
+    A confirmed character profile is an explicit setting, while a trait
+    inferred from published chapters is historical evidence. The latter may
+    explain a change later, but it cannot silently replace an overlapping
+    explicit setting as the baseline for draft review.
+    """
 
     selected: list[BaselineEntry] = []
     shadowed = 0
@@ -1723,27 +2052,17 @@ def _select_authoritative_baselines(
             selected.append(entry)
             continue
         dominated = False
-        for _, other, other_scope, other_character_key in baselines:
+        for other_entry in baselines:
+            _, other, other_scope, _ = other_entry
             if (
-                other.authority_tier != "core_canon"
-                or other_character_key != character_key
-                or other.dimension != baseline.dimension
-                or not trait_keys_compatible(
-                    dimension=baseline.dimension,
-                    baseline_key=baseline.trait_key,
-                    observation_key=other.trait_key,
-                )
-                or not _release_ranges_overlap(baseline, other)
+                not _higher_authority_on_axis(entry, other_entry)
+                or not _release_range_covers(other, baseline)
+                or not _scope_covers(other_scope, scope)
+                or not _context_coverage(baseline, other)
             ):
                 continue
-            if scope_relation(
-                scope,
-                other_scope,
-                first_resolution="confirmed",
-                second_resolution="confirmed",
-            ) == "compatible":
-                dominated = True
-                break
+            dominated = True
+            break
         if dominated:
             shadowed += 1
         else:
@@ -1951,11 +2270,45 @@ def _safe_trace_identifier(value: str, *, max_chars: int) -> str:
     return normalized
 
 
+def _safe_trace_document_name(value: str) -> str:
+    """Expose a file label, never a path, URL, credential or source prose."""
+
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if "/" in normalized or "\\" in normalized:
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+        return f"redacted_{digest}"
+    return _safe_trace_identifier(normalized, max_chars=128)
+
+
+def _safe_observation_refs(
+    observations: tuple[CharacterSignal, ...],
+) -> list[dict[str, Any]]:
+    """Only source coordinates and validated signal labels leave the stage."""
+
+    return [
+        {
+            "document_name": _safe_trace_document_name(row.evidence.document_name),
+            "line_start": row.evidence.line_start,
+            "line_end": row.evidence.line_end,
+            "observation_kind": row.observation_kind,
+            "polarity": row.polarity,
+            "key_object_sha256": (
+                hashlib.sha256(_key(row.key_object).encode("utf-8")).hexdigest()
+                if _key(row.key_object)
+                else None
+            ),
+        }
+        for row in observations[:_MAX_CASE_TRACE_OBSERVATION_REFS]
+    ]
+
+
 def _safe_case_trace(
     *,
     character_key: str,
     baseline: ConfirmedTraitSnapshot,
+    baseline_entry: BaselineEntry | None = None,
     matched_observation_count: int,
+    matched_observations: tuple[CharacterSignal, ...] = (),
     prepare_reason: str,
     review: CharacterReviewResult | None,
     final_outcome: str,
@@ -1975,21 +2328,51 @@ def _safe_case_trace(
         if decision is not None
         else []
     )
-    if _CONTEXT_SECRET_OR_URL.search(baseline.trait_key):
+    frozen_key = (
+        _frozen_comparison_identity(baseline_entry)
+        if baseline_entry is not None
+        and baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS
+        else ""
+    )
+    if frozen_key:
+        comparison_key = frozen_key
+    elif _CONTEXT_SECRET_OR_URL.search(baseline.trait_key):
+        # Legacy snapshots may lack a usable object axis. Preserve the old
+        # content-free fallback without exposing a suspicious trait label.
         comparison_key = (
             "redacted_"
             + hashlib.sha256(baseline.trait_key.encode("utf-8")).hexdigest()[:16]
         )
     else:
+        # Non-object traits and legacy snapshots retain their prior trace key.
         comparison_key = stable_trait_identity(
             baseline.dimension,
             baseline.trait_key,
         )
+    candidate_id_sha256 = None
+    if baseline_entry is not None:
+        candidate_id = getattr(baseline_entry[0], "candidate_id", None)
+        try:
+            if (
+                isinstance(candidate_id, str)
+                and str(UUID(candidate_id)) == candidate_id
+                and baseline.id == f"ct_{candidate_id}"
+            ):
+                candidate_id_sha256 = hashlib.sha256(
+                    candidate_id.encode("utf-8")
+                ).hexdigest()
+        except ValueError:
+            pass
     return {
         "character_key": _safe_trace_identifier(character_key, max_chars=64),
         "dimension": baseline.dimension,
         "comparison_key": _safe_trace_identifier(comparison_key, max_chars=128),
+        "confirmed_candidate_id_sha256": candidate_id_sha256,
         "matched_observation_count": max(0, min(matched_observation_count, 24)),
+        "matched_observation_refs": _safe_observation_refs(matched_observations),
+        "matched_observation_refs_truncated": (
+            len(matched_observations) > _MAX_CASE_TRACE_OBSERVATION_REFS
+        ),
         "prepare_reason": prepare_reason,
         "review_outcome": (
             review.diagnostics.outcome if review is not None else "not_run"

@@ -19,18 +19,22 @@ from app.character_drift import (
 )
 from app.character_trait_extraction import (
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
+    TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
     _MAX_SIGNAL_RESPONSE_RECORDS,
     _MAX_SIGNAL_REGENERATION_METADATA_CHARS,
     _SIGNAL_PACKAGE_VALIDATION_REASONS,
     _SignalValidationFailure,
     _chunk_prompt,
+    _matching_target,
     _regeneration_prompt,
+    _targeted_chunk_prompt,
     CharacterSignal,
     CharacterSignalChunk,
     CharacterSignalExtractor,
     CharacterSignalTarget,
     build_pending_trait_candidates,
+    preference_modifier_bridge,
     stable_trait_identity,
     trait_keys_compatible,
 )
@@ -192,6 +196,70 @@ def valid_signal_record(**overrides) -> dict:
     }
     row.update(overrides)
     return row
+
+
+def test_same_line_different_preference_objects_survive_signal_validation():
+    evidence = "林澈喜欢蜜瓜，也喜欢葡萄。"
+    melon = valid_signal_record(
+        trait_key="food_preference",
+        statement="林澈喜欢蜜瓜",
+        evidence=evidence,
+    )
+    grape = valid_signal_record(
+        trait_key="food_preference",
+        statement="林澈喜欢葡萄",
+        key_object="葡萄",
+        evidence=evidence,
+    )
+    provider = FakeProvider(
+        json.dumps({"records": [melon, grape]}, ensure_ascii=False)
+    )
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "same-line-objects",
+            "profile.md",
+            evidence,
+            10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.ignored_duplicate_records == 0
+    assert {signal.key_object for signal in result.signals} == {"蜜瓜", "葡萄"}
+    assert len({signal.id for signal in result.signals}) == 2
+    assert {candidate.comparison_key for candidate in result.pending_candidates} == {
+        "preference:蜜瓜",
+        "preference:葡萄",
+    }
+
+
+def test_same_line_same_object_paraphrase_still_deduplicates():
+    evidence = "林澈一直喜欢蜜瓜。"
+    original = valid_signal_record(evidence=evidence)
+    paraphrase = valid_signal_record(
+        statement="林澈喜欢蜜瓜",
+        evidence=evidence,
+    )
+    provider = FakeProvider(
+        json.dumps({"records": [original, paraphrase]}, ensure_ascii=False)
+    )
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "same-object-paraphrase",
+            "profile.md",
+            evidence,
+            10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.diagnostics.ignored_duplicate_records == 1
+    assert len(result.pending_candidates) == 1
 
 
 def test_signal_extractor_rejects_invalid_json_without_leaking_content():
@@ -405,6 +473,698 @@ def test_signal_regeneration_prompt_guides_key_object_correction_without_raw_rec
     assert '"reason":"key_object_support"' in retry_prompt
     assert "key_object 逐字出现在 evidence 范围内" in retry_prompt
     assert "private-unsupported-object" not in retry_prompt
+
+
+@pytest.mark.parametrize(
+    "rejected_evidence",
+    (
+        "林澈一直喜欢蜜瓜。",
+        "林澈很喜欢蜜瓜。\n林澈每周都买一颗蜜瓜。",
+    ),
+)
+def test_signal_evidence_mismatch_retry_copies_complete_source_lines(
+    rejected_evidence: str,
+):
+    source = "林澈一直喜欢蜜瓜。\n林澈每周都买一颗蜜瓜。"
+    valid = valid_signal_record(
+        source_line_end=11,
+        evidence=source,
+    )
+    invalid = {
+        **valid,
+        "context": "private-rejected-response-context",
+        "evidence": rejected_evidence,
+    }
+    provider = SequenceProvider(
+        json.dumps({"records": [invalid]}, ensure_ascii=False),
+        json.dumps({"records": [valid]}, ensure_ascii=False),
+    )
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "evidence-copy", "profile.md", source, 10, "formal_character_profile"
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.attempted_calls == 2
+    assert result.diagnostics.reason_counts == {
+        "regenerated_from_evidence_mismatch": 1
+    }
+    assert len(result.signals) == 1
+    assert result.signals[0].evidence.text == source
+    retry_prompt = provider.calls[1][1]
+    assert '"record_index":0,"reason":"evidence_mismatch"' in retry_prompt
+    assert "source_line_start/end 逐字复制完整原文行" in retry_prompt
+    assert "含标点及换行" in retry_prompt
+    assert "勿摘录、改写、增减行或重释" in retry_prompt
+    assert "private-rejected-response-context" not in retry_prompt
+    assert "private-rejected-response-context" not in result.model_dump_json()
+
+
+def test_signal_repeated_evidence_mismatch_stays_fail_closed():
+    source = "林澈一直喜欢蜜瓜。\n林澈每周都买一颗蜜瓜。"
+    invalid = valid_signal_record(
+        source_line_end=11,
+        evidence="林澈一直喜欢蜜瓜。",
+        context="private-rejected-response-context",
+    )
+    rejected = json.dumps({"records": [invalid]}, ensure_ascii=False)
+    provider = SequenceProvider(rejected, rejected)
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "evidence-fail-closed", "profile.md", source, 10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.attempted_calls == 2
+    assert result.diagnostics.reason_counts == {"evidence_mismatch": 2}
+    assert "private-rejected-response-context" not in provider.calls[1][1]
+    assert "private-rejected-response-context" not in result.model_dump_json()
+
+
+def test_draft_preference_rejects_object_and_attitude_spliced_across_lines():
+    source = (
+        "周尧递来一盘冰镇蜜瓜。\n"
+        "林澈说：\"我一直最讨厌蜜瓜。\""
+    )
+    mixed = valid_signal_record(
+        statement="林澈说我一直最讨厌蜜瓜",
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        key_object="冰镇蜜瓜",
+        source_line_end=11,
+        evidence=source,
+        context="private-mixed-record-context",
+    )
+    general = valid_signal_record(
+        statement="林澈说我一直最讨厌蜜瓜",
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        key_object="蜜瓜",
+        source_line_start=11,
+        source_line_end=11,
+        evidence=source.splitlines()[1],
+    )
+    provider = SequenceProvider(
+        json.dumps({"records": [mixed]}, ensure_ascii=False),
+        json.dumps({"records": [general]}, ensure_ascii=False),
+    )
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk("mixed-preference-lines", "draft.md", source, 10, "draft")
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.reason_counts == {
+        "regenerated_from_statement_support": 1
+    }
+    assert len(result.signals) == 1
+    assert result.signals[0].key_object == "蜜瓜"
+    assert result.signals[0].evidence.line_start == 11
+    assert result.signals[0].observation_kind == "preference_expression"
+    assert '"reason":"statement_support"' in provider.calls[1][1]
+    assert "偏好对象须整词同句绑定态度" in provider.calls[1][1]
+    assert "private-mixed-record-context" not in provider.calls[1][1]
+    assert "private-mixed-record-context" not in result.model_dump_json()
+
+
+def test_draft_preference_mixed_line_binding_retry_exhaustion_fails_closed():
+    source = "周尧递来一盘冰镇蜜瓜。\n林澈一直讨厌蜜瓜。"
+    mixed = valid_signal_record(
+        statement="林澈一直讨厌蜜瓜",
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        key_object="冰镇蜜瓜",
+        source_line_end=11,
+        evidence=source,
+        context="private-rejected-mixed-context",
+    )
+    rejected = json.dumps({"records": [mixed]}, ensure_ascii=False)
+    provider = SequenceProvider(rejected, rejected)
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk("mixed-preference-fail-closed", "draft.md", source, 10, "draft")
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"statement_support": 2}
+    assert "private-rejected-mixed-context" not in provider.calls[1][1]
+    assert "private-rejected-mixed-context" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("source", "statement", "key_object", "expected_kind"),
+    [
+        (
+            "周尧递来一盘冰镇蜜瓜。\n林澈一直讨厌蜜瓜。",
+            "林澈一直讨厌蜜瓜",
+            "蜜瓜",
+            "preference_expression",
+        ),
+        (
+            "周尧递来一盘水果。\n林澈一直讨厌蜜瓜。",
+            "林澈一直讨厌蜜瓜",
+            "蜜瓜",
+            "preference_expression",
+        ),
+        (
+            "周尧递来一盘水果。\n林澈拒绝吃冰镇蜜瓜。",
+            "林澈拒绝吃冰镇蜜瓜",
+            "冰镇蜜瓜",
+            "action",
+        ),
+    ],
+)
+def test_draft_preference_valid_same_line_claim_or_concrete_action_survives(
+    source: str, statement: str, key_object: str, expected_kind: str
+):
+    row = valid_signal_record(
+        statement=statement,
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        key_object=key_object,
+        source_line_start=11,
+        source_line_end=11,
+        evidence=source.splitlines()[1],
+    )
+    provider = FakeProvider(json.dumps({"records": [row]}, ensure_ascii=False))
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk("valid-preference-line", "draft.md", source, 10, "draft")
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].observation_kind == expected_kind
+
+
+def test_draft_preference_safe_adjacent_pronoun_keeps_object_and_attitude_together():
+    source = "房间里只剩林澈。\n她讨厌蜜瓜。"
+    record = valid_signal_record(
+        statement="林澈讨厌蜜瓜",
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        key_object="蜜瓜",
+        source_line_end=11,
+        evidence=source,
+    )
+
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(CharacterSignalChunk("safe-pronoun-preference", "draft.md", source, 10, "draft"))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].character == "林澈"
+    assert result.signals[0].key_object == "蜜瓜"
+
+
+@pytest.mark.parametrize(
+    ("source", "key_object"),
+    [
+        ("林澈喜欢蜜瓜味糖。", "蜜瓜"),
+        ("林澈喜欢冰镇蜜瓜味糖。", "冰镇蜜瓜"),
+    ],
+)
+def test_draft_direct_preference_rejects_compound_object_substring(
+    source: str, key_object: str
+):
+    record = valid_signal_record(
+        statement=f"林澈喜欢{key_object}",
+        trait_key="food_preference",
+        key_object=key_object,
+        evidence=source,
+        stability="temporary",
+        observation_kind="preference_expression",
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    provider = SequenceProvider(payload, payload)
+    target = CharacterSignalTarget(
+        character="林澈",
+        dimension="preference",
+        trait_key="food_preference",
+        comparison_key=stable_trait_identity("preference", "food_preference", key_object),
+        baseline_polarity="negative",
+        requested_polarity="positive",
+        baseline_hint=f"林澈讨厌{key_object}",
+    )
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        CharacterSignalChunk("compound-food-substring", "draft.md", source, 10, "draft"),
+        (target,),
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"statement_support": 2}
+    assert "偏好对象须整词同句绑定态度" in provider.calls[1][1]
+
+
+@pytest.mark.parametrize(
+    ("source", "key_object"),
+    [
+        ("林澈喜欢蜜瓜。", "蜜瓜"),
+        ("林澈喜欢蜜瓜味糖。", "蜜瓜味糖"),
+        ("林澈喜欢冰镇蜜瓜。", "冰镇蜜瓜"),
+    ],
+)
+def test_draft_direct_preference_keeps_whole_object(source: str, key_object: str):
+    record = valid_signal_record(
+        statement=source.rstrip("。"),
+        trait_key="food_preference",
+        key_object=key_object,
+        evidence=source,
+        stability="temporary",
+        observation_kind="preference_expression",
+    )
+
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(CharacterSignalChunk("whole-food-object", "draft.md", source, 10, "draft"))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].key_object == key_object
+
+
+@pytest.mark.parametrize(
+    ("source", "dimension", "statement", "key_object"),
+    [
+        ("林澈笑了，周尧讨厌蜜瓜。", "preference", "林澈讨厌蜜瓜", "蜜瓜"),
+        (
+            "林澈留在家里，周尧主动与陌生人交谈。",
+            "core_personality",
+            "林澈主动与陌生人交谈",
+            "",
+        ),
+        ("林澈的朋友周尧讨厌蜜瓜。", "preference", "林澈讨厌蜜瓜", "蜜瓜"),
+        ("林澈看着周尧讨厌蜜瓜。", "preference", "林澈讨厌蜜瓜", "蜜瓜"),
+        ("林澈说周尧讨厌蜜瓜。", "preference", "林澈讨厌蜜瓜", "蜜瓜"),
+        (
+            "林澈看着周尧主动与陌生人交谈。",
+            "core_personality",
+            "林澈主动与陌生人交谈",
+            "",
+        ),
+        (
+            "林澈看着周尧救了人。",
+            "core_personality",
+            "林澈救了人",
+            "",
+        ),
+        (
+            "林澈的朋友周尧救了人。",
+            "core_personality",
+            "林澈救了人",
+            "",
+        ),
+        ("林澈让周尧救了人。", "core_personality", "林澈救了人", ""),
+        ("林澈请周尧救了人。", "core_personality", "林澈救了人", ""),
+    ],
+)
+def test_draft_signal_never_borrows_another_named_actor(
+    source: str, dimension: str, statement: str, key_object: str
+):
+    record = valid_signal_record(
+        dimension=dimension,
+        trait_key="food_preference" if dimension == "preference" else "social_initiative",
+        statement=statement,
+        polarity="negative" if dimension == "preference" else "positive",
+        stability="temporary",
+        observation_kind="preference_expression" if dimension == "preference" else "action",
+        key_object=key_object,
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    provider = SequenceProvider(payload, payload)
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk("wrong-actor-guard", "draft.md", source, 10, "draft")
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"character_support": 2}
+
+
+def test_draft_direct_observation_keeps_target_watching_action():
+    source = "林澈看着远处等待救援。"
+    record = valid_signal_record(
+        dimension="core_personality",
+        trait_key="patient_observation",
+        statement="林澈看着远处等待救援",
+        polarity="neutral",
+        stability="temporary",
+        observation_kind="action",
+        key_object="",
+        evidence=source,
+    )
+
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(CharacterSignalChunk("target-watching-action", "draft.md", source, 10, "draft"))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].statement == "林澈看着远处等待救援"
+
+
+@pytest.mark.parametrize("verb", ["让", "请"])
+def test_draft_direct_delegation_keeps_target_managerial_action(verb: str):
+    source = f"林澈{verb}周尧救人。"
+    statement = source.rstrip("。")
+    record = valid_signal_record(
+        dimension="core_personality",
+        trait_key="delegation_action",
+        statement=statement,
+        polarity="neutral",
+        stability="temporary",
+        observation_kind="action",
+        key_object="",
+        evidence=source,
+    )
+
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(CharacterSignalChunk("target-delegation-action", "draft.md", source, 10, "draft"))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].statement == statement
+
+
+@pytest.mark.parametrize(
+    ("line_number", "character", "dimension", "statement", "polarity", "kind"),
+    [
+        (
+            13,
+            "苏弦",
+            "core_personality",
+            "苏弦不看提纲便开始介绍列车",
+            "positive",
+            "action",
+        ),
+        (
+            18,
+            "祁雾",
+            "speech_pattern",
+            "祁雾连续夸赞他的制服与待客礼仪",
+            "negative",
+            "speech_sample",
+        ),
+        (
+            19,
+            "祁雾",
+            "speech_pattern",
+            "祁雾称其字迹与办事能力无人能及",
+            "negative",
+            "speech_sample",
+        ),
+    ],
+)
+def test_draft_explicit_same_subject_continuation_from_demo_source(
+    line_number: int,
+    character: str,
+    dimension: str,
+    statement: str,
+    polarity: str,
+    kind: str,
+):
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "data/character-continuity-demo/04-draft-event-v1.1.md"
+    )
+    source = fixture.read_text(encoding="utf-8").splitlines()[line_number - 1]
+    record = valid_signal_record(
+        character=character,
+        dimension=dimension,
+        trait_key=(
+            "public_speaking_participation"
+            if character == "苏弦"
+            else "directness"
+        ),
+        statement=statement,
+        polarity=polarity,
+        stability="temporary",
+        observation_kind=kind,
+        key_object="",
+        source_line_start=line_number,
+        source_line_end=line_number,
+        evidence=source,
+    )
+
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(
+        CharacterSignalChunk(
+            "demo-subject-continuation", "draft.md", source, line_number, "draft"
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].character == character
+
+
+def _candidate_ranges_in_prompt(prompt: str) -> list[dict]:
+    return json.loads(prompt.split("候选证据范围：", 1)[1].split("\n", 1)[0])
+
+
+def _template_target(character: str) -> CharacterSignalTarget:
+    return CharacterSignalTarget(
+        character=character,
+        dimension="core_personality",
+        trait_key="source_action",
+        comparison_key=stable_trait_identity("core_personality", "source_action"),
+        baseline_polarity="negative",
+        requested_polarity="positive",
+        baseline_hint=f"{character}的行动方式",
+    )
+
+
+@pytest.mark.parametrize(
+    ("line_number", "character", "expected"),
+    [
+        (13, "苏弦", "苏弦不看提纲便开始介绍列车"),
+        (18, "祁雾", "祁雾连续夸赞他的制服与待客礼仪"),
+        (19, "祁雾", "祁雾称其字迹与办事能力无人能及"),
+    ],
+)
+def test_targeted_verification_offers_only_proven_demo_continuation_templates(
+    line_number: int, character: str, expected: str
+):
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "data/character-continuity-demo/04-draft-event-v1.1.md"
+    )
+    source = fixture.read_text(encoding="utf-8").splitlines()[line_number - 1]
+    prompt = _targeted_chunk_prompt(
+        CharacterSignalChunk("demo-templates", "draft.md", source, line_number, "draft"),
+        (_template_target(character),),
+        candidate_evidence_ranges=((line_number, line_number),),
+    )
+
+    candidate = _candidate_ranges_in_prompt(prompt)[0]
+    assert expected in candidate["canonical_statements"]
+    assert candidate["line_start"] == candidate["line_end"] == line_number
+    assert "不证明行为符合 target 语义轴或 requested_polarity" in prompt
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "林澈笑了。连续夸赞他的制服。",
+        "林澈笑了，周尧站起来，连续夸赞他的制服。",
+        "林澈笑了，而是周尧站起来，连续夸赞他的制服。",
+        "林澈说：‘周尧喜欢蜜瓜’，连续夸赞他的口味。",
+        "如果林澈站到台上，不看提纲便开始介绍列车。",
+    ],
+)
+def test_targeted_verification_does_not_offer_unsafe_actor_templates(source: str):
+    prompt = _targeted_chunk_prompt(
+        CharacterSignalChunk("unsafe-templates", "draft.md", source, 10, "draft"),
+        (_template_target("林澈"),),
+        candidate_evidence_ranges=((10, 10),),
+    )
+
+    assert "canonical_statements" not in _candidate_ranges_in_prompt(prompt)[0]
+
+
+def test_targeted_verification_does_not_assign_single_actor_templates_to_many_targets():
+    source = "苏弦站到台上，不看提纲便开始介绍列车。"
+    prompt = _targeted_chunk_prompt(
+        CharacterSignalChunk("many-targets", "draft.md", source, 10, "draft"),
+        (_template_target("苏弦"), _template_target("祁雾")),
+        candidate_evidence_ranges=((10, 10),),
+    )
+
+    assert "canonical_statements" not in _candidate_ranges_in_prompt(prompt)[0]
+
+
+def test_targeted_verification_bounds_same_subject_template_payload():
+    source_line = "苏弦站到台上，连续夸赞" + "制服" * 30 + "。"
+    content = "\n".join([source_line] * 64)
+    ranges = tuple((line, line) for line in range(1, 65))
+    prompt = _targeted_chunk_prompt(
+        CharacterSignalChunk("bounded-templates", "draft.md", content, 1, "draft"),
+        (_template_target("苏弦"),),
+        candidate_evidence_ranges=ranges,
+    )
+
+    candidates = _candidate_ranges_in_prompt(prompt)
+    template_payload_bytes = sum(
+        len(json.dumps(candidate["canonical_statements"], ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        for candidate in candidates
+        if "canonical_statements" in candidate
+    )
+    assert template_payload_bytes <= 4_096
+    assert 0 < sum("canonical_statements" in candidate for candidate in candidates) < 64
+
+
+def test_targeted_system_prompt_limits_same_subject_templates_to_matching_source_and_axis():
+    assert "候选范围若提供 canonical_statements" in TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
+    assert "原文行为确实符合目标语义轴和 requested_polarity" in TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
+    assert "模板不得用于其他范围" in TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
+    assert "没有匹配模板时" in TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
+    assert "单数她/他指代只允许一种" in TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
+
+
+def test_targeted_character_support_retry_uses_existing_templates_without_waiving_guard():
+    first = "林澈走进房间，连续夸赞守卫。"
+    wrong_actor = "林澈笑了，周尧救了人。"
+    invalid = valid_signal_record(
+        dimension="core_personality",
+        trait_key="source_action",
+        statement="林澈救了人",
+        polarity="positive",
+        stability="temporary",
+        observation_kind="action",
+        context="",
+        key_object="",
+        source_line_start=11,
+        source_line_end=11,
+        evidence=wrong_actor,
+    )
+    payload = json.dumps({"records": [invalid]}, ensure_ascii=False)
+    provider = SequenceProvider(payload, payload)
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        CharacterSignalChunk(
+            "template-retry-guard", "draft.md", f"{first}\n{wrong_actor}", 10, "draft"
+        ),
+        (_template_target("林澈"),),
+        candidate_evidence_ranges=((10, 10), (11, 11)),
+    )
+
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"character_support": 2}
+    assert _candidate_ranges_in_prompt(provider.calls[0][1])[0]["canonical_statements"]
+    assert "canonical_statements" not in _candidate_ranges_in_prompt(provider.calls[0][1])[1]
+    retry_prompt = provider.calls[1][1]
+    assert "若对应候选范围提供 canonical_statements" in retry_prompt
+    assert "原文行为、target 语义轴与 requested_polarity" in retry_prompt
+    assert "不得回显模板字段或挪用别行模板" in retry_prompt
+    assert "没有匹配模板时行为句须直接点名角色" in retry_prompt
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "林澈笑了。连续夸赞他的制服。",
+        "林澈笑了。\n连续夸赞他的制服。",
+        "林澈笑了，周尧站起来，连续夸赞他的制服。",
+        "林澈笑了，而是周尧站起来，连续夸赞他的制服。",
+        "林澈笑了，而是他连续夸赞守卫。",
+        "如果林澈站到台上，不看提纲便开始介绍列车。",
+        "林澈说：‘周尧喜欢蜜瓜’，连续夸赞他的口味。",
+    ],
+)
+def test_draft_continuation_does_not_cross_actor_sentence_quote_or_condition(
+    source: str,
+):
+    record = valid_signal_record(
+        dimension="speech_pattern",
+        trait_key="flattery_style",
+        statement="林澈连续夸赞他的制服",
+        polarity="neutral",
+        stability="temporary",
+        observation_kind="speech_sample",
+        key_object="",
+        source_line_end=10 + len(source.splitlines()) - 1,
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    provider = SequenceProvider(payload, payload)
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk("unsafe-subject-continuation", "draft.md", source, 10, "draft")
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"character_support": 2}
+
+
+@pytest.mark.parametrize(
+    ("source", "statement"),
+    [
+        ("林澈留在原地，而是周尧救了人。", "林澈救了人"),
+        ("林澈留在原地，只是周尧救了人。", "林澈只是周尧救了人"),
+        ("林澈留在原地，而是周尧救了人。", "林澈而是周尧救了人"),
+        ("林澈留在原地，而是周尧救了人。", "林澈周尧救了人"),
+        ("林澈留在原地，而是周尧救了人。", "林澈说，周尧救了人"),
+        ("林澈留在原地，而是周尧救了人。", "林澈留在原地，周尧救了人"),
+        ("林澈留在原地，而是周尧搬走箱子。", "林澈搬走箱子"),
+        ("林澈留在原地，而是周尧藏起钥匙。", "林澈藏起钥匙"),
+        ("林澈留在原地，而是周尧背叛同伴。", "林澈背叛同伴"),
+        ("林澈留在原地，只是周尧救了人。", "林澈只是周尧救了人"),
+        *(
+            (
+                f"林澈留在原地，而是{causative}周尧连续夸赞守卫。",
+                "林澈连续夸赞守卫",
+            )
+            for causative in ("由", "让", "请", "叫", "派")
+        ),
+    ],
+)
+def test_draft_continuation_never_borrows_bare_or_causative_other_actor(
+    source: str, statement: str
+):
+    record = valid_signal_record(
+        dimension="core_personality",
+        trait_key="rescue_or_praise_action",
+        statement=statement,
+        polarity="positive",
+        stability="temporary",
+        observation_kind="action",
+        key_object="",
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    provider = SequenceProvider(payload, payload)
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk("other-actor-continuation", "draft.md", source, 10, "draft")
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"character_support": 2}
 
 
 def test_targeted_regeneration_reproduces_all_safe_anchors_before_completion():
@@ -812,6 +1572,309 @@ def test_targeted_signal_extractor_uses_same_safe_duplicate_recovery():
     assert result.diagnostics.reason_counts == {
         "regenerated_from_statement_support": 1
     }
+
+
+def _targeted_schema_case():
+    line = "林澈主动邀请陌生摊主长谈。"
+    row = valid_signal_record(
+        dimension="core_personality",
+        trait_key="social_initiative",
+        statement="林澈主动邀请陌生摊主长谈",
+        polarity="positive",
+        stability="temporary",
+        observation_kind="action",
+        context="",
+        key_object="",
+        evidence=line,
+    )
+    target = CharacterSignalTarget(
+        character="林澈",
+        dimension="core_personality",
+        trait_key="social_initiative",
+        comparison_key=stable_trait_identity("core_personality", "social_initiative"),
+        baseline_polarity="negative",
+        requested_polarity="positive",
+        baseline_hint="在陌生人面前很少主动交谈",
+    )
+    return CharacterSignalChunk("targeted-schema", "draft.md", line, 10, "draft"), target, row
+
+
+def test_targeted_schema_retry_requests_exact_fields_and_recovers_clean_package():
+    draft_chunk, target, row = _targeted_schema_case()
+    polluted = json.dumps(
+        {"records": [
+            {**row, "requested_polarity": "positive"},
+            {**row, "statement": 7},
+        ]},
+        ensure_ascii=False,
+    )
+    clean = json.dumps({"records": [row]}, ensure_ascii=False)
+    provider = SequenceProvider(polluted, clean)
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        draft_chunk, (target,)
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.attempted_calls == 2
+    assert len(result.signals) == 1
+    assert result.diagnostics.reason_counts == {
+        "regenerated_from_forbidden_server_field": 1,
+        "regenerated_from_schema_validation": 1,
+    }
+    retry_prompt = provider.calls[1][1]
+    assert "必须且只能包含 character、dimension、trait_key" in retry_prompt
+    assert "source_line_start/source_line_end 必须是整数" in retry_prompt
+    assert "不得回显 targets、候选证据范围、canonical_statement" in retry_prompt
+    assert '"reason":"forbidden_server_field"' in retry_prompt
+    assert '"reason":"schema_validation"' in retry_prompt
+
+
+def test_targeted_schema_retry_stays_fail_closed_if_pollution_continues():
+    draft_chunk, target, row = _targeted_schema_case()
+    polluted = json.dumps(
+        {"records": [
+            {**row, "requested_polarity": "positive"},
+            {**row, "statement": 7},
+        ]},
+        ensure_ascii=False,
+    )
+    provider = SequenceProvider(polluted, polluted)
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        draft_chunk, (target,)
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.attempted_calls == 2
+    assert result.diagnostics.reason_counts == {
+        "forbidden_server_field": 2,
+        "schema_validation": 2,
+    }
+
+
+def test_targeted_preference_matches_frozen_object_identity():
+    line = "林澈明确表示讨厌蜜瓜。"
+    record = valid_signal_record(
+        trait_key="food_preference",
+        statement="林澈明确表示讨厌蜜瓜",
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        context="",
+        key_object="蜜瓜",
+        evidence=line,
+    )
+    target = CharacterSignalTarget(
+        character="林澈",
+        dimension="preference",
+        trait_key="food_preference",
+        comparison_key=stable_trait_identity("preference", "food_preference", "蜜瓜"),
+        baseline_polarity="positive",
+        requested_polarity="negative",
+        baseline_hint="林澈一直喜欢蜜瓜",
+    )
+    provider = SequenceProvider(json.dumps({"records": [record]}, ensure_ascii=False))
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        CharacterSignalChunk("targeted-melon", "draft.md", line, 10, "draft"),
+        (target,),
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].key_object == "蜜瓜"
+
+
+def test_qualified_preference_bridge_requires_opposed_direct_whole_object_claim():
+    def observation(
+        text: str, *, key_object: str = "蜜瓜", polarity: str = "negative",
+        kind: str = "preference_expression"
+    ) -> CharacterSignal:
+        return CharacterSignal(
+            id="cs_" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:32],
+            character="林澈",
+            dimension="preference",
+            trait_key="melon_preference",
+            statement=text.rstrip("。"),
+            polarity=polarity,
+            stability="temporary",
+            observation_kind=kind,
+            key_object=key_object,
+            source_kind="draft",
+            evidence=EvidenceSpan(
+                document_id="draft", document_name="draft.md",
+                line_start=1, line_end=1, text=text,
+            ),
+        )
+
+    def bridged(value: CharacterSignal, key: str = "preference:冰镇蜜瓜") -> bool:
+        return preference_modifier_bridge(
+            baseline_comparison_key=key,
+            baseline_polarity="positive",
+            observation=value,
+        )
+
+    assert bridged(observation("林澈说：“我一直最讨厌蜜瓜，闻到味道就想离开。”"))
+    assert bridged(observation("林澈说：我一直讨厌蜜瓜。"))
+    assert bridged(observation("林澈一直讨厌蜜瓜。"))
+    assert not bridged(observation("林澈记下周尧一直讨厌蜜瓜。"))
+    assert not bridged(observation("周尧对林澈说：“我一直讨厌蜜瓜。”"))
+    assert not bridged(observation("林澈说：“周尧一直讨厌蜜瓜。”"))
+    assert not bridged(observation("周尧说：“林澈一直讨厌蜜瓜。”"))
+    assert not bridged(observation("林澈和周尧都讨厌蜜瓜。"))
+    assert not bridged(observation("林澈一直讨厌葡萄。", key_object="葡萄"))
+    assert not bridged(observation("林澈一直讨厌蜜瓜味糖。"))
+    assert not bridged(observation("林澈拒绝吃蜜瓜。", kind="action"))
+    assert not bridged(observation("林澈一直喜欢蜜瓜。", polarity="positive"))
+    assert not bridged(observation("林澈一直讨厌蜜瓜。"), key="preference:蜜瓜")
+    assert not bridged(observation("林澈一直讨厌蜜瓜。"), key="preference:冰镇葡萄")
+    assert not bridged(observation("林澈一直讨厌蜜瓜。"), key="preference:冰镇蜜瓜:伪造")
+
+
+def test_targeted_qualified_preference_accepts_general_opposition_without_rewriting_object():
+    line = "林澈说：“我一直最讨厌蜜瓜，闻到味道就想离开。”"
+    record = valid_signal_record(
+        trait_key="melon_preference",
+        statement=line,
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        context="",
+        key_object="蜜瓜",
+        evidence=line,
+    )
+    target = CharacterSignalTarget(
+        character="林澈",
+        dimension="preference",
+        trait_key="melon_preference",
+        comparison_key="preference:冰镇蜜瓜",
+        baseline_polarity="positive",
+        requested_polarity="negative",
+        baseline_hint="林澈一直喜欢冰镇蜜瓜",
+    )
+    provider = SequenceProvider(json.dumps({"records": [record]}, ensure_ascii=False))
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        CharacterSignalChunk("targeted-general-melon", "draft.md", line, 10, "draft"),
+        (target,),
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].key_object == "蜜瓜"
+    assert '"comparison_key":"preference:冰镇蜜瓜"' in provider.calls[0][1]
+
+
+def test_targeted_qualified_preference_rejects_compound_even_if_model_uses_substring():
+    line = "林澈一直讨厌蜜瓜味糖。"
+    record = valid_signal_record(
+        trait_key="melon_preference",
+        statement=line,
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        context="",
+        key_object="蜜瓜",
+        evidence=line,
+    )
+    target = CharacterSignalTarget(
+        character="林澈",
+        dimension="preference",
+        trait_key="melon_preference",
+        comparison_key="preference:冰镇蜜瓜",
+        baseline_polarity="positive",
+        requested_polarity="negative",
+        baseline_hint="林澈一直喜欢冰镇蜜瓜",
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    provider = SequenceProvider(payload, payload)
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        CharacterSignalChunk("targeted-flavored-candy", "draft.md", line, 10, "draft"),
+        (target,),
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"statement_support": 2}
+    assert "偏好对象须整词同句绑定态度" in provider.calls[1][1]
+
+
+@pytest.mark.parametrize(
+    ("line", "reason"),
+    [
+        ("林澈记下周尧一直讨厌蜜瓜。", "character_support"),
+        ("林澈说：“周尧一直讨厌蜜瓜。”", "character_support"),
+        ("林澈和周尧都讨厌蜜瓜。", "targeted_target_mismatch"),
+    ],
+)
+def test_targeted_qualified_preference_does_not_reassign_other_speakers(line, reason):
+    record = valid_signal_record(
+        trait_key="melon_preference",
+        statement=line,
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        context="",
+        key_object="蜜瓜",
+        evidence=line,
+    )
+    target = CharacterSignalTarget(
+        character="林澈",
+        dimension="preference",
+        trait_key="melon_preference",
+        comparison_key="preference:冰镇蜜瓜",
+        baseline_polarity="positive",
+        requested_polarity="negative",
+        baseline_hint="林澈一直喜欢冰镇蜜瓜",
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    provider = SequenceProvider(payload, payload)
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        CharacterSignalChunk("targeted-other-speaker", "draft.md", line, 10, "draft"),
+        (target,),
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {reason: 2}
+
+
+def test_targeted_preference_rejects_same_trait_key_with_different_object():
+    line = "林澈明确表示讨厌葡萄。"
+    record = valid_signal_record(
+        trait_key="food_preference",
+        statement="林澈明确表示讨厌葡萄",
+        polarity="negative",
+        stability="temporary",
+        observation_kind="preference_expression",
+        context="",
+        key_object="葡萄",
+        evidence=line,
+    )
+    target = CharacterSignalTarget(
+        character="林澈",
+        dimension="preference",
+        trait_key="food_preference",
+        comparison_key=stable_trait_identity("preference", "food_preference", "蜜瓜"),
+        baseline_polarity="positive",
+        requested_polarity="negative",
+        baseline_hint="林澈一直喜欢蜜瓜",
+    )
+    invalid = json.dumps({"records": [record]}, ensure_ascii=False)
+    provider = SequenceProvider(invalid, invalid)
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        CharacterSignalChunk("targeted-grape", "draft.md", line, 10, "draft"),
+        (target,),
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"targeted_target_mismatch": 2}
 
 
 def test_character_signal_target_requires_opposite_direction_and_bounded_ranges():
@@ -1515,6 +2578,61 @@ def test_pending_candidates_keep_incompatible_traits_from_same_line():
         "companion_interaction_value",
         "companion_interaction_frequency",
     }
+
+
+def test_same_object_distinct_value_axes_keep_separate_candidates_and_ids():
+    source = _formal_interaction_candidate_signal(
+        "candidate-trust-axis", "companion_trust", key_object="同伴"
+    )
+    trust = source.model_copy(update={"dimension": "value"})
+    protect = source.model_copy(
+        update={
+            "id": "cs_" + "e" * 32,
+            "dimension": "value",
+            "trait_key": "companion_protection",
+        }
+    )
+
+    candidates = build_pending_trait_candidates([trust, protect])
+
+    assert len(candidates) == 2
+    assert {candidate.trait_key for candidate in candidates} == {
+        "companion_trust",
+        "companion_protection",
+    }
+    assert {candidate.comparison_key for candidate in candidates} == {"value:同伴"}
+    assert len({candidate.id for candidate in candidates}) == 2
+
+
+def test_targeted_nonpreference_binder_requires_exact_relation_axis():
+    baseline = CharacterSignalTarget(
+        character="林澈",
+        dimension="value",
+        trait_key="companion_trust",
+        comparison_key="value:同伴",
+        baseline_polarity="positive",
+        requested_polarity="negative",
+        baseline_hint="林澈信任同伴",
+    )
+    observation = CharacterSignal(
+        id="cs_" + "e" * 32,
+        character="林澈",
+        dimension="value",
+        trait_key="companion_protection",
+        statement="林澈不保护同伴",
+        polarity="negative",
+        stability="stable",
+        observation_kind="explicit_declaration",
+        key_object="同伴",
+        source_kind="draft",
+        evidence=span("林澈明确表示不会保护同伴。"),
+    )
+
+    assert _matching_target(observation, (baseline,)) is None
+    assert _matching_target(
+        observation.model_copy(update={"trait_key": "companion_trust"}),
+        (baseline,),
+    ) == baseline
 
 
 def test_pending_candidates_do_not_merge_compatible_keys_across_evidence_lines():
@@ -2586,6 +3704,8 @@ def test_targeted_binding_failure_can_recover_only_with_clean_complete_package()
     assert result.diagnostics.reason_counts == {
         "regenerated_from_targeted_target_mismatch": 1
     }
+    assert "逐字复用 target 的 character、dimension、trait_key" in provider.calls[1][1]
+    assert "key_object 必须来自草稿原文" in provider.calls[1][1]
 
 
 def test_signal_regeneration_respects_one_total_logical_deadline():

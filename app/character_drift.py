@@ -166,6 +166,7 @@ CHARACTER_REVIEW_SYSTEM_PROMPT = """你是 LoreGuard 的角色一致性证据审
 - explanation 只解释一致性判断，不得生成改写文本、替换台词或创作建议。
 
 单次反常行为不能证明核心人格改变；情境、临时状态、伪装和正式成长事件必须按已给证据处理。若材料不足或只找到可能相关事件，选择 needs_confirmation 或 insufficient_evidence，不得把“未检索到”写成“不存在”。
+偏好基线若限定了“冰镇”等制作方式、当前证据只称未限定的对象，须核对当前表述是否明确覆盖该限定对象；只有普遍且直接对立的偏好声明才可判 contradicts，局部体验、不同食品或范围不清时选择 needs_confirmation，不得把一次拒食外推为长期偏好改变。
 """
 
 

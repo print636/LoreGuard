@@ -83,9 +83,9 @@ def record(
     }
 
 
-def target() -> CharacterSignalTarget:
+def target(character: str = "南枝") -> CharacterSignalTarget:
     return CharacterSignalTarget(
-        character="南枝",
+        character=character,
         dimension="core_personality",
         trait_key="social_initiative",
         comparison_key=stable_trait_identity(
@@ -100,6 +100,11 @@ def target() -> CharacterSignalTarget:
 
 def response(row: dict[str, object]) -> str:
     return json.dumps({"records": [row]}, ensure_ascii=False)
+
+
+def candidate_ranges_from_prompt(prompt: str) -> list[dict[str, object]]:
+    serialized = prompt.split("候选证据范围：", 1)[1].split("\n", 1)[0]
+    return json.loads(serialized)
 
 
 def test_generic_extraction_accepts_literal_two_line_pronoun_attribution():
@@ -138,6 +143,123 @@ def test_targeted_candidate_view_accepts_only_the_server_listed_two_line_span():
     assert '"line_start":3,"line_end":4' in prompt
     assert f"3: {NANZHI_ANTECEDENT}" in prompt
     assert f"4: {NANZHI_OBSERVATION}" in prompt
+    assert candidate_ranges_from_prompt(prompt) == [
+        {
+            "line_start": 3,
+            "line_end": 4,
+            "canonical_statement": NANZHI_OBSERVATION.replace("她", "南枝", 1),
+        }
+    ]
+    assert "不证明行为符合 target 语义轴或 requested_polarity" in prompt
+
+
+@pytest.mark.parametrize(
+    ("character", "source", "candidate_range", "expected_statement"),
+    [
+        (
+            "祁雾",
+            "这里只有祁雾。清晨，她主动向陌生人打招呼。",
+            (3, 3),
+            "清晨，祁雾主动向陌生人打招呼。",
+        ),
+        (
+            "季遥",
+            "季遥独自。\n随后，他主动与新来的旅客交谈。",
+            (3, 4),
+            "随后，季遥主动与新来的旅客交谈。",
+        ),
+    ],
+)
+def test_candidate_template_generalizes_to_safe_same_and_adjacent_lines(
+    character: str,
+    source: str,
+    candidate_range: tuple[int, int],
+    expected_statement: str,
+):
+    provider = FakeProvider('{"records":[]}')
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        chunk(source),
+        (target(character),),
+        candidate_evidence_ranges=(candidate_range,),
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert result.signals == ()
+    assert candidate_ranges_from_prompt(provider.calls[0][1]) == [
+        {
+            "line_start": candidate_range[0],
+            "line_end": candidate_range[1],
+            "canonical_statement": expected_statement,
+        }
+    ]
+
+
+def test_candidate_template_is_not_a_semantic_claim():
+    source = "这里只有祁雾。\n清晨，她主动向陌生人打招呼。"
+    unrelated_target = CharacterSignalTarget(
+        character="祁雾",
+        dimension="core_personality",
+        trait_key="tool_care",
+        comparison_key=stable_trait_identity("core_personality", "tool_care"),
+        baseline_polarity="negative",
+        requested_polarity="positive",
+        baseline_hint="经常忽略工具保养",
+    )
+    provider = FakeProvider('{"records":[]}')
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        chunk(source),
+        (unrelated_target,),
+        candidate_evidence_ranges=((3, 4),),
+    )
+
+    assert result.signals == ()
+    prompt = provider.calls[0][1]
+    assert candidate_ranges_from_prompt(prompt)[0]["canonical_statement"] == (
+        "清晨，祁雾主动向陌生人打招呼。"
+    )
+    assert "先判断行为含义，匹配时才逐字复制，否则返回空 records" in prompt
+
+
+def test_unsafe_single_line_candidate_has_no_pronoun_template():
+    source = "南枝和苏弦检查展台。她主动与陌生人长谈。"
+    provider = FakeProvider('{"records":[]}')
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        chunk(source),
+        (target(),),
+        candidate_evidence_ranges=((3, 3),),
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert candidate_ranges_from_prompt(provider.calls[0][1]) == [
+        {"line_start": 3, "line_end": 3}
+    ]
+    assert "canonical_statement" not in provider.calls[0][1]
+
+
+def test_character_support_retry_explains_exact_pronoun_statement_without_raw_record():
+    evidence = f"{NANZHI_ANTECEDENT}\n{NANZHI_OBSERVATION}"
+    short_paraphrase = "南枝主动与陌生人长谈"
+    provider = FakeProvider(
+        response(record(evidence, statement=short_paraphrase))
+    )
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        chunk(evidence),
+        (target(),),
+        candidate_evidence_ranges=((3, 4),),
+    )
+
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"character_support": 2}
+    assert len(provider.calls) == 2
+    retry_prompt = provider.calls[1][1]
+    assert "character_support：相邻代词证据须完整引用两句" in retry_prompt
+    assert "statement 只将后句主语她/他换成角色名，不得概括" in retry_prompt
+    assert NANZHI_STATEMENT in retry_prompt
+    assert short_paraphrase not in retry_prompt
 
 
 def test_pronoun_candidate_range_is_draft_only():

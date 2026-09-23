@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 
+from .character_trait_extraction import stable_trait_identity
 from .db import (
     AnalysisRunInputRow,
     AnalysisRunRow,
@@ -25,6 +26,9 @@ from .narrative_context import (
 CHARACTER_TRAIT_SCHEMA_VERSION = 1
 MAX_CONFIRMED_TRAITS_PER_RUN = 5_000
 MAX_CANDIDATES_PER_SOURCE_RUN = 500
+_OBJECT_BEARING_TRAIT_DIMENSIONS = frozenset(
+    {"preference", "value", "behavior_boundary", "current_state"}
+)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _FORBIDDEN_PROVENANCE_KEY_FRAGMENTS = (
     "apikey",
@@ -148,6 +152,48 @@ def _clean_text(value: str, *, maximum: int, label: str) -> str:
     return normalized
 
 
+def _validated_comparison_key(value: str | None, *, trait_type: str) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or len(value) > 200
+        or _CONTROL.search(value)
+        or any(unicodedata.category(char).startswith("C") for char in value)
+    ):
+        raise ValueError("comparison key is invalid")
+    prefix = f"{trait_type}:"
+    anchor = value[len(prefix) :] if value.startswith(prefix) else ""
+    if (
+        not anchor
+        or ":" in anchor
+        or re.search(r"\s", anchor)
+        or unicodedata.normalize("NFKC", anchor).casefold() != anchor
+    ):
+        raise ValueError("comparison key is invalid")
+    return value
+
+
+def _stored_comparison_key(value: object, *, trait_type: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        return None
+    try:
+        return _validated_comparison_key(value, trait_type=trait_type)
+    except ValueError:
+        return None
+
+
+def candidate_snapshot_comparison_key(
+    candidate: CharacterTraitCandidateRow,
+) -> dict[str, str]:
+    """Freeze only an actual stored identity; legacy rows remain keyless."""
+
+    key = _stored_comparison_key(
+        candidate.comparison_key, trait_type=candidate.trait_type
+    )
+    return {"comparison_key": key} if key is not None else {}
+
+
 def _validate_safe_provenance(value: object, *, depth: int = 0) -> None:
     if depth > 8:
         raise ValueError("candidate provenance is too deep")
@@ -222,6 +268,9 @@ def validate_character_trait_supersession(
     character_key: str,
     trait_type: str,
     trait_key: str,
+    comparison_key: str | None,
+    origin: str,
+    authority_tier: str,
     scope: NarrativeScopeV1 | dict[str, Any],
     valid_from_release_ordinal: int | None,
     valid_until_release_ordinal: int | None,
@@ -230,7 +279,8 @@ def validate_character_trait_supersession(
     """Fail closed unless ``superseded`` is the same live profile identity.
 
     A client-supplied internal id is never enough to establish that two rows
-    represent the same trait.  Narrative scopes must be provably compatible,
+    represent the same trait.  Lower-authority evidence cannot replace a
+    higher-authority baseline. Narrative scopes must be provably compatible,
     and their release ranges must overlap; unknown scope relations are rejected.
     """
 
@@ -241,12 +291,44 @@ def validate_character_trait_supersession(
             and normalize_character_key(superseded.character_key)
             == normalize_character_key(character_key)
             and superseded.trait_type == trait_type
-            and normalize_trait_key(superseded.trait_key)
-            == normalize_trait_key(trait_key)
         )
+        if same_identity and trait_type in _OBJECT_BEARING_TRAIT_DIMENSIONS:
+            new_key = _stored_comparison_key(comparison_key, trait_type=trait_type)
+            old_key = _stored_comparison_key(
+                superseded.comparison_key, trait_type=trait_type
+            )
+            # Explicitly linked legacy rows without a usable anchor retain the
+            # earlier label rule; two valid keys identify the object directly.
+            if new_key is not None and old_key is not None:
+                same_identity = new_key == old_key and (
+                    trait_type == "preference"
+                    or stable_trait_identity(trait_type, superseded.trait_key)
+                    == stable_trait_identity(trait_type, trait_key)
+                )
+            else:
+                same_identity = normalize_trait_key(
+                    superseded.trait_key
+                ) == normalize_trait_key(trait_key)
+        elif same_identity:
+            same_identity = normalize_trait_key(
+                superseded.trait_key
+            ) == normalize_trait_key(trait_key)
     except (TypeError, ValueError):
         same_identity = False
     if not same_identity:
+        raise ValueError("superseded candidate is incompatible")
+
+    # Match the snapshot authority order: canon, explicit formal setting,
+    # inferred formal history. Unknown stored values fail closed.
+    authority_rank = {
+        ("core_canon", "explicit_setting"): 2,
+        ("core_canon", "history_inference"): 2,
+        ("formal_record", "explicit_setting"): 1,
+        ("formal_record", "history_inference"): 0,
+    }
+    new_rank = authority_rank.get((authority_tier, origin))
+    old_rank = authority_rank.get((superseded.authority_tier, superseded.origin))
+    if new_rank is None or old_rank is None or new_rank < old_rank:
         raise ValueError("superseded candidate is incompatible")
 
     first_start = valid_from_release_ordinal or 0
@@ -309,6 +391,9 @@ def upsert_character_trait_candidate(
     )
     trait_key = _clean_text(parsed.trait_key, maximum=160, label="trait key")
     trait_value = _clean_text(parsed.value, maximum=2_000, label="trait value")
+    comparison_key = _validated_comparison_key(
+        parsed.comparison_key, trait_type=parsed.trait_type
+    )
     _validate_safe_provenance(parsed.provenance)
     if len(canonical_json(parsed.provenance).encode("utf-8")) > 32_000:
         raise ValueError("candidate provenance is too large")
@@ -329,6 +414,89 @@ def upsert_character_trait_candidate(
     )
     scope = canonical_scope_payload(parsed.scope)
     scope_hash = payload_sha256(scope)
+    fingerprint_payload = {
+        "character_key": character_key,
+        "trait_type": parsed.trait_type,
+        "comparison_key": comparison_key or normalize_trait_key(trait_key),
+        "polarity": parsed.polarity,
+        "stability": parsed.stability,
+        "contexts": parsed.contexts,
+        "origin": parsed.origin,
+        "authority_tier": parsed.authority_tier,
+        "scope_sha256": scope_hash,
+        "valid_from_release_ordinal": parsed.valid_from_release_ordinal,
+        "valid_until_release_ordinal": parsed.valid_until_release_ordinal,
+        "semantic_evidence_sha256": semantic_evidence_hash,
+        "supersedes_candidate_id": parsed.supersedes_candidate_id,
+        "generator_version": parsed.generator_version,
+    }
+    keyed_preference = comparison_key is not None and parsed.trait_type == "preference"
+    keyed_relation = (
+        comparison_key is not None
+        and parsed.trait_type in _OBJECT_BEARING_TRAIT_DIMENSIONS
+        and parsed.trait_type != "preference"
+    )
+    legacy_fingerprint = payload_sha256(fingerprint_payload)
+    if keyed_preference:
+        # Pre-0014 hashes could contain the parsed object key even though the
+        # migrated row has no stored key. A versioned hash makes a new,
+        # reviewable keyed candidate without changing that historical row.
+        fingerprint_payload["fingerprint_version"] = "keyed_preference_v2"
+    elif keyed_relation:
+        # Keep historical hashes unchanged. New keyed rows cannot collide when
+        # they share an object and evidence but describe distinct relations.
+        fingerprint_payload["relation_axis"] = stable_trait_identity(
+            parsed.trait_type, trait_key
+        )
+    fingerprint = payload_sha256(fingerprint_payload)
+    possible_existing = db.scalars(
+        select(CharacterTraitCandidateRow)
+        .join(
+            AnalysisRunRow,
+            AnalysisRunRow.id == CharacterTraitCandidateRow.source_run_id,
+        )
+        .where(
+            CharacterTraitCandidateRow.project_id == project_id,
+            CharacterTraitCandidateRow.candidate_fingerprint.in_(
+                (fingerprint, legacy_fingerprint)
+                if keyed_preference or keyed_relation
+                else (fingerprint,)
+            ),
+            (
+                (CharacterTraitCandidateRow.source_run_id == source_run_id)
+                | (AnalysisRunRow.status == "completed")
+            ),
+        )
+        .order_by(CharacterTraitCandidateRow.created_at, CharacterTraitCandidateRow.id)
+    ).all()
+    for existing in possible_existing:
+        if existing.candidate_fingerprint == fingerprint:
+            return existing, False
+        if (
+            keyed_preference
+            and existing.candidate_fingerprint == legacy_fingerprint
+            and _stored_comparison_key(
+                existing.comparison_key, trait_type=parsed.trait_type
+            ) == comparison_key
+        ):
+            return existing, False
+        if (
+            keyed_relation
+            and existing.candidate_fingerprint == legacy_fingerprint
+            and stable_trait_identity(parsed.trait_type, existing.trait_key)
+            == stable_trait_identity(parsed.trait_type, trait_key)
+            and (
+                _stored_comparison_key(
+                    existing.comparison_key, trait_type=parsed.trait_type
+                ) == comparison_key
+                # Rows migrated from before the comparison_key column have a
+                # NULL key, but their old fingerprint already included the
+                # parsed object key. Match that hash and the relation axis;
+                # never infer an object from the prose value.
+                or existing.comparison_key is None
+            )
+        ):
+            return existing, False
     if parsed.supersedes_candidate_id:
         superseded = db.get(
             CharacterTraitCandidateRow, parsed.supersedes_candidate_id
@@ -340,47 +508,14 @@ def upsert_character_trait_candidate(
             character_key=character_key,
             trait_type=parsed.trait_type,
             trait_key=trait_key,
+            comparison_key=comparison_key,
+            origin=parsed.origin,
+            authority_tier=parsed.authority_tier,
             scope=scope,
             valid_from_release_ordinal=parsed.valid_from_release_ordinal,
             valid_until_release_ordinal=parsed.valid_until_release_ordinal,
             superseded=superseded,
         )
-    fingerprint = payload_sha256(
-        {
-            "character_key": character_key,
-            "trait_type": parsed.trait_type,
-            "comparison_key": parsed.comparison_key or normalize_trait_key(trait_key),
-            "polarity": parsed.polarity,
-            "stability": parsed.stability,
-            "contexts": parsed.contexts,
-            "origin": parsed.origin,
-            "authority_tier": parsed.authority_tier,
-            "scope_sha256": scope_hash,
-            "valid_from_release_ordinal": parsed.valid_from_release_ordinal,
-            "valid_until_release_ordinal": parsed.valid_until_release_ordinal,
-            "semantic_evidence_sha256": semantic_evidence_hash,
-            "supersedes_candidate_id": parsed.supersedes_candidate_id,
-            "generator_version": parsed.generator_version,
-        }
-    )
-    existing = db.scalar(
-        select(CharacterTraitCandidateRow)
-        .join(
-            AnalysisRunRow,
-            AnalysisRunRow.id == CharacterTraitCandidateRow.source_run_id,
-        )
-        .where(
-            CharacterTraitCandidateRow.project_id == project_id,
-            CharacterTraitCandidateRow.candidate_fingerprint == fingerprint,
-            (
-                (CharacterTraitCandidateRow.source_run_id == source_run_id)
-                | (AnalysisRunRow.status == "completed")
-            ),
-        )
-        .order_by(CharacterTraitCandidateRow.created_at, CharacterTraitCandidateRow.id)
-    )
-    if existing is not None:
-        return existing, False
     from sqlalchemy import func
 
     total = db.scalar(
@@ -397,6 +532,7 @@ def upsert_character_trait_candidate(
         character_display_name=display_name,
         trait_type=parsed.trait_type,
         trait_key=trait_key,
+        comparison_key=comparison_key,
         value=trait_value,
         polarity=parsed.polarity,
         stability=parsed.stability,
@@ -439,6 +575,7 @@ def candidate_snapshot_payload(
         "character_display_name": candidate.character_display_name,
         "trait_type": candidate.trait_type,
         "trait_key": candidate.trait_key,
+        **candidate_snapshot_comparison_key(candidate),
         "value": candidate.value,
         "polarity": candidate.polarity,
         "stability": candidate.stability,

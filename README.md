@@ -93,9 +93,16 @@ case remained unverifiable, and the single emergency behavior was not falsely
 promoted. It is a developer-visible failure diagnostic, not a quality gain.
 The follow-up added evidence-bound adjacent-pronoun handling, directional
 trait-key rejection, and a separately labeled diagnostic candidate-review
-path. Three new strict runs passed the known Demo at a local 100k character-stage
-budget; the distinct OOC transfer and draft checks still did not pass. See the
-same checkpoint for both results and the limits of each claim.
+path. An earlier build passed three strict runs of the known Demo, but later
+object-identity and actor-binding changes required fresh validation. On the
+current code build, the latest three independent strict Demo workflows passed
+in only 1/3 trials: the other drafts had partial coverage, including exhausted
+targeted-verification budgets and rejected model records. A different frozen
+OOC story stopped at baseline candidate selection on the preceding build.
+The local acceptance environment used a raised 100k character-stage limit
+and 6m daily limit; product defaults are unchanged. These developer-visible
+results do not establish cross-story or production OOC quality. See the
+checkpoint for the complete chronology and failure boundaries.
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a

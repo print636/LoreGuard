@@ -183,7 +183,11 @@ def test_transfer_loader_cannot_downgrade_frozen_policy(monkeypatch, tmp_path):
         live_acceptance._load_oracle()
 
 
-def _source_anchor_candidate(selector: dict, *, candidate_id: str = "candidate-1") -> dict:
+def _source_anchor_candidate(
+    selector: dict,
+    *,
+    candidate_id: str = "11111111-1111-4111-8111-111111111111",
+) -> dict:
     return {
         "id": candidate_id,
         "revision": 1,
@@ -245,7 +249,10 @@ def test_source_anchored_dev_review_is_explicit_and_does_not_relax_strict_review
     assert "value" not in identities[0]
 
 
-@pytest.mark.parametrize("candidates", [[], ["candidate-1", "candidate-2"]])
+@pytest.mark.parametrize("candidates", [[], [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+]])
 def test_source_anchored_dev_review_rejects_missing_or_ambiguous_candidates(candidates):
     oracle = _validate_oracle_payload(json.loads(
         (TRANSFER_FIXTURE / "acceptance-oracle.json").read_text(encoding="utf-8")
@@ -260,6 +267,8 @@ def test_source_anchored_dev_review_rejects_missing_or_ambiguous_candidates(cand
 
 def test_source_anchored_dev_report_forces_strict_gate_false(monkeypatch):
     captured = []
+    # run() selects a module-global fixture; restore it for later test modules.
+    monkeypatch.setattr(live_acceptance, "DEMO", FIXTURES["demo"])
     monkeypatch.setattr(live_acceptance, "_request", lambda *_args, **_kwargs: {
         "runtime_provenance": {"capabilities": {"character_consistency": True}},
         "model": {"configured": True},

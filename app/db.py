@@ -662,6 +662,8 @@ class CharacterTraitCandidateRow(Base):
     character_display_name: Mapped[str] = mapped_column(String(160))
     trait_type: Mapped[str] = mapped_column(String(32))
     trait_key: Mapped[str] = mapped_column(String(160))
+    # Pre-migration candidates have no recoverable object anchor.
+    comparison_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     value: Mapped[str] = mapped_column(Text)
     polarity: Mapped[str] = mapped_column(String(24), default="unclear")
     stability: Mapped[str] = mapped_column(String(24))

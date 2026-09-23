@@ -12,13 +12,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 
@@ -27,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.character_trait_extraction import stable_trait_identity
+from app.character_traits import _OBJECT_BEARING_TRAIT_DIMENSIONS
 
 
 FIXTURES = {
@@ -52,6 +54,17 @@ DIAGNOSTIC_SOURCE_COUNTS = frozenset({"source_formal", "source_history"})
 DIAGNOSTIC_REGENERATION_COUNTS = frozenset(
     f"regenerated_from_{reason}" for reason in DIAGNOSTIC_RECORD_REASONS
 )
+_TRACE_OBSERVATION_KINDS = frozenset({
+    "explicit_declaration", "preference_expression", "dialogue",
+    "speech_sample", "action", "decision", "interaction",
+    "state_description",
+})
+_TRACE_POLARITIES = frozenset({"positive", "negative", "neutral", "unclear"})
+_TRACE_SENSITIVE_LABEL = re.compile(
+    r"(?:api[_\s-]?key|base[_\s-]?url|authorization|bearer\s+|password|"
+    r"credential|private[_\s-]?key|(?:^|[^a-z0-9])sk-[a-z0-9]{8,}|密钥|密码)",
+    re.IGNORECASE,
+)
 
 
 def _dataset_label() -> str:
@@ -73,11 +86,10 @@ def _sha256_text(value: str) -> str:
 
 
 def _comparison_identity(*, dimension: str, trait_key: str) -> dict[str, str]:
-    """Return a report-safe binding to one runtime-confirmed trait.
+    """Return the legacy label-derived identity for a confirmed trait.
 
     The raw model label is intentionally not copied into the acceptance report.
-    The trace and the confirmed candidate are instead joined through the digest
-    of the same server-owned comparison identity.
+    New object-axis runs bind by candidate ID and use the frozen trace key.
     """
 
     comparison_key = stable_trait_identity(dimension, trait_key)
@@ -92,6 +104,63 @@ def _trace_comparison_sha256(trace: dict[str, Any]) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     return _sha256_text(value)
+
+
+def _candidate_id_sha256(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        if str(UUID(value)) != value:
+            return None
+    except ValueError:
+        return None
+    return _sha256_text(value)
+
+
+def _valid_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _trace_for_candidate(
+    trace: list[dict[str, Any]],
+    *,
+    candidate_id_sha256: str | None,
+    character_key: str,
+    dimension: str,
+    legacy_comparison_sha256: str | None = None,
+) -> dict[str, Any] | None:
+    """Bind only a unique candidate trace, or a unique pre-ID legacy trace."""
+
+    if not _valid_sha256(candidate_id_sha256):
+        return None
+    rows = [row for row in trace if isinstance(row, dict)]
+    matches = [
+        row for row in rows
+        if row.get("confirmed_candidate_id_sha256") == candidate_id_sha256
+    ]
+    if matches:
+        if len(matches) != 1:
+            return None
+        match = matches[0]
+        if (
+            match.get("character_key") != character_key
+            or match.get("dimension") != dimension
+            or not _valid_sha256(match.get("comparison_key_sha256"))
+        ):
+            return None
+        return match
+    if (
+        not _valid_sha256(legacy_comparison_sha256)
+        or any(row.get("confirmed_candidate_id_sha256") is not None for row in rows)
+    ):
+        return None
+    matches = [
+        row for row in rows
+        if row.get("character_key") == character_key
+        and row.get("dimension") == dimension
+        and row.get("comparison_key_sha256") == legacy_comparison_sha256
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _request(
@@ -667,10 +736,20 @@ def _review_explicit_candidates(
                     "details": {"case_id": case_id},
                 },
             )
-        case_traits[case_id] = _comparison_identity(
-            dimension=dimension,
-            trait_key=trait_key,
-        )
+        candidate_id_sha256 = _candidate_id_sha256(candidate_id)
+        if candidate_id_sha256 is None:
+            raise AcceptanceFailure(
+                "candidate_trait_identity_invalid",
+                safe_payload={
+                    "code": "candidate_trait_identity_invalid",
+                    "stage": "baseline_candidate_review",
+                    "details": {"case_id": case_id},
+                },
+            )
+        case_traits[case_id] = {
+            **_comparison_identity(dimension=dimension, trait_key=trait_key),
+            "confirmed_candidate_id_sha256": candidate_id_sha256,
+        }
         confirmed += 1
     review = {
         "confirmed": confirmed,
@@ -685,13 +764,72 @@ def _review_explicit_candidates(
     return review
 
 
+def _safe_trace_observation_refs(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    refs: list[dict[str, Any]] = []
+    for row in value[:12]:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("document_name")
+        line_start = row.get("line_start")
+        line_end = row.get("line_end")
+        kind = row.get("observation_kind")
+        polarity = row.get("polarity")
+        key_object_sha256 = row.get("key_object_sha256")
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name) > 128
+            or any(ord(char) < 32 or char in "/\\" for char in name)
+            or _TRACE_SENSITIVE_LABEL.search(name)
+            or type(line_start) is not int
+            or type(line_end) is not int
+            or not 1 <= line_start <= line_end <= 10_000_000
+            or not isinstance(kind, str)
+            or kind not in _TRACE_OBSERVATION_KINDS
+            or not isinstance(polarity, str)
+            or polarity not in _TRACE_POLARITIES
+            or not (
+                key_object_sha256 is None
+                or (
+                    isinstance(key_object_sha256, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", key_object_sha256)
+                )
+            )
+        ):
+            continue
+        refs.append({
+            "document_name": name,
+            "line_start": line_start,
+            "line_end": line_end,
+            "observation_kind": kind,
+            "polarity": polarity,
+            "key_object_sha256": key_object_sha256,
+        })
+    return refs
+
+
 def _safe_case_trace_summary(row: dict[str, Any]) -> dict[str, Any]:
     roles = row.get("citation_roles")
+    candidate_id_sha256 = row.get("confirmed_candidate_id_sha256")
+    if not _valid_sha256(candidate_id_sha256):
+        # A present but invalid binding is not a pre-ID legacy trace.
+        candidate_id_sha256 = (
+            "" if "confirmed_candidate_id_sha256" in row else None
+        )
     return {
         "character_key": row.get("character_key"),
         "dimension": row.get("dimension"),
         "comparison_key_sha256": _trace_comparison_sha256(row),
+        "confirmed_candidate_id_sha256": candidate_id_sha256,
         "matched_observation_count": row.get("matched_observation_count"),
+        "matched_observation_refs": _safe_trace_observation_refs(
+            row.get("matched_observation_refs")
+        ),
+        "matched_observation_refs_truncated": (
+            row.get("matched_observation_refs_truncated") is True
+        ),
         "prepare_reason": row.get("prepare_reason"),
         "review_outcome": row.get("review_outcome"),
         "review_verdict": row.get("review_verdict"),
@@ -738,26 +876,54 @@ def _safe_evidence_refs(evidence: object) -> list[dict[str, Any]]:
     ]
 
 
-def _safe_visible_issue(issue: dict[str, Any]) -> dict[str, Any]:
+def _safe_visible_issue(
+    issue: dict[str, Any], *, case_trace: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     metadata = issue.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
     dimension = metadata.get("dimension")
     trait_key = metadata.get("trait_key")
+    character_key = metadata.get("character_key")
+    candidate_id_sha256 = _candidate_id_sha256(
+        metadata.get("confirmed_candidate_id")
+    )
     comparison_key_sha256 = None
+    legacy_comparison_sha256 = None
     if (
         isinstance(dimension, str)
         and dimension
         and isinstance(trait_key, str)
         and trait_key
     ):
-        comparison_key_sha256 = _comparison_identity(
+        legacy_comparison_sha256 = _comparison_identity(
             dimension=dimension,
             trait_key=trait_key,
         )["comparison_key_sha256"]
+    if (
+        case_trace is not None
+        and isinstance(character_key, str)
+        and isinstance(dimension, str)
+    ):
+        matched_trace = _trace_for_candidate(
+            case_trace,
+            candidate_id_sha256=candidate_id_sha256,
+            character_key=character_key,
+            dimension=dimension,
+            legacy_comparison_sha256=legacy_comparison_sha256,
+        )
+        if matched_trace is not None:
+            comparison_key_sha256 = matched_trace["comparison_key_sha256"]
+    if case_trace is None or (
+        comparison_key_sha256 is None
+        and candidate_id_sha256 is None
+        and dimension not in _OBJECT_BEARING_TRAIT_DIMENSIONS
+    ):
+        comparison_key_sha256 = legacy_comparison_sha256
     return {
-        "character_key": metadata.get("character_key"),
+        "character_key": character_key,
         "dimension": dimension,
         "comparison_key_sha256": comparison_key_sha256,
+        "confirmed_candidate_id_sha256": candidate_id_sha256,
         "subtype": metadata.get("subtype"),
         "judgement": metadata.get("judgement"),
         "evidence_refs": _safe_evidence_refs(issue.get("evidence")),
@@ -802,7 +968,7 @@ def _run_summary(
     for issue in issues:
         if not isinstance(issue, dict) or issue.get("run_id") != run_id:
             continue
-        safe_issue = _safe_visible_issue(issue)
+        safe_issue = _safe_visible_issue(issue, case_trace=case_trace)
         signatures.append(
             json.dumps(safe_issue, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         )
@@ -842,7 +1008,9 @@ def _run_summary(
 
 
 def _runtime_identity(
-    expected: dict[str, Any], case_traits: dict[str, dict[str, str]]
+    expected: dict[str, Any],
+    case_traits: dict[str, dict[str, str]],
+    trace: list[dict[str, Any]],
 ) -> tuple[str, str, str] | None:
     case_id = expected.get("case_id")
     character_key = expected.get("character_key")
@@ -857,7 +1025,21 @@ def _runtime_identity(
     if not isinstance(runtime, dict) or runtime.get("dimension") != dimension:
         return None
     comparison_hash = runtime.get("comparison_key_sha256")
-    if not isinstance(comparison_hash, str) or len(comparison_hash) != 64:
+    candidate_id_sha256 = runtime.get("confirmed_candidate_id_sha256")
+    if candidate_id_sha256 is not None:
+        if not _valid_sha256(candidate_id_sha256):
+            return None
+        matched_trace = _trace_for_candidate(
+            trace,
+            candidate_id_sha256=candidate_id_sha256,
+            character_key=character_key,
+            dimension=dimension,
+            legacy_comparison_sha256=comparison_hash,
+        )
+        if matched_trace is None:
+            return None
+        comparison_hash = matched_trace["comparison_key_sha256"]
+    if not _valid_sha256(comparison_hash):
         return None
     return character_key, dimension, comparison_hash
 
@@ -1033,7 +1215,7 @@ def _evaluate_oracle_trial(
         case_id = expected.get("case_id")
         if not isinstance(case_id, str):
             continue
-        runtime_identity = _runtime_identity(expected, case_traits)
+        runtime_identity = _runtime_identity(expected, case_traits, trace)
         if runtime_identity is None:
             checks[case_id] = False
             if expected.get("visible") is True:

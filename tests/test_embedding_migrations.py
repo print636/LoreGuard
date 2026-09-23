@@ -9,20 +9,125 @@ from unittest.mock import patch
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import MetaData, create_engine, inspect
+from sqlalchemy import MetaData, Table, create_engine, inspect, select
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.schema import CreateIndex
 
 from app.db import Base
 from app import db as app_db
+from app.narrative_context import payload_sha256
 
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0013_account_model_provider"
+HEAD_REVISION = "0014_trait_comparison_key"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
+    def test_trait_comparison_key_migration_preserves_legacy_rows_and_snapshot_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trait-comparison.db"
+            url = f"sqlite:///{path.as_posix()}"
+            self.upgrade_to(url, "0013_account_model_provider")
+            engine = create_engine(url)
+            before_columns = {
+                item["name"]
+                for item in inspect(engine).get_columns("character_trait_candidates")
+            }
+            self.assertNotIn("comparison_key", before_columns)
+            metadata = MetaData()
+            candidate_table = Table(
+                "character_trait_candidates", metadata, autoload_with=engine
+            )
+            snapshot_table = Table(
+                "analysis_run_character_trait_inputs", metadata, autoload_with=engine
+            )
+            scope = {"schema_version": 1, "timeline_key": "main"}
+            evidence = [{"document_id": "document-1", "text": "林澈喜欢蜜瓜。"}]
+            legacy_payload = {"schema_version": 1, "trait_key": "食物偏好"}
+            legacy_hash = payload_sha256(legacy_payload)
+            with engine.begin() as connection:
+                connection.execute(
+                    candidate_table.insert().values(
+                        id="candidate-legacy",
+                        project_id="project-legacy",
+                        source_run_id="run-source",
+                        character_key="林澈",
+                        character_display_name="林澈",
+                        trait_type="preference",
+                        trait_key="食物偏好",
+                        value="喜欢蜜瓜",
+                        polarity="positive",
+                        stability="stable",
+                        contexts=[],
+                        origin="explicit_setting",
+                        authority_tier="formal_record",
+                        confidence=0.9,
+                        scope_payload=scope,
+                        scope_sha256=payload_sha256(scope),
+                        evidence=evidence,
+                        evidence_sha256=payload_sha256(evidence),
+                        candidate_fingerprint="f" * 64,
+                        generator_version="test-v1",
+                        provenance={},
+                        review_state="confirmed",
+                        lock_version=1,
+                        created_at=datetime(2026, 9, 1),
+                    )
+                )
+                connection.execute(
+                    snapshot_table.insert().values(
+                        id="snapshot-legacy",
+                        run_id="run-frozen",
+                        project_id="project-legacy",
+                        candidate_id="candidate-legacy",
+                        confirmation_review_id="review-legacy",
+                        candidate_lock_version=1,
+                        ordinal=0,
+                        payload=legacy_payload,
+                        payload_sha256=legacy_hash,
+                    )
+                )
+            engine.dispose()
+
+            self.upgrade(url)
+            engine = create_engine(url)
+            comparison_column = next(
+                item
+                for item in inspect(engine).get_columns("character_trait_candidates")
+                if item["name"] == "comparison_key"
+            )
+            self.assertTrue(comparison_column["nullable"])
+            self.assertEqual(comparison_column["type"].length, 200)
+            with engine.connect() as connection:
+                candidate = connection.exec_driver_sql(
+                    "SELECT comparison_key, candidate_fingerprint "
+                    "FROM character_trait_candidates WHERE id = 'candidate-legacy'"
+                ).one()
+                frozen = connection.execute(
+                    select(snapshot_table.c.payload, snapshot_table.c.payload_sha256)
+                    .where(snapshot_table.c.id == "snapshot-legacy")
+                ).one()
+            self.assertIsNone(candidate.comparison_key)
+            self.assertEqual(candidate.candidate_fingerprint, "f" * 64)
+            self.assertEqual(frozen.payload, legacy_payload)
+            self.assertEqual(frozen.payload_sha256, legacy_hash)
+            engine.dispose()
+
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            config.attributes["database_url"] = url
+            command.downgrade(config, "0013_account_model_provider")
+            engine = create_engine(url)
+            self.assertEqual(
+                {
+                    item["name"]
+                    for item in inspect(engine).get_columns("character_trait_candidates")
+                },
+                before_columns,
+            )
+            engine.dispose()
+
     def test_run_idempotency_indexes_compile_for_sqlite_and_postgresql(self):
         table = Base.metadata.tables["analysis_runs"]
         indexes = {

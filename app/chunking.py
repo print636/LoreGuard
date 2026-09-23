@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import TYPE_CHECKING
+import unicodedata
 
 if TYPE_CHECKING:
     from .pipeline import DocumentInput
+
+
+_PROFILE_H2 = re.compile(r"^##[ \t]+([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·・]{0,19})[ \t]*$")
+_PROFILE_H1 = re.compile(r"^#[ \t]+(.+?)[ \t]*$")
+_PROFILE_FENCE = re.compile(r"^[ \t]*(?:```|~~~)")
+_PROFILE_GENERIC_HEADINGS = frozenset(
+    {
+        "简介", "概览", "总览", "角色", "人物", "角色档案", "人物档案",
+        "角色设定", "人物设定", "世界观", "背景", "身世", "经历",
+        "性格", "核心性格", "人物性格", "性格特点", "偏好", "习惯",
+        "能力", "外貌", "人物关系", "角色关系", "关系", "时间线",
+        "设定", "故事", "章节", "事件", "备注", "补充", "其他",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +63,101 @@ def chunk_document(
     if not lines:
         return []
 
+    return _chunk_numbered_rows(
+        document,
+        list(enumerate(lines, start=1)),
+        max_chars,
+        overlap_lines=overlap_lines,
+    )
+
+
+def chunk_character_profile_document(
+    document: DocumentInput,
+    max_chars: int,
+) -> list[DocumentChunk]:
+    """Isolate clearly named character sections without changing source offsets.
+
+    Ambiguous Markdown, preamble facts, and profiles without a unique named
+    section layout retain ordinary line-based chunking.  Every original line
+    belongs to exactly one section before the existing long-line splitter runs.
+    """
+    if max_chars < 32:
+        raise ValueError("model_chunk_max_chars must be at least 32")
+    if document.role != "character_profile":
+        return chunk_document(document, max_chars, overlap_lines=0)
+    lines = document.content.splitlines()
+    if not lines or any(_PROFILE_FENCE.match(line) for line in lines):
+        return chunk_document(document, max_chars, overlap_lines=0)
+
+    headings = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("## ") or line.startswith("##\t")
+    ]
+    if len(headings) < 2:
+        return chunk_document(document, max_chars, overlap_lines=0)
+
+    preamble = [line for line in lines[: headings[0]] if line.strip()]
+    if len(preamble) > 1 or (
+        preamble
+        and not (
+            (match := _PROFILE_H1.fullmatch(preamble[0]))
+            and re.search(r"角色|人物|人设|档案|character|profile", match.group(1), re.I)
+        )
+    ):
+        return chunk_document(document, max_chars, overlap_lines=0)
+
+    names: list[str] = []
+    for index in headings:
+        match = _PROFILE_H2.fullmatch(lines[index])
+        if match is None:
+            return chunk_document(document, max_chars, overlap_lines=0)
+        name = match.group(1)
+        if unicodedata.normalize("NFKC", name).casefold() in _PROFILE_GENERIC_HEADINGS:
+            return chunk_document(document, max_chars, overlap_lines=0)
+        names.append(name)
+    normalized_names = [unicodedata.normalize("NFKC", name).casefold() for name in names]
+    if len(set(normalized_names)) != len(names):
+        return chunk_document(document, max_chars, overlap_lines=0)
+
+    if any(name in "\n".join(preamble) for name in names):
+        return chunk_document(document, max_chars, overlap_lines=0)
+    boundaries = [*headings, len(lines)]
+    for section_index, name in enumerate(names):
+        body = lines[boundaries[section_index] + 1 : boundaries[section_index + 1]]
+        if any(_PROFILE_H1.fullmatch(line) for line in body):
+            return chunk_document(document, max_chars, overlap_lines=0)
+        if not any(name in line and len(line.strip()) >= len(name) + 4 for line in body):
+            return chunk_document(document, max_chars, overlap_lines=0)
+        if any(other in line for other in names if other != name for line in body):
+            return chunk_document(document, max_chars, overlap_lines=0)
+
+    chunks: list[DocumentChunk] = []
+    for section_index in range(len(names)):
+        start = 0 if section_index == 0 else boundaries[section_index]
+        end = boundaries[section_index + 1]
+        numbered = [(index + 1, lines[index]) for index in range(start, end)]
+        chunks.extend(
+            _chunk_numbered_rows(
+                document,
+                numbered,
+                max_chars,
+                overlap_lines=0,
+                first_chunk_index=len(chunks),
+            )
+        )
+    return chunks
+
+
+def _chunk_numbered_rows(
+    document: DocumentInput,
+    numbered_rows: list[tuple[int, str]],
+    max_chars: int,
+    *,
+    overlap_lines: int,
+    first_chunk_index: int = 0,
+) -> list[DocumentChunk]:
+
     chunks: list[DocumentChunk] = []
     current: list[tuple[int, str]] = []
     current_chars = 0
@@ -55,7 +166,7 @@ def chunk_document(
         nonlocal current, current_chars
         if not current:
             return
-        chunks.append(_make_chunk(document, len(chunks), current))
+        chunks.append(_make_chunk(document, first_chunk_index + len(chunks), current))
         overlap: list[tuple[int, str]] = []
         if overlap_lines and len({line for line, _ in current}) > 1:
             wanted = set(sorted({line for line, _ in current})[-overlap_lines:])
@@ -65,14 +176,20 @@ def chunk_document(
         current = overlap
         current_chars = sum(len(text) for _, text in current) + max(0, len(current) - 1)
 
-    for line_number, line in enumerate(lines, start=1):
+    for line_number, line in numbered_rows:
         if len(line) > max_chars:
             flush()
             current = []
             current_chars = 0
             for offset in range(0, len(line), max_chars):
                 fragment = line[offset : offset + max_chars]
-                chunks.append(_make_chunk(document, len(chunks), [(line_number, fragment)]))
+                chunks.append(
+                    _make_chunk(
+                        document,
+                        first_chunk_index + len(chunks),
+                        [(line_number, fragment)],
+                    )
+                )
             continue
         added = len(line) + (1 if current else 0)
         if current and current_chars + added > max_chars:
