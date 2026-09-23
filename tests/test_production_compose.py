@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from app.config import Settings
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = ROOT / "docker-compose.yml"
@@ -26,6 +28,13 @@ PRODUCTION_ENV = {
         ROOT / "tests" / "fixtures" / "account-model-keyring.test.json"
     ),
     "ACCOUNT_MODEL_ALLOWED_ORIGINS": "https://api.example.test",
+}
+
+OPTIONAL_ENV_DEFAULTS = {
+    "SEMANTIC_REPAIR_TIMEOUT_SECONDS": "5",
+    "SEMANTIC_REPAIR_TOTAL_DEADLINE_SECONDS": "8",
+    "SEMANTIC_REPAIR_MAX_COMPLETION_TOKENS": "",
+    "SEMANTIC_REPAIR_MAX_RESPONSE_BYTES": "64000",
 }
 
 
@@ -52,7 +61,7 @@ def _compose_config(
     return subprocess.run(
         command,
         cwd=ROOT,
-        env={**os.environ, **env},
+        env={**os.environ, **OPTIONAL_ENV_DEFAULTS, **env},
         capture_output=True,
         text=True,
         check=False,
@@ -99,6 +108,8 @@ def test_rendered_production_config_is_required_auth_and_loopback_only():
         assert environment["ACCOUNT_MODEL_ALLOWED_ORIGINS"] == PRODUCTION_ENV[
             "ACCOUNT_MODEL_ALLOWED_ORIGINS"
         ]
+        for key, value in OPTIONAL_ENV_DEFAULTS.items():
+            assert environment[key] == value
         assert services[service_name]["secrets"] == [
             {
                 "source": "account_model_keyring",
@@ -147,3 +158,8 @@ def test_rendered_production_config_is_required_auth_and_loopback_only():
 def test_compose_merge_operator_support_is_validated_without_starting_containers():
     result = _compose_config(env=PRODUCTION_ENV, quiet=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_blank_optional_semantic_repair_completion_limit_normalizes_to_none():
+    settings = Settings(semantic_repair_max_completion_tokens="")
+    assert settings.semantic_repair_max_completion_tokens is None

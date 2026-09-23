@@ -404,6 +404,7 @@ class Settings(BaseSettings):
     @field_validator(
         "provider_total_deadline_seconds",
         "provider_max_completion_tokens",
+        "semantic_repair_max_completion_tokens",
         mode="before",
     )
     @classmethod

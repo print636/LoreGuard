@@ -297,6 +297,34 @@ def _semantic_label_error_codes(exc: ValidationError) -> tuple[str, ...] | None:
     return tuple(sorted(codes)) or None
 
 
+def _validate_raw_evidence_boundary(
+    document: DocumentInput,
+    chunk: DocumentChunk,
+    raw_record: Any,
+) -> None:
+    """Prove evidence coordinates before any other record error is isolated."""
+    if not isinstance(raw_record, dict):
+        raise ValueError("模型返回的证据行号越界")
+    start = raw_record.get("source_line_start")
+    end = raw_record.get("source_line_end")
+    # ``bool`` is a subclass of ``int`` in Python, so an ``isinstance`` check
+    # would accept JSON true/false as a line number. The provider contract
+    # requires actual JSON integers and never coerces strings or floats.
+    if type(start) is not int or type(end) is not int:
+        raise ValueError("模型返回的证据行号越界")
+    lines = document.content.splitlines()
+    if (
+        start < 1
+        or end < start
+        or end > len(lines)
+        or start < chunk.global_line_start
+        or end > chunk.global_line_end
+    ):
+        raise ValueError("模型返回的证据行号越界")
+    if not "\n".join(lines[start - 1 : end]).strip():
+        raise ValueError("模型返回了空证据区间")
+
+
 def _repair_input(candidate: _RepairCandidate) -> dict[str, Any]:
     raw = candidate.raw_record
     # This is a positive allowlist. Provider-facing repair input contains no
@@ -1466,11 +1494,12 @@ class ModelEnhancedExtractor:
                 raise BatchProtocolError("批量响应的 doc_ref 未与输入一一对应")
             groups = {group.doc_ref: group for group in envelope.documents}
 
-            # Validate the entire shared response before repair. Attribution,
-            # core/schema and evidence-range errors remain fatal to the batch
-            # and can never be presented to the label repair call. A record
-            # whose already-attributed content fails lexical/semantic quality
-            # is isolated within its document and never committed.
+            # Validate the entire shared response before repair. Envelope/ref
+            # attribution, context self-reporting and evidence-range errors
+            # remain fatal to the batch. A core-schema error is confined to an
+            # already-attributed record, so that record is quarantined without
+            # discarding independently validated siblings. Content failures
+            # are likewise isolated within their document and never committed.
             validated_records: dict[tuple[int, int], ParsedDirective] = {}
             semantic_reasons: dict[tuple[int, int], str] = {}
             next_repair_index = 1
@@ -1492,6 +1521,25 @@ class ModelEnhancedExtractor:
                             "模型试图自报文档归属或上下文"
                         )
                     try:
+                        _validate_raw_evidence_boundary(
+                            document,
+                            chunks[0],
+                            raw_record,
+                        )
+                    except ValueError as exc:
+                        executions[doc_index].invalid_records += 1
+                        _add_execution_counter(
+                            executions[doc_index], "unresolved_invalid_records"
+                        )
+                        fatal_reason = {
+                            "模型返回的证据行号越界": "evidence_range",
+                            "模型返回了空证据区间": "empty_evidence",
+                        }.get(str(exc), "record_validation")
+                        executions[doc_index].note(fatal_reason)
+                        raise BatchProtocolError(
+                            f"批量文档 {ref} 的模型记录 #{record_index} 证据边界无效"
+                        ) from exc
+                    try:
                         assessed, repair_candidate, semantic_reason = (
                             self._validate_or_quarantine(
                                 document,
@@ -1508,9 +1556,7 @@ class ModelEnhancedExtractor:
                             executions[doc_index], "unresolved_invalid_records"
                         )
                         executions[doc_index].note("schema_validation")
-                        raise BatchProtocolError(
-                            f"批量文档 {ref} 的模型记录 #{record_index} 不符合 schema"
-                        ) from exc
+                        continue
                     except ValueError as exc:
                         reason = {
                             "模型记录缺少原文词面支持": "lexical_support",
@@ -1629,6 +1675,11 @@ class ModelEnhancedExtractor:
                             "语义标签 repair pass 未完成；隔离候选已丢弃并保留基线"
                         )
                 unresolved = execution.unresolved_invalid_records or 0
+                if unresolved and model_directives:
+                    staged_warnings.append(
+                        f"该批量文档有 {unresolved} 条模型记录未通过验证，已逐条隔离；"
+                        "其余记录仍按原文证据独立校验"
+                    )
                 group_failed = bool(
                     group.records and not model_directives and unresolved
                 )
@@ -1656,9 +1707,10 @@ class ModelEnhancedExtractor:
                 )
 
             # Atomic attribution boundary: no parsed document observes model
-            # output until the envelope, doc_ref mapping, record schema and
-            # evidence ranges are proven. Content-invalid records are already
-            # isolated within their attributed document above.
+            # output until the envelope, doc_ref mapping, every retained
+            # record schema and all retained evidence ranges are proven.
+            # Schema/content-invalid records are already isolated within their
+            # attributed document above and can never reach this commit.
             for parsed, execution, (
                 directives, warnings, empty, model_contributed, group_failed
             ) in zip(

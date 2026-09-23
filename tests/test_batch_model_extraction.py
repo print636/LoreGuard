@@ -174,10 +174,70 @@ class BatchModelExtractionTests(unittest.TestCase):
             row.model_execution.recovered_invalid_records or 0 for row in parsed
         ))
 
-    def test_label_candidate_before_fatal_schema_is_atomically_unresolved(self):
+    def test_core_schema_error_cannot_hide_invalid_evidence_coordinate(self):
+        invalid_records = []
+
+        out_of_range = fact("苏弦", "档案官", line=999)
+        out_of_range.pop("predicate")
+        invalid_records.append(("out_of_range", out_of_range))
+
+        missing = fact("苏弦", "档案官")
+        missing.pop("predicate")
+        missing.pop("source_line_start")
+        invalid_records.append(("missing", missing))
+
+        string_coordinate = fact("苏弦", "档案官")
+        string_coordinate.pop("predicate")
+        string_coordinate["source_line_start"] = "1"
+        invalid_records.append(("string", string_coordinate))
+
+        boolean_coordinate = fact("苏弦", "档案官")
+        boolean_coordinate.pop("predicate")
+        boolean_coordinate["source_line_start"] = True
+        invalid_records.append(("boolean", boolean_coordinate))
+
+        for name, invalid_record in invalid_records:
+            with self.subTest(name=name):
+                result, calls = self.run_batch({"documents": [
+                    {"doc_ref": "d1", "records": [fact("林澈", "领航员")]},
+                    {"doc_ref": "d2", "records": [invalid_record]},
+                ]})
+
+                self.assertEqual(1, len(calls))
+                self.assertFalse(result.model_used)
+                status = result.diagnostics["model"]
+                self.assertEqual((1, 1, 0), (
+                    status["invalid_records"],
+                    status["unresolved_invalid_records"],
+                    status["recovered_invalid_records"],
+                ))
+                self.assertIn("evidence_range", status["reason_codes"])
+                self.assertIn("batch_protocol", status["reason_codes"])
+
+    def test_core_schema_error_cannot_hide_empty_evidence_range(self):
+        invalid = fact("苏弦", "档案官")
+        invalid.pop("predicate")
+        documents = [
+            DocumentInput("real-a", "a.md", "林澈的身份是领航员。", "canon", "global"),
+            DocumentInput("real-b", "b.md", "\n", "chapter", "route_b"),
+        ]
+        result, calls = self.run_batch({"documents": [
+            {"doc_ref": "d1", "records": [fact("林澈", "领航员")]},
+            {"doc_ref": "d2", "records": [invalid]},
+        ]}, documents)
+
+        self.assertEqual(1, len(calls))
+        self.assertFalse(result.model_used)
+        status = result.diagnostics["model"]
+        self.assertEqual((1, 1), (
+            status["invalid_records"],
+            status["unresolved_invalid_records"],
+        ))
+        self.assertIn("empty_evidence", status["reason_codes"])
+        self.assertIn("batch_protocol", status["reason_codes"])
+
+    def test_core_schema_error_isolated_without_discarding_valid_sibling_group(self):
         candidate = fact("林澈", "领航员")
-        for field in ("modality", "source_scope", "certainty"):
-            candidate.pop(field)
         fatal = fact("苏弦", "档案官")
         fatal.pop("predicate")
         result, calls = self.run_batch({"documents": [
@@ -186,9 +246,9 @@ class BatchModelExtractionTests(unittest.TestCase):
         ]})
 
         self.assertEqual(1, len(calls))
-        self.assertFalse(result.model_used)
+        self.assertTrue(result.model_used)
         status = result.diagnostics["model"]
-        self.assertEqual((2, 2, 0), (
+        self.assertEqual((1, 1, 0), (
             status["invalid_records"],
             status["unresolved_invalid_records"],
             status["recovered_invalid_records"],
@@ -198,9 +258,106 @@ class BatchModelExtractionTests(unittest.TestCase):
             status["unresolved_invalid_records"]
             + status["recovered_invalid_records"],
         )
+        self.assertIn("schema_validation", status["reason_codes"])
+        self.assertNotIn("batch_protocol", status["reason_codes"])
+        self.assertEqual((1, 1), (status["succeeded_chunks"], status["failed_chunks"]))
+        self.assertEqual(
+            [(1, 0), (0, 1)],
+            [
+                (row["succeeded_chunks"], row["failed_chunks"])
+                for row in status["documents"]
+            ],
+        )
+        self.assertTrue(any(
+            warning.startswith("b.md: 该批量文档的模型记录均未通过内容验证")
+            for warning in result.warnings
+        ))
+        model_sources = {
+            directive.evidence.document_id: directive.provenance_sources
+            for directive in result.directives
+        }
+        self.assertIn("model", model_sources["real-a"])
+        self.assertNotIn("model", model_sources["real-b"])
+
+    def test_mixed_valid_and_core_schema_invalid_records_keep_document_success(self):
+        invalid = fact("林澈", "")
+        result, calls = self.run_batch({"documents": [
+            {"doc_ref": "d1", "records": [
+                fact("林澈", "领航员"),
+                invalid,
+            ]},
+            {"doc_ref": "d2", "records": [fact("苏弦", "档案官")]},
+        ]})
+
+        self.assertEqual(1, len(calls))
+        self.assertTrue(result.model_used)
+        status = result.diagnostics["model"]
+        self.assertEqual((1, 1, 2, 0), (
+            status["invalid_records"],
+            status["unresolved_invalid_records"],
+            status["succeeded_chunks"],
+            status["failed_chunks"],
+        ))
+        self.assertNotIn("batch_protocol", status["reason_codes"])
+        self.assertTrue(all(
+            row["succeeded_chunks"] == 1 for row in status["documents"]
+        ))
+
+    def test_label_repair_survives_later_core_schema_invalid_sibling(self):
+        candidate = fact("林澈", "领航员")
+        candidate["source_scope"] = "scene"
+        invalid = fact("苏弦", "")
+        responses = [
+            {"documents": [
+                {"doc_ref": "d1", "records": [candidate]},
+                {"doc_ref": "d2", "records": [
+                    invalid,
+                    fact("苏弦", "档案官"),
+                ]},
+            ]},
+            {"patches": [{
+                "record_index": 1,
+                "modality": "asserted",
+                "source_scope": "narrator",
+                "certainty": "certain",
+            }]},
+        ]
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return completion(json.dumps(responses[len(calls) - 1], ensure_ascii=False))
+
+        provider = OpenAICompatibleProvider(
+            settings(),
+            transport=httpx.MockTransport(handler),
+            retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+            sleep=lambda _: None,
+        )
+        result = AnalysisPipeline(extractor=ModelEnhancedExtractor(provider)).run([
+            DocumentInput("real-a", "a.md", "林澈的身份是领航员。", "canon", "global"),
+            DocumentInput("real-b", "b.md", "苏弦的身份是档案官。", "chapter", "route_b"),
+        ])
+
+        self.assertEqual(2, len(calls))
+        self.assertTrue(result.model_used)
+        status = result.diagnostics["model"]
+        self.assertEqual((2, 1, 1), (
+            status["invalid_records"],
+            status["unresolved_invalid_records"],
+            status["recovered_invalid_records"],
+        ))
+        self.assertEqual(
+            status["invalid_records"],
+            status["unresolved_invalid_records"]
+            + status["recovered_invalid_records"],
+        )
+        self.assertEqual((2, 0), (status["succeeded_chunks"], status["failed_chunks"]))
+        self.assertTrue(status["repair_attempted"])
+        self.assertTrue(status["repair_succeeded"])
         self.assertIn("semantic_labels_quarantined", status["reason_codes"])
         self.assertIn("schema_validation", status["reason_codes"])
-        self.assertIn("batch_protocol", status["reason_codes"])
+        self.assertNotIn("batch_protocol", status["reason_codes"])
 
     def test_content_invalid_record_is_isolated_without_weakening_attribution(self):
         documents = [
@@ -274,7 +431,16 @@ class BatchModelExtractionTests(unittest.TestCase):
                 {"doc_ref": "d2", "records": []},
             ]
         }
-        for payload in (cross, deceptive):
+        deceptive_and_core_invalid = fact(
+            "林澈", "领航员", story_scope="route_b"
+        )
+        deceptive_and_core_invalid.pop("predicate")
+        for payload in (cross, deceptive, {
+            "documents": [
+                {"doc_ref": "d1", "records": [deceptive_and_core_invalid]},
+                {"doc_ref": "d2", "records": []},
+            ]
+        }):
             with self.subTest(payload=payload):
                 result, calls = self.run_batch(payload, documents)
                 self.assertEqual(1, len(calls))
@@ -283,6 +449,27 @@ class BatchModelExtractionTests(unittest.TestCase):
                 self.assertEqual({"route_a", "route_b"}, {
                     row.attrs.get("story_scope") for row in result.directives
                 })
+
+    def test_malformed_batch_group_envelope_remains_atomic(self):
+        payloads = [
+            {"documents": [
+                {"doc_ref": "d1", "records": "not-an-array"},
+                {"doc_ref": "d2", "records": []},
+            ]},
+            {"documents": [
+                {"doc_ref": "d1", "records": [], "scope": "forged"},
+                {"doc_ref": "d2", "records": []},
+            ]},
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                result, calls = self.run_batch(payload)
+                self.assertEqual(1, len(calls))
+                self.assertFalse(result.model_used)
+                status = result.diagnostics["model"]
+                self.assertEqual(1, status["invalid_records"])
+                self.assertEqual(1, status["unresolved_invalid_records"])
+                self.assertIn("batch_protocol", status["reason_codes"])
 
     def test_shared_subject_predicate_cannot_import_another_documents_value(self):
         documents = [
