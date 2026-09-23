@@ -30,6 +30,7 @@ from .character_trait_extraction import (
     CharacterSignalTarget,
     PendingTraitCandidate,
     build_pending_trait_candidates,
+    safe_pronoun_evidence_range,
     stable_trait_identity,
     trait_keys_compatible,
 )
@@ -445,7 +446,12 @@ class CharacterConsistencyStage:
                         "character_signal_token_budget": min(
                             settings.character_signal_token_budget,
                             targeted_budget,
-                        )
+                        ),
+                        "character_signal_max_completion_tokens": (
+                            _targeted_completion_reserve(
+                                settings, targeted_chunk
+                            )
+                        ),
                     }
                 )
                 targeted = CharacterSignalExtractor(
@@ -515,7 +521,9 @@ class CharacterConsistencyStage:
                         targeted_verification_no_candidate_targets += 1
                         continue
                     targeted_verification_eligible_targets += 1
-                    targeted_verification_candidate_lines += len(candidate_ranges)
+                    targeted_verification_candidate_lines += sum(
+                        end - start + 1 for start, end in candidate_ranges
+                    )
                     if truncated_lines:
                         targeted_verification_candidate_lines_truncated += (
                             truncated_lines
@@ -554,7 +562,14 @@ class CharacterConsistencyStage:
                         "character_signal_token_budget": min(
                             settings.character_signal_token_budget,
                             verification_budget,
-                        )
+                        ),
+                        "character_signal_max_completion_tokens": (
+                            _targeted_completion_reserve(
+                                settings,
+                                targeted_chunk,
+                                candidate_ranges=candidate_ranges,
+                            )
+                        ),
                     }
                 )
                 verification = CharacterSignalExtractor(
@@ -1263,28 +1278,94 @@ def _target_candidate_line_ranges(
     chunk: CharacterSignalChunk,
     target: CharacterSignalTarget,
 ) -> tuple[tuple[tuple[int, int], ...], int]:
-    """Select bounded, exact full lines naming the target character.
+    """Select bounded, exact named lines or strictly proven adjacent spans.
 
-    Returned ranges retain the original global line numbers. The extractor
-    still binds output against ``chunk`` and applies this tuple as an exact
-    server-owned allowlist, so omitted or cross-line evidence cannot re-enter.
+    Returned ranges retain the original global line numbers. An adjacent
+    pronoun line is included only when the extraction binder's same structural
+    proof accepts that pair. The extractor still binds output against ``chunk``
+    and applies the tuple as an exact server-owned allowlist.
     """
 
     character_key = _key(target.character)
-    candidates = [
-        (line_number, line_number)
-        for line_number, line in enumerate(
-            chunk.content.splitlines(), start=chunk.global_line_start
+    candidates: list[tuple[int, int]] = []
+    used_lines: set[int] = set()
+    for line_number, line in enumerate(
+        chunk.content.splitlines(), start=chunk.global_line_start
+    ):
+        if (
+            not character_key
+            or character_key not in _key(line)
+            or line_number in used_lines
+        ):
+            continue
+        paired = safe_pronoun_evidence_range(
+            chunk, target.character, line_number
         )
-        if character_key
-        and character_key in _key(line)
-        and not any(
-            not (line_number < start or line_number > end)
+        candidate = paired or (line_number, line_number)
+        if any(
+            not (candidate[1] < start or candidate[0] > end)
             for start, end in target.existing_evidence_ranges
-        )
-    ]
-    selected = tuple(candidates[:MAX_TARGETED_CHARACTER_SIGNAL_CANDIDATE_LINES])
-    return selected, max(0, len(candidates) - len(selected))
+        ):
+            # A pair could overlap an already-bound following line while the
+            # named antecedent remains unused. Keep only that exact named line.
+            candidate = (line_number, line_number)
+            if any(
+                not (candidate[1] < start or candidate[0] > end)
+                for start, end in target.existing_evidence_ranges
+            ):
+                continue
+        candidates.append(candidate)
+        used_lines.update(range(candidate[0], candidate[1] + 1))
+    selected: list[tuple[int, int]] = []
+    selected_line_count = 0
+    for candidate in candidates:
+        span_lines = candidate[1] - candidate[0] + 1
+        if selected_line_count + span_lines > MAX_TARGETED_CHARACTER_SIGNAL_CANDIDATE_LINES:
+            break
+        selected.append(candidate)
+        selected_line_count += span_lines
+    omitted_lines = sum(
+        end - start + 1 for start, end in candidates[len(selected) :]
+    )
+    return tuple(selected), omitted_lines
+
+
+def _targeted_completion_reserve(
+    settings: Settings,
+    chunk: CharacterSignalChunk,
+    *,
+    candidate_ranges: tuple[tuple[int, int], ...] = (),
+) -> int:
+    """Reserve for at most three focused records, not a full extraction batch.
+
+    The signal extractor charges its entire completion allowance on admission,
+    even when the provider returns a short response. Reusing the 12-record
+    allowance for each one-target pass can starve later targets. Keep a generous
+    floor for JSON fields and short statements; grow with the three longest
+    eligible evidence lines and retain the configured full cap for long prose.
+    This changes only capacity planning, never evidence or issue thresholds.
+    """
+
+    lines = chunk.content.splitlines()
+    if candidate_ranges:
+        eligible_indexes = {
+            line_number - chunk.global_line_start
+            for start, end in candidate_ranges
+            for line_number in range(start, end + 1)
+            if chunk.global_line_start <= line_number <= chunk.global_line_end
+        }
+        eligible_lines = (lines[index] for index in sorted(eligible_indexes))
+        max_span_lines = max(end - start + 1 for start, end in candidate_ranges)
+    else:
+        eligible_lines = iter(lines)
+        # The binder can accept a strictly proven two-line pronoun span in a
+        # full targeted pass. Reserve for up to three such records.
+        max_span_lines = 2
+    longest_evidence_lines = sorted(
+        (min(len(line), 2_000) for line in eligible_lines), reverse=True
+    )[: 3 * max_span_lines]
+    requested = max(2_048, 1_024 + 2 * sum(longest_evidence_lines))
+    return min(settings.character_signal_max_completion_tokens, requested)
 
 
 def _safe_server_context(

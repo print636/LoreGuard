@@ -20,12 +20,14 @@ from app.character_consistency_stage import (
     _safe_baseline_hint,
     _safe_server_context,
     _select_authoritative_baselines,
+    _targeted_completion_reserve,
     _trait_applies_to_release,
 )
 from app.character_drift import ConfirmedTraitSnapshot
 from app.character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
+    CharacterSignalChunk,
 )
 from app.config import Settings
 from app.db import (
@@ -56,6 +58,19 @@ class QueueProvider:
         return SimpleNamespace(text=value, prompt_tokens=17, completion_tokens=9)
 
 
+class CapturingQueueProvider(QueueProvider):
+    def __init__(self, *responses: str | Exception):
+        super().__init__(*responses)
+        self.completion_caps: list[int] = []
+
+    def fork_for_character_consistency(
+        self, *, settings, stage, remaining_deadline_seconds=None
+    ):
+        if stage == "signal":
+            self.completion_caps.append(settings.character_signal_max_completion_tokens)
+        return self
+
+
 @pytest.fixture(autouse=True)
 def _clear_write_rate_limiter():
     write_limiter.events.clear()
@@ -74,6 +89,136 @@ def _settings(**overrides) -> Settings:
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
+
+
+def test_targeted_reserve_reclaims_short_response_capacity_without_lifting_cap():
+    chunk = CharacterSignalChunk(
+        document_id="doc-1",
+        document_name="draft.md",
+        content="甲在晨会上主动发言。\n乙听完后离开。\n甲在晚会上主动攀谈。",
+        global_line_start=7,
+        source_kind="draft",
+    )
+    settings = _settings(character_signal_max_completion_tokens=4_096)
+
+    assert _targeted_completion_reserve(settings, chunk) == 2_048
+    assert _targeted_completion_reserve(
+        settings, chunk, candidate_ranges=((7, 7),)
+    ) == 2_048
+    assert _targeted_completion_reserve(
+        _settings(character_signal_max_completion_tokens=1_024), chunk
+    ) == 1_024
+
+    long_chunk = chunk.__class__(
+        document_id="doc-2",
+        document_name="long.md",
+        content="甲" + "讲述过往" * 400,
+        global_line_start=1,
+        source_kind="draft",
+    )
+    assert _targeted_completion_reserve(settings, long_chunk) == 4_096
+
+    paired_chunk = chunk.__class__(
+        document_id="doc-3",
+        document_name="paired.md",
+        content="甲" + "准备" * 250 + "。\n她" + "记录" * 250 + "。",
+        global_line_start=7,
+        source_kind="draft",
+    )
+    assert 2_048 < _targeted_completion_reserve(
+        settings, paired_chunk, candidate_ranges=((7, 8),)
+    ) <= 4_096
+
+
+def test_targeted_reserve_reaches_provider_fork_for_short_draft():
+    with TestClient(app) as client:
+        project = _confirmed_directness_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content="祁雾走进会议室。",
+            narrative_context=_context(publication="draft"),
+        )
+        provider = CapturingQueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence="祁雾说话直来直往，这是他的核心性格。",
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="core_personality",
+                    trait_key="directness",
+                    statement="说话直来直往",
+                )
+            ),
+            _response(),
+            _response(),
+            _response(),
+        )
+        _run_stage(_new_run(client, project["id"]), provider)
+
+    assert provider.completion_caps[:2] == [4_096, 4_096]
+    assert provider.completion_caps[2:] == [2_048, 2_048]
+
+
+def test_empty_first_targeted_pass_recovers_safe_adjacent_pronoun_in_verification():
+    antecedent = "这里只有祁雾。"
+    observation = "她用奉承话术迂回交流。"
+    with TestClient(app) as client:
+        project = _confirmed_directness_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content=f"{antecedent}\n{observation}",
+            narrative_context=_context(publication="draft"),
+        )
+        pronoun_record = _record(
+            character="祁雾",
+            evidence=f"{antecedent}\n{observation}",
+            polarity="negative",
+            kind="action",
+            dimension="core_personality",
+            trait_key="directness",
+            statement="祁雾用奉承话术迂回交流",
+            line=1,
+        )
+        pronoun_record["source_line_end"] = 2
+        provider = QueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence="祁雾说话直来直往，这是他的核心性格。",
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="core_personality",
+                    trait_key="directness",
+                    statement="说话直来直往",
+                )
+            ),
+            _response(),
+            _response(),
+            _response(pronoun_record),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            provider,
+            character_signal_max_completion_tokens=512,
+        )
+
+    counts = result.diagnostics["counts"]
+    assert counts["targeted_verification_scheduled_count"] == 1
+    assert counts["targeted_verification_candidate_line_count"] == 2
+    assert counts["targeted_verification_signal_added_count"] == 1
+    assert counts["draft_observation_count"] == 1
+    assert result.diagnostics["material_coverage"] == "complete"
+    verification_prompt = provider.calls[3][1]
+    assert "candidate_lines_only" in verification_prompt
+    assert f"1: {antecedent}" in verification_prompt
+    assert f"2: {observation}" in verification_prompt
 
 
 def _context(

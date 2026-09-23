@@ -32,6 +32,7 @@ from app.character_trait_extraction import stable_trait_identity
 FIXTURES = {
     "demo": ROOT / "data" / "character-continuity-demo",
     "ooc-v1": ROOT / "data" / "character-ooc-challenge-v1",
+    "ooc-transfer-v1": ROOT / "data" / "character-ooc-transfer-v1",
 }
 DEMO = FIXTURES["demo"]
 BASELINE_FILES = (
@@ -45,8 +46,12 @@ TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 DIAGNOSTIC_RECORD_REASONS = frozenset({
     "evidence_range", "evidence_mismatch", "character_support",
     "key_object_required", "key_object_support", "statement_support",
-    "source_formal", "source_history", "schema_validation", "record_validation",
+    "schema_validation", "record_validation", "directional_trait_key",
 })
+DIAGNOSTIC_SOURCE_COUNTS = frozenset({"source_formal", "source_history"})
+DIAGNOSTIC_REGENERATION_COUNTS = frozenset(
+    f"regenerated_from_{reason}" for reason in DIAGNOSTIC_RECORD_REASONS
+)
 
 
 def _dataset_label() -> str:
@@ -211,7 +216,9 @@ def _wait_run(
         time.sleep(1.0)
 
 
-def _validate_oracle_payload(payload: object) -> dict[str, Any]:
+def _validate_oracle_payload(
+    payload: object, *, require_frozen_semantic_axis: bool = False
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError("acceptance oracle must be a JSON object")
     if payload.get("schema_version") != "character-continuity-live-oracle-v2":
@@ -224,6 +231,11 @@ def _validate_oracle_payload(payload: object) -> dict[str, Any]:
         "open_text_generalization_claim": False,
     }:
         raise RuntimeError("acceptance oracle dataset boundary is invalid")
+    selector_policy = payload.get("selector_policy")
+    if selector_policy not in {None, "frozen_semantic_axis_v1"}:
+        raise RuntimeError("acceptance oracle selector policy is invalid")
+    if require_frozen_semantic_axis and selector_policy != "frozen_semantic_axis_v1":
+        raise RuntimeError("frozen transfer oracle selector policy is missing")
     selectors = payload.get("confirm_candidates")
     expected = payload.get("expected_cases")
     if not isinstance(selectors, list) or not selectors:
@@ -244,6 +256,32 @@ def _validate_oracle_payload(payload: object) -> dict[str, Any]:
     for selector in selectors:
         if not isinstance(selector, dict):
             raise RuntimeError("acceptance oracle selector is invalid")
+        if selector_policy == "frozen_semantic_axis_v1":
+            value_options = selector.get("value_contains_any")
+            if (
+                not {
+                    "case_id", "character_key", "trait_type", "source_document",
+                    "source_line", "stability", "value_contains_any",
+                    "trait_polarity_options",
+                } <= set(selector)
+                or not all(
+                    isinstance(selector[field], str) and bool(selector[field])
+                    for field in (
+                        "case_id", "character_key", "trait_type",
+                        "source_document",
+                    )
+                )
+                or type(selector["source_line"]) is not int
+                or selector["source_line"] < 1
+                or selector["stability"] not in {"core", "stable"}
+                or not isinstance(value_options, list)
+                or not value_options
+                or any(not isinstance(value, str) or not value for value in value_options)
+                or len(set(value_options)) != len(value_options)
+                or "value_contains" in selector
+                or "trait_polarity_options" not in selector
+            ):
+                raise RuntimeError("frozen selector lacks independent semantic anchors")
         variants = selector.get("trait_polarity_options")
         if variants is None:
             continue
@@ -267,6 +305,57 @@ def _validate_oracle_payload(payload: object) -> dict[str, Any]:
     for row in expected:
         if not isinstance(row, dict):
             raise RuntimeError("acceptance oracle case must be an object")
+        if selector_policy == "frozen_semantic_axis_v1":
+            required_fields = {
+                "case_id", "character_key", "dimension", "review_outcome",
+                "final_outcome", "promote_reason", "review_verdict", "visible",
+                "expected_citation_roles",
+            }
+            exact_observation_count = row.get("matched_observation_count")
+            minimum_observation_count = row.get("min_matched_observation_count")
+            maximum_observation_count = row.get("max_matched_observation_count")
+            has_exact_count = "matched_observation_count" in row
+            has_range_count = (
+                "min_matched_observation_count" in row
+                or "max_matched_observation_count" in row
+            )
+            count_contract_valid = has_exact_count != has_range_count and (
+                (
+                    has_exact_count
+                    and type(exact_observation_count) is int
+                    and exact_observation_count >= 0
+                )
+                or (
+                    has_range_count
+                    and type(minimum_observation_count) is int
+                    and type(maximum_observation_count) is int
+                    and 0 <= minimum_observation_count <= maximum_observation_count
+                )
+            )
+            review_contract_valid = (
+                (
+                    row.get("review_outcome") == "not_run"
+                    and row.get("review_verdict") is None
+                )
+                or (
+                    row.get("review_outcome") == "completed"
+                    and row.get("review_verdict")
+                    in {"contradicts", "explained", "uncertain"}
+                )
+            )
+            if (
+                not required_fields <= set(row)
+                or not all(
+                    isinstance(row[field], str) and bool(row[field])
+                    for field in (
+                        "case_id", "character_key", "dimension",
+                        "final_outcome", "promote_reason",
+                    )
+                )
+                or not review_contract_valid
+                or not count_contract_valid
+            ):
+                raise RuntimeError("frozen expected case lacks an explicit contract")
         has_exact_prepare_reason = "prepare_reason" in row
         has_prepare_reason_allowlist = "prepare_reason_any_of" in row
         if has_exact_prepare_reason == has_prepare_reason_allowlist:
@@ -308,16 +397,13 @@ def _validate_oracle_payload(payload: object) -> dict[str, Any]:
 
 def _load_oracle() -> dict[str, Any]:
     payload = json.loads((DEMO / ORACLE_FILE).read_text(encoding="utf-8"))
-    return _validate_oracle_payload(payload)
+    return _validate_oracle_payload(
+        payload, require_frozen_semantic_axis=DEMO == FIXTURES["ooc-transfer-v1"]
+    )
 
 
 def _matches_selector(candidate: dict[str, Any], selector: dict[str, Any]) -> bool:
-    if (
-        candidate.get("character_key") != selector.get("character_key")
-        or candidate.get("trait_type") != selector.get("trait_type")
-        or candidate.get("origin") != "explicit_setting"
-        or candidate.get("reviewable") is not True
-    ):
+    if not _matches_source_anchored_selector(candidate, selector):
         return False
     variants = selector.get("trait_polarity_options")
     if variants is not None and not any(
@@ -330,6 +416,20 @@ def _matches_selector(candidate: dict[str, Any], selector: dict[str, Any]) -> bo
         expected_value = selector.get(field)
         if expected_value is not None and candidate.get(field) != expected_value:
             return False
+    return True
+
+
+def _matches_source_anchored_selector(
+    candidate: dict[str, Any], selector: dict[str, Any]
+) -> bool:
+    """DEV diagnosis only: identify a setting candidate by source, not trait semantics."""
+    if (
+        candidate.get("character_key") != selector.get("character_key")
+        or candidate.get("trait_type") != selector.get("trait_type")
+        or candidate.get("origin") != "explicit_setting"
+        or candidate.get("reviewable") is not True
+    ):
+        return False
     document = selector.get("source_document")
     line = selector.get("source_line")
     if not isinstance(document, str) or type(line) is not int:
@@ -339,6 +439,18 @@ def _matches_selector(candidate: dict[str, Any], selector: dict[str, Any]) -> bo
         not isinstance(value_contains, str)
         or not value_contains
         or value_contains not in str(candidate.get("value") or "")
+    ):
+        return False
+    value_contains_any = selector.get("value_contains_any")
+    if value_contains_any is not None and (
+        not isinstance(value_contains_any, list)
+        or not value_contains_any
+        or not any(
+            isinstance(value, str)
+            and value
+            and value in str(candidate.get("value") or "")
+            for value in value_contains_any
+        )
     ):
         return False
     evidence = candidate.get("evidence")
@@ -358,6 +470,8 @@ def _review_explicit_candidates(
     client: httpx.Client,
     project_id: str,
     selectors: list[dict[str, Any]],
+    *,
+    diagnostic_source_anchored: bool = False,
 ) -> dict[str, Any]:
     roster = _request(
         client,
@@ -417,6 +531,7 @@ def _review_explicit_candidates(
                 candidates_by_id[candidate_id] = candidate
 
     selected: dict[str, tuple[str, dict[str, Any]]] = {}
+    relaxed_identities: list[dict[str, Any]] = []
     used_candidate_ids: set[str] = set()
     for selector in selectors:
         case_id = selector.get("case_id")
@@ -432,13 +547,25 @@ def _review_explicit_candidates(
         matches = [
             candidate
             for candidate in candidates_by_id.values()
-            if _matches_selector(candidate, selector)
+            if (
+                _matches_source_anchored_selector(candidate, selector)
+                if diagnostic_source_anchored
+                else _matches_selector(candidate, selector)
+            )
         ]
         if len(matches) != 1:
             raise AcceptanceFailure(
-                "oracle_selector_match_count",
+                (
+                    "diagnostic_source_anchor_match_count"
+                    if diagnostic_source_anchored
+                    else "oracle_selector_match_count"
+                ),
                 safe_payload={
-                    "code": "oracle_selector_match_count",
+                    "code": (
+                        "diagnostic_source_anchor_match_count"
+                        if diagnostic_source_anchored
+                        else "oracle_selector_match_count"
+                    ),
                     "stage": "baseline_candidate_review",
                     "details": {
                         "case_id": case_id,
@@ -459,6 +586,27 @@ def _review_explicit_candidates(
             )
         used_candidate_ids.add(candidate_id)
         selected[candidate_id] = (case_id, matches[0])
+        if diagnostic_source_anchored:
+            relaxed_identities.append({
+                "case_id": case_id,
+                "candidate_id_sha256": _sha256_text(candidate_id),
+                "character_key": selector.get("character_key"),
+                "trait_type": selector.get("trait_type"),
+                "trait_key_sha256": _sha256_text(str(matches[0].get("trait_key") or "")),
+                "polarity": (
+                    matches[0]["polarity"]
+                    if matches[0].get("polarity") in {"positive", "negative", "neutral"}
+                    else None
+                ),
+                "stability": (
+                    matches[0]["stability"]
+                    if matches[0].get("stability") in {"core", "stable", "temporary"}
+                    else None
+                ),
+                "source_document": selector.get("source_document"),
+                "source_line": selector.get("source_line"),
+                "strict_selector_match": _matches_selector(matches[0], selector),
+            })
 
     confirmed = rejected = 0
     case_traits: dict[str, dict[str, str]] = {}
@@ -489,7 +637,11 @@ def _review_explicit_candidates(
                 "decision": decision,
                 "expected_revision": revision,
                 "comment": (
-                    "原创 DEV 演示集：命中人工编写的确认清单"
+                    (
+                        "原创 DEV 诊断：仅按设定来源锚点模拟确认，非正式验收"
+                        if diagnostic_source_anchored
+                        else "原创 DEV 演示集：命中人工编写的确认清单"
+                    )
                     if chosen is not None
                     else "原创 DEV 演示集：未命中人工确认清单，自动拒绝"
                 ),
@@ -520,7 +672,7 @@ def _review_explicit_candidates(
             trait_key=trait_key,
         )
         confirmed += 1
-    return {
+    review = {
         "confirmed": confirmed,
         "rejected": rejected,
         "expected_confirmed": len(selectors),
@@ -528,6 +680,9 @@ def _review_explicit_candidates(
         "recognized_characters": sorted(set(characters)),
         "case_traits": case_traits,
     }
+    if diagnostic_source_anchored:
+        review["diagnostic_relaxed_candidate_identities"] = relaxed_identities
+    return review
 
 
 def _safe_case_trace_summary(row: dict[str, Any]) -> dict[str, Any]:
@@ -1119,8 +1274,15 @@ def _diagnostic_partial_baseline_allowed(summary: dict[str, Any]) -> bool:
         and processed == planned
         and type(usage.get("attempted_calls")) is int
         and usage["attempted_calls"] > 0
-        and bool(counts)
-        and set(counts) <= DIAGNOSTIC_RECORD_REASONS
+        and any(
+            type(counts.get(reason)) is int and counts[reason] > 0
+            for reason in DIAGNOSTIC_RECORD_REASONS
+        )
+        and set(counts) <= (
+            DIAGNOSTIC_RECORD_REASONS
+            | DIAGNOSTIC_SOURCE_COUNTS
+            | DIAGNOSTIC_REGENERATION_COUNTS
+        )
     )
 
 
@@ -1226,6 +1388,7 @@ def _execute_trial(
     timeout_seconds: float,
     guided_review: bool = False,
     diagnostic_continue_partial: bool = False,
+    diagnostic_source_anchored: bool = False,
 ) -> dict[str, Any]:
     project = _request(
         client,
@@ -1282,6 +1445,7 @@ def _execute_trial(
         client,
         project_id,
         oracle["confirm_candidates"],
+        diagnostic_source_anchored=diagnostic_source_anchored,
     )
     if candidate_review["confirmed"] != len(oracle["confirm_candidates"]):
         raise AcceptanceFailure(
@@ -1343,6 +1507,20 @@ def _model_available_for_session(client: httpx.Client, health: dict[str, Any]) -
 def run(args: argparse.Namespace) -> int:
     global DEMO
     DEMO = FIXTURES[args.fixture]
+    diagnostic_source_anchored = bool(
+        getattr(args, "diagnostic_review_source_anchored_candidates", False)
+    )
+    if diagnostic_source_anchored and (
+        args.fixture not in {"ooc-v1", "ooc-transfer-v1"} or args.trials != 1
+    ):
+        raise AcceptanceFailure(
+            "diagnostic_source_anchored_scope_invalid",
+            safe_payload={
+                "code": "diagnostic_source_anchored_scope_invalid",
+                "stage": "runner_preflight",
+                "details": {"allowed_fixtures": ["ooc-v1", "ooc-transfer-v1"], "trials": 1},
+            },
+        )
     missing = [name for name, _ in BASELINE_FILES if not (DEMO / name).is_file()]
     if not (DEMO / DRAFT_FILE).is_file():
         missing.append(DRAFT_FILE)
@@ -1388,16 +1566,18 @@ def run(args: argparse.Namespace) -> int:
                 oracle,
                 trial_number=index,
                 timeout_seconds=args.run_timeout_seconds,
-                guided_review=args.fixture == "ooc-v1",
+                guided_review=args.fixture in {"ooc-v1", "ooc-transfer-v1"},
                 diagnostic_continue_partial=(
-                    args.fixture == "ooc-v1"
+                    args.fixture in {"ooc-v1", "ooc-transfer-v1"}
                     and args.diagnostic_continue_partial_baseline
                 ),
+                diagnostic_source_anchored=diagnostic_source_anchored,
             )
             for index in range(1, args.trials + 1)
         ]
 
     gates = _evaluate_gates(trials)
+    gates["strict_candidate_selector_identity"] = not diagnostic_source_anchored
     report = {
         "schema_version": "character-continuity-live-dev-v2",
         "dataset": _dataset_label(),
@@ -1406,6 +1586,7 @@ def run(args: argparse.Namespace) -> int:
             "production_quality": False,
             "open_text_generalization": False,
             "semantic_coverage": False,
+            "diagnostic_source_anchored_candidate_review": diagnostic_source_anchored,
             "independent_full_workflow_trials": gates[
                 "at_least_three_independent_full_workflow_trials"
             ],
@@ -1414,7 +1595,7 @@ def run(args: argparse.Namespace) -> int:
         "dataset_sha256": _dataset_hashes(),
         "trials": trials,
         "gates": gates,
-        "passed": all(gates.values()),
+        "passed": all(gates.values()) and not diagnostic_source_anchored,
     }
     _emit_report(report, args.output_json)
     return 0 if report["passed"] else 1
@@ -1427,6 +1608,14 @@ def parse_args() -> argparse.Namespace:
         "--diagnostic-continue-partial-baseline",
         action="store_true",
         help="OOC DEV only: continue after record-level partial baseline; full gate stays false",
+    )
+    parser.add_argument(
+        "--diagnostic-review-source-anchored-candidates",
+        action="store_true",
+        help=(
+            "one-trial OOC DEV only: simulate candidate confirmation from unique "
+            "source anchors to observe draft; strict acceptance always fails"
+        ),
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--trials", type=int, default=3, choices=range(1, 6))

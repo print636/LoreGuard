@@ -21,6 +21,7 @@ from app.character_trait_extraction import (
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
     _MAX_SIGNAL_RESPONSE_RECORDS,
+    _MAX_SIGNAL_REGENERATION_METADATA_CHARS,
     _SIGNAL_PACKAGE_VALIDATION_REASONS,
     _SignalValidationFailure,
     _chunk_prompt,
@@ -579,6 +580,28 @@ def test_signal_regeneration_metadata_has_absolute_record_boundary():
             _MAX_SIGNAL_RESPONSE_RECORDS,
             "statement_support",
         )
+
+
+def test_signal_regeneration_metadata_rejects_all_oversized_anchors_without_truncation():
+    anchors = tuple(
+        signal(
+            identifier=f"large-anchor-{index}",
+            statement=f"林澈记录第{index}次行动",
+            polarity="positive",
+            observation_kind="action",
+            line=index + 1,
+            trait_key=f"route_decision_{index:02d}_" + "a" * 61,
+        )
+        for index in range(_MAX_SIGNAL_RESPONSE_RECORDS)
+    )
+    assert len(anchors) == _MAX_SIGNAL_RESPONSE_RECORDS
+    with pytest.raises(ValueError, match="character boundary"):
+        _regeneration_prompt(
+            "bounded",
+            ("statement_support",),
+            required_anchors=anchors,
+        )
+    assert _MAX_SIGNAL_REGENERATION_METADATA_CHARS == 8_192
 
 
 def test_signal_regeneration_fails_closed_when_clean_package_drops_bound_signal():
@@ -2638,7 +2661,7 @@ def test_production_accounting_wrapper_forwards_remaining_regeneration_deadline(
     assert extractor.provider.signal_provider.settings.provider_timeout_seconds == 5.0
 
 
-def test_default_signal_budget_admits_two_maximum_prompt_packages():
+def test_default_signal_budget_admits_two_maximum_prompt_packages_without_retry_metadata():
     configured = settings()
     chunk = CharacterSignalChunk(
         "d" * 200,
@@ -2663,6 +2686,95 @@ def test_default_signal_budget_admits_two_maximum_prompt_packages():
     ]
 
     assert sum(estimates) <= configured.character_signal_token_budget
+
+
+def _five_anchor_retry_records() -> tuple[list[str], list[dict], dict]:
+    lines = [f"林澈一直喜欢蜜瓜{index}。" for index in range(6)]
+    valid = [
+        valid_signal_record(
+            trait_key=f"melon_preference_{index}",
+            statement=f"林澈一直喜欢蜜瓜{index}",
+            key_object=f"蜜瓜{index}",
+            source_line_start=10 + index,
+            source_line_end=10 + index,
+            evidence=lines[index],
+        )
+        for index in range(5)
+    ]
+    invalid = valid_signal_record(
+        trait_key="melon_preference_5",
+        statement="林澈讨厌蜜瓜5",
+        polarity="negative",
+        key_object="蜜瓜5",
+        source_line_start=15,
+        source_line_end=15,
+        evidence=lines[5],
+    )
+    return lines, valid, invalid
+
+
+def test_default_signal_budget_admits_realistic_five_anchor_retry():
+    lines, valid, invalid = _five_anchor_retry_records()
+    provider = SequenceProvider(
+        json.dumps({"records": [*valid, invalid]}, ensure_ascii=False),
+        json.dumps({"records": valid}, ensure_ascii=False),
+    )
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "five-anchors", "profile.md", "\n".join(lines), 10,
+            "formal_character_profile",
+        )
+    )
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.attempted_calls == 2
+    assert len(result.signals) == 5
+    assert result.diagnostics.charged_tokens <= settings().character_signal_token_budget
+    retry_prompt = provider.calls[1][1]
+    for index in range(5):
+        assert f'"trait_key":"melon_preference_{index}"' in retry_prompt
+        assert f'"source_line_start":{10 + index}' in retry_prompt
+    assert invalid["statement"] not in retry_prompt
+
+
+def test_maximum_signal_chunk_with_five_anchors_fails_closed_when_retry_exceeds_budget():
+    configured = settings()
+    lines, valid, invalid = _five_anchor_retry_records()
+    original = "\n".join(lines) + "\n"
+    content = original + "甲" * (configured.character_signal_max_chunk_chars - len(original))
+    global_line_start = 10_000_000 - len(lines)
+    offset = global_line_start - 10
+    shifted_valid = [
+        {
+            **record,
+            "source_line_start": record["source_line_start"] + offset,
+            "source_line_end": record["source_line_end"] + offset,
+        }
+        for record in valid
+    ]
+    shifted_invalid = {
+        **invalid,
+        "source_line_start": invalid["source_line_start"] + offset,
+        "source_line_end": invalid["source_line_end"] + offset,
+    }
+    provider = SequenceProvider(
+        json.dumps({"records": [*shifted_valid, shifted_invalid]}, ensure_ascii=False),
+        json.dumps({"records": shifted_valid}, ensure_ascii=False),
+    )
+    result = CharacterSignalExtractor(provider, settings=configured).extract(
+        CharacterSignalChunk(
+            "d" * 200,
+            "文" * 255,
+            content,
+            global_line_start,
+            "draft",
+            "x" * MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
+        )
+    )
+    assert result.diagnostics.outcome == "degraded"
+    assert result.signals == ()
+    assert result.diagnostics.attempted_calls == 1
+    assert result.diagnostics.reason_counts["regeneration_token_budget"] == 1
+    assert len(provider.calls) == 1
 
 
 def test_unknown_provider_category_is_redacted_from_diagnostics():

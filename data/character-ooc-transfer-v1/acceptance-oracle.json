@@ -6,45 +6,55 @@
     "production_quality_claim": false,
     "open_text_generalization_claim": false
   },
+  "selector_policy": "frozen_semantic_axis_v1",
   "confirm_candidates": [
     {
-      "case_id": "nanzhi_unexplained_social_shift",
-      "character_key": "南枝",
+      "case_id": "jiqing_unexplained_unilateral_route",
+      "character_key": "霁青",
       "trait_type": "core_personality",
       "source_document": "02-character-profiles.md",
       "source_line": 5,
-      "value_contains": "陌生人主动攀谈",
-      "polarity": "negative",
+      "value_contains_any": ["征询当值伙伴意见", "不会独自改变撤离路线"],
+      "trait_polarity_options": [
+        {"trait_key": "route_decision_collaboration", "polarity": "positive"},
+        {"trait_key": "decision_consultation", "polarity": "positive"},
+        {"trait_key": "unilateral_route_decision", "polarity": "negative"}
+      ],
       "stability": "core"
     },
     {
-      "case_id": "yuli_training_bridge",
-      "character_key": "郁礼",
+      "case_id": "wentang_published_training_bridge",
+      "character_key": "闻棠",
       "trait_type": "core_personality",
       "source_document": "02-character-profiles.md",
       "source_line": 9,
-      "value_contains": "害怕面对陌生听众",
-      "polarity": "negative",
-      "stability": "stable"
+      "value_contains_any": ["回避即兴讲解", "把演示交给同事"],
+      "trait_polarity_options": [
+        {"trait_key": "public_speaking_participation", "polarity": "negative"},
+        {"trait_key": "improvised_presentation_participation", "polarity": "negative"},
+        {"trait_key": "impromptu_explanation_participation", "polarity": "negative"}
+      ],
+      "stability": "core"
     },
     {
-      "case_id": "cenzhu_emergency_interrupt",
-      "character_key": "岑烛",
+      "case_id": "zhouyao_single_emergency_rebuke",
+      "character_key": "舟遥",
       "trait_type": "core_personality",
       "source_document": "02-character-profiles.md",
       "source_line": 13,
-      "value_contains": "厉声打断队友",
+      "value_contains_any": ["一贯平声说明", "厉声呵斥同伴"],
       "trait_polarity_options": [
-        {"trait_key": "interruption_restraint", "polarity": "positive"},
-        {"trait_key": "interruption_behavior", "polarity": "negative"}
+        {"trait_key": "public_rebuke_restraint", "polarity": "positive"},
+        {"trait_key": "public_rebuke_behavior", "polarity": "negative"},
+        {"trait_key": "calm_communication", "polarity": "positive"}
       ],
       "stability": "core"
     }
   ],
   "expected_cases": [
     {
-      "case_id": "nanzhi_unexplained_social_shift",
-      "character_key": "南枝",
+      "case_id": "jiqing_unexplained_unilateral_route",
+      "character_key": "霁青",
       "dimension": "core_personality",
       "prepare_reason": "two_independent_behaviors",
       "review_outcome": "completed",
@@ -74,8 +84,8 @@
       }
     },
     {
-      "case_id": "yuli_training_bridge",
-      "character_key": "郁礼",
+      "case_id": "wentang_published_training_bridge",
+      "character_key": "闻棠",
       "dimension": "core_personality",
       "prepare_reason": "two_independent_behaviors",
       "review_outcome": "completed",
@@ -88,8 +98,8 @@
       "expected_citation_roles": ["B", "C", "G"]
     },
     {
-      "case_id": "cenzhu_emergency_interrupt",
-      "character_key": "岑烛",
+      "case_id": "zhouyao_single_emergency_rebuke",
+      "character_key": "舟遥",
       "dimension": "core_personality",
       "prepare_reason": "single_behavior_is_not_drift",
       "review_outcome": "not_run",

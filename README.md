@@ -91,6 +91,11 @@ not pass: all three formal character candidates were confirmed, but baseline
 and draft coverage were partial, one intended conflict was missed, one growth
 case remained unverifiable, and the single emergency behavior was not falsely
 promoted. It is a developer-visible failure diagnostic, not a quality gain.
+The follow-up added evidence-bound adjacent-pronoun handling, directional
+trait-key rejection, and a separately labeled diagnostic candidate-review
+path. Three new strict runs passed the known Demo at a local 100k character-stage
+budget; the distinct OOC transfer and draft checks still did not pass. See the
+same checkpoint for both results and the limits of each claim.
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a
