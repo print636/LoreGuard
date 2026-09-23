@@ -300,6 +300,30 @@ def _semantic_label_error_codes(exc: ValidationError) -> tuple[str, ...] | None:
     return tuple(sorted(codes)) or None
 
 
+def _schema_rejection_reason(exc: ValidationError) -> str:
+    """Classify an invalid record without persisting input, field names or text."""
+    types = {
+        str(error.get("type", ""))
+        for error in exc.errors(
+            include_url=False, include_context=False, include_input=False
+        )
+    }
+    if types & {"union_tag_invalid", "union_tag_not_found"}:
+        return "schema_invalid_kind"
+    if "missing" in types:
+        return "schema_missing_required"
+    if "extra_forbidden" in types:
+        return "schema_extra_field"
+    if types & {"string_too_short", "too_short"}:
+        return "schema_empty_required"
+    if any(
+        code.endswith(("_type", "_parsing")) or code in {"int_from_float", "bool_parsing"}
+        for code in types
+    ):
+        return "schema_wrong_type"
+    return "schema_other"
+
+
 def _validate_raw_evidence_boundary(
     document: DocumentInput,
     chunk: DocumentChunk,
@@ -1570,6 +1594,9 @@ class ModelEnhancedExtractor:
                             executions[doc_index], "unresolved_invalid_records"
                         )
                         executions[doc_index].note("schema_validation")
+                        executions[doc_index].note_record_rejection(
+                            _schema_rejection_reason(exc)
+                        )
                         continue
                     except ValueError as exc:
                         reason = {
@@ -1586,6 +1613,7 @@ class ModelEnhancedExtractor:
                                 executions[doc_index], "unresolved_invalid_records"
                             )
                             executions[doc_index].note(reason)
+                            executions[doc_index].note_record_rejection(reason)
                             continue
                         executions[doc_index].invalid_records += 1
                         _add_execution_counter(
@@ -1606,9 +1634,15 @@ class ModelEnhancedExtractor:
                         executions[doc_index].invalid_records += 1
                         if "lexical_support" in repair_candidate.error_codes:
                             executions[doc_index].note("lexical_support")
+                            executions[doc_index].note_record_rejection(
+                                "lexical_support"
+                            )
                         else:
                             executions[doc_index].note("semantic_labels_quarantined")
                             executions[doc_index].note("schema_validation")
+                            executions[doc_index].note_record_rejection(
+                                "semantic_labels_quarantined"
+                            )
                         next_repair_index += 1
                     elif assessed is not None:
                         validated_records[location] = assessed
@@ -1899,9 +1933,13 @@ class ModelEnhancedExtractor:
                             execution.invalid_records += 1
                             if "lexical_support" in repair_candidate.error_codes:
                                 execution.note("lexical_support")
+                                execution.note_record_rejection("lexical_support")
                             else:
                                 execution.note("semantic_labels_quarantined")
                                 execution.note("schema_validation")
+                                execution.note_record_rejection(
+                                    "semantic_labels_quarantined"
+                                )
                             waiting = (
                                 "受限证据修复 Agent"
                                 if self.provider.settings.enable_review_agent
@@ -1922,13 +1960,16 @@ class ModelEnhancedExtractor:
                             )
                         if assessed is not None:
                             chunk_directives.append(assessed)
-                    except ValidationError:
+                    except ValidationError as exc:
                         invalid_count += 1
                         execution.invalid_records += 1
                         _add_execution_counter(
                             execution, "unresolved_invalid_records"
                         )
                         execution.note("schema_validation")
+                        execution.note_record_rejection(
+                            _schema_rejection_reason(exc)
+                        )
                         parsed.warnings.append(
                             f"模型记录 #{index}（分块 {chunk.id}）不符合抽取协议（schema_validation），已安全跳过"
                         )
@@ -1945,6 +1986,8 @@ class ModelEnhancedExtractor:
                             "模型记录未通过语义质量门": "semantic_quality",
                         }.get(str(exc), "record_validation")
                         execution.note(reason)
+                        if reason in {"lexical_support", "semantic_quality"}:
+                            execution.note_record_rejection(reason)
                         parsed.warnings.append(
                             f"模型记录 #{index}（分块 {chunk.id}）不符合抽取协议（{reason}），已安全跳过"
                         )

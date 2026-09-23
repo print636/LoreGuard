@@ -13,6 +13,7 @@ from .domain import (
     IssueCategory,
     ModelExecutionDiagnostics,
     ParsedDirective,
+    SAFE_MODEL_RECORD_REJECTIONS,
     apply_semantic_quality_gate_with_provenance,
     directive_fingerprint,
     issue_fingerprint,
@@ -333,6 +334,17 @@ class AnalysisPipeline:
                 "reason_codes": sorted({
                     reason for row in model_documents for reason in row["reason_codes"]
                 }),
+                "record_rejections": {
+                    reason: sum(
+                        row.get("record_rejections", {}).get(reason, 0)
+                        for row in model_documents
+                    )
+                    for reason in sorted(SAFE_MODEL_RECORD_REJECTIONS)
+                    if any(
+                        row.get("record_rejections", {}).get(reason, 0)
+                        for row in model_documents
+                    )
+                },
                 "provider_calls": provider_calls,
                 "logical_call_count": (
                     len(provider_calls) if isinstance(provider_calls, list) else None
@@ -527,6 +539,7 @@ def _safe_execution_dict(execution) -> dict:
             )
         },
         "reason_codes": list(getattr(execution, "reason_codes", [])),
+        "record_rejections": {},
         "batch_used": bool(getattr(execution, "batch_used", False)),
         "batch_document_count": getattr(execution, "batch_document_count", 0),
         "batch_estimated_tokens": getattr(execution, "batch_estimated_tokens", 0),

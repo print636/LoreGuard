@@ -441,6 +441,19 @@ class ProviderCallDiagnostics:
         }
 
 
+SAFE_MODEL_RECORD_REJECTIONS = frozenset({
+    "schema_invalid_kind",
+    "schema_missing_required",
+    "schema_extra_field",
+    "schema_wrong_type",
+    "schema_empty_required",
+    "schema_other",
+    "lexical_support",
+    "semantic_quality",
+    "semantic_labels_quarantined",
+})
+
+
 @dataclass(slots=True)
 class ModelExecutionDiagnostics:
     """Structured model execution plus safe logical-call telemetry.
@@ -485,6 +498,9 @@ class ModelExecutionDiagnostics:
     # boundary is a positive allowlist with no prompt, raw response or text.
     review_agent_runs: list[dict[str, Any]] = field(default_factory=list)
     reason_codes: list[str] = field(default_factory=list)
+    # Counts observed isolated record failures only. Fatal envelope, attribution
+    # and evidence-range failures are intentionally not represented here.
+    record_rejections: dict[str, int] = field(default_factory=dict)
     provider_calls: list[ProviderCallDiagnostics] | None = field(default_factory=list)
 
     @classmethod
@@ -533,6 +549,11 @@ class ModelExecutionDiagnostics:
     def note(self, reason: str) -> None:
         if reason not in self.reason_codes:
             self.reason_codes.append(reason)
+
+    def note_record_rejection(self, reason: str) -> None:
+        if reason not in SAFE_MODEL_RECORD_REJECTIONS:
+            raise ValueError("unsupported model rejection category")
+        self.record_rejections[reason] = self.record_rejections.get(reason, 0) + 1
 
     def record_provider_call(
         self,
@@ -602,6 +623,13 @@ class ModelExecutionDiagnostics:
             "review_agent_total_runs": len(self.review_agent_runs),
             "review_agent_runs_truncated": len(self.review_agent_runs) > 8,
             "reason_codes": list(self.reason_codes),
+            "record_rejections": {
+                reason: count
+                for reason, count in sorted(self.record_rejections.items())
+                if reason in SAFE_MODEL_RECORD_REJECTIONS
+                and type(count) is int
+                and count >= 0
+            },
             "provider_calls": (
                 [row.safe_dict() for row in self.provider_calls]
                 if self.provider_calls is not None

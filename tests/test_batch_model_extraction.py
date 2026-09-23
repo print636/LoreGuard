@@ -299,6 +299,9 @@ class BatchModelExtractionTests(unittest.TestCase):
             status["failed_chunks"],
         ))
         self.assertNotIn("batch_protocol", status["reason_codes"])
+        self.assertEqual(
+            {"schema_empty_required": 1}, status["record_rejections"]
+        )
         self.assertTrue(all(
             row["succeeded_chunks"] == 1 for row in status["documents"]
         ))

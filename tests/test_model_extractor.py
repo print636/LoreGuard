@@ -3,9 +3,15 @@ from copy import deepcopy
 import unittest
 
 import httpx
+from pydantic import ValidationError
 
 from app.config import Settings
-from app.model_extractor import ModelEnhancedExtractor
+from app.domain import ModelExecutionDiagnostics
+from app.model_extractor import (
+    ModelEnhancedExtractor,
+    RECORD_ADAPTER,
+    _schema_rejection_reason,
+)
 from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
 from app.provider import (
     OpenAICompatibleProvider,
@@ -178,6 +184,38 @@ class ProviderTests(unittest.TestCase):
 
 
 class ModelExtractorTests(unittest.TestCase):
+    def test_record_rejection_diagnostics_reject_unlisted_values(self):
+        diagnostics = ModelExecutionDiagnostics()
+        diagnostics.note_record_rejection("lexical_support")
+        with self.assertRaises(ValueError):
+            diagnostics.note_record_rejection("attacker controlled text")
+        diagnostics.record_rejections["unexpected_raw_response"] = 1
+        self.assertEqual(
+            {"lexical_support": 1}, diagnostics.safe_dict()["record_rejections"]
+        )
+
+    def test_record_schema_reasons_are_fixed_categories_without_input_values(self):
+        valid = {
+            "kind": "fact", "subject": "林澈", "predicate": "身份",
+            "value": "领航员", "source_line_start": 1,
+            "source_line_end": 1, "modality": "asserted",
+            "source_scope": "narrator", "certainty": "certain",
+        }
+        cases = (
+            ({**valid, "kind": "attacker-defined-kind"}, "schema_invalid_kind"),
+            ({key: value for key, value in valid.items() if key != "value"}, "schema_missing_required"),
+            ({**valid, "private_notes": "do not persist"}, "schema_extra_field"),
+            ({**valid, "subject": []}, "schema_wrong_type"),
+            ({**valid, "value": ""}, "schema_empty_required"),
+        )
+        for raw, expected in cases:
+            with self.subTest(expected=expected):
+                with self.assertRaises(ValidationError) as error:
+                    RECORD_ADAPTER.validate_python(raw)
+                reason = _schema_rejection_reason(error.exception)
+                self.assertEqual(expected, reason)
+                self.assertNotIn("private_notes", reason)
+
     def provider_for(self, payload: dict) -> OpenAICompatibleProvider:
         content = json.dumps(semantic_payload(payload), ensure_ascii=False)
         return OpenAICompatibleProvider(
