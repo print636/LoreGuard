@@ -267,6 +267,26 @@ class SemanticRepairTests(unittest.TestCase):
                 self.assertEqual(0, parsed.model_execution.recovered_invalid_records)
                 self.assertEqual([], parsed.directives)
 
+    def test_repair_failure_exposes_only_safe_reason_codes(self):
+        raw = {key: value for key, value in fact().items() if key not in {
+            "modality", "source_scope", "certainty"
+        }}
+        cases = (
+            ({"patches": []}, "repair_index_mapping"),
+            ({"patches": [{
+                "record_index": 1,
+                "modality": "asserted",
+                "source_scope": "narrator",
+            }]}, "repair_response_schema"),
+        )
+        for response, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                parsed, _ = self.run_single(raw, response)
+                self.assertTrue(parsed.model_execution.repair_failed)
+                self.assertIn("repair_failed", parsed.model_execution.reason_codes)
+                self.assertIn(expected_code, parsed.model_execution.reason_codes)
+                self.assertEqual([], parsed.directives)
+
     def test_unknown_and_quoted_patches_never_become_rule_eligible(self):
         raw = {key: value for key, value in fact().items() if key not in {
             "modality", "source_scope", "certainty"
@@ -344,7 +364,7 @@ class SemanticRepairTests(unittest.TestCase):
             "modality", "source_scope", "certainty"
         }}
         calls = []
-        provider = provider_for([{"records": [raw]}], calls, per_run_token_budget=2300)
+        provider = provider_for([{"records": [raw]}], calls, per_run_token_budget=2600)
         parsed = ModelEnhancedExtractor(provider, baseline=EmptyBaseline()).extract(
             DocumentInput("doc", "chapter.md", "林澈的身份是领航员。")
         )
@@ -372,6 +392,7 @@ class SemanticRepairTests(unittest.TestCase):
         self.assertEqual(2, len(calls))
         self.assertTrue(parsed.model_execution.repair_failed)
         self.assertEqual("read_timeout", parsed.model_execution.provider_calls[-1].category)
+        self.assertIn("repair_provider_error", parsed.model_execution.reason_codes)
 
     def test_later_chunk_run_limit_preserves_success_as_partial_repair(self):
         first = {

@@ -206,6 +206,9 @@ quoted_material 和 unknown 绝不是 narrator；台词不是叙述者事实。"
 SYSTEM_PROMPT = """你是 LoreGuard 的叙事状态抽取器，只抽取状态，不判断矛盾。
 只返回 JSON 对象 {"records": [...]}；顶层不得有其他字段，不得使用 Markdown 代码块。
 每条记录只表达一个原子状态，且只能使用对应 kind 的字段；所有记录都必须包含 kind、source_line_start、source_line_end、modality、source_scope、certainty。
+以下只是完整字段结构示例，不是待抽取的故事内容，也不能复制进输出：
+{"kind":"fact","subject":"角色甲","predicate":"身份","value":"档案官","source_line_start":1,"source_line_end":1,"modality":"asserted","source_scope":"narrator","certainty":"certain"}
+其他 kind 同样必须逐条写齐 modality、source_scope、certainty；即使证据显然成立，也不得省略任何一个标签。
 
 语义字段是强约束而不是装饰：
 - modality 只能是 asserted、negated、uncertain、interrogative、hypothetical、conditional_rule、reported
@@ -1152,6 +1155,17 @@ class ModelEnhancedExtractor:
                     succeeded=False,
                     purpose="repair",
                 )
+                detail_code = "repair_provider_error"
+            elif isinstance(exc, ValidationError):
+                detail_code = "repair_response_schema"
+            elif str(exc) in {"repair_duplicate_index", "repair_index_coverage"}:
+                detail_code = "repair_index_mapping"
+            elif str(exc) == "repair_response_too_large":
+                detail_code = "repair_response_too_large"
+            else:
+                detail_code = "repair_revalidation"
+            for execution in executions:
+                execution.note(detail_code)
             return finish_failed("repair_failed", attempted=True)
 
     def _resolve_with_review_agent(
