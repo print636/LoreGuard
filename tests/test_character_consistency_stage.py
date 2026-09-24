@@ -81,6 +81,13 @@ class QueueProvider:
         return SimpleNamespace(text=value, prompt_tokens=17, completion_tokens=9)
 
 
+def test_empty_character_stage_has_empty_mismatch_diagnostics():
+    diagnostics = failed_character_consistency_stage().diagnostics
+    assert diagnostics["evidence_mismatch_counts"] == {}
+    assert diagnostics["evidence_mismatch_chunks"] == []
+    assert diagnostics["evidence_mismatch_chunks_omitted_count"] == 0
+
+
 class CapturingQueueProvider(QueueProvider):
     def __init__(self, *responses: str | Exception):
         super().__init__(*responses)
@@ -242,6 +249,66 @@ def test_empty_first_targeted_pass_recovers_safe_adjacent_pronoun_in_verificatio
     assert "candidate_lines_only" in verification_prompt
     assert f"1: {antecedent}" in verification_prompt
     assert f"2: {observation}" in verification_prompt
+
+
+def test_targeted_mismatch_diagnostics_include_recall_and_verification_phases():
+    antecedent = "这里只有祁雾。"
+    observation = "她用奉承话术迂回交流。"
+    with TestClient(app) as client:
+        project = _confirmed_directness_project(client)
+        _create_document(
+            client, project["id"], name="private-draft.md", role="chapter",
+            content=f"{antecedent}\n{observation}",
+            narrative_context=_context(publication="draft"),
+        )
+        profile_line = "祁雾说话直来直往，这是他的核心性格。"
+        profile_record = _record(
+            character="祁雾", evidence=profile_line, polarity="positive",
+            kind="explicit_declaration", dimension="core_personality",
+            trait_key="directness", statement="说话直来直往",
+        )
+        mismatch = _record(
+            character="祁雾", evidence=antecedent, polarity="negative",
+            kind="action", dimension="core_personality",
+            trait_key="directness", statement="祁雾用奉承话术迂回交流",
+        )
+        mismatch["source_line_end"] = 2
+        format_mismatch = {
+            **mismatch,
+            "evidence": f"{antecedent}\n{observation.replace('。', '！')}",
+        }
+        provider = QueueProvider(
+            _response(profile_record), _response(),
+            _response(mismatch), _response(),
+            _response(format_mismatch), _response(),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]), provider,
+            character_signal_max_completion_tokens=512,
+        )
+
+    diagnostics = result.diagnostics
+    assert diagnostics["counts"]["targeted_verification_scheduled_count"] == 1
+    assert diagnostics["evidence_mismatch_counts"] == {
+        "presentation_difference": 1, "multiline_omission": 1,
+    }
+    events = diagnostics["evidence_mismatch_chunks"]
+    assert len(events) == 2
+    assert [event["phase"] for event in events] == [
+        "targeted_recall", "targeted_verification",
+    ]
+    assert [event["counts"] for event in events] == [
+        {"multiline_omission": 1}, {"presentation_difference": 1},
+    ]
+    assert all(event["source_document_ordinal"] == 1 for event in events)
+    assert all(event["document_chunk_ordinal"] == 1 for event in events)
+    assert all(event["stage_chunk_ordinal"] == 2 for event in events)
+    assert all(event["target_ordinal"] == 1 for event in events)
+    assert all(event["document_role"] == "chapter" for event in events)
+    assert all(event["source_kind"] == "draft" for event in events)
+    assert all(event["outcome"] == "completed" for event in events)
+    assert diagnostics["evidence_mismatch_chunks_omitted_count"] == 0
+    assert "private-draft.md" not in json.dumps(events, ensure_ascii=False)
 
 
 def _context(
@@ -431,6 +498,88 @@ def _record(
 
 def _response(*records: dict) -> str:
     return json.dumps({"records": list(records)}, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("event_limit", (128, 1))
+def test_mismatch_stage_diagnostics_keep_role_order_and_bound_details(
+    monkeypatch, event_limit: int,
+):
+    monkeypatch.setattr(
+        "app.character_consistency_stage._MAX_EVIDENCE_MISMATCH_CHUNKS",
+        event_limit,
+    )
+    canon_line = "林澈一直喜欢蜜瓜。"
+    history_line = "林澈每周都买一颗蜜瓜。"
+    canon_rejected = _record(
+        evidence="一直喜欢蜜瓜", polarity="positive",
+        kind="explicit_declaration", statement="林澈一直喜欢蜜瓜",
+    )
+    history_valid = _record(
+        evidence=history_line, polarity="positive", kind="action",
+        statement="林澈每周都买一颗蜜瓜",
+    )
+    history_rejected = {
+        **history_valid,
+        "evidence": history_line.replace("。", "！"),
+    }
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"形态诊断-{uuid4().hex}"}
+        ).json()
+        canon = _create_document(
+            client, project["id"], name="private-canon.md", role="canon",
+            content=canon_line, narrative_context=_context(publication="published"),
+        )
+        history = _create_document(
+            client, project["id"], name="private-history.md", role="chapter",
+            content=history_line, narrative_context=_context(publication="published"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(
+                _response(canon_rejected), _response(canon_rejected),
+                _response(history_rejected), _response(history_valid),
+            ),
+            character_signal_max_completion_tokens=1_024,
+        )
+
+    diagnostics = result.diagnostics
+    assert diagnostics["outcome"] == "partial"
+    assert diagnostics["reason_counts"]["evidence_mismatch"] == 2
+    assert diagnostics["reason_counts"]["regenerated_from_evidence_mismatch"] == 1
+    assert diagnostics["evidence_mismatch_counts"] == {
+        "presentation_difference": 1, "source_excerpt": 2,
+    }
+    assert diagnostics["evidence_mismatch_chunks_omitted_count"] == 2 - min(event_limit, 2)
+    events = diagnostics["evidence_mismatch_chunks"]
+    assert len(events) == min(event_limit, 2)
+    assert events[0] == {
+        "source_document_ordinal": 0,
+        "document_chunk_ordinal": 1,
+        "stage_chunk_ordinal": 1,
+        "document_role": "canon",
+        "source_kind": "formal_character_profile",
+        "phase": "primary_extraction",
+        "target_ordinal": None,
+        "outcome": "degraded",
+        "counts": {"source_excerpt": 2},
+    }
+    if event_limit > 1:
+        assert events[1] == {
+            "source_document_ordinal": 1,
+            "document_chunk_ordinal": 1,
+            "stage_chunk_ordinal": 2,
+            "document_role": "chapter",
+            "source_kind": "published_history",
+            "phase": "primary_extraction",
+            "target_ordinal": None,
+            "outcome": "completed",
+            "counts": {"presentation_difference": 1},
+        }
+    serialized = json.dumps(events, ensure_ascii=False)
+    for private in (canon_line, history_line, canon["id"], history["id"],
+                    "private-canon.md", "private-history.md"):
+        assert private not in serialized
 
 
 def test_same_line_distinct_preference_objects_reach_stage_candidates():

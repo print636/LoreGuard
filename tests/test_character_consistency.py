@@ -546,8 +546,106 @@ def test_signal_repeated_evidence_mismatch_stays_fail_closed():
     assert result.diagnostics.outcome == "degraded"
     assert result.diagnostics.attempted_calls == 2
     assert result.diagnostics.reason_counts == {"evidence_mismatch": 2}
+    assert result.diagnostics.evidence_mismatch_counts == {
+        "multiline_omission": 2
+    }
     assert "private-rejected-response-context" not in provider.calls[1][1]
     assert "private-rejected-response-context" not in result.model_dump_json()
+
+
+def test_question_mark_presentation_difference_never_admits_statement():
+    source = "林澈一直喜欢蜜瓜。"
+    rejected = valid_signal_record(evidence="林澈一直喜欢蜜瓜？")
+    payload = json.dumps({"records": [rejected]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload, payload), settings=settings()
+    ).extract(
+        CharacterSignalChunk(
+            "question-punctuation", "profile.md", source, 10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"evidence_mismatch": 2}
+    assert result.diagnostics.evidence_mismatch_counts == {
+        "presentation_difference": 2
+    }
+
+
+def test_evidence_mismatch_diagnostics_count_safe_shapes_after_clean_regeneration():
+    source = "林澈一直喜欢蜜瓜。\n林澈每周都买一颗蜜瓜。"
+    valid = valid_signal_record(source_line_end=11, evidence=source)
+    rejected = [
+        {**valid, "evidence": source.replace("。", "！", 1)},
+        {**valid, "source_line_start": 11, "evidence": source.splitlines()[0]},
+        {**valid, "evidence": source.splitlines()[0]},
+        {**valid, "source_line_end": 10, "evidence": "一直喜欢蜜瓜"},
+        {**valid, "evidence": "unrelated-response-marker"},
+        {**valid, "key_object": "梨汤"},
+    ]
+    provider = SequenceProvider(
+        json.dumps({"records": rejected}, ensure_ascii=False),
+        json.dumps({"records": [valid]}, ensure_ascii=False),
+    )
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "shape-diagnostic", "profile.md", source, 10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.reason_counts == {
+        "regenerated_from_evidence_mismatch": 5,
+        "regenerated_from_key_object_support": 1,
+    }
+    assert result.diagnostics.evidence_mismatch_counts == {
+        "presentation_difference": 1,
+        "multiline_omission": 1,
+        "other": 1,
+        "source_excerpt": 1,
+        "unique_other_line": 1,
+    }
+    assert len(result.signals) == 1
+    assert result.signals[0].evidence.text == source
+    assert "unrelated-response-marker" not in result.diagnostics.model_dump_json()
+
+
+def test_evidence_mismatch_diagnostics_keep_mixed_failed_attempts_without_admission():
+    source = "林澈一直喜欢蜜瓜。\n林澈每周都买一颗蜜瓜。"
+    valid = valid_signal_record(source_line_end=11, evidence=source)
+    provider = SequenceProvider(
+        json.dumps(
+            {"records": [
+                {**valid, "source_line_start": 11, "evidence": source.splitlines()[0]},
+                {**valid, "key_object": "梨汤"},
+            ]}, ensure_ascii=False,
+        ),
+        json.dumps(
+            {"records": [
+                {**valid, "source_line_end": 10, "evidence": "一直喜欢蜜瓜"},
+            ]}, ensure_ascii=False,
+        ),
+    )
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "failed-shape-diagnostic", "profile.md", source, 10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {
+        "evidence_mismatch": 2,
+        "key_object_support": 1,
+    }
+    assert result.diagnostics.evidence_mismatch_counts == {
+        "source_excerpt": 1,
+        "unique_other_line": 1,
+    }
 
 
 def test_draft_preference_rejects_object_and_attitude_spliced_across_lines():

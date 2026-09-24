@@ -47,6 +47,13 @@ ObservationKind = Literal[
     "state_description",
 ]
 SignalSourceKind = Literal["formal_character_profile", "published_history", "draft"]
+EvidenceMismatchKind = Literal[
+    "presentation_difference",
+    "unique_other_line",
+    "multiline_omission",
+    "source_excerpt",
+    "other",
+]
 
 # The server context contains identifiers only, never source prose.  Keep a
 # hard ceiling here as a second boundary in addition to the stage builder's
@@ -473,6 +480,10 @@ class CharacterSignalDiagnostics(BaseModel):
     rejected_records: int = Field(ge=0)
     ignored_duplicate_records: int = Field(default=0, ge=0)
     reason_counts: dict[str, int] = Field(default_factory=dict)
+    # Classification is content-free and never changes record admission.
+    evidence_mismatch_counts: dict[EvidenceMismatchKind, int] = Field(
+        default_factory=dict
+    )
     prompt_tokens: int = Field(default=0, ge=0)
     completion_tokens: int = Field(default=0, ge=0)
     charged_tokens: int = Field(default=0, ge=0)
@@ -514,6 +525,7 @@ class _ValidatedSignalPackage:
     rejected_records: int = 0
     ignored_duplicate_records: int = 0
     reason_counts: dict[str, int] | None = None
+    evidence_mismatch_counts: dict[EvidenceMismatchKind, int] | None = None
     failures: tuple[_SignalValidationFailure, ...] = ()
 
     @property
@@ -868,6 +880,9 @@ class CharacterSignalExtractor:
                         ignored_duplicate_records=(
                             validation.ignored_duplicate_records
                         ),
+                        evidence_mismatch_counts=(
+                            validation.evidence_mismatch_counts
+                        ),
                         reason_counts={
                             "regeneration_coverage_regression": missing
                         },
@@ -882,6 +897,9 @@ class CharacterSignalExtractor:
             if validation.complete:
                 clean = validation.signals
                 reasons: Counter[str] = Counter()
+                mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
+                for attempt in validation_attempts:
+                    mismatch_counts.update(attempt.evidence_mismatch_counts or {})
                 for earlier in validation_attempts[:-1]:
                     for reason, count in (earlier.reason_counts or {}).items():
                         reasons[f"regenerated_from_{reason}"] += count
@@ -911,6 +929,7 @@ class CharacterSignalExtractor:
                             )
                         ),
                         reason_counts=dict(sorted(reasons.items())),
+                        evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
                         prompt_tokens=total_prompt_tokens,
                         completion_tokens=total_completion_tokens,
                         charged_tokens=total_charged_tokens,
@@ -967,6 +986,7 @@ def _validate_signal_package(
         )
 
     reasons: Counter[str] = Counter()
+    mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
     signals: list[CharacterSignal] = []
     accepted_groups: set[tuple[str, str, str, str, str, str, int, int]] = set()
     accepted_signal_ids: set[str] = set()
@@ -1004,6 +1024,8 @@ def _validate_signal_package(
                 reason if reason in _REJECTION_REASONS else "record_validation"
             )
             reasons[safe_reason] += 1
+            if safe_reason == "evidence_mismatch":
+                mismatch_counts[_classify_evidence_mismatch(record, chunk)] += 1
             failures.append(_SignalValidationFailure(record_index, safe_reason))
             continue
 
@@ -1084,6 +1106,7 @@ def _validate_signal_package(
         rejected_records=sum(reasons.values()),
         ignored_duplicate_records=ignored_duplicate_records,
         reason_counts=dict(sorted(reasons.items())),
+        evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
         failures=tuple(failures),
     )
 
@@ -1278,8 +1301,10 @@ def _failed_package_result(
     token_admission: CharacterSignalTokenAdmission | None = None,
 ) -> CharacterSignalExtractionResult:
     reasons: Counter[str] = Counter()
+    mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
     for attempt in attempts:
         reasons.update(attempt.reason_counts or {})
+        mismatch_counts.update(attempt.evidence_mismatch_counts or {})
     if extra_reason:
         reasons[extra_reason] += 1
     return _empty_result(
@@ -1294,6 +1319,7 @@ def _failed_package_result(
         completion_tokens=completion_tokens,
         charged_tokens=charged_tokens,
         reason_counts=dict(sorted(reasons.items())),
+        evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
         token_admission=token_admission,
     )
 
@@ -1521,6 +1547,61 @@ def _raw_signal_group_identity(
         record.source_line_start,
         record.source_line_end,
     )
+
+
+def _classify_evidence_mismatch(
+    record: _RawCharacterSignal, chunk: CharacterSignalChunk
+) -> EvidenceMismatchKind:
+    """Describe a rejected echo using a fixed label, never source content.
+
+    This runs only after the strict source-line binder rejects the record.  Its
+    answer is diagnostic and cannot correct a line range or admit a signal.
+    """
+
+    lines = chunk.content.splitlines()
+    local_start = record.source_line_start - chunk.global_line_start
+    local_end = record.source_line_end - chunk.global_line_start + 1
+    if local_start < 0 or local_end > len(lines) or local_start >= local_end:
+        return "other"
+    selected = lines[local_start:local_end]
+    source = "\n".join(selected).strip()
+    echoed = record.evidence
+
+    def presentation_text(value: str) -> str:
+        normalized = unicodedata.normalize("NFKC", value)
+        return "".join(
+            char
+            for char in normalized
+            if not char.isspace() and not unicodedata.category(char).startswith("P")
+        )
+
+    echoed_compact = _compact(echoed)
+    if echoed_compact and len(echoed.splitlines()) == 1:
+        matches = [
+            index for index, line in enumerate(lines)
+            if _compact(line) == echoed_compact
+        ]
+        if len(matches) == 1 and not local_start <= matches[0] < local_end:
+            return "unique_other_line"
+
+    echoed_lines = tuple(_compact(line) for line in echoed.splitlines() if _compact(line))
+    selected_lines = tuple(_compact(line) for line in selected if _compact(line))
+    if len(selected_lines) > len(echoed_lines) > 0:
+        remaining = iter(selected_lines)
+        if all(any(line == candidate for candidate in remaining) for line in echoed_lines):
+            return "multiline_omission"
+
+    if presentation_text(echoed) == presentation_text(source):
+        return "presentation_difference"
+
+    source_compact = _compact(source)
+    if (
+        echoed_compact
+        and len(echoed_compact) < len(source_compact)
+        and echoed_compact in source_compact
+    ):
+        return "source_excerpt"
+    return "other"
 
 
 def _bind_record(record: _RawCharacterSignal, chunk: CharacterSignalChunk) -> CharacterSignal:
@@ -3111,6 +3192,7 @@ def _empty_result(
     completion_tokens: int = 0,
     charged_tokens: int = 0,
     reason_counts: dict[str, int] | None = None,
+    evidence_mismatch_counts: dict[EvidenceMismatchKind, int] | None = None,
     token_admission: CharacterSignalTokenAdmission | None = None,
 ) -> CharacterSignalExtractionResult:
     return CharacterSignalExtractionResult(
@@ -3122,6 +3204,7 @@ def _empty_result(
             rejected_records=rejected_records,
             ignored_duplicate_records=ignored_duplicate_records,
             reason_counts=reason_counts or {},
+            evidence_mismatch_counts=evidence_mismatch_counts or {},
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             charged_tokens=charged_tokens,

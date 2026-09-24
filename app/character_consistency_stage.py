@@ -140,6 +140,16 @@ _MAX_CASE_TRACE_LINE = 10_000_000
 _CASE_TRACE_CITATION_HANDLE = re.compile(r"^[BCGX][0-9]{2}$")
 _MAX_ACCEPTED_DRAFT_OBSERVATION_REFS = 64
 _MAX_TOKEN_ADMISSION_EVENTS = 24
+_MAX_EVIDENCE_MISMATCH_CHUNKS = 128
+_EVIDENCE_MISMATCH_KINDS = frozenset(
+    {
+        "presentation_difference", "unique_other_line", "multiline_omission",
+        "source_excerpt", "other",
+    }
+)
+_SAFE_DOCUMENT_ROLES = frozenset(
+    {"chapter", "canon", "character_profile", "reference"}
+)
 _OBJECT_BEARING_TRAIT_DIMENSIONS = frozenset(
     {"preference", "value", "behavior_boundary", "current_state"}
 )
@@ -300,6 +310,9 @@ class CharacterConsistencyStage:
 
         usage = _Usage()
         reason_counts: Counter[str] = Counter()
+        evidence_mismatch_counts: Counter[str] = Counter()
+        evidence_mismatch_chunks: list[dict[str, Any]] = []
+        evidence_mismatch_chunks_omitted = 0
         frozen = self._bind_frozen_documents(
             db,
             run_id=run_id,
@@ -350,6 +363,11 @@ class CharacterConsistencyStage:
                 )
             for chunk in chunks:
                 planned_chunks.append((source, chunk))
+        document_chunk_counts: Counter[str] = Counter()
+        original_chunk_ordinals: dict[int, int] = {}
+        for source, chunk in planned_chunks:
+            document_chunk_counts[source.input_id] += 1
+            original_chunk_ordinals[id(chunk)] = document_chunk_counts[source.input_id]
         partial = (
             len(planned_chunks) > settings.character_consistency_max_chunks_per_run
             or bool(reason_counts["invalid_confirmed_trait_snapshot"])
@@ -484,6 +502,53 @@ class CharacterConsistencyStage:
         token_admission_events: list[dict[str, int | str | None]] = []
         token_admission_omitted = 0
 
+        def record_evidence_mismatch(
+            phase: str,
+            extraction: object,
+            *,
+            source: _FrozenDocument,
+            chunk: object,
+            chunk_ordinal: int,
+            target_ordinal: int | None = None,
+        ) -> None:
+            nonlocal evidence_mismatch_chunks_omitted
+            diagnostics = getattr(extraction, "diagnostics", None)
+            counts = getattr(diagnostics, "evidence_mismatch_counts", {})
+            if not isinstance(counts, dict):
+                return
+            safe_counts = {
+                key: value for key, value in counts.items()
+                if key in _EVIDENCE_MISMATCH_KINDS
+                and type(value) is int and 0 < value <= 1_000_000
+            }
+            if not safe_counts:
+                return
+            evidence_mismatch_counts.update(safe_counts)
+            if len(evidence_mismatch_chunks) >= _MAX_EVIDENCE_MISMATCH_CHUNKS:
+                evidence_mismatch_chunks_omitted += 1
+                return
+            if source.source_kind not in {
+                "formal_character_profile", "published_history", "draft"
+            }:
+                return
+            evidence_mismatch_chunks.append(
+                {
+                    "source_document_ordinal": source.ordinal,
+                    "document_chunk_ordinal": original_chunk_ordinals[id(chunk)],
+                    "stage_chunk_ordinal": chunk_ordinal,
+                    "document_role": (
+                        source.document.role
+                        if source.document.role in _SAFE_DOCUMENT_ROLES
+                        else "unknown"
+                    ),
+                    "source_kind": source.source_kind,
+                    "phase": phase,
+                    "target_ordinal": target_ordinal,
+                    "outcome": diagnostics.outcome,
+                    "counts": dict(sorted(safe_counts.items())),
+                }
+            )
+
         def record_token_admission(
             phase: str,
             extraction: object,
@@ -550,6 +615,10 @@ class CharacterConsistencyStage:
                 stage_remaining_before=remaining,
             )
             usage.add(extraction.diagnostics)
+            record_evidence_mismatch(
+                "primary_extraction", extraction,
+                source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
+            )
             signal_ignored_duplicates += (
                 extraction.diagnostics.ignored_duplicate_records
             )
@@ -650,6 +719,11 @@ class CharacterConsistencyStage:
                     reviewer_reserve=targeted_reviewer_reserve_tokens,
                 )
                 usage.add(targeted.diagnostics)
+                record_evidence_mismatch(
+                    "targeted_recall", targeted,
+                    source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
+                    target_ordinal=target_index + 1,
+                )
                 targeted_passes_attempted += targeted.diagnostics.attempted_calls
                 targeted_records_accepted += targeted.diagnostics.accepted_records
                 targeted_records_rejected += targeted.diagnostics.rejected_records
@@ -788,6 +862,11 @@ class CharacterConsistencyStage:
                     reviewer_reserve=targeted_reviewer_reserve_tokens,
                 )
                 usage.add(verification.diagnostics)
+                record_evidence_mismatch(
+                    "targeted_verification", verification,
+                    source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
+                    target_ordinal=target_index + 1,
+                )
                 targeted_passes_attempted += verification.diagnostics.attempted_calls
                 targeted_verification_attempted += (
                     verification.diagnostics.attempted_calls
@@ -1276,6 +1355,11 @@ class CharacterConsistencyStage:
                 accepted_draft_observation_refs_truncated
             ),
             token_admission_events=token_admission_events,
+            evidence_mismatch_counts=evidence_mismatch_counts,
+            evidence_mismatch_chunks=evidence_mismatch_chunks,
+            evidence_mismatch_chunks_omitted_count=(
+                evidence_mismatch_chunks_omitted
+            ),
         )
         return CharacterConsistencyStageResult(
             issues=tuple(issues),
@@ -3146,6 +3230,9 @@ def _diagnostics(
     accepted_draft_observation_total: int = 0,
     accepted_draft_observation_refs_truncated: bool = False,
     token_admission_events: list[dict[str, int | str | None]] | None = None,
+    evidence_mismatch_counts: Counter[str] | None = None,
+    evidence_mismatch_chunks: list[dict[str, Any]] | None = None,
+    evidence_mismatch_chunks_omitted_count: int = 0,
     **counts: Any,
 ) -> dict[str, Any]:
     return {
@@ -3172,6 +3259,13 @@ def _diagnostics(
         ),
         "token_admission_events": list(token_admission_events or ()),
         "reason_counts": dict(sorted(reasons.items())),
+        "evidence_mismatch_counts": dict(
+            sorted((evidence_mismatch_counts or {}).items())
+        ),
+        "evidence_mismatch_chunks": list(evidence_mismatch_chunks or ()),
+        "evidence_mismatch_chunks_omitted_count": (
+            evidence_mismatch_chunks_omitted_count
+        ),
         "usage": usage.safe_dict(),
         "boundary": (
             "Optional frozen-input stage; model output cannot decide authority, "
@@ -3203,6 +3297,9 @@ def _empty_stage_result(outcome: str, reason_code: str) -> CharacterConsistencyS
             "accepted_draft_observation_refs_truncated": False,
             "token_admission_events": [],
             "reason_counts": {},
+            "evidence_mismatch_counts": {},
+            "evidence_mismatch_chunks": [],
+            "evidence_mismatch_chunks_omitted_count": 0,
             "usage": _Usage().safe_dict(),
             "boundary": (
                 "Optional frozen-input stage; model output cannot decide authority, "

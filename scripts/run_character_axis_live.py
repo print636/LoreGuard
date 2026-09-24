@@ -64,7 +64,8 @@ GIT_HASH = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 SAFE_KEY = re.compile(r"[A-Za-z0-9_.:-]{1,100}\Z")
 SAFE_REASON_KEYS = frozenset({
     "source_formal", "source_history",
-    "regenerated_from_evidence_mismatch", "statement_support",
+    "regenerated_from_evidence_mismatch", "evidence_mismatch",
+    "key_object_support", "statement_support",
     "lower_authority_baseline_shadowed", "invalid_confirmed_trait_snapshot",
     "chunk_limit", "confirmed_trait_hint_ambiguous",
     "confirmed_trait_context_truncated", "stage_token_budget",
@@ -93,6 +94,19 @@ SAFE_SIGNAL_DIMENSIONS = frozenset({
 SAFE_CANDIDATE_ELIGIBILITY_KEYS = frozenset({
     "stable_or_core_formal_signals", "stable_or_core_history_signals",
     "prelimit_candidates",
+})
+SAFE_EVIDENCE_MISMATCH_CATEGORIES = frozenset({
+    "presentation_difference", "unique_other_line", "multiline_omission",
+    "source_excerpt", "other",
+})
+SAFE_EVIDENCE_MISMATCH_ROLES = frozenset({
+    "chapter", "canon", "character_profile", "reference", "unknown",
+})
+SAFE_EVIDENCE_MISMATCH_PHASES = frozenset({
+    "primary_extraction", "targeted_recall", "targeted_verification",
+})
+SAFE_EVIDENCE_MISMATCH_OUTCOMES = frozenset({
+    "disabled", "completed", "partial", "degraded", "skipped",
 })
 TERMINAL = {"completed", "failed", "cancelled"}
 # Each official fixture has its own committed digest. Custom fixtures require
@@ -507,6 +521,87 @@ def _safe_accepted_signal_diagnostics(
     ), dict(raw_eligibility)
 
 
+def _safe_evidence_mismatch_diagnostics(
+    stage: dict[str, Any],
+) -> tuple[dict[str, int] | None, list[dict[str, Any]] | None, int | None]:
+    """Project only fixed enums, ordinals and bounded counts from worker data."""
+    raw_counts = stage.get("evidence_mismatch_counts")
+    raw_chunks = stage.get("evidence_mismatch_chunks")
+    omitted = stage.get("evidence_mismatch_chunks_omitted_count")
+    if (
+        not isinstance(raw_counts, dict)
+        or not isinstance(raw_chunks, list) or len(raw_chunks) > 128
+        or type(omitted) is not int or not 0 <= omitted <= 1_000_000
+        or not set(raw_counts) <= SAFE_EVIDENCE_MISMATCH_CATEGORIES
+        or any(type(value) is not int or not 1 <= value <= 1_000_000
+               for value in raw_counts.values())
+    ):
+        return None, None, None
+    safe_chunks: list[dict[str, Any]] = []
+    emitted_counts: dict[str, int] = {}
+    row_keys = {
+        "source_document_ordinal", "document_chunk_ordinal", "stage_chunk_ordinal",
+        "document_role", "source_kind", "phase", "target_ordinal", "outcome",
+        "counts",
+    }
+    for row in raw_chunks:
+        if not isinstance(row, dict) or set(row) != row_keys:
+            return None, None, None
+        counts = row["counts"]
+        target = row["target_ordinal"]
+        if (
+            type(row["source_document_ordinal"]) is not int
+            or not 0 <= row["source_document_ordinal"] <= 1_000_000
+            or type(row["document_chunk_ordinal"]) is not int
+            or not 1 <= row["document_chunk_ordinal"] <= 1_000_000
+            or type(row["stage_chunk_ordinal"]) is not int
+            or not 1 <= row["stage_chunk_ordinal"] <= 1_000_000
+            or type(row["document_role"]) is not str
+            or row["document_role"] not in SAFE_EVIDENCE_MISMATCH_ROLES
+            or type(row["source_kind"]) is not str
+            or row["source_kind"] not in SAFE_SIGNAL_SOURCE_KINDS
+            or type(row["phase"]) is not str
+            or row["phase"] not in SAFE_EVIDENCE_MISMATCH_PHASES
+            or type(row["outcome"]) is not str
+            or row["outcome"] not in SAFE_EVIDENCE_MISMATCH_OUTCOMES
+            or (target is not None and (
+                type(target) is not int or not 1 <= target <= 1_000_000
+            ))
+            or not isinstance(counts, dict) or not counts
+            or not set(counts) <= SAFE_EVIDENCE_MISMATCH_CATEGORIES
+            or any(type(value) is not int or not 1 <= value <= 1_000_000
+                   for value in counts.values())
+        ):
+            return None, None, None
+        safe_chunks.append({
+            "source_document_ordinal": row["source_document_ordinal"],
+            "document_chunk_ordinal": row["document_chunk_ordinal"],
+            "stage_chunk_ordinal": row["stage_chunk_ordinal"],
+            "document_role": row["document_role"],
+            "source_kind": row["source_kind"],
+            "phase": row["phase"],
+            "target_ordinal": target,
+            "outcome": row["outcome"],
+            "counts": {key: counts[key] for key in sorted(counts)},
+        })
+        for key, value in counts.items():
+            emitted_counts[key] = emitted_counts.get(key, 0) + value
+    if (
+        (omitted == 0 and emitted_counts != raw_counts)
+        or (omitted > 0 and (
+            not raw_counts
+            or any(value > raw_counts.get(key, 0)
+                   for key, value in emitted_counts.items())
+        ))
+    ):
+        return None, None, None
+    return (
+        {key: raw_counts[key] for key in sorted(raw_counts)},
+        safe_chunks,
+        omitted,
+    )
+
+
 def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     """Whitelist only model, character-stage, and build identity fields.
 
@@ -623,6 +718,9 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
     signal_histogram, candidate_eligibility = _safe_accepted_signal_diagnostics(
         stage, counts
     )
+    mismatch_counts, mismatch_chunks, mismatch_omitted = (
+        _safe_evidence_mismatch_diagnostics(stage)
+    )
     accepted_draft_refs = _safe_accepted_draft_refs(
         stage, known_documents=known_documents
     )
@@ -676,6 +774,9 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
         "targeted_record_rejection_events": counts.get("targeted_record_rejected_count"),
         "accepted_signal_histogram": signal_histogram,
         "candidate_eligibility": candidate_eligibility,
+        "evidence_mismatch_counts": mismatch_counts,
+        "evidence_mismatch_chunks": mismatch_chunks,
+        "evidence_mismatch_chunks_omitted_count": mismatch_omitted,
         "stage_usage": {key: usage.get(key) for key in ("attempted_calls", "input_tokens", "completion_tokens", "charged_tokens")},
         "reason_counts": safe_reasons,
         "unreported_reason_entries": len(reasons) - len(safe_reasons),
@@ -716,7 +817,9 @@ def _list_pending(client: httpx.Client, project_id: str) -> list[dict[str, Any]]
             )
             if not isinstance(result, dict) or not isinstance(result.get("items"), list):
                 raise SafeFailure("candidate_list_contract", "candidate_review")
-            candidates.extend(row for row in result["items"] if isinstance(row, dict))
+            if any(not isinstance(row, dict) for row in result["items"]):
+                raise SafeFailure("candidate_list_contract", "candidate_review")
+            candidates.extend(result["items"])
             if not result.get("has_more"):
                 break
             offset += len(result["items"])
@@ -792,6 +895,67 @@ def _candidate_matches(row: dict[str, Any], selector: dict[str, Any]) -> bool:
         selector["trait_type"], trait_key, key_object or ""
     )
     return row.get("comparison_key") == expected_key
+
+
+def _partial_baseline_inventory(
+    client: httpx.Client, project_id: str, suite: VerifiedSuite,
+) -> dict[str, Any]:
+    """Read-only, redacted inventory after a partial baseline fails admission."""
+    pending = _list_pending(client, project_id)
+    candidate_ids: set[str] = set()
+    required_text = (
+        "character_key", "trait_type", "trait_key", "value", "polarity",
+        "stability", "origin",
+    )
+    for row in pending:
+        candidate_id = row.get("id")
+        evidence = row.get("evidence")
+        if (
+            not isinstance(candidate_id, str) or not candidate_id
+            or candidate_id in candidate_ids
+            or type(row.get("reviewable")) is not bool
+            or any(not isinstance(row.get(key), str) for key in required_text)
+            or not (
+                row.get("comparison_key") is None
+                or isinstance(row.get("comparison_key"), str)
+            )
+            or not isinstance(evidence, list)
+            or any(
+                not isinstance(ref, dict)
+                or not isinstance(ref.get("document_name"), str)
+                or type(ref.get("line_start")) is not int
+                or type(ref.get("line_end")) is not int
+                or not isinstance(ref.get("text"), str)
+                for ref in evidence
+            )
+        ):
+            raise SafeFailure("candidate_inventory_contract", "candidate_inventory")
+        candidate_ids.add(candidate_id)
+
+    reviewable = [row for row in pending if row["reviewable"]]
+    matched_ids: set[str] = set()
+    matches_by_selector = [
+        [row["id"] for row in reviewable if _candidate_matches(row, selector)]
+        for selector in suite.plan["candidate_decisions"]
+    ]
+    match_frequency: dict[str, int] = {}
+    for match_ids in matches_by_selector:
+        matched_ids.update(match_ids)
+        for candidate_id in match_ids:
+            match_frequency[candidate_id] = match_frequency.get(candidate_id, 0) + 1
+    selector_counts: dict[str, dict[str, int | bool]] = {}
+    for ordinal, match_ids in enumerate(matches_by_selector, start=1):
+        unique = len(match_ids) == 1 and match_frequency[match_ids[0]] == 1
+        selector_counts[f"selector_{ordinal}"] = {
+            "match_count": len(match_ids), "unique": unique,
+        }
+    return {
+        "available": True,
+        "reviewable_total": len(reviewable),
+        "matched_reviewable_total": len(matched_ids),
+        "extra_reviewable_total": len(reviewable) - len(matched_ids),
+        "selectors": selector_counts,
+    }
 
 
 def _review_candidates(
@@ -898,6 +1062,15 @@ def _execute_trial(client: httpx.Client, suite: VerifiedSuite, trial: int, state
     state["baseline"] = baseline
     state["baseline_admission"] = _baseline_admission(baseline)
     if state["baseline_admission"]["admitted"] is not True:
+        if baseline.get("status") == "completed" and baseline.get("stage_outcome") == "partial":
+            try:
+                state["partial_baseline_inventory"] = _partial_baseline_inventory(
+                    client, project_id, suite
+                )
+            except Exception as exc:
+                state["partial_baseline_inventory"] = {
+                    "available": False, "reason_code": _failure(exc)["code"],
+                }
         raise SafeFailure("baseline_admission_failed", "baseline")
     _review_candidates(client, project_id, suite, state)
     draft_document_id = _upload(
@@ -1232,6 +1405,8 @@ def _public_run(summary: dict[str, Any] | None) -> dict[str, Any] | None:
             "processed_chunks", "draft_observations", "accepted_draft_observation_total",
             "accepted_draft_observation_refs_complete", "targeted_record_rejection_events",
             "accepted_signal_histogram", "candidate_eligibility",
+            "evidence_mismatch_counts", "evidence_mismatch_chunks",
+            "evidence_mismatch_chunks_omitted_count",
             "stage_usage", "reason_counts", "unreported_reason_entries",
             "token_admission_events",
         )
@@ -1300,6 +1475,8 @@ def _score_trial(
         "failure": state.get("failure"),
         "baseline": _public_run(baseline),
         "baseline_admitted": admission.get("admitted") is True,
+        **({"partial_baseline_inventory": state["partial_baseline_inventory"]}
+           if "partial_baseline_inventory" in state else {}),
         "candidate_review": review,
         "axis_count": state.get("axis_count", 0),
         "draft": _public_run(draft),
@@ -1822,6 +1999,21 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "candidate_eligibility": (
                 "正式/历史 core 或 stable 信号数与真实候选构建后的限额前候选数；"
                 "不公开历史精确分组，不能仅凭本简表推断每条信号被滤除的原因"
+            ),
+            "evidence_mismatch_counts": (
+                "各次模型抽取尝试中的证据拒收/重试后恢复事件分类计数；"
+                "不是独立原文行数、最终失败次数或剧情错误数"
+            ),
+            "evidence_mismatch_chunks": (
+                "每个分块或目标抽取调用汇总其各次模型尝试中的证据拒收/恢复事件；"
+                "仅展示固定类别、"
+                "来源/阶段枚举、文档与分块序号及有界计数，不代表独立原文行或最终失败数；"
+                "不含原文、文档名、候选 ID、密钥或服务地址，也不改变准入与评分"
+            ),
+            "partial_baseline_inventory": (
+                "仅在基线部分完成且准入失败时，对待审核候选执行只读查询；"
+                "以匿名序号槽报告预注册锚点的脱敏匹配计数和额外可审核候选数，不确认候选、"
+                "不上传草稿，也不改变基线失败或试验通过状态"
             ),
             "unselected_reviewable_candidates": (
                 "基线运行产生、但不在预注册作者审核计划内的可审核候选数；字段缺失或无效"

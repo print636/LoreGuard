@@ -693,6 +693,185 @@ def test_execute_trial_uploads_only_story_documents_and_explicit_draft_target(
     assert all("oracle" not in json.dumps(row) for row in uploads)
 
 
+@pytest.mark.parametrize(
+    ("candidate_items", "expected_inventory"),
+    [
+        ("valid", {"available": True, "reviewable_total": 2,
+                   "matched_reviewable_total": 1, "extra_reviewable_total": 1,
+                   "selectors": {"selector_1": {"match_count": 1, "unique": True}}}),
+        ("malformed", {"available": False,
+                       "reason_code": "candidate_inventory_contract"}),
+        ("non_dict", {"available": False,
+                      "reason_code": "candidate_list_contract"}),
+        ("transport", {"available": False, "reason_code": "http_transport"}),
+    ],
+)
+def test_partial_baseline_inventory_is_read_only_and_cannot_admit(
+    tmp_path, monkeypatch, candidate_items, expected_inventory,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    calls = []
+    uploads = []
+    matched = {
+        "id": "candidate-match", "reviewable": True, "character_key": "Actor",
+        "trait_type": "core_personality", "trait_key": "decision_axis",
+        "comparison_key": axis_live.stable_trait_identity(
+            "core_personality", "decision_axis"
+        ),
+        "value": "source anchor", "polarity": "positive", "stability": "core",
+        "origin": "explicit_setting",
+        "evidence": [{"document_name": "02-character-profiles.md", "line_start": 1,
+                      "line_end": 1, "text": "source anchor"}],
+    }
+
+    def fake_request(_client, method, _path, route, **_kwargs):
+        calls.append((method, route))
+        if route == "project_create":
+            assert method == "POST"
+            return {"id": "project-uuid"}
+        assert method == "GET"
+        if route == "characters":
+            return {"items": [{"character_key": "Actor"}], "has_more": False}
+        assert route == "candidate_list"
+        if candidate_items == "transport":
+            raise axis_live.SafeFailure("http_transport", "candidate_list")
+        if candidate_items == "malformed":
+            items = [{"id": "bad", "reviewable": True}]
+        elif candidate_items == "non_dict":
+            items = ["bad row"]
+        else:
+            items = [matched, {
+                **matched, "id": "candidate-extra", "trait_key": "other_axis",
+                "comparison_key": axis_live.stable_trait_identity(
+                    "core_personality", "other_axis"
+                ),
+                "value": "private model statement that must not appear in report",
+            }]
+        return {"items": items, "has_more": False}
+
+    def fake_upload(_client, _project, _suite, name, *_args, **_kwargs):
+        assert name != axis_live.DRAFT_FILE
+        uploads.append(name)
+        return name
+
+    monkeypatch.setattr(axis_live, "_request", fake_request)
+    monkeypatch.setattr(axis_live, "_upload", fake_upload)
+    monkeypatch.setattr(axis_live, "_start_run", lambda _c, _p, *, mode: "baseline-run")
+    monkeypatch.setattr(axis_live, "_wait_run", lambda *_a, **_k: {"id": "baseline-run"})
+    monkeypatch.setattr(axis_live, "_run_summary", lambda *_a, **_k: {
+        "status": "completed", "stage_outcome": "partial", "material_coverage": "partial",
+    })
+    monkeypatch.setattr(axis_live, "_baseline_admission", lambda _s: {"admitted": False})
+
+    state = {"trial": 1}
+    with pytest.raises(axis_live.SafeFailure, match="baseline_admission_failed") as error:
+        axis_live._execute_trial(object(), suite, 1, state, timeout_seconds=1)
+    assert state["partial_baseline_inventory"] == expected_inventory
+    assert calls == [
+        ("POST", "project_create"), ("GET", "characters"),
+        ("GET", "candidate_list"),
+    ]
+    assert uploads == [name for name, _ in axis_live.BASELINE_FILES]
+    state["failure"] = error.value.payload
+    scored = axis_live._score_trial(suite, state, [])
+    assert scored["passed"] is False
+    assert scored["draft"] is None
+    assert scored["partial_baseline_inventory"] == expected_inventory
+    assert "private model statement" not in json.dumps(scored)
+
+
+def test_partial_inventory_anonymizes_selector_keys_and_rejects_reused_candidate(
+    tmp_path, monkeypatch,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    selectors = suite.plan["candidate_decisions"]
+    selectors[0]["candidate_key"] = "sk-secret-first"
+    selectors.append({**selectors[0], "candidate_key": "sk-secret-second"})
+    row = {
+        "id": "candidate-1", "reviewable": True, "character_key": "Actor",
+        "trait_type": "core_personality", "trait_key": "decision_axis",
+        "comparison_key": axis_live.stable_trait_identity(
+            "core_personality", "decision_axis"
+        ),
+        "value": "source anchor", "polarity": "positive", "stability": "core",
+        "origin": "explicit_setting",
+        "evidence": [{"document_name": "02-character-profiles.md", "line_start": 1,
+                      "line_end": 1, "text": "source anchor"}],
+    }
+    monkeypatch.setattr(axis_live, "_list_pending", lambda *_a: [row])
+    inventory = axis_live._partial_baseline_inventory(object(), "project-id", suite)
+    assert inventory == {
+        "available": True, "reviewable_total": 1,
+        "matched_reviewable_total": 1, "extra_reviewable_total": 0,
+        "selectors": {
+            "selector_1": {"match_count": 1, "unique": False},
+            "selector_2": {"match_count": 1, "unique": False},
+        },
+    }
+    assert "sk-secret" not in json.dumps(inventory)
+    assert "candidate-1" not in json.dumps(inventory)
+
+
+def test_partial_inventory_global_uniqueness_rejects_shared_multimatch(
+    tmp_path, monkeypatch,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    selectors = suite.plan["candidate_decisions"]
+    selectors[0]["source_quote"] = "anchor one"
+    selectors.append({**selectors[0], "source_quote": "source anchor"})
+    row = {
+        "id": "candidate-1", "reviewable": True, "character_key": "Actor",
+        "trait_type": "core_personality", "trait_key": "decision_axis",
+        "comparison_key": axis_live.stable_trait_identity(
+            "core_personality", "decision_axis"
+        ),
+        "value": "anchor one source anchor", "polarity": "positive",
+        "stability": "core", "origin": "explicit_setting",
+        "evidence": [{"document_name": "02-character-profiles.md", "line_start": 1,
+                      "line_end": 1, "text": "anchor one source anchor"}],
+    }
+    monkeypatch.setattr(axis_live, "_list_pending", lambda *_a: [
+        row, {**row, "id": "candidate-2", "value": "source anchor"},
+    ])
+    inventory = axis_live._partial_baseline_inventory(object(), "project-id", suite)
+    assert inventory["selectors"] == {
+        "selector_1": {"match_count": 1, "unique": False},
+        "selector_2": {"match_count": 2, "unique": False},
+    }
+    assert inventory["matched_reviewable_total"] == 2
+    assert inventory["extra_reviewable_total"] == 0
+
+
+def test_nonpartial_baseline_rejection_does_not_fetch_candidate_inventory(
+    tmp_path, monkeypatch,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    calls = []
+
+    def fake_request(_client, method, _path, route, **_kwargs):
+        calls.append((method, route))
+        assert route == "project_create"
+        return {"id": "project-uuid"}
+
+    monkeypatch.setattr(axis_live, "_request", fake_request)
+    monkeypatch.setattr(axis_live, "_upload", lambda *_a, **_k: "baseline-document")
+    monkeypatch.setattr(axis_live, "_start_run", lambda _c, _p, *, mode: "baseline-run")
+    monkeypatch.setattr(axis_live, "_wait_run", lambda *_a, **_k: {"id": "baseline-run"})
+    monkeypatch.setattr(axis_live, "_run_summary", lambda *_a, **_k: {
+        "status": "failed", "stage_outcome": "failed", "material_coverage": "none",
+    })
+    monkeypatch.setattr(axis_live, "_baseline_admission", lambda _s: {"admitted": False})
+    state = {}
+    with pytest.raises(axis_live.SafeFailure, match="baseline_admission_failed"):
+        axis_live._execute_trial(object(), suite, 1, state, timeout_seconds=1)
+    assert "partial_baseline_inventory" not in state
+    assert calls == [("POST", "project_create")]
+
+
 def test_six_trials_finish_before_oracle_is_parsed(tmp_path, monkeypatch):
     root, digest = _fixture(tmp_path)
     events = []
@@ -1267,6 +1446,21 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
                     "stable_or_core_history_signals": 0,
                     "prelimit_candidates": 1,
                 },
+                "evidence_mismatch_counts": {
+                    "presentation_difference": 2, "unique_other_line": 1,
+                },
+                "evidence_mismatch_chunks": [{
+                    "source_document_ordinal": 0, "document_chunk_ordinal": 2,
+                    "stage_chunk_ordinal": 3, "document_role": "character_profile",
+                    "source_kind": "formal_character_profile",
+                    "phase": "primary_extraction", "target_ordinal": None,
+                    "outcome": "partial", "counts": {
+                        "presentation_difference": 2, "unique_other_line": 1,
+                    },
+                }],
+                "evidence_mismatch_chunks_omitted_count": 0,
+                "source_text": "sk-secret never report",
+                "source_url": "https://private.invalid/key",
                 "counts": {
                     "targeted_record_rejected_count": 3,
                     "signal_count": 2,
@@ -1276,6 +1470,8 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
                     "source_formal": 2,
                     "source_history": 1,
                     "regenerated_from_evidence_mismatch": 5,
+                    "evidence_mismatch": 5,
+                    "key_object_support": 1,
                     "statement_support": 4,
                     "sk-secret": 1,
                 },
@@ -1316,20 +1512,125 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
         "stable_or_core_history_signals": 0,
         "prelimit_candidates": 1,
     }
+    assert summary["evidence_mismatch_counts"] == {
+        "presentation_difference": 2, "unique_other_line": 1,
+    }
+    assert summary["evidence_mismatch_chunks"] == [{
+        "source_document_ordinal": 0, "document_chunk_ordinal": 2,
+        "stage_chunk_ordinal": 3, "document_role": "character_profile",
+        "source_kind": "formal_character_profile", "phase": "primary_extraction",
+        "target_ordinal": None, "outcome": "partial", "counts": {
+            "presentation_difference": 2, "unique_other_line": 1,
+        },
+    }]
+    assert summary["evidence_mismatch_chunks_omitted_count"] == 0
     assert summary["reason_counts"] == {
         "candidate_limit": 2,
         "source_formal": 2,
         "source_history": 1,
         "regenerated_from_evidence_mismatch": 5,
+        "evidence_mismatch": 5,
+        "key_object_support": 1,
         "statement_support": 4,
     }
     assert summary["unreported_reason_entries"] == 1
     assert "sk-secret" not in repr(summary)
+    assert "private.invalid" not in repr(axis_live._public_run(summary))
     raw_trace["citation_refs_incomplete"] = True
     incomplete = axis_live._run_summary(
         object(), {"id": "run-id"}, known_documents={"history.md", "draft.md"}
     )
     assert incomplete["case_trace"][0]["citation_refs"] is None
+
+
+def test_evidence_mismatch_projection_fails_closed_on_untrusted_payload(monkeypatch):
+    valid = {
+        "evidence_mismatch_counts": {"source_excerpt": 1},
+        "evidence_mismatch_chunks": [{
+            "source_document_ordinal": 1, "document_chunk_ordinal": 1,
+            "stage_chunk_ordinal": 2, "document_role": "chapter",
+            "source_kind": "published_history", "phase": "targeted_recall",
+            "target_ordinal": 1, "outcome": "partial",
+            "counts": {"source_excerpt": 1},
+        }],
+        "evidence_mismatch_chunks_omitted_count": 0,
+    }
+    counts, chunks, omitted = axis_live._safe_evidence_mismatch_diagnostics(valid)
+    assert counts == {"source_excerpt": 1}
+    assert chunks == valid["evidence_mismatch_chunks"]
+    assert omitted == 0
+
+    bad_fields = [
+        ("source_document_ordinal", True),
+        ("document_chunk_ordinal", -1),
+        ("document_role", "C:/private/story.md"),
+        ("source_kind", ["published_history"]),
+        ("phase", "https://private.invalid/key"),
+        ("outcome", "sk-secret"),
+        ("counts", {"sk-secret": 1}),
+        ("counts", {"source_excerpt": True}),
+    ]
+    for field, value in bad_fields:
+        bad = json.loads(json.dumps(valid))
+        bad["evidence_mismatch_chunks"][0][field] = value
+        assert axis_live._safe_evidence_mismatch_diagnostics(bad) == (
+            None, None, None,
+        )
+    bad = json.loads(json.dumps(valid))
+    bad["evidence_mismatch_chunks"][0]["source_text"] = "sk-secret"
+    assert axis_live._safe_evidence_mismatch_diagnostics(bad) == (None, None, None)
+    bad = json.loads(json.dumps(valid))
+    bad["evidence_mismatch_counts"]["sk-secret"] = 1
+    assert axis_live._safe_evidence_mismatch_diagnostics(bad) == (None, None, None)
+    bad = json.loads(json.dumps(valid))
+    bad["evidence_mismatch_chunks_omitted_count"] = "C:/private/story.md"
+    assert axis_live._safe_evidence_mismatch_diagnostics(bad) == (None, None, None)
+    missing_global = json.loads(json.dumps(valid))
+    missing_global["evidence_mismatch_counts"]["presentation_difference"] = 1
+    assert axis_live._safe_evidence_mismatch_diagnostics(missing_global) == (
+        None, None, None,
+    )
+    missing_chunk = json.loads(json.dumps(valid))
+    missing_chunk["evidence_mismatch_counts"]["other"] = 1
+    assert axis_live._safe_evidence_mismatch_diagnostics(missing_chunk) == (
+        None, None, None,
+    )
+    missing_chunk["evidence_mismatch_chunks_omitted_count"] = 1
+    assert axis_live._safe_evidence_mismatch_diagnostics(missing_chunk) == (
+        {"other": 1, "source_excerpt": 1}, valid["evidence_mismatch_chunks"], 1,
+    )
+    overcount = json.loads(json.dumps(valid))
+    overcount["evidence_mismatch_chunks_omitted_count"] = 1
+    overcount["evidence_mismatch_chunks"][0]["counts"]["source_excerpt"] = 2
+    assert axis_live._safe_evidence_mismatch_diagnostics(overcount) == (
+        None, None, None,
+    )
+
+    untrusted = json.loads(json.dumps(valid))
+    untrusted["evidence_mismatch_chunks"][0]["source_text"] = "sk-secret"
+    untrusted["provider_url"] = "https://private.invalid/key"
+
+    def fake_request(_client, _method, _path, route, **_kwargs):
+        if route == "diagnostics":
+            return {"character_consistency": {
+                **untrusted, "outcome": "partial", "reason_code": "bounded_partial",
+                "reason_counts": {"evidence_mismatch": 1, "sk-secret": 1},
+            }}
+        assert route == "issues"
+        return []
+
+    monkeypatch.setattr(axis_live, "_request", fake_request)
+    summary = axis_live._run_summary(
+        object(), {"id": "run-id", "status": "completed"}, known_documents=set()
+    )
+    public = axis_live._public_run(summary)
+    assert public["status"] == "completed"
+    assert public["stage_outcome"] == "partial"
+    assert public["stage_reason"] == "bounded_partial"
+    assert public["reason_counts"] == {"evidence_mismatch": 1}
+    assert public["evidence_mismatch_chunks"] is None
+    assert "sk-secret" not in json.dumps(public)
+    assert "private.invalid" not in json.dumps(public)
 
 
 def test_signal_histogram_projection_rejects_unbounded_or_untrusted_labels():
