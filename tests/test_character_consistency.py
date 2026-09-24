@@ -19,6 +19,7 @@ from app.character_drift import (
     promote_character_drift,
 )
 from app.character_trait_extraction import (
+    CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
     CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
@@ -297,6 +298,92 @@ def test_signal_full_line_prompt_v2_is_opt_in_and_default_prompt_is_unchanged():
     assert "示例甲。示例乙。" in enabled_system
     assert "完整回显" in enabled_user.split("原文如下：", 1)[1]
     assert "key_object 必须逐字出现在这些原文行中" in enabled_user
+
+
+def test_signal_core_scope_v3_requires_v2_and_keeps_default_off():
+    assert settings().character_signal_core_scope_prompt_v3 is False
+    with pytest.raises(ValueError, match="core scope v3 requires full line v2"):
+        settings(character_signal_core_scope_prompt_v3=True)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    (
+        ({"character_signal_core_scope_prompt_v3": True}, "core scope v3 requires full line v2"),
+        (
+            {
+                "character_signal_full_line_prompt_v2": "false",
+                "character_signal_core_scope_prompt_v3": True,
+            },
+            "prompt variant flags must be bool",
+        ),
+        ({"character_signal_core_scope_prompt_v3": "false"}, "prompt variant flags must be bool"),
+        ({"character_signal_full_line_prompt_v2": "true"}, "prompt variant flags must be bool"),
+    ),
+)
+def test_signal_prompt_model_copy_bypass_fails_before_model_call_or_charge(
+    overrides: dict, expected_error: str,
+):
+    from app.service import (
+        CharacterConsistencyUsageAccumulator,
+        _CharacterConsistencyAccountingProvider,
+    )
+
+    bypassed = settings().model_copy(update=overrides)
+    chunk = CharacterSignalChunk(
+        "scope-bypass", "profile.md", "林澈的核心性格是谨慎。", 10,
+        "formal_character_profile",
+    )
+    signal = FakeProvider('{"records":[]}')
+    usage = CharacterConsistencyUsageAccumulator()
+    accounting = _CharacterConsistencyAccountingProvider(
+        bypassed, usage, signal_provider=signal, drift_provider=signal,
+    )
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        CharacterSignalExtractor(accounting, settings=bypassed).extract(chunk)
+    assert signal.calls == []
+    assert usage.safe_dict(terminal_status="failed") is None
+
+    for system in (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
+        TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
+        CHARACTER_REVIEW_SYSTEM_PROMPT,
+    ):
+        with pytest.raises(RuntimeError, match=expected_error):
+            accounting.complete(system, "bypassed settings")
+    assert signal.calls == []
+    assert usage.safe_dict(terminal_status="failed") is None
+
+
+def test_signal_core_scope_v3_appends_only_primary_system_and_survives_regeneration():
+    chunk = CharacterSignalChunk(
+        "scope-v3", "profile.md", "林澈的核心性格是谨慎。", 10,
+        "formal_character_profile",
+    )
+    provider = SequenceProvider('{"unexpected":[]}', '{"records":[]}')
+    configured = settings(
+        character_signal_full_line_prompt_v2=True,
+        character_signal_core_scope_prompt_v3=True,
+    )
+
+    result = CharacterSignalExtractor(provider, settings=configured).extract(chunk)
+
+    expected_system = (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT
+        + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
+        + CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3
+    )
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.attempted_calls == 2
+    assert [system for system, _ in provider.calls] == [expected_system] * 2
+    assert provider.calls[0][1].startswith(_chunk_prompt(chunk))
+    assert "重新生成完整 records 包" in provider.calls[1][1]
+    assert "最小的独立断言" in expected_system
+    assert "引例或列举" in expected_system
+    assert "这也是" in expected_system
+    assert "这属于" in expected_system
+    assert "这是她长期稳定的核心性格" in expected_system
 
 
 @pytest.mark.parametrize(
@@ -4638,6 +4725,41 @@ def test_signal_initial_budget_skip_reports_only_numeric_admission():
     assert provider.calls == []
 
 
+def test_core_scope_v3_initial_budget_skip_never_calls_or_charges_model():
+    from app.service import (
+        CharacterConsistencyUsageAccumulator,
+        _CharacterConsistencyAccountingProvider,
+    )
+
+    configured = settings(
+        character_signal_full_line_prompt_v2=True,
+        character_signal_core_scope_prompt_v3=True,
+        character_signal_token_budget=4_096,
+        character_signal_max_completion_tokens=64,
+    )
+    signal = FakeProvider('{"records":[]}')
+    usage = CharacterConsistencyUsageAccumulator()
+    accounting = _CharacterConsistencyAccountingProvider(
+        configured, usage, signal_provider=signal, drift_provider=signal,
+    )
+    with patch(
+        "app.character_trait_extraction.estimate_issue_evidence_review_tokens",
+        return_value=9_999,
+    ):
+        result = CharacterSignalExtractor(accounting, settings=configured).extract(
+            CharacterSignalChunk(
+                "scope-budget", "profile.md", "林澈的核心性格是谨慎。", 10,
+                "formal_character_profile",
+            )
+        )
+
+    assert result.diagnostics.outcome == "skipped"
+    assert result.diagnostics.attempted_calls == 0
+    assert result.diagnostics.reason_counts == {"token_budget": 1}
+    assert signal.calls == []
+    assert usage.safe_dict(terminal_status="failed") is None
+
+
 def test_signal_two_invalid_packages_fail_closed_without_first_valid_sibling():
     evidence, valid, unsupported = _duplicate_interaction_records()
     provider = SequenceProvider(
@@ -4713,9 +4835,13 @@ def test_signal_regeneration_respects_one_total_logical_deadline():
     assert len(provider.calls) == 1
 
 
-@pytest.mark.parametrize("full_line_prompt_v2", (False, True))
+@pytest.mark.parametrize(
+    ("full_line_prompt_v2", "core_scope_prompt_v3"),
+    ((False, False), (True, False), (True, True)),
+)
 def test_production_accounting_wrapper_forwards_remaining_regeneration_deadline(
     full_line_prompt_v2: bool,
+    core_scope_prompt_v3: bool,
 ):
     from app.service import (
         CharacterConsistencyUsageAccumulator,
@@ -4734,6 +4860,7 @@ def test_production_accounting_wrapper_forwards_remaining_regeneration_deadline(
     configured = settings(
         character_signal_total_deadline_seconds=30,
         character_signal_full_line_prompt_v2=full_line_prompt_v2,
+        character_signal_core_scope_prompt_v3=core_scope_prompt_v3,
     )
     inner = OpenAICompatibleProvider(
         configured,
@@ -4810,11 +4937,14 @@ def test_full_line_v2_extraction_routes_through_accounting_and_rejects_unknown_p
     assert safe_usage["completion_tokens"] == 9
     assert safe_usage["charged_tokens"] >= 26
 
-    with pytest.raises(RuntimeError, match="unsupported character consistency provider purpose"):
-        accounting.complete(
-            CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2 + "\n",
-            "unknown purpose",
-        )
+    for unknown_system in (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2 + "\n",
+        CHARACTER_SIGNAL_SYSTEM_PROMPT
+        + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
+        + CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
+    ):
+        with pytest.raises(RuntimeError, match="unsupported character consistency provider purpose"):
+            accounting.complete(unknown_system, "unknown purpose")
     assert len(signal.calls) == 1
     assert usage.logical_calls == 1
 
@@ -4842,6 +4972,53 @@ def test_full_line_v2_accounting_rejects_disabled_variant_without_call_or_charge
 
     assert signal.calls == []
     assert usage.safe_dict(terminal_status="failed") is None
+
+
+def test_core_scope_v3_accounting_accepts_only_exact_active_primary_system():
+    from app.service import (
+        CharacterConsistencyUsageAccumulator,
+        _CharacterConsistencyAccountingProvider,
+    )
+
+    configured = settings(
+        character_signal_full_line_prompt_v2=True,
+        character_signal_core_scope_prompt_v3=True,
+    )
+    signal = FakeProvider('{"records":[]}')
+    drift = FakeProvider('{"records":[]}')
+    usage = CharacterConsistencyUsageAccumulator()
+    accounting = _CharacterConsistencyAccountingProvider(
+        configured, usage, signal_provider=signal, drift_provider=drift,
+    )
+    chunk = CharacterSignalChunk(
+        "scope-v3-routing", "profile.md", "林澈的核心性格是谨慎。", 10,
+        "formal_character_profile",
+    )
+    result = CharacterSignalExtractor(accounting, settings=configured).extract(chunk)
+    assert result.diagnostics.outcome == "completed"
+    active = (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT
+        + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
+        + CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3
+    )
+    assert signal.calls[0][0] == active
+    assert usage.logical_calls == 1
+
+    for inactive in (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT,
+        CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
+        active + "\n",
+    ):
+        with pytest.raises(RuntimeError, match="unsupported character consistency provider purpose"):
+            accounting.complete(inactive, "inactive variant")
+    assert len(signal.calls) == 1
+    assert usage.logical_calls == 1
+
+    accounting.complete(TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT, "targeted")
+    accounting.complete(CHARACTER_REVIEW_SYSTEM_PROMPT, "review")
+    assert len(signal.calls) == 2
+    assert len(drift.calls) == 1
+    assert usage.logical_calls == 3
 
 
 def test_default_signal_budget_admits_two_maximum_prompt_packages_without_retry_metadata():

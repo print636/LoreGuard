@@ -582,6 +582,22 @@ key_object 只能逐字取自当前 evidence 对应的原文行；不能根据�
 """
 
 
+CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3 = """
+仅当服务端来源类型为 formal_character_profile 时：每条 statement 必须唯一锚定原文中最小的独立断言，尽量逐字复用其主张；完整 evidence 行可以含多个断言，但不是整行共享一个标签。逗号、冒号、分号、句号、问号、叹号、换行分隔出的后续分句及引例，即使延续同一主语，也须单独判定核心标签，不自动继承；唯一冒号标签头例外是“角色名：核心性格是……”或“角色名：核心人格是……”。仅当所锚定断言自身明示该角色的核心标签，或紧邻的明确核心标签短句唯一回指该角色的前一断言时，才输出 dimension=core_personality、stability=core；可识别“这是”“这也是”“这属于”“属于”等以角色名或唯一指向该角色的“她/他”标明归属的短句，包括“这是她长期稳定的核心性格”，但不能仅凭无锚点代词推断。引例或列举即使重复定义里的词也不得据此升格；重要、稳定或性格倾向不等于明示核心。若 statement 无法唯一定位、主语或标签范围不清，就省略该记录；evidence 仍按 V2 协议完整复制原文行。其他来源类型仍按前述规则抽取。
+"""
+
+
+def _validate_signal_prompt_variant_settings(settings: Settings) -> None:
+    """Guard runtime copies that bypass Settings model validators."""
+
+    full_line = settings.character_signal_full_line_prompt_v2
+    core_scope = settings.character_signal_core_scope_prompt_v3
+    if type(full_line) is not bool or type(core_scope) is not bool:
+        raise RuntimeError("character signal prompt variant flags must be bool")
+    if core_scope and not full_line:
+        raise RuntimeError("character signal core scope v3 requires full line v2")
+
+
 _CHARACTER_SIGNAL_FULL_LINE_USER_REMINDER_V2 = (
     "最终检查：每条 evidence 必须完整回显 source_line_start/source_line_end "
     "指定的原文行（去除编号，保留所有原文字词、标点和换行）；"
@@ -628,13 +644,15 @@ class CharacterSignalExtractor:
         self._monotonic = time.monotonic
 
     def extract(self, chunk: CharacterSignalChunk) -> CharacterSignalExtractionResult:
+        _validate_signal_prompt_variant_settings(self.settings)
         full_line_prompt_v2 = self.settings.character_signal_full_line_prompt_v2
+        core_scope_prompt_v3 = self.settings.character_signal_core_scope_prompt_v3
         return self._extract_with_prompt(
             chunk,
             system_prompt=(
-                CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
-                if full_line_prompt_v2
-                else CHARACTER_SIGNAL_SYSTEM_PROMPT
+                CHARACTER_SIGNAL_SYSTEM_PROMPT
+                + (CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2 if full_line_prompt_v2 else "")
+                + (CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3 if core_scope_prompt_v3 else "")
             ),
             user_prompt=_chunk_prompt(chunk, full_line_prompt_v2=full_line_prompt_v2),
             full_line_prompt_v2=full_line_prompt_v2,

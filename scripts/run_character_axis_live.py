@@ -41,6 +41,7 @@ from scripts.run_evidence_investigator_live import (
     _CAPABILITY_KEYS,
     _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS,
     _CHARACTER_CONSISTENCY_LIMIT_KEYS,
+    _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
     _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
     _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
     _local_service_artifact_sha256,
@@ -739,6 +740,8 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
             _CHARACTER_CONSISTENCY_LIMIT_KEYS
             | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY},
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY, _CHARACTER_SIGNAL_CORE_SCOPE_KEY},
         }
         or limits.get("sensitivity") not in {"conservative", "balanced", "exploratory"}
     ):
@@ -746,6 +749,14 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     if (
         _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY in limits
         and type(limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY]) is not bool
+    ):
+        return None
+    if _CHARACTER_SIGNAL_CORE_SCOPE_KEY in limits and (
+        type(limits[_CHARACTER_SIGNAL_CORE_SCOPE_KEY]) is not bool
+        or (
+            limits[_CHARACTER_SIGNAL_CORE_SCOPE_KEY]
+            and limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY] is not True
+        )
     ):
         return None
     for key, (minimum, maximum) in _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS.items():
@@ -1733,6 +1744,16 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
         "signal_full_line_echo_v2": (
             limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY)
             if type(limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY)) is bool
+            else None
+        ),
+        "signal_core_scope_v3": (
+            limits.get(_CHARACTER_SIGNAL_CORE_SCOPE_KEY)
+            if type(limits.get(_CHARACTER_SIGNAL_CORE_SCOPE_KEY)) is bool
+            and type(limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY)) is bool
+            and (
+                limits[_CHARACTER_SIGNAL_CORE_SCOPE_KEY] is False
+                or limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY] is True
+            )
             else None
         ),
     }

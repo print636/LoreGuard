@@ -79,6 +79,7 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     ] == 4_096
     assert result["character_consistency_limits"]["signal_max_records"] == 48
     assert result["character_consistency_limits"]["signal_full_line_echo_v2"] is False
+    assert result["character_consistency_limits"]["signal_core_scope_v3"] is False
     assert result["character_consistency_limits"][
         "signal_targeted_max_targets_per_chunk"
     ] == 12
@@ -125,6 +126,10 @@ def test_character_runtime_fingerprint_tracks_stage_and_effective_provider_limit
     baseline_digest = _character_limits_digest(baseline)
     variants = (
         {"character_signal_full_line_prompt_v2": True},
+        {
+            "character_signal_full_line_prompt_v2": True,
+            "character_signal_core_scope_prompt_v3": True,
+        },
         {"character_signal_max_records": 47},
         {"character_signal_targeted_max_targets_per_chunk": 11},
         {"character_signal_timeout_seconds": 20},
@@ -160,6 +165,28 @@ def test_character_runtime_fingerprint_tracks_stage_and_effective_provider_limit
     assert type(baseline_limits["drift_timeout_seconds"]) is float
     assert type(baseline_limits["per_run_token_budget"]) is int
     assert type(baseline_limits["daily_token_budget"]) is int
+
+
+def test_health_api_provenance_exposes_only_safe_core_scope_flag(monkeypatch):
+    from app import main
+
+    configured = configured_settings(
+        character_signal_full_line_prompt_v2=True,
+        character_signal_core_scope_prompt_v3=True,
+    )
+    monkeypatch.setattr(main, "settings", configured)
+
+    payload = main.health()
+    limits = payload["runtime_provenance"]["character_consistency_limits"]
+    assert limits["signal_full_line_echo_v2"] is True
+    assert limits["signal_core_scope_v3"] is True
+    assert live_runner._safe_runtime_provenance(payload["runtime_provenance"]) == payload[
+        "runtime_provenance"
+    ]
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "character_signal_core_scope_prompt_v3" not in serialized
+    assert "test-only-secret" not in serialized
+    assert "https://" not in serialized
 
 
 def test_runtime_provenance_marks_unversioned_build_without_inventing_revision():

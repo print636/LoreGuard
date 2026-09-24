@@ -1350,9 +1350,24 @@ def test_runtime_provenance_parser_is_exact_and_fail_closed():
 
     # Older v3 reports did not carry this optional experiment flag.
     assert _safe_runtime_provenance(value) == value
+    assert _safe_runtime_provenance(value)["character_consistency_limits"].get(
+        "signal_core_scope_v3"
+    ) is None
     with_variant = json.loads(json.dumps(value))
     with_variant["character_consistency_limits"]["signal_full_line_echo_v2"] = True
     assert _safe_runtime_provenance(with_variant) == with_variant
+    with_variant["character_consistency_limits"]["signal_core_scope_v3"] = False
+    assert _safe_runtime_provenance(with_variant) == with_variant
+    with_variant["character_consistency_limits"]["signal_core_scope_v3"] = True
+    assert _safe_runtime_provenance(with_variant) == with_variant
+    with_variant["character_consistency_limits"]["signal_full_line_echo_v2"] = False
+    assert _safe_runtime_provenance(with_variant) is None
+    with_variant["character_consistency_limits"]["signal_full_line_echo_v2"] = True
+    with_variant["character_consistency_limits"]["signal_core_scope_v3"] = "true"
+    assert _safe_runtime_provenance(with_variant) is None
+    del with_variant["character_consistency_limits"]["signal_full_line_echo_v2"]
+    assert _safe_runtime_provenance(with_variant) is None
+    del with_variant["character_consistency_limits"]["signal_core_scope_v3"]
     with_variant["character_consistency_limits"]["signal_full_line_echo_v2"] = "true"
     assert _safe_runtime_provenance(with_variant) is None
 

@@ -271,6 +271,8 @@ class Settings(BaseSettings):
     # Experimental prompt A/B for the primary character signal extractor.
     # Keep disabled until frozen DEV results justify changing the default.
     character_signal_full_line_prompt_v2: bool = False
+    # Scope experiment depends on the full-line evidence protocol.
+    character_signal_core_scope_prompt_v3: bool = False
     # A draft chunk can receive bounded, one-trait-at-a-time recall calls for
     # undercovered confirmed traits. Keep the selected set no larger than the
     # content-free context boundary; the shared stage budget remains final.
@@ -527,6 +529,11 @@ class Settings(BaseSettings):
     def validate_character_consistency_limits(self):
         """Keep the two model stages independently bounded and admissible."""
 
+        if (
+            self.character_signal_core_scope_prompt_v3
+            and not self.character_signal_full_line_prompt_v2
+        ):
+            raise ValueError("character signal core scope v3 requires full line v2")
         if (
             self.character_signal_total_deadline_seconds
             < self.character_signal_timeout_seconds

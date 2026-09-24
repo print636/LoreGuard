@@ -161,6 +161,7 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "signal_full_line_echo_v2": (
                 settings.character_signal_full_line_prompt_v2
             ),
+            "signal_core_scope_v3": settings.character_signal_core_scope_prompt_v3,
             "signal_targeted_max_targets_per_chunk": (
                 settings.character_signal_targeted_max_targets_per_chunk
             ),

@@ -1054,6 +1054,9 @@ def test_character_runtime_provenance_requires_new_effective_limits_and_hashes_c
     base = _runtime_provenance()
     digest = axis_live._runtime_provenance_digest(base)
     assert digest is not None
+    assert axis_live._runtime_summary({"runtime_provenance": base})[
+        "signal_core_scope_v3"
+    ] is None
     # Preserve parsing of historical v3 reports while recording new A/B runs.
     variant = json.loads(json.dumps(base))
     variant["character_consistency_limits"]["signal_full_line_echo_v2"] = False
@@ -1067,6 +1070,31 @@ def test_character_runtime_provenance_requires_new_effective_limits_and_hashes_c
     assert axis_live._runtime_summary({"runtime_provenance": variant})[
         "signal_full_line_echo_v2"
     ] is True
+    assert axis_live._runtime_summary({"runtime_provenance": variant})[
+        "signal_core_scope_v3"
+    ] is None
+    variant["character_consistency_limits"]["signal_core_scope_v3"] = False
+    v3_off_digest = axis_live._runtime_provenance_digest(variant)
+    assert v3_off_digest is not None
+    assert axis_live._runtime_summary({"runtime_provenance": variant})[
+        "signal_core_scope_v3"
+    ] is False
+    variant["character_consistency_limits"]["signal_core_scope_v3"] = True
+    assert axis_live._runtime_provenance_digest(variant) not in {None, v3_off_digest}
+    assert axis_live._runtime_summary({"runtime_provenance": variant})[
+        "signal_core_scope_v3"
+    ] is True
+    variant["character_consistency_limits"]["signal_full_line_echo_v2"] = False
+    assert axis_live._runtime_provenance_digest(variant) is None
+    assert axis_live._runtime_summary({"runtime_provenance": variant})[
+        "signal_core_scope_v3"
+    ] is None
+    variant["character_consistency_limits"]["signal_full_line_echo_v2"] = True
+    variant["character_consistency_limits"]["signal_core_scope_v3"] = "true"
+    assert axis_live._runtime_provenance_digest(variant) is None
+    del variant["character_consistency_limits"]["signal_full_line_echo_v2"]
+    assert axis_live._runtime_provenance_digest(variant) is None
+    del variant["character_consistency_limits"]["signal_core_scope_v3"]
     variant["character_consistency_limits"]["signal_full_line_echo_v2"] = "true"
     assert axis_live._runtime_provenance_digest(variant) is None
     new_fields = (

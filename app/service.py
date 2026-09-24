@@ -43,9 +43,11 @@ from .character_consistency_stage import (
 )
 from .character_drift import CHARACTER_REVIEW_SYSTEM_PROMPT
 from .character_trait_extraction import (
+    CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
     CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
+    _validate_signal_prompt_variant_settings,
     _bounded_provider,
 )
 from .domain import AnalysisCancelled
@@ -437,13 +439,21 @@ class _CharacterConsistencyAccountingProvider:
         )
 
     def complete(self, system: str, user: str):
-        if system in {
-            CHARACTER_SIGNAL_SYSTEM_PROMPT,
-            TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
-        } or (
-            self.settings.character_signal_full_line_prompt_v2
-            and system == CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
-        ):
+        # Settings.model_copy(update=...) can bypass model validators; fail
+        # before purpose selection, estimation, provider call or charge.
+        _validate_signal_prompt_variant_settings(self.settings)
+        active_primary_system = (
+            CHARACTER_SIGNAL_SYSTEM_PROMPT
+            + (
+                CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
+                if self.settings.character_signal_full_line_prompt_v2 else ""
+            )
+            + (
+                CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3
+                if self.settings.character_signal_core_scope_prompt_v3 else ""
+            )
+        )
+        if system in {active_primary_system, TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT}:
             provider = self.signal_provider
             completion_reserve = self.settings.character_signal_max_completion_tokens
         elif system == CHARACTER_REVIEW_SYSTEM_PROMPT:
