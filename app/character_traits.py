@@ -255,10 +255,14 @@ def _validate_evidence(
             or item.line_end > len(lines)
         ):
             raise ValueError("candidate evidence does not match the frozen run")
-        source = "\n".join(lines[item.line_start - 1 : item.line_end]).strip()
-        if source != item.text.strip():
+        source = "\n".join(lines[item.line_start - 1 : item.line_end])
+        if source.strip() != item.text.strip():
             raise ValueError("candidate evidence text does not match the frozen run")
-        result.append(item.model_dump(mode="json"))
+        if not source.strip() or len(source) > 8_000:
+            raise ValueError("candidate evidence full line exceeds the supported length")
+        # The extractor may trim boundary whitespace. Persist the verified
+        # frozen line itself so new review records retain exact source text.
+        result.append({**item.model_dump(mode="json"), "text": source})
     return result
 
 

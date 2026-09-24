@@ -368,9 +368,31 @@
 .characterEvidenceMeta { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 8px; }
 .characterEvidenceMeta b { min-width: 0; overflow-wrap: anywhere; color: var(--cyan); font-size: 12px; }
 .characterEvidenceMeta span { color: var(--muted); font-size: 12px; }
-.characterEvidenceList blockquote { margin: 0; padding: 11px 13px; color: var(--text-2); border-left: 3px solid var(--lavender); background: var(--field); line-height: 1.7; overflow-wrap: anywhere; }
+.characterEvidenceList blockquote { margin: 0; padding: 11px 13px; color: var(--text-2); border-left: 3px solid var(--lavender); background: var(--field); line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
 .characterEvidenceGroup.contrary blockquote { border-left-color: var(--warning); }
+.characterEvidenceLineStatus { margin: 0 0 8px; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .characterInlineEmpty { color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+.candidateSourceNeighbors { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+.candidateSourceIntro { margin: 8px 0 12px; color: var(--text-2); font-size: 13px; line-height: 1.65; }
+.candidateSourceNotice { padding: 10px 12px; color: var(--warning); border-left: 3px solid var(--warning); background: rgba(255, 189, 130, .06); line-height: 1.6; }
+.candidateSourceNotice button { min-height: 44px; margin-left: 8px; }
+.candidateSourceGroup { padding: 15px 0; border-top: 1px solid var(--line); }
+.candidateSourceGroupTitle { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin: 0 0 8px; font-size: 12px; }
+.candidateSourceGroupTitle b { color: var(--cyan); overflow-wrap: anywhere; }
+.candidateSourceGroupTitle span,
+.candidateSourceScope { color: var(--muted); }
+.candidateSourceScope { margin: 0 0 9px; font-size: 12px; }
+.candidateSourceGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; }
+.candidateSourceItem { display: grid; gap: 6px; min-width: 0; min-height: 78px; padding: 12px 8px; color: var(--text-2); border-bottom: 1px solid var(--line); text-decoration: none; }
+.candidateSourceItem.current { border-left: 2px solid var(--lavender); padding-left: 12px; }
+.candidateSourceItem:not(.current):hover { background: rgba(183, 162, 255, .08); }
+.candidateSourceItem small { color: var(--muted); }
+.candidateSourceItem b { color: var(--text); overflow-wrap: anywhere; line-height: 1.55; }
+.candidateSourceItem span { color: var(--lavender); font-size: 12px; }
+.candidateSourcePagination { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.candidateSourcePagination p { flex: 1 1 230px; margin: 0; color: var(--text-2); font-size: 13px; }
+.candidateSourcePagination button { min-height: 44px; }
 
 .candidateDecision { margin-top: 20px; padding: 16px; border: 1px solid var(--line); border-left: 3px solid var(--lavender); background: rgba(41, 31, 75, .24); }
 .candidateDecision.blocked { border-left-color: var(--warning); }
@@ -494,6 +516,7 @@
   .candidateDecision button,
   .characterReportLink { min-height: 44px; justify-content: center; }
   .characterEvidenceList li { padding: 10px; }
+  .candidateSourceGrid { grid-template-columns: 1fr; }
   .characterPrerequisite { margin: 24px 14px; padding: 28px 18px; }
 }
 

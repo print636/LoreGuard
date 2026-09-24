@@ -354,6 +354,7 @@ _CHARACTER_CONSISTENCY_LIMIT_KEYS = frozenset(
         *_CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
     }
 )
+_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY = "signal_full_line_echo_v2"
 _INVESTIGATOR_INTEGER_LIMIT_KEYS = frozenset(
     {
         "max_seeds",
@@ -2839,7 +2840,11 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
     character_limits = root.get("character_consistency_limits")
     if (
         type(character_limits) is not dict
-        or set(character_limits) != _CHARACTER_CONSISTENCY_LIMIT_KEYS
+        or set(character_limits) not in {
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS,
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY},
+        }
         or character_limits.get("sensitivity")
         not in _CHARACTER_CONSISTENCY_SENSITIVITIES
     ):
@@ -2847,6 +2852,11 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
     safe_character_limits: dict[str, Any] = {
         "sensitivity": character_limits["sensitivity"]
     }
+    if _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY in character_limits:
+        variant = character_limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY]
+        if type(variant) is not bool:
+            return None
+        safe_character_limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY] = variant
     for key, (minimum, maximum) in (
         _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS.items()
     ):

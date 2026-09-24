@@ -58,6 +58,7 @@ export type CharacterProfileItem = {
 };
 
 export type ProfileEvidence = {
+  input_id: string | null;
   document_id: string;
   document_name: string;
   document_version: number | null;
@@ -68,6 +69,9 @@ export type ProfileEvidence = {
   line_start: number;
   line_end: number;
   text: string;
+  source_verified: boolean;
+  source_text_exact: boolean;
+  context_verified: boolean;
 };
 
 export type ProfileCandidateStatus =
@@ -103,7 +107,50 @@ export type ProfileCandidate = {
   source_run_id: string;
   source_snapshot_revision: string;
   model_coverage: ModelCoverage;
+  source_verified: boolean;
   revision: number;
+};
+
+export type SourceNeighbor = {
+  id: string;
+  character_id: string;
+  source_run_id: string;
+  dimension: CharacterDimension;
+  statement: string;
+  polarity: ProfileCandidate["polarity"];
+  status: ProfileCandidateStatus;
+  shared_evidence: Array<{
+    input_id: string;
+    document_id: string;
+    document_name: string;
+    document_version: number;
+    line_start: number;
+    line_end: number;
+    context_verified: boolean;
+    story_scope: NarrativeScopeRef | null;
+  }>;
+};
+
+export type SourceNeighborPage = {
+  items: SourceNeighbor[];
+  total: number;
+  has_more: boolean;
+  candidate_id: string;
+  character_id: string;
+  source_run_id: string;
+  limit: number;
+  offset: number;
+  source_groups: Array<{
+    input_id: string;
+    document_id: string;
+    document_name: string;
+    document_version: number;
+    line_start: number;
+    line_end: number;
+    total: number;
+    context_verified: boolean;
+    story_scope: NarrativeScopeRef | null;
+  }>;
 };
 
 export type CharacterDetail = {

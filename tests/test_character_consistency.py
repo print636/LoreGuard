@@ -20,6 +20,7 @@ from app.character_drift import (
 )
 from app.character_trait_extraction import (
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
+    CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
     _MAX_SIGNAL_RESPONSE_RECORDS,
@@ -275,6 +276,63 @@ def test_signal_extractor_rejects_invalid_json_without_leaking_content():
     assert result.diagnostics.reason_counts == {"invalid_json": 2}
 
 
+def test_signal_full_line_prompt_v2_is_opt_in_and_default_prompt_is_unchanged():
+    chunk = CharacterSignalChunk(
+        "prompt-variant", "profile.md", "林澈一直喜欢蜜瓜。", 10,
+        "formal_character_profile",
+    )
+    default_provider = FakeProvider('{"records":[]}')
+    enabled_provider = FakeProvider('{"records":[]}')
+
+    CharacterSignalExtractor(default_provider, settings=settings()).extract(chunk)
+    CharacterSignalExtractor(
+        enabled_provider,
+        settings=settings(character_signal_full_line_prompt_v2=True),
+    ).extract(chunk)
+
+    assert default_provider.calls == [(CHARACTER_SIGNAL_SYSTEM_PROMPT, _chunk_prompt(chunk))]
+    enabled_system, enabled_user = enabled_provider.calls[0]
+    assert enabled_system == CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
+    assert enabled_user.startswith(_chunk_prompt(chunk))
+    assert "示例甲。示例乙。" in enabled_system
+    assert "完整回显" in enabled_user.split("原文如下：", 1)[1]
+    assert "key_object 必须逐字出现在这些原文行中" in enabled_user
+
+
+@pytest.mark.parametrize(
+    ("record_override", "expected_reason"),
+    (
+        ({"evidence": "林澈一直喜欢蜜瓜。"}, "evidence_mismatch"),
+        ({"key_object": "荔枝"}, "key_object_support"),
+    ),
+)
+def test_signal_full_line_prompt_v2_keeps_invalid_records_fail_closed(
+    record_override: dict, expected_reason: str,
+):
+    source = "林澈一直喜欢蜜瓜，还喜欢在茶室读书。"
+    response = json.dumps(
+        {"records": [valid_signal_record(**{"evidence": source, **record_override})]},
+        ensure_ascii=False,
+    )
+    provider = FakeProvider(response)
+
+    result = CharacterSignalExtractor(
+        provider,
+        settings=settings(character_signal_full_line_prompt_v2=True),
+    ).extract(
+        CharacterSignalChunk(
+            "prompt-invalid", "profile.md", source, 10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {expected_reason: 2}
+    assert len(provider.calls) == 2
+    assert "完整回显" in provider.calls[1][1].split("重新生成完整 records 包。", 1)[1]
+
+
 def test_signal_extractor_binds_server_context_and_rejects_model_authority():
     injected = valid_signal_record(authority="最高权威")
     provider = FakeProvider(json.dumps({"records": [injected]}, ensure_ascii=False))
@@ -347,7 +405,7 @@ def test_signal_extractor_rejects_inverted_and_unrelated_summaries():
     assert unrelated_result.diagnostics.reason_counts == {"statement_support": 2}
 
 
-def test_signal_extractor_accepts_supported_clause_in_mixed_polarity_line():
+def test_signal_extractor_does_not_borrow_core_label_across_comma():
     evidence = (
         "祁雾非常重视每一个承诺，把守信看作不可动摇的核心性格；"
         "即使与人争执，她也不会用沉默回避问题。"
@@ -371,8 +429,8 @@ def test_signal_extractor_accepts_supported_clause_in_mixed_polarity_line():
         )
     )
 
-    assert len(result.signals) == 1
-    assert result.diagnostics.reason_counts == {}
+    assert result.signals == ()
+    assert result.diagnostics.reason_counts == {"core_label_scope": 2}
 
 
 def _duplicate_interaction_records() -> tuple[str, dict, dict]:
@@ -2959,7 +3017,7 @@ def test_named_colon_core_label_binds_only_the_named_character(
     ) == "core"
 
 
-def test_colon_core_label_survives_full_signal_binding():
+def test_colon_core_label_does_not_upgrade_independent_semicolon_assertion():
     evidence = "许砚灯：核心人格是谨慎尽责；许砚灯始终坚持双人签名核验。"
     record = valid_signal_record(
         character="许砚灯",
@@ -2985,8 +3043,453 @@ def test_colon_core_label_survives_full_signal_binding():
 
     assert result.diagnostics.outcome == "completed"
     assert len(result.signals) == 1
+    assert result.signals[0].dimension == "value"
+    assert result.signals[0].stability == "stable"
+
+
+@pytest.mark.parametrize(
+    "separator",
+    ("。", "；", "，"),
+)
+def test_core_label_on_same_line_cannot_promote_independent_model_core_claim(
+    separator: str,
+):
+    evidence = f"甲的核心性格是谨慎核对{separator}甲做决定很快。"
+    unrelated = valid_signal_record(
+        character="甲",
+        dimension="core_personality",
+        trait_key="decision_speed",
+        statement="甲做决定很快",
+        stability="core",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    provider = SequenceProvider(
+        json.dumps({"records": [unrelated]}, ensure_ascii=False),
+        '{"records":[]}',
+    )
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "unrelated-core", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.reason_counts == {
+        "regenerated_from_core_label_scope": 1
+    }
+    assert '"reason":"core_label_scope"' in provider.calls[1][1]
+
+
+def test_core_label_does_not_promote_separate_stable_preference():
+    evidence = "甲的核心性格是谨慎核对。甲有长期稳定偏好：热茶。"
+    preference = valid_signal_record(
+        character="甲",
+        dimension="preference",
+        trait_key="tea_preference",
+        statement="甲有长期稳定偏好热茶",
+        stability="stable",
+        key_object="热茶",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [preference]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(
+        CharacterSignalChunk(
+            "stable-preference", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].dimension == "preference"
+    assert result.signals[0].stability == "stable"
+
+
+def test_comma_separated_preference_does_not_inherit_core_personality():
+    evidence = "甲的核心性格是谨慎核对，甲也喜欢热茶。"
+    preference = valid_signal_record(
+        character="甲",
+        dimension="preference",
+        trait_key="tea_preference",
+        statement="甲也喜欢热茶",
+        stability="stable",
+        key_object="热茶",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [preference]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(
+        CharacterSignalChunk(
+            "comma-preference", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].dimension == "preference"
+    assert result.signals[0].stability == "stable"
+
+
+def test_unrelated_example_cannot_inherit_core_even_if_model_says_core():
+    evidence = "甲的核心性格是谨慎核对；例如，甲也喜欢热茶。"
+    unrelated = valid_signal_record(
+        character="甲",
+        dimension="core_personality",
+        trait_key="tea_preference",
+        statement="甲也喜欢热茶",
+        stability="core",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    provider = SequenceProvider(
+        json.dumps({"records": [unrelated]}, ensure_ascii=False),
+        '{"records":[]}',
+    )
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "unrelated-example", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.reason_counts == {
+        "regenerated_from_core_label_scope": 1
+    }
+
+
+def test_comma_separated_preference_does_not_borrow_stability_label():
+    evidence = "甲有长期稳定偏好热茶，甲偶尔喜欢蜜瓜。"
+    other_preference = valid_signal_record(
+        character="甲",
+        dimension="preference",
+        trait_key="melon_preference",
+        statement="甲偶尔喜欢蜜瓜",
+        stability="unknown",
+        key_object="蜜瓜",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [other_preference]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(
+        CharacterSignalChunk(
+            "comma-stability", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].dimension == "preference"
+    assert result.signals[0].stability == "unknown"
+    assert result.pending_candidates == ()
+
+
+def test_same_statement_in_two_assertions_cannot_borrow_core_label():
+    evidence = "甲的核心性格是甲谨慎核对；甲谨慎核对。"
+    ambiguous = valid_signal_record(
+        character="甲",
+        dimension="core_personality",
+        trait_key="record_verification",
+        statement="甲谨慎核对",
+        stability="core",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    provider = SequenceProvider(
+        json.dumps({"records": [ambiguous]}, ensure_ascii=False),
+        '{"records":[]}',
+    )
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "ambiguous-core", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.reason_counts == {
+        "regenerated_from_core_label_scope": 1
+    }
+
+
+def test_other_person_possessive_core_label_does_not_promote_subject():
+    evidence = "甲珍惜承诺，把乙的守信看作核心性格。"
+    record = valid_signal_record(
+        character="甲",
+        dimension="value",
+        trait_key="promise_value",
+        statement="甲珍惜承诺",
+        stability="stable",
+        key_object="承诺",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(
+        CharacterSignalChunk(
+            "other-core", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].dimension == "value"
+    assert result.signals[0].stability == "stable"
+
+
+@pytest.mark.parametrize(
+    ("evidence", "statement"),
+    (
+        ("甲的核心性格是甲在签发前先核对两份记录。", "甲在签发前先核对两份记录"),
+        ("甲谨慎核对每份记录。这是他的稳定核心性格。", "甲谨慎核对每份记录"),
+    ),
+)
+def test_core_label_keeps_its_own_claim_or_anaphoric_definition(
+    evidence: str, statement: str,
+):
+    record = valid_signal_record(
+        character="甲",
+        dimension="value",
+        trait_key="record_verification",
+        statement=statement,
+        stability="stable",
+        key_object="两份记录" if "两份记录" in statement else "每份记录",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(
+        CharacterSignalChunk(
+            "core-own-claim", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
     assert result.signals[0].dimension == "core_personality"
     assert result.signals[0].stability == "core"
+
+
+@pytest.mark.parametrize(
+    ("separate_claim", "statement"),
+    (
+        ("也喜欢热茶", "甲也喜欢热茶"),
+        ("平时喜欢热茶", "甲平时喜欢热茶"),
+    ),
+)
+def test_omitted_subject_preference_after_comma_does_not_borrow_core(
+    separate_claim: str, statement: str,
+):
+    evidence = f"甲的核心性格是谨慎核对，{separate_claim}。"
+    preference = valid_signal_record(
+        character="甲",
+        dimension="preference",
+        trait_key="tea_preference",
+        statement=statement,
+        stability="stable",
+        key_object="热茶",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [preference]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(
+        CharacterSignalChunk(
+            "comma-omitted-subject", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].dimension == "preference"
+    assert result.signals[0].stability == "stable"
+
+
+@pytest.mark.parametrize(
+    "model_claims_core",
+    (False, True),
+)
+def test_semicolon_example_with_incidental_preference_never_inherits_core(
+    model_claims_core: bool,
+):
+    evidence = "甲的核心性格是谨慎核对记录；例如，甲喜欢在核对记录时喝热茶。"
+    example = valid_signal_record(
+        character="甲",
+        dimension="core_personality" if model_claims_core else "preference",
+        trait_key="tea_preference",
+        statement="甲喜欢在核对记录时喝热茶",
+        stability="core" if model_claims_core else "stable",
+        key_object="" if model_claims_core else "热茶",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    if model_claims_core:
+        provider = SequenceProvider(
+            json.dumps({"records": [example]}, ensure_ascii=False),
+            '{"records":[]}',
+        )
+    else:
+        provider = FakeProvider(json.dumps({"records": [example]}, ensure_ascii=False))
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "incidental-example", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    if model_claims_core:
+        assert result.signals == ()
+        assert result.diagnostics.reason_counts == {
+            "regenerated_from_core_label_scope": 1
+        }
+    else:
+        assert len(result.signals) == 1
+        assert result.signals[0].dimension == "preference"
+        assert result.signals[0].stability == "stable"
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    (
+        "甲的核心性格是谨慎核对：甲也喜欢热茶。",
+        "甲的核心性格是谨慎核对，喜欢热茶。",
+    ),
+)
+@pytest.mark.parametrize("model_claims_core", (False, True))
+def test_core_definition_does_not_spill_across_colon_or_comma(
+    evidence: str, model_claims_core: bool,
+):
+    preference = valid_signal_record(
+        character="甲",
+        dimension="core_personality" if model_claims_core else "preference",
+        trait_key="tea_preference",
+        statement="甲也喜欢热茶" if "甲也" in evidence else "甲喜欢热茶",
+        stability="core" if model_claims_core else "stable",
+        key_object="" if model_claims_core else "热茶",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    if model_claims_core:
+        provider = SequenceProvider(
+            json.dumps({"records": [preference]}, ensure_ascii=False),
+            '{"records":[]}',
+        )
+    else:
+        provider = FakeProvider(json.dumps({"records": [preference]}, ensure_ascii=False))
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "colon-or-comma", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    if model_claims_core:
+        assert result.signals == ()
+        assert result.diagnostics.reason_counts == {
+            "regenerated_from_core_label_scope": 1
+        }
+    else:
+        assert len(result.signals) == 1
+        assert result.signals[0].dimension == "preference"
+        assert result.signals[0].stability == "stable"
+
+
+def test_named_colon_core_label_head_survives_complete_extraction():
+    evidence = "甲：核心人格是谨慎核对。"
+    record = valid_signal_record(
+        character="甲",
+        dimension="value",
+        trait_key="record_verification",
+        statement="甲：核心人格是谨慎核对",
+        stability="stable",
+        key_object="谨慎核对",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(
+        CharacterSignalChunk(
+            "named-colon-head", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].dimension == "core_personality"
+    assert result.signals[0].stability == "core"
+
+
+def test_anaphoric_core_label_does_not_skip_over_another_claim():
+    evidence = "甲谨慎核对，喜欢热茶。这是他的核心性格。"
+    unrelated = valid_signal_record(
+        character="甲",
+        dimension="core_personality",
+        trait_key="tea_preference",
+        statement="甲喜欢热茶",
+        stability="core",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    provider = SequenceProvider(
+        json.dumps({"records": [unrelated]}, ensure_ascii=False),
+        '{"records":[]}',
+    )
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "ambiguous-anaphora", "profile.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.reason_counts == {
+        "regenerated_from_core_label_scope": 1
+    }
 
 
 @pytest.mark.parametrize(
@@ -3140,8 +3643,7 @@ def test_signal_prompt_requires_single_draft_behavior_and_explicit_type_preceden
     ("evidence", "record_overrides", "expected_stability"),
     [
         (
-            "林澈一向内向谨慎，习惯先观察再开口；面对陌生人时，她很少主动发起长谈。"
-            "这是她长期稳定的核心性格。",
+            "林澈很少主动发起长谈。这是她长期稳定的核心性格。",
             {
                 "character": "林澈",
                 "dimension": "core_personality",
@@ -3173,8 +3675,7 @@ def test_signal_prompt_requires_single_draft_behavior_and_explicit_type_preceden
             "stable",
         ),
         (
-            "在开始主持训练前，苏弦长期胆怯内向，回避公开演讲，尤其害怕在毫无准备时"
-            "站到聚光灯下。这是她当时稳定的核心性格。",
+            "苏弦回避公开演讲。这是她当时稳定的核心性格。",
             {
                 "character": "苏弦",
                 "dimension": "core_personality",
@@ -3190,7 +3691,7 @@ def test_signal_prompt_requires_single_draft_behavior_and_explicit_type_preceden
             "core",
         ),
         (
-            "祁雾在普通社交中一向直来直往，不擅长说讨好人的话。"
+            "祁雾一向直来直往。"
             "这是她稳定的说话方式。",
             {
                 "character": "祁雾",

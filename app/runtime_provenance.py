@@ -158,6 +158,9 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             ),
             "signal_max_chunk_chars": settings.character_signal_max_chunk_chars,
             "signal_max_records": settings.character_signal_max_records,
+            "signal_full_line_echo_v2": (
+                settings.character_signal_full_line_prompt_v2
+            ),
             "signal_targeted_max_targets_per_chunk": (
                 settings.character_signal_targeted_max_targets_per_chunk
             ),

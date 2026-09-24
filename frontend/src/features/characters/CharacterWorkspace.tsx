@@ -16,6 +16,7 @@ import {
   fetchDriftIssues,
   fetchProfileCandidate,
   fetchProfileCandidates,
+  fetchSourceNeighbors,
   submitCandidateDecision,
 } from "./api";
 import CandidateReview from "./CandidateReview";
@@ -47,6 +48,7 @@ import type {
   CharacterTraitAxis,
   DriftIssuePage,
   ProfileCandidate,
+  SourceNeighborPage,
 } from "./types";
 
 type CharacterWorkspaceProps = {
@@ -127,6 +129,12 @@ export default function CharacterWorkspace({
   const [characterDetail, setCharacterDetail] = useState<CharacterDetail | null>(null);
   const [candidatePage, setCandidatePage] = useState<CandidatePage | null>(null);
   const [candidate, setCandidate] = useState<ProfileCandidate | null>(null);
+  const [neighborPage, setNeighborPage] = useState<SourceNeighborPage | null>(null);
+  const [neighborLoading, setNeighborLoading] = useState(false);
+  const [neighborMoreBusy, setNeighborMoreBusy] = useState(false);
+  const [neighborError, setNeighborError] = useState("");
+  const [neighborMoreError, setNeighborMoreError] = useState("");
+  const [neighborReload, setNeighborReload] = useState(0);
   const [driftPage, setDriftPage] = useState<DriftIssuePage | null>(null);
   const [listLoading, setListLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -158,6 +166,8 @@ export default function CharacterWorkspace({
   const detailTitleRef = useRef<HTMLHeadingElement | null>(null);
   const detailRegionRef = useRef<HTMLElement | null>(null);
   const axisMoreRequestRef = useRef(0);
+  const neighborMoreRequestRef = useRef(0);
+  const neighborMorePendingRef = useRef(false);
   const axisCreateRequestRef = useRef(0);
   const decisionRequestRef = useRef(0);
   const axisCreatePendingRef = useRef(false);
@@ -414,6 +424,86 @@ export default function CharacterWorkspace({
     return () => controller.abort();
   }, [projectId, route.candidateId, candidate?.id, candidate?.dimension, readiness, axisReload]);
 
+  useEffect(() => {
+    setNeighborPage(null);
+    setNeighborError("");
+    setNeighborMoreError("");
+    neighborMoreRequestRef.current += 1;
+    neighborMorePendingRef.current = false;
+    setNeighborMoreBusy(false);
+    if (
+      !projectId || !route.characterId || !route.candidateId ||
+      route.section !== "candidates" || readiness !== "ready" ||
+      candidate?.id !== route.candidateId || !candidate.source_verified
+    ) {
+      setNeighborLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    const startedScope = reviewScopeRef.current;
+    setNeighborLoading(true);
+    void fetchSourceNeighbors(
+      projectId, route.characterId, route.candidateId,
+      { limit: 20, offset: 0 }, controller.signal,
+    )
+      .then((page) => {
+        if (!controller.signal.aborted && isCurrentReviewScope(reviewScopeRef.current, startedScope)) {
+          setNeighborPage(page);
+        }
+      })
+      .catch((error) => {
+        if (controller.signal.aborted || !isCurrentReviewScope(reviewScopeRef.current, startedScope)) return;
+        setNeighborError(requestError(error));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && isCurrentReviewScope(reviewScopeRef.current, startedScope)) {
+          setNeighborLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [projectId, route.characterId, route.candidateId, route.section, readiness, candidate?.id, candidate?.source_verified, neighborReload]);
+
+  async function loadMoreNeighbors() {
+    if (
+      !route.characterId || !route.candidateId || !neighborPage ||
+      !neighborPage.has_more || neighborLoading || neighborMorePendingRef.current
+    ) return;
+    const startedScope = reviewScopeRef.current;
+    const requestId = ++neighborMoreRequestRef.current;
+    neighborMorePendingRef.current = true;
+    setNeighborMoreBusy(true);
+    setNeighborMoreError("");
+    try {
+      const page = await fetchSourceNeighbors(
+        projectId, route.characterId, route.candidateId,
+        { limit: 20, offset: neighborPage.items.length },
+      );
+      if (!isCurrentReviewRequest(reviewScopeRef.current, startedScope, neighborMoreRequestRef.current, requestId)) return;
+      const prior = neighborPage;
+      const sameGroups = JSON.stringify(prior.source_groups) === JSON.stringify(page.source_groups);
+      const ids = new Set(prior.items.map((item) => item.id));
+      if (
+        page.candidate_id !== prior.candidate_id ||
+        page.source_run_id !== prior.source_run_id ||
+        page.total !== prior.total || page.offset !== prior.items.length ||
+        !sameGroups || page.items.some((item) => ids.has(item.id))
+      ) {
+        setNeighborMoreError("同源候选列表在翻页期间发生变化；请重新读取后核对。");
+        return;
+      }
+      setNeighborPage({ ...page, items: [...prior.items, ...page.items] });
+    } catch (error) {
+      if (isCurrentReviewRequest(reviewScopeRef.current, startedScope, neighborMoreRequestRef.current, requestId)) {
+        setNeighborMoreError(requestError(error));
+      }
+    } finally {
+      if (isCurrentReviewRequest(reviewScopeRef.current, startedScope, neighborMoreRequestRef.current, requestId)) {
+        neighborMorePendingRef.current = false;
+        setNeighborMoreBusy(false);
+      }
+    }
+  }
+
   async function loadMoreAxes() {
     if (
       axisLoading || axisMoreBusy || axisListDirty ||
@@ -514,7 +604,7 @@ export default function CharacterWorkspace({
       setDecisionBusy(decision);
       setActionError("");
       setAnnouncement("");
-      const result = await submitCandidateDecision(
+      await submitCandidateDecision(
         projectId,
         route.characterId,
         candidate.id,
@@ -531,7 +621,11 @@ export default function CharacterWorkspace({
         },
       );
       if (!isCurrentRequest()) return;
-      setCandidate(result.candidate);
+      // The mutation response is intentionally compact and does not carry
+      // verified frozen evidence. Re-read the detail instead of replacing it
+      // with a misleading unverified candidate, including on replay.
+      setCandidate(null);
+      setCandidateReload((value) => value + 1);
       setAnnouncement(
         decision === "confirm"
           ? "归纳已确认并写入角色档案；作者轴只影响之后创建的分析，既有报告不会改写。"
@@ -540,6 +634,7 @@ export default function CharacterWorkspace({
       setListReload((value) => value + 1);
       setDetailReload((value) => value + 1);
       setSectionReload((value) => value + 1);
+      setNeighborReload((value) => value + 1);
     } catch (error) {
       if (!isCurrentRequest()) return;
       const message = requestError(error);
@@ -735,6 +830,11 @@ export default function CharacterWorkspace({
                             ? candidate : null
                         }
                         selectedId={route.candidateId}
+                        neighborPage={neighborPage?.candidate_id === route.candidateId ? neighborPage : null}
+                        neighborLoading={neighborLoading}
+                        neighborMoreBusy={neighborMoreBusy}
+                        neighborError={neighborError}
+                        neighborMoreError={neighborMoreError}
                         loading={sectionLoading}
                         detailLoading={candidateLoading}
                         error={sectionError}
@@ -757,6 +857,8 @@ export default function CharacterWorkspace({
                         onPage={(page) => navigate({ page, candidateId: null })}
                         onRetry={() => setSectionReload((value) => value + 1)}
                         onRetryDetail={() => setCandidateReload((value) => value + 1)}
+                        onRetryNeighbors={() => setNeighborReload((value) => value + 1)}
+                        onLoadMoreNeighbors={() => void loadMoreNeighbors()}
                         onBack={() => navigate({ candidateId: null })}
                         onRetryAxes={() => setAxisReload((value) => value + 1)}
                         onLoadMoreAxes={() => void loadMoreAxes()}

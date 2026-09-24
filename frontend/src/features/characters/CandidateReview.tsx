@@ -16,6 +16,7 @@ import type {
   CandidatePage,
   CharacterTraitAxis,
   ProfileCandidate,
+  SourceNeighborPage,
 } from "./types";
 
 type CandidateReviewProps = {
@@ -23,6 +24,11 @@ type CandidateReviewProps = {
   page: CandidatePage | null;
   selected: ProfileCandidate | null;
   selectedId: string | null;
+  neighborPage: SourceNeighborPage | null;
+  neighborLoading: boolean;
+  neighborMoreBusy: boolean;
+  neighborError: string;
+  neighborMoreError: string;
   loading: boolean;
   detailLoading: boolean;
   error: string;
@@ -45,6 +51,8 @@ type CandidateReviewProps = {
   onPage: (page: number) => void;
   onRetry: () => void;
   onRetryDetail: () => void;
+  onRetryNeighbors: () => void;
+  onLoadMoreNeighbors: () => void;
   onBack: () => void;
   onRetryAxes: () => void;
   onLoadMoreAxes: () => void;
@@ -85,6 +93,11 @@ export default function CandidateReview({
   page,
   selected,
   selectedId,
+  neighborPage,
+  neighborLoading,
+  neighborMoreBusy,
+  neighborError,
+  neighborMoreError,
   loading,
   detailLoading,
   error,
@@ -107,6 +120,8 @@ export default function CandidateReview({
   onPage,
   onRetry,
   onRetryDetail,
+  onRetryNeighbors,
+  onLoadMoreNeighbors,
   onBack,
   onRetryAxes,
   onLoadMoreAxes,
@@ -416,13 +431,84 @@ export default function CandidateReview({
                 title="支持这条归纳的证据"
                 items={selected.supporting_evidence}
                 emptyText="没有可展示的支持证据，因此不能仅凭候选表述作出确认。"
+                candidateEvidence
               />
               <EvidenceList
                 title="反向或例外证据"
                 items={selected.contrary_evidence}
                 emptyText="本次没有检索到反向证据；这不代表反向证据一定不存在。"
                 tone="contrary"
+                candidateEvidence
               />
+
+              <section className="candidateSourceNeighbors" aria-labelledby={`candidate-source-neighbors-${selected.id}`}>
+                <div className="characterSubhead">
+                  <h4 id={`candidate-source-neighbors-${selected.id}`}>完全相同证据区间的其他归纳</h4>
+                  {neighborPage && <span>{neighborPage.total} 条</span>}
+                </div>
+                <p className="candidateSourceIntro">仅按本次运行的冻结输入与完全相同的起止行坐标对照；部分重叠区间不在此列。同一区间可能支持不同归纳，并不代表语义相同。每条仍须单独审核。</p>
+                {!selected.source_verified ? (
+                  <p className="candidateSourceNotice" role="status">冻结证据无法核对，不能显示同源对照或确认此归纳。</p>
+                ) : neighborError ? (
+                  <div className="characterPanelError" role="alert">
+                    <p>{neighborError}</p>
+                    <button type="button" onClick={onRetryNeighbors}>重新读取同源归纳</button>
+                  </div>
+                ) : neighborLoading || !neighborPage ? (
+                  <p className="characterInlineEmpty" aria-busy="true">正在核对相同冻结证据区间…</p>
+                ) : (
+                  <>
+                    {neighborPage.source_groups.map((group) => {
+                      const related = neighborPage.items.filter((item) => item.shared_evidence.some((anchor) =>
+                        anchor.input_id === group.input_id && anchor.line_start === group.line_start && anchor.line_end === group.line_end));
+                      const complete = related.length >= group.total;
+                      return (
+                        <div className="candidateSourceGroup" key={`${group.input_id}:${group.line_start}:${group.line_end}`}>
+                          <p className="candidateSourceGroupTitle">
+                            <b>{group.document_name} · v{group.document_version} · 第 {group.line_start}{group.line_end === group.line_start ? "" : `–${group.line_end}`} 行</b>
+                            <span>相同区间另有 {group.total} 条 · 已显示 {related.length} 条</span>
+                          </p>
+                          {group.context_verified && group.story_scope && <p className="candidateSourceScope">冻结作用域：{group.story_scope.label}</p>}
+                          <div className="candidateSourceGrid">
+                            <div className="candidateSourceItem current">
+                              <small>当前审核 · {candidateStatusNames[selected.status]}</small>
+                              <b>{selected.statement}</b>
+                              <span>{selected.polarity ? polarityNames[selected.polarity] : "方向未提供"}</span>
+                            </div>
+                            {related.map((item) => (
+                              <a
+                                key={item.id}
+                                className="candidateSourceItem"
+                                href={hrefForCandidate(item.id)}
+                                onClick={(event) => {
+                                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                                  event.preventDefault();
+                                  onSelect(item.id);
+                                }}
+                              >
+                                <small>查看并独立审核 · {candidateStatusNames[item.status]}</small>
+                                <b>{item.statement}</b>
+                                <span>{item.polarity ? polarityNames[item.polarity] : "方向未提供"}</span>
+                              </a>
+                            ))}
+                          </div>
+                          {group.total === 0 && <p className="characterInlineEmpty">这个证据区间暂无其他可核对的归纳。</p>}
+                          {!complete && <p className="characterInlineEmpty">还有 {group.total - related.length} 条未显示；请继续加载后再比较这个区间的全部候选。</p>}
+                        </div>
+                      );
+                    })}
+                    {neighborPage.has_more && (
+                      <div className="candidateSourcePagination">
+                        <p>已加载 {neighborPage.items.length} / {neighborPage.total} 条；其他候选可能来自上述任意证据区间。</p>
+                        <button type="button" disabled={neighborMoreBusy} onClick={onLoadMoreNeighbors}>
+                          {neighborMoreBusy ? "正在加载…" : "继续加载同源归纳"}
+                        </button>
+                      </div>
+                    )}
+                    {neighborMoreError && <p className="candidateSourceNotice" role="alert">{neighborMoreError} <button type="button" onClick={onRetryNeighbors}>重新读取</button></p>}
+                  </>
+                )}
+              </section>
 
               <section className={`candidateDecision ${review?.allowed ? "ready" : "blocked"}`}>
                 <p>{review?.label}</p>

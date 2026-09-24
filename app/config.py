@@ -268,6 +268,9 @@ class Settings(BaseSettings):
         default=8_000, ge=256, le=12_000
     )
     character_signal_max_records: int = Field(default=48, ge=1, le=64)
+    # Experimental prompt A/B for the primary character signal extractor.
+    # Keep disabled until frozen DEV results justify changing the default.
+    character_signal_full_line_prompt_v2: bool = False
     # A draft chunk can receive bounded, one-trait-at-a-time recall calls for
     # undercovered confirmed traits. Keep the selected set no larger than the
     # content-free context boundary; the shared stage budget remains final.

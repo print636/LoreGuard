@@ -41,6 +41,7 @@ from scripts.run_evidence_investigator_live import (
     _CAPABILITY_KEYS,
     _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS,
     _CHARACTER_CONSISTENCY_LIMIT_KEYS,
+    _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
     _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
     _local_service_artifact_sha256,
 )
@@ -65,6 +66,7 @@ SAFE_KEY = re.compile(r"[A-Za-z0-9_.:-]{1,100}\Z")
 SAFE_REASON_KEYS = frozenset({
     "source_formal", "source_history",
     "regenerated_from_evidence_mismatch", "evidence_mismatch",
+    "regenerated_from_core_label_scope", "core_label_scope",
     "key_object_support", "statement_support",
     "lower_authority_baseline_shadowed", "invalid_confirmed_trait_snapshot",
     "chunk_limit", "confirmed_trait_hint_ambiguous",
@@ -647,8 +649,17 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     if (
         set(capabilities) != _CAPABILITY_KEYS
         or any(type(flag) is not bool for flag in capabilities.values())
-        or set(limits) != _CHARACTER_CONSISTENCY_LIMIT_KEYS
+        or set(limits) not in {
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS,
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY},
+        }
         or limits.get("sensitivity") not in {"conservative", "balanced", "exploratory"}
+    ):
+        return None
+    if (
+        _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY in limits
+        and type(limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY]) is not bool
     ):
         return None
     for key, (minimum, maximum) in _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS.items():
@@ -1559,6 +1570,11 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
             )
             if type(value := limits.get(key)) is int and value >= 0
         },
+        "signal_full_line_echo_v2": (
+            limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY)
+            if type(limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY)) is bool
+            else None
+        ),
     }
 
 

@@ -13,6 +13,7 @@ from app.character_traits import upsert_character_trait_candidate
 from app.db import (
     AnalysisDiagnosticRow,
     AnalysisRunInputRow,
+    AnalysisRunInputNarrativeContextRow,
     AnalysisRunRow,
     CharacterTraitAxisRow,
     CharacterTraitCandidateRow,
@@ -31,7 +32,8 @@ def _clear_write_limiter():
 
 
 def _project_and_document(
-    client: TestClient, *, headers: dict[str, str] | None = None
+    client: TestClient, *, headers: dict[str, str] | None = None,
+    content: str = "林澈一直喜欢蜜瓜。",
 ) -> tuple[dict, dict]:
     project_response = client.post(
         "/api/v1/projects",
@@ -44,7 +46,7 @@ def _project_and_document(
         f"/api/v1/projects/{project['id']}/documents/text",
         json={
             "name": "character.md",
-            "content": "林澈一直喜欢蜜瓜。",
+            "content": content,
             "document_role": "character_profile",
         },
         headers=headers,
@@ -87,21 +89,34 @@ def _candidate(
     valid_from_release_ordinal: int | None = None,
     valid_until_release_ordinal: int | None = None,
     supersedes_candidate_id: str | None = None,
+    character_key: str = "林澈",
+    line_start: int = 1,
+    line_end: int = 1,
+    document_id: str | None = None,
 ) -> str:
     with SessionLocal() as db:
         snapshot = db.scalar(
             select(AnalysisRunInputRow).where(
-                AnalysisRunInputRow.run_id == run_id
+                AnalysisRunInputRow.run_id == run_id,
+                *(
+                    (AnalysisRunInputRow.document_id == document_id,)
+                    if document_id is not None
+                    else ()
+                ),
             )
         )
         assert snapshot is not None
+        evidence_text = "\n".join(
+            snapshot.content.splitlines()[line_start - 1 : line_end]
+        ).strip()
+        assert evidence_text
         row, created = upsert_character_trait_candidate(
             db,
             project_id=project_id,
             source_run_id=run_id,
             candidate={
-                "character_key": "林澈",
-                "character_display_name": "林澈",
+                "character_key": character_key,
+                "character_display_name": character_key,
                 "trait_type": trait_type,
                 "trait_key": trait_key,
                 "comparison_key": comparison_key,
@@ -127,9 +142,9 @@ def _candidate(
                         "document_name": snapshot.document_name,
                         "document_version": snapshot.document_version,
                         "content_sha256": snapshot.content_sha256,
-                        "line_start": 1,
-                        "line_end": 1,
-                        "text": snapshot.content,
+                        "line_start": line_start,
+                        "line_end": line_end,
+                        "text": evidence_text,
                     }
                 ],
                 "generator_version": "api-contract-test-v1",
@@ -147,6 +162,17 @@ def _decision_path(project_id: str, candidate_id: str) -> str:
         f"/api/v1/projects/{project_id}/characters/{quote('林澈', safe='')}"
         f"/profile-candidates/{candidate_id}/decisions"
     )
+
+
+def _candidate_path(project_id: str, candidate_id: str) -> str:
+    return (
+        f"/api/v1/projects/{project_id}/characters/{quote('林澈', safe='')}"
+        f"/profile-candidates/{candidate_id}"
+    )
+
+
+def _neighbor_path(project_id: str, candidate_id: str) -> str:
+    return f"{_candidate_path(project_id, candidate_id)}/source-neighbors"
 
 
 def _create_axis(
@@ -1499,6 +1525,297 @@ def test_concurrent_author_axis_confirmation_commits_one_binding():
                 )
             )
             assert len(reviews) == 1 and reviews[0].approved_axis_id == axis["id"]
+
+
+def test_candidate_detail_uses_only_verified_frozen_line_and_context_metadata():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        candidate_id = _candidate(project["id"], run["id"])
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            frozen = db.get(AnalysisRunInputRow, row.evidence[0]["input_id"])
+            context = db.get(AnalysisRunInputNarrativeContextRow, frozen.id)
+            assert context is not None
+            expected = context.payload
+        detail = client.get(_candidate_path(project["id"], candidate_id))
+        assert detail.status_code == 200, detail.text
+        body = detail.json()
+        assert body["source_verified"] is True
+        assert body["reviewable"] is True
+        evidence = body["evidence"][0]
+        assert evidence["source_verified"] is True
+        assert evidence["context_verified"] is True
+        assert evidence["text"] == frozen.content.splitlines()[0]
+        assert evidence["document_version"] == frozen.document_version
+        assert evidence["document_role"] == expected["legacy_document_role"]
+        assert evidence["publication_status"] == expected["publication_status"]
+        assert evidence["authority_level"] == expected["authority_tier"]
+        assert evidence["story_scope"] == expected["scope"]
+
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            row.evidence = [{**row.evidence[0], "document_role": "canon",
+                             "publication_status": "published", "authority_level": "core_canon"}]
+            row.evidence_sha256 = payload_sha256(row.evidence)
+            db.commit()
+        whitelisted = client.get(_candidate_path(project["id"], candidate_id))
+        assert whitelisted.status_code == 200
+        assert whitelisted.json()["evidence"][0]["document_role"] == expected["legacy_document_role"]
+        assert whitelisted.json()["evidence"][0]["authority_level"] == expected["authority_tier"]
+
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            row.evidence = [{**row.evidence[0], "text": "伪造的原文", "document_role": "canon",
+                             "publication_status": "published", "story_scope": {"fake": True}}]
+            db.commit()
+        invalid = client.get(_candidate_path(project["id"], candidate_id))
+        assert invalid.status_code == 200
+        body = invalid.json()
+        assert body["source_verified"] is False
+        assert body["reviewable"] is False
+        assert body["evidence"][0]["source_verified"] is False
+        assert "document_role" not in body["evidence"][0]
+        assert "publication_status" not in body["evidence"][0]
+        assert "story_scope" not in body["evidence"][0]
+        assert client.get(_neighbor_path(project["id"], candidate_id)).status_code == 409
+        denied = client.post(
+            _decision_path(project["id"], candidate_id),
+            json={"decision": "confirm", "expected_revision": 0},
+        )
+        assert denied.status_code == 409
+
+
+def test_candidate_evidence_metadata_fails_closed_when_frozen_context_hash_invalid():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        candidate_id = _candidate(project["id"], run["id"])
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            context = db.get(AnalysisRunInputNarrativeContextRow, row.evidence[0]["input_id"])
+            context.payload = {**context.payload, "legacy_document_role": "canon"}
+            db.commit()
+        detail = client.get(_candidate_path(project["id"], candidate_id))
+        assert detail.status_code == 200
+        evidence = detail.json()["evidence"][0]
+        assert evidence["source_verified"] is True
+        assert evidence["context_verified"] is False
+        assert "document_role" not in evidence
+        assert "story_scope" not in evidence
+        assert detail.json()["reviewable"] is False
+        neighbors = client.get(_neighbor_path(project["id"], candidate_id))
+        assert neighbors.status_code == 200
+        assert neighbors.json()["source_groups"][0]["context_verified"] is False
+        assert "story_scope" not in neighbors.json()["source_groups"][0]
+
+
+def test_source_neighbors_page_across_candidate_queue_without_mixing_runs_or_lines():
+    with TestClient(app) as client:
+        project, document = _project_and_document(
+            client, content="林澈喜欢蜜瓜。\n林澈喜欢葡萄。"
+        )
+        second_document = client.post(
+            f"/api/v1/projects/{project['id']}/documents/text",
+            json={"name": "other.md", "content": "林澈喜欢蜜瓜。", "document_role": "chapter"},
+        )
+        assert second_document.status_code == 201
+        run = _completed_run(client, project["id"])
+        selected = _candidate(project["id"], run["id"], trait_key="选中", value="选中")
+        sibling_ids = [
+            _candidate(project["id"], run["id"], trait_key=f"同源-{index}", value=f"取值-{index}")
+            for index in range(25)
+        ]
+        other_line = _candidate(project["id"], run["id"], trait_key="第二行", line_start=2, line_end=2)
+        other_input = _candidate(
+            project["id"], run["id"], trait_key="另一文档", document_id=second_document.json()["id"]
+        )
+        other_character = _candidate(
+            project["id"], run["id"], trait_key="其他角色", character_key="另一个角色"
+        )
+        other_run = _completed_run(client, project["id"])
+        later = _candidate(project["id"], other_run["id"], trait_key="另一次运行")
+        first = client.get(_neighbor_path(project["id"], selected), params={"limit": 10, "offset": 0})
+        second = client.get(_neighbor_path(project["id"], selected), params={"limit": 10, "offset": 10})
+        third = client.get(_neighbor_path(project["id"], selected), params={"limit": 10, "offset": 20})
+        assert all(response.status_code == 200 for response in (first, second, third))
+        pages = [response.json() for response in (first, second, third)]
+        assert [len(page["items"]) for page in pages] == [10, 10, 5]
+        assert [page["has_more"] for page in pages] == [True, True, False]
+        assert all(page["total"] == 25 for page in pages)
+        assert pages[0]["source_groups"][0]["total"] == 25
+        seen = {item["id"] for page in pages for item in page["items"]}
+        assert seen == set(sibling_ids)
+        assert not seen.intersection({selected, other_line, other_input, other_character, later})
+        assert all(
+            item["shared_evidence"][0]["document_id"] == document["id"]
+            for page in pages for item in page["items"]
+        )
+        assert "text" not in pages[0]["items"][0]["shared_evidence"][0]
+        empty = client.get(_neighbor_path(project["id"], selected), params={"offset": 99})
+        assert empty.status_code == 200 and empty.json()["items"] == []
+        assert empty.json()["has_more"] is False
+        for params in ({"limit": 0}, {"limit": 51}, {"offset": -1}):
+            assert client.get(_neighbor_path(project["id"], selected), params=params).status_code == 422
+
+
+def test_source_neighbor_groups_keep_each_independent_evidence_line_separate():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈喜欢蜜瓜。\n林澈害怕烟火。"
+        )
+        run = _completed_run(client, project["id"])
+        selected = _candidate(project["id"], run["id"], trait_key="多来源")
+        line_one = _candidate(project["id"], run["id"], trait_key="第一行")
+        line_two = _candidate(project["id"], run["id"], trait_key="第二行", line_start=2, line_end=2)
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, selected)
+            first = row.evidence[0]
+            row.evidence = [first, {**first, "line_start": 2, "line_end": 2, "text": "林澈害怕烟火。"}]
+            row.evidence_sha256 = payload_sha256(row.evidence)
+            db.commit()
+        response = client.get(_neighbor_path(project["id"], selected))
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["total"] == 2
+        groups = {group["line_start"]: group for group in body["source_groups"]}
+        assert groups[1]["total"] == groups[2]["total"] == 1
+        shared = {item["id"]: item["shared_evidence"] for item in body["items"]}
+        assert [item["line_start"] for item in shared[line_one]] == [1]
+        assert [item["line_start"] for item in shared[line_two]] == [2]
+
+
+def test_source_neighbor_workspace_isolation_and_bounded_scan():
+    with patch.multiple(
+        settings, auth_mode="required", auth_secret_key="neighbor-api-test-secret-key-32-bytes",
+        auth_cookie_secure=False, auth_cookie_samesite="lax",
+    ), TestClient(app) as owner, TestClient(app) as outsider:
+        owner_auth = owner.post(
+            "/api/v1/auth/register",
+            json={"email": f"neighbor-owner-{uuid4().hex}@example.com", "password": "correct horse battery staple", "display_name": "Owner"},
+        )
+        other_auth = outsider.post(
+            "/api/v1/auth/register",
+            json={"email": f"neighbor-other-{uuid4().hex}@example.com", "password": "correct horse battery staple", "display_name": "Other"},
+        )
+        assert owner_auth.status_code == other_auth.status_code == 201
+        headers = {"X-CSRF-Token": owner_auth.headers["X-CSRF-Token"]}
+        project, _ = _project_and_document(owner, headers=headers)
+        run = _completed_run(owner, project["id"], headers=headers)
+        selected = _candidate(project["id"], run["id"], trait_key="选中")
+        assert outsider.get(_neighbor_path(project["id"], selected)).status_code == 404
+        assert owner.get(_neighbor_path(project["id"], selected)).status_code == 200
+        _candidate(project["id"], run["id"], trait_key="邻项一")
+        _candidate(project["id"], run["id"], trait_key="邻项二")
+        with patch("app.main.MAX_CANDIDATES_PER_SOURCE_RUN", 2):
+            capped = owner.get(_neighbor_path(project["id"], selected))
+        assert capped.status_code == 409
+        assert capped.json()["detail"]["code"] == "character_trait_source_neighbor_limit"
+
+
+def test_new_and_legacy_trimmed_evidence_are_distinguished_without_mutating_history():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="  林澈一直喜欢蜜瓜。  "
+        )
+        run = _completed_run(client, project["id"])
+        candidate_id = _candidate(project["id"], run["id"])
+        detail_path = _candidate_path(project["id"], candidate_id)
+        current = client.get(detail_path)
+        assert current.status_code == 200
+        evidence = current.json()["evidence"][0]
+        assert evidence["source_verified"] is True
+        assert evidence["source_text_exact"] is True
+        assert evidence["text"] == "  林澈一直喜欢蜜瓜。  "
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            row.evidence = [{**row.evidence[0], "text": "林澈一直喜欢蜜瓜。"}]
+            row.evidence_sha256 = payload_sha256(row.evidence)
+            db.commit()
+        legacy = client.get(detail_path)
+        assert legacy.status_code == 200
+        assert legacy.json()["source_verified"] is True
+        assert legacy.json()["reviewable"] is True
+        evidence = legacy.json()["evidence"][0]
+        assert evidence["source_verified"] is True
+        assert evidence["source_text_exact"] is False
+        assert evidence["text"] == "  林澈一直喜欢蜜瓜。  "
+        accepted = client.post(
+            _decision_path(project["id"], candidate_id),
+            json={"decision": "confirm", "expected_revision": 0},
+        )
+        assert accepted.status_code == 201, accepted.text
+        after = client.get(detail_path)
+        assert after.status_code == 200
+        assert after.json()["status"] == "confirmed"
+        assert after.json()["evidence"][0]["source_text_exact"] is False
+
+
+def test_source_neighbors_do_not_merge_partially_overlapping_line_ranges():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈喜欢蜜瓜。\n林澈害怕烟火。"
+        )
+        run = _completed_run(client, project["id"])
+        selected = _candidate(
+            project["id"], run["id"], trait_key="跨两行", line_start=1, line_end=2
+        )
+        _candidate(project["id"], run["id"], trait_key="仅第二行", line_start=2, line_end=2)
+        body = client.get(_neighbor_path(project["id"], selected)).json()
+        assert body["total"] == 0
+        assert body["source_groups"][0]["line_start"] == 1
+        assert body["source_groups"][0]["line_end"] == 2
+
+
+def test_candidate_evidence_hash_blocks_switch_to_another_real_frozen_line():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈喜欢蜜瓜。\n林澈害怕烟火。"
+        )
+        run = _completed_run(client, project["id"])
+        selected = _candidate(project["id"], run["id"], trait_key="食物偏好")
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, selected)
+            row.evidence = [{**row.evidence[0], "line_start": 2, "line_end": 2,
+                             "text": "林澈害怕烟火。"}]
+            db.commit()
+        detail = client.get(_candidate_path(project["id"], selected))
+        assert detail.status_code == 200
+        assert detail.json()["source_verified"] is False
+        assert detail.json()["reviewable"] is False
+        assert client.get(_neighbor_path(project["id"], selected)).status_code == 409
+        decision = client.post(
+            _decision_path(project["id"], selected),
+            json={"decision": "confirm", "expected_revision": 0},
+        )
+        assert decision.status_code == 409
+
+
+def test_verified_context_requires_semantic_authority_not_just_matching_hash():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        candidate_id = _candidate(project["id"], run["id"])
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            context = db.get(AnalysisRunInputNarrativeContextRow, row.evidence[0]["input_id"])
+            context.payload = {**context.payload, "authority_tier": "core_canon"}
+            context.payload_sha256 = payload_sha256(context.payload)
+            db.commit()
+        detail = client.get(_candidate_path(project["id"], candidate_id))
+        assert detail.status_code == 200
+        assert detail.json()["evidence"][0]["context_verified"] is False
+        assert "authority_level" not in detail.json()["evidence"][0]
+        assert detail.json()["reviewable"] is False
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            context = db.get(AnalysisRunInputNarrativeContextRow, row.evidence[0]["input_id"])
+            context.payload = {**context.payload, "publication_status": []}
+            context.payload_sha256 = payload_sha256(context.payload)
+            db.commit()
+        malformed = client.get(_candidate_path(project["id"], candidate_id))
+        assert malformed.status_code == 200
+        assert malformed.json()["evidence"][0]["context_verified"] is False
 
 
 def test_author_axis_supersession_requires_same_explicit_axis_and_preserves_old_binding():

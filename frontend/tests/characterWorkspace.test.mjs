@@ -10,6 +10,8 @@ import {
   fetchCharacters,
   fetchDriftIssues,
   fetchProfileCandidates,
+  fetchProfileCandidate,
+  fetchSourceNeighbors,
   normalizeCharacterDimension,
   normalizeProfileCandidate,
   submitCandidateDecision,
@@ -93,6 +95,123 @@ test("character route state rejects untrusted ids, sections and pages", () => {
     ).candidateId,
     null,
   );
+});
+
+test("candidate source-neighbor pages preserve distinct frozen-line groups and explicit pagination", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const sourceGroups = [1, 2].map((line) => ({
+    input_id: "input-1", document_id: "document-1", document_name: "设定.md",
+    document_version: 2, line_start: line, line_end: line, total: 1,
+    context_verified: false,
+  }));
+  const neighbor = (id, group) => ({
+    id, character_key: "林澈", source_run_id: "run-1", trait_type: "preference",
+    trait_key: `归纳${id}`, value: "偏好", polarity: "positive", review_state: "pending",
+    shared_evidence: [group],
+  });
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    const offset = Number(new URL(String(url), "http://local").searchParams.get("offset"));
+    return new Response(JSON.stringify({
+      candidate_id: "selected", character_key: "林澈", source_run_id: "run-1",
+      limit: 1, offset, total: 2, has_more: offset === 0,
+      source_groups: sourceGroups,
+      items: [offset === 0 ? neighbor("one", sourceGroups[0]) : neighbor("two", sourceGroups[1])],
+    }), { status: 200 });
+  };
+  const first = await fetchSourceNeighbors("project-1", "林澈", "selected", { limit: 1, offset: 0 });
+  const second = await fetchSourceNeighbors("project-1", "林澈", "selected", { limit: 1, offset: 1 });
+  assert.equal(first.total, 2);
+  assert.equal(first.has_more, true);
+  assert.equal(second.has_more, false);
+  assert.equal(first.items[0].shared_evidence[0].line_start, 1);
+  assert.equal(second.items[0].shared_evidence[0].line_start, 2);
+  assert.equal(first.source_groups.length, 2);
+  assert.match(urls[0], /source-neighbors\?limit=1&offset=0/);
+  assert.match(urls[1], /source-neighbors\?limit=1&offset=1/);
+});
+
+test("candidate source-neighbor adapter rejects another character, line, and inconsistent pages", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const group = {
+    input_id: "input-1", document_id: "document-1", document_name: "设定.md",
+    document_version: 1, line_start: 1, line_end: 1, total: 1,
+    context_verified: false,
+  };
+  const base = {
+    candidate_id: "selected", character_key: "林澈", source_run_id: "run-1",
+    limit: 20, offset: 0, total: 1, has_more: false, source_groups: [group],
+    items: [{
+      id: "neighbor", character_key: "林澈", source_run_id: "run-1",
+      trait_type: "preference", trait_key: "偏好", value: "蜜瓜",
+      polarity: "positive", review_state: "pending", shared_evidence: [group],
+    }],
+  };
+  for (const malformed of [
+    { ...base, character_key: "别的角色" },
+    { ...base, items: [{ ...base.items[0], shared_evidence: [{ ...group, line_start: 2, line_end: 2 }] }] },
+    { ...base, has_more: true },
+    { ...base, items: [base.items[0], base.items[0]], total: 2 },
+  ]) {
+    globalThis.fetch = async () => new Response(JSON.stringify(malformed), { status: 200 });
+    await assert.rejects(fetchSourceNeighbors("project-1", "林澈", "selected"), TypeError);
+  }
+});
+
+test("candidate detail refuses confirmation when source verification is absent", () => {
+  const raw = {
+    id: "candidate-1", character_key: "林澈", trait_type: "preference",
+    trait_key: "食物偏好", value: "喜欢蜜瓜", origin: "explicit_setting",
+    source_run_id: "run-1", scope_sha256: "snapshot", revision: 0,
+    review_state: "pending", reviewable: true, model_coverage: "full",
+    evidence: [{ document_id: "doc-1", document_name: "设定.md", document_version: 1,
+      line_start: 1, line_end: 1, text: "林澈喜欢蜜瓜。",
+      document_role: "canon", authority_level: "core_canon" }],
+  };
+  const candidate = normalizeProfileCandidate(raw);
+  assert.equal(candidate.source_verified, false);
+  assert.equal(candidate.reviewable, false);
+  assert.equal(candidate.supporting_evidence[0].context_verified, false);
+  assert.equal(candidateReviewState(candidate).allowed, false);
+});
+
+test("decision replay is followed by a verified detail read, not treated as enriched evidence", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  context.after(() => { globalThis.fetch = originalFetch; globalThis.document = originalDocument; });
+  globalThis.document = { cookie: "loreguard_csrf=review-token" };
+  const compact = {
+    id: "candidate-1", character_key: "林澈", trait_type: "preference",
+    trait_key: "食物偏好", value: "喜欢蜜瓜", origin: "explicit_setting",
+    source_run_id: "run-1", scope_sha256: "snapshot", revision: 1,
+    review_state: "confirmed", reviewable: false, model_coverage: "full",
+    evidence: [{ document_id: "doc-1", document_name: "设定.md", document_version: 1,
+      line_start: 1, line_end: 1, text: "林澈喜欢蜜瓜。" }],
+  };
+  let reads = 0;
+  globalThis.fetch = async (_url, init) => {
+    if (init?.method === "POST") {
+      return new Response(JSON.stringify({ candidate: compact }), { status: 201 });
+    }
+    reads += 1;
+    return new Response(JSON.stringify({
+      ...compact, source_verified: true,
+      evidence: [{ ...compact.evidence[0], input_id: "input-1", source_verified: true,
+        source_text_exact: true, context_verified: false }],
+    }), { status: 200 });
+  };
+  const mutation = await submitCandidateDecision("project-1", "林澈", "candidate-1", {
+    decision: "confirm", comment: "", expected_revision: 0,
+  });
+  assert.equal(mutation.candidate.source_verified, false);
+  const detail = await fetchProfileCandidate("project-1", "林澈", "candidate-1");
+  assert.equal(reads, 1);
+  assert.equal(detail.status, "confirmed");
+  assert.equal(detail.source_verified, true);
+  assert.equal(detail.supporting_evidence[0].source_text_exact, true);
 });
 
 test("coverage and readiness copy never turn degraded extraction into a clean result", () => {
@@ -232,6 +351,7 @@ test("frozen character dimensions include current state and fail unknown values 
     scope: { schema_version: 1, timeline_key: "main" },
     scope_sha256: "snapshot-raw",
     source_run_id: "run-raw",
+    source_verified: true,
     review_state: "pending",
     revision: 0,
     evidence: [
@@ -263,6 +383,8 @@ test("character API and report paths encode opaque identifiers", () => {
       "/api/v1/projects/project%20a/characters/%E8%A7%92%E8%89%B2%2Fid/profile-candidates/candidate%20%3F",
     decisions:
       "/api/v1/projects/project%20a/characters/%E8%A7%92%E8%89%B2%2Fid/profile-candidates/candidate%20%3F/decisions",
+    sourceNeighbors:
+      "/api/v1/projects/project%20a/characters/%E8%A7%92%E8%89%B2%2Fid/profile-candidates/candidate%20%3F/source-neighbors",
     driftIssues: "/api/v1/projects/project%20a/drift-issues",
   });
   assert.equal(

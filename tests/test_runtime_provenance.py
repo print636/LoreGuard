@@ -78,6 +78,7 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
         "signal_max_completion_tokens"
     ] == 4_096
     assert result["character_consistency_limits"]["signal_max_records"] == 48
+    assert result["character_consistency_limits"]["signal_full_line_echo_v2"] is False
     assert result["character_consistency_limits"][
         "signal_targeted_max_targets_per_chunk"
     ] == 12
@@ -123,6 +124,7 @@ def test_character_runtime_fingerprint_tracks_stage_and_effective_provider_limit
     baseline_limits = safe_runtime_provenance(baseline)["character_consistency_limits"]
     baseline_digest = _character_limits_digest(baseline)
     variants = (
+        {"character_signal_full_line_prompt_v2": True},
         {"character_signal_max_records": 47},
         {"character_signal_targeted_max_targets_per_chunk": 11},
         {"character_signal_timeout_seconds": 20},

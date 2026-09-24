@@ -1003,6 +1003,21 @@ def test_character_runtime_provenance_requires_new_effective_limits_and_hashes_c
     base = _runtime_provenance()
     digest = axis_live._runtime_provenance_digest(base)
     assert digest is not None
+    # Preserve parsing of historical v3 reports while recording new A/B runs.
+    variant = json.loads(json.dumps(base))
+    variant["character_consistency_limits"]["signal_full_line_echo_v2"] = False
+    off_digest = axis_live._runtime_provenance_digest(variant)
+    assert off_digest is not None and off_digest != digest
+    assert axis_live._runtime_summary({"runtime_provenance": variant})[
+        "signal_full_line_echo_v2"
+    ] is False
+    variant["character_consistency_limits"]["signal_full_line_echo_v2"] = True
+    assert axis_live._runtime_provenance_digest(variant) not in {None, off_digest}
+    assert axis_live._runtime_summary({"runtime_provenance": variant})[
+        "signal_full_line_echo_v2"
+    ] is True
+    variant["character_consistency_limits"]["signal_full_line_echo_v2"] = "true"
+    assert axis_live._runtime_provenance_digest(variant) is None
     new_fields = (
         "signal_max_records", "signal_targeted_max_targets_per_chunk",
         "signal_max_response_bytes", "drift_max_evidence_chars",
@@ -1473,6 +1488,8 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
                     "evidence_mismatch": 5,
                     "key_object_support": 1,
                     "statement_support": 4,
+                    "core_label_scope": 2,
+                    "regenerated_from_core_label_scope": 3,
                     "sk-secret": 1,
                 },
             }}
@@ -1532,6 +1549,8 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
         "evidence_mismatch": 5,
         "key_object_support": 1,
         "statement_support": 4,
+        "core_label_scope": 2,
+        "regenerated_from_core_label_scope": 3,
     }
     assert summary["unreported_reason_entries"] == 1
     assert "sk-secret" not in repr(summary)

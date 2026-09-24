@@ -18,6 +18,8 @@ import type {
   ProfileCandidate,
   ProfileCandidateStatus,
   ProfileEvidence,
+  SourceNeighbor,
+  SourceNeighborPage,
 } from "./types.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -188,7 +190,14 @@ function normalizeEvidence(
   const lineEnd = integer(source.line_end);
   if (!documentName || !excerpt || lineStart < 1 || lineEnd < lineStart) return null;
   const documentId = text(source.document_id, `unresolved-document-${index}`);
+  const sourceVerified = source.source_verified === true;
+  const contextVerified = sourceVerified && source.context_verified === true &&
+    Boolean(text(source.document_role)) &&
+    Boolean(text(source.publication_status)) &&
+    Boolean(text(source.authority_level)) &&
+    Boolean(record(source.story_scope));
   return {
+    input_id: optionalText(source.input_id),
     document_id: documentId,
     document_name: documentName,
     document_version: nullableInteger(source.document_version),
@@ -206,6 +215,9 @@ function normalizeEvidence(
     line_start: lineStart,
     line_end: lineEnd,
     text: excerpt,
+    source_verified: sourceVerified,
+    source_text_exact: sourceVerified && source.source_text_exact === true,
+    context_verified: contextVerified,
   };
 }
 
@@ -323,6 +335,7 @@ export function normalizeProfileCandidate(
   }
   const reviewable = Boolean(
     explicitlyReviewable &&
+      source.source_verified === true &&
       status === "pending" &&
       dimension !== "unknown" &&
       origin !== "unknown" &&
@@ -333,7 +346,9 @@ export function normalizeProfileCandidate(
   );
   let unreviewableReason = optionalText(source.unreviewable_reason);
   if (!reviewable && !unreviewableReason) {
-    if (dimension === "unknown") {
+    if (source.source_verified !== true) {
+      unreviewableReason = "候选原文行未与冻结输入核对，不能确认。";
+    } else if (dimension === "unknown") {
       unreviewableReason = "服务端返回了未识别的角色特征类型。";
     } else if (origin === "unknown") {
       unreviewableReason = "候选没有提供可核对的归纳来源。";
@@ -389,6 +404,7 @@ export function normalizeProfileCandidate(
     model_coverage: coverage(
       source.model_coverage ?? options.inheritedCoverage ?? "unknown",
     ),
+    source_verified: source.source_verified === true,
     revision: revision ?? 0,
   };
 }
@@ -778,7 +794,124 @@ export function characterApiPaths(
     candidates,
     candidate,
     decisions: `${candidate}/decisions`,
+    sourceNeighbors: `${candidate}/source-neighbors`,
     driftIssues: `${projectRoot(projectId)}/drift-issues`,
+  };
+}
+
+function sourceAnchorKey(inputId: string, lineStart: number, lineEnd: number): string {
+  return JSON.stringify([inputId, lineStart, lineEnd]);
+}
+
+function normalizeSourceAnchor(value: unknown) {
+  const source = requiredRecord(value, "同源证据定位");
+  const inputId = text(source.input_id);
+  const documentId = text(source.document_id);
+  const documentName = text(source.document_name);
+  const documentVersion = positiveInteger(source.document_version);
+  const lineStart = positiveInteger(source.line_start);
+  const lineEnd = positiveInteger(source.line_end);
+  if (
+    !inputId || !documentId || !documentName || !documentVersion ||
+    !lineStart || !lineEnd || lineEnd < lineStart ||
+    typeof source.context_verified !== "boolean"
+  ) throw new TypeError("同源证据定位无效");
+  const contextVerified = source.context_verified && Boolean(record(source.story_scope));
+  if (source.context_verified && !contextVerified) {
+    throw new TypeError("同源证据的冻结上下文无效");
+  }
+  return {
+    input_id: inputId,
+    document_id: documentId,
+    document_name: documentName,
+    document_version: documentVersion,
+    line_start: lineStart,
+    line_end: lineEnd,
+    context_verified: contextVerified,
+    story_scope: contextVerified
+      ? normalizeScope(source.story_scope, `source:${inputId}:${lineStart}:${lineEnd}`)
+      : null,
+  };
+}
+
+export async function fetchSourceNeighbors(
+  projectId: string,
+  characterId: string,
+  candidateId: string,
+  input: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<SourceNeighborPage> {
+  const limit = input.limit ?? 20;
+  const offset = input.offset ?? 0;
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  const source = requiredRecord(await apiJson<unknown>(
+    `${characterApiPaths(projectId, characterId, candidateId).sourceNeighbors}?${params}`,
+    { signal },
+  ), "同源归纳列表");
+  const rawItems = requiredItems(source, "同源归纳列表");
+  const rawGroups = requiredItems({ items: source.source_groups }, "同源证据分组");
+  const total = nullableInteger(source.total);
+  if (
+    source.candidate_id !== candidateId ||
+    source.character_key !== characterId ||
+    !text(source.source_run_id) ||
+    source.limit !== limit || source.offset !== offset ||
+    total === null || typeof source.has_more !== "boolean" ||
+    rawItems.length > limit || (rawItems.length > 0 && total < offset + rawItems.length) ||
+    (rawItems.length === 0 && offset < total) ||
+    source.has_more !== (offset + rawItems.length < total)
+  ) throw new TypeError("同源归纳分页或身份信息无效");
+  const groups = rawGroups.map((item) => {
+    const anchor = normalizeSourceAnchor(item);
+    const count = nullableInteger(record(item)?.total);
+    if (count === null) throw new TypeError("同源证据数量无效");
+    return { ...anchor, total: count };
+  });
+  const groupKeys = new Set(groups.map((group) =>
+    sourceAnchorKey(group.input_id, group.line_start, group.line_end)));
+  if (groups.length === 0 || groupKeys.size !== groups.length) {
+    throw new TypeError("同源证据分组无效");
+  }
+  const items: SourceNeighbor[] = rawItems.map((item) => {
+    const row = requiredRecord(item, "同源归纳");
+    const id = text(row.id);
+    const traitKey = text(row.trait_key);
+    const value = text(row.value);
+    const rawEvidence = requiredItems({ items: row.shared_evidence }, "共享证据");
+    const shared = rawEvidence.map(normalizeSourceAnchor);
+    if (
+      !id || id === candidateId || row.character_key !== characterId ||
+      row.source_run_id !== source.source_run_id ||
+      !value || !shared.length ||
+      shared.some((anchor) => !groupKeys.has(
+        sourceAnchorKey(anchor.input_id, anchor.line_start, anchor.line_end)))
+    ) throw new TypeError("同源归纳身份或证据无效");
+    return {
+      id,
+      character_id: characterId,
+      source_run_id: row.source_run_id as string,
+      dimension: normalizeCharacterDimension(row.trait_type),
+      statement: traitKey ? `${traitKey}：${value}` : value,
+      polarity: row.polarity === "positive" || row.polarity === "negative" ||
+        row.polarity === "neutral" || row.polarity === "unclear"
+        ? row.polarity : null,
+      status: candidateStatus(row.review_state),
+      shared_evidence: shared,
+    };
+  });
+  if (new Set(items.map((item) => item.id)).size !== items.length) {
+    throw new TypeError("同源归纳列表包含重复候选");
+  }
+  return {
+    candidate_id: candidateId,
+    character_id: characterId,
+    source_run_id: source.source_run_id as string,
+    limit,
+    offset,
+    total,
+    has_more: source.has_more as boolean,
+    items,
+    source_groups: groups,
   };
 }
 

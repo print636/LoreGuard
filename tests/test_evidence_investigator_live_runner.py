@@ -1348,7 +1348,13 @@ def test_missing_decision_trace_is_unavailable_not_a_false_read():
 def test_runtime_provenance_parser_is_exact_and_fail_closed():
     value = runtime_provenance()
 
+    # Older v3 reports did not carry this optional experiment flag.
     assert _safe_runtime_provenance(value) == value
+    with_variant = json.loads(json.dumps(value))
+    with_variant["character_consistency_limits"]["signal_full_line_echo_v2"] = True
+    assert _safe_runtime_provenance(with_variant) == with_variant
+    with_variant["character_consistency_limits"]["signal_full_line_echo_v2"] = "true"
+    assert _safe_runtime_provenance(with_variant) is None
 
     missing_limit = json.loads(json.dumps(value))
     missing_limit["investigator_limits"].pop("max_reads")

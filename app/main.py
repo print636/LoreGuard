@@ -66,6 +66,7 @@ from .provider_credentials import (
     validate_provider_security_configuration,
 )
 from .character_traits import (
+    MAX_CANDIDATES_PER_SOURCE_RUN,
     _OBJECT_BEARING_TRAIT_DIMENSIONS,
     _validated_comparison_key,
     normalize_character_key,
@@ -84,6 +85,8 @@ from .narrative_context import (
     NarrativeContextRevisionConflict,
     NarrativeContextRevisionInput,
     NarrativeScopeV1,
+    canonical_scope_payload,
+    derive_authority_tier,
     add_context_revision,
     context_snapshot_payload,
     latest_context_revisions,
@@ -959,62 +962,108 @@ def serialize_character_trait_candidate(row: CharacterTraitCandidateRow) -> dict
     }
 
 
+def _verified_candidate_frozen_inputs(
+    db,
+    row: CharacterTraitCandidateRow,
+    *,
+    run_inputs: dict[str, AnalysisRunInputRow] | None = None,
+) -> tuple[dict[str, AnalysisRunInputRow] | None, str | None]:
+    """Bind every saved evidence line to the exact immutable run input."""
+
+    evidence = row.evidence if isinstance(row.evidence, list) else []
+    if not evidence:
+        return None, "候选缺少可核对的原文证据"
+    if payload_sha256(evidence) != row.evidence_sha256:
+        return None, "候选证据与保存时的校验值不一致"
+    input_ids = {
+        item.get("input_id")
+        for item in evidence
+        if isinstance(item, dict) and isinstance(item.get("input_id"), str)
+    }
+    if len(input_ids) == 0:
+        return None, "候选缺少可核对的来源文档"
+    frozen_by_id = (
+        run_inputs
+        if run_inputs is not None
+        else {
+            item.id: item
+            for item in db.scalars(
+                select(AnalysisRunInputRow).where(
+                    AnalysisRunInputRow.run_id == row.source_run_id,
+                    AnalysisRunInputRow.id.in_(input_ids),
+                )
+            ).all()
+        }
+    )
+    verified: dict[str, AnalysisRunInputRow] = {}
+    seen_spans: set[tuple[str, int, int]] = set()
+    for item in evidence:
+        if not isinstance(item, dict):
+            return None, "候选原文证据格式无法核对"
+        input_id = item.get("input_id")
+        document_id = item.get("document_id")
+        document_name = item.get("document_name")
+        document_version = item.get("document_version")
+        content_sha256 = item.get("content_sha256")
+        line_start = item.get("line_start")
+        line_end = item.get("line_end")
+        evidence_text = item.get("text")
+        frozen = frozen_by_id.get(input_id) if isinstance(input_id, str) else None
+        if (
+            frozen is None
+            or frozen.run_id != row.source_run_id
+            or not isinstance(document_id, str)
+            or not isinstance(document_name, str)
+            or type(document_version) is not int
+            or not isinstance(content_sha256, str)
+            or type(line_start) is not int
+            or type(line_end) is not int
+            or not isinstance(evidence_text, str)
+            or line_start < 1
+            or line_end < line_start
+            or (input_id, line_start, line_end) in seen_spans
+        ):
+            return None, "候选原文证据格式无法核对"
+        seen_spans.add((input_id, line_start, line_end))
+        if (
+            document_id != frozen.document_id
+            or document_name != frozen.document_name
+            or document_version != frozen.document_version
+            or content_sha256 != frozen.content_sha256
+            or document_content_sha256(frozen.content) != frozen.content_sha256
+        ):
+            return None, "候选来源与冻结输入不一致"
+        lines = frozen.content.splitlines()
+        raw_line = "\n".join(lines[line_start - 1 : line_end])
+        if line_end > len(lines) or evidence_text not in (raw_line, raw_line.strip()):
+            return None, "候选原文行与冻结输入不一致"
+        verified[input_id] = frozen
+    return verified, None
+
+
 def _candidate_source_is_current(
-    db, row: CharacterTraitCandidateRow
-) -> tuple[bool, str | None]:
+    db,
+    row: CharacterTraitCandidateRow,
+    *,
+    frozen_validation: tuple[dict[str, AnalysisRunInputRow] | None, str | None]
+    | None = None,
+) -> tuple[bool, str | None, dict[str, AnalysisRunInputRow] | None]:
     source_run = db.get(AnalysisRunRow, row.source_run_id)
     if (
         source_run is None
         or source_run.project_id != row.project_id
         or source_run.status != "completed"
     ):
-        return False, "来源分析尚未完整完成"
-    evidence = row.evidence if isinstance(row.evidence, list) else []
-    bindings: dict[str, tuple[str, int, str]] = {}
-    for item in evidence:
-        if not isinstance(item, dict):
-            return False, "候选缺少可核对的来源文档"
-        input_id = item.get("input_id")
-        document_id = item.get("document_id")
-        document_version = item.get("document_version")
-        content_sha256 = item.get("content_sha256")
-        if (
-            not isinstance(input_id, str)
-            or not input_id
-            or not isinstance(document_id, str)
-            or not document_id
-            or type(document_version) is not int
-            or document_version < 1
-            or not isinstance(content_sha256, str)
-            or len(content_sha256) != 64
-        ):
-            return False, "候选缺少可核对的来源文档"
-        binding = (document_id, document_version, content_sha256)
-        if input_id in bindings and bindings[input_id] != binding:
-            return False, "候选来源快照存在歧义"
-        bindings[input_id] = binding
-    if not bindings:
-        return False, "候选缺少可核对的来源文档"
-
-    frozen_inputs = list(
-        db.scalars(
-            select(AnalysisRunInputRow).where(
-                AnalysisRunInputRow.run_id == row.source_run_id,
-                AnalysisRunInputRow.id.in_(bindings),
-            )
-        ).all()
+        return False, "来源分析尚未完整完成", None
+    frozen_by_id, evidence_reason = (
+        frozen_validation
+        if frozen_validation is not None
+        else _verified_candidate_frozen_inputs(db, row)
     )
-    frozen_by_id = {item.id: item for item in frozen_inputs}
-    if len(frozen_by_id) != len(bindings):
-        return False, "候选来源快照已缺失"
-    for input_id, binding in bindings.items():
-        frozen = frozen_by_id[input_id]
-        if binding != (
-            frozen.document_id,
-            frozen.document_version,
-            frozen.content_sha256,
-        ):
-            return False, "候选来源与冻结输入不一致"
+    if frozen_by_id is None:
+        return False, evidence_reason, None
+    frozen_inputs = list(frozen_by_id.values())
+    bindings = set(frozen_by_id)
 
     document_ids = {item.document_id for item in frozen_inputs}
     active_documents = list(
@@ -1028,7 +1077,7 @@ def _candidate_source_is_current(
     )
     active_by_id = {item.id: item for item in active_documents}
     if len(active_by_id) != len(document_ids):
-        return False, "来源文档已被新版本替代，请重新分析后确认"
+        return False, "来源文档已被新版本替代，请重新分析后确认", frozen_by_id
 
     for frozen in frozen_inputs:
         current = active_by_id[frozen.document_id]
@@ -1036,7 +1085,7 @@ def _candidate_source_is_current(
             current.version != frozen.document_version
             or document_content_sha256(current.content) != frozen.content_sha256
         ):
-            return False, "来源文档已变更，请重新分析后确认"
+            return False, "来源文档已变更，请重新分析后确认", frozen_by_id
 
     legacy_rows = list(
         db.scalars(
@@ -1047,11 +1096,11 @@ def _candidate_source_is_current(
     )
     legacy_by_document = {item.document_id: item for item in legacy_rows}
     if len(legacy_by_document) != len(document_ids):
-        return False, "来源文档的叙事上下文已缺失"
+        return False, "来源文档的叙事上下文已缺失", frozen_by_id
 
     current_revisions = latest_context_revisions(db, list(document_ids))
     if set(current_revisions) != document_ids:
-        return False, "来源文档的叙事上下文已缺失"
+        return False, "来源文档的叙事上下文已缺失", frozen_by_id
 
     frozen_context_rows = list(
         db.scalars(
@@ -1064,7 +1113,7 @@ def _candidate_source_is_current(
         item.input_id: item for item in frozen_context_rows
     }
     if len(frozen_context_by_input) != len(bindings):
-        return False, "来源分析的冻结叙事上下文已缺失"
+        return False, "来源分析的冻结叙事上下文已缺失", frozen_by_id
 
     for frozen in frozen_inputs:
         frozen_context = frozen_context_by_input[frozen.id]
@@ -1074,7 +1123,7 @@ def _candidate_source_is_current(
             or payload_sha256(frozen_context.payload)
             != frozen_context.payload_sha256
         ):
-            return False, "来源分析的冻结叙事上下文无法校验"
+            return False, "来源分析的冻结叙事上下文无法校验", frozen_by_id
         legacy = legacy_by_document[frozen.document_id]
         try:
             current_payload = context_snapshot_payload(
@@ -1083,20 +1132,128 @@ def _candidate_source_is_current(
                 story_scope=legacy.story_scope,
             )
         except (TypeError, ValueError):
-            return False, "来源文档的叙事上下文无法校验"
+            return False, "来源文档的叙事上下文无法校验", frozen_by_id
         if (
             current_payload != frozen_context.payload
             or payload_sha256(current_payload) != frozen_context.payload_sha256
         ):
-            return False, "来源文档的叙事上下文已变更，请重新分析后确认"
-    return True, None
+            return False, "来源文档的叙事上下文已变更，请重新分析后确认", frozen_by_id
+    return True, None, frozen_by_id
+
+
+def _candidate_evidence_for_review(
+    db,
+    row: CharacterTraitCandidateRow,
+    frozen_by_id: dict[str, AnalysisRunInputRow] | None,
+) -> list[dict]:
+    evidence = row.evidence if isinstance(row.evidence, list) else []
+    safe_evidence = [
+        {
+            key: item[key]
+            for key in (
+                "input_id",
+                "document_id",
+                "document_name",
+                "document_version",
+                "content_sha256",
+                "line_start",
+                "line_end",
+                "text",
+            )
+            if key in item
+        }
+        for item in evidence
+        if isinstance(item, dict)
+        and isinstance(item.get("document_name"), str)
+        and isinstance(item.get("text"), str)
+        and type(item.get("line_start")) is int
+        and type(item.get("line_end")) is int
+        and item["line_start"] >= 1
+        and item["line_end"] >= item["line_start"]
+    ]
+    if frozen_by_id is None:
+        return [
+            {**item, "source_verified": False, "source_text_exact": False,
+             "context_verified": False}
+            for item in safe_evidence
+        ]
+    frozen_contexts = {
+        item.input_id: item
+        for item in db.scalars(
+            select(AnalysisRunInputNarrativeContextRow).where(
+                AnalysisRunInputNarrativeContextRow.input_id.in_(frozen_by_id)
+            )
+        ).all()
+    }
+    result: list[dict] = []
+    for item in safe_evidence:
+        frozen = frozen_by_id.get(item.get("input_id"))
+        if frozen is None:
+            result.append({**item, "source_verified": False, "source_text_exact": False,
+                           "context_verified": False})
+            continue
+        raw_line = "\n".join(
+            frozen.content.splitlines()[item["line_start"] - 1 : item["line_end"]]
+        )
+        enriched = {
+            **item,
+            "text": raw_line,
+            "source_verified": True,
+            "source_text_exact": item["text"] == raw_line,
+            "context_verified": False,
+        }
+        context = frozen_contexts.get(item.get("input_id"))
+        if context is not None and context.schema_version == 1:
+            payload = context.payload
+            if (
+                isinstance(payload, dict)
+                and payload.get("schema_version") == 1
+                and payload_sha256(payload) == context.payload_sha256
+            ):
+                role = payload.get("legacy_document_role")
+                publication = payload.get("publication_status")
+                authority = payload.get("authority_tier")
+                scope = payload.get("scope")
+                resolution = payload.get("resolution_state")
+                if (
+                    isinstance(role, str)
+                    and role in {member.value for member in DocumentRole}
+                    and isinstance(publication, str)
+                    and publication in {"draft", "in_review", "published", "retired", "unknown"}
+                    and isinstance(resolution, str)
+                    and resolution in {"unresolved", "inferred", "confirmed"}
+                    and authority == derive_authority_tier(role, resolution, publication)
+                    and payload.get("context_revision_id") == context.context_revision_id
+                    and isinstance(scope, dict)
+                    and payload_sha256(scope) == payload.get("scope_sha256")
+                ):
+                    try:
+                        if canonical_scope_payload(scope) != scope:
+                            raise ValueError("non-canonical narrative scope")
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        enriched.update(
+                            {
+                                "context_verified": True,
+                                "document_role": role,
+                                "publication_status": publication,
+                                "authority_level": authority,
+                                "story_scope": scope,
+                            }
+                        )
+        result.append(enriched)
+    return result
 
 
 def serialize_character_trait_candidate_for_review(
-    db, row: CharacterTraitCandidateRow
+    db, row: CharacterTraitCandidateRow, *, include_evidence_context: bool = False
 ) -> dict:
     payload = serialize_character_trait_candidate(row)
-    current, reason = _candidate_source_is_current(db, row)
+    current, reason, frozen_by_id = _candidate_source_is_current(db, row)
+    payload["source_verified"] = frozen_by_id is not None
+    if include_evidence_context:
+        payload["evidence"] = _candidate_evidence_for_review(db, row, frozen_by_id)
     if row.review_state == "pending" and not current:
         payload.update(
             {
@@ -3018,7 +3175,9 @@ def get_character_profile_candidate(
             ).all()
         )
         return {
-            **serialize_character_trait_candidate_for_review(db, row),
+            **serialize_character_trait_candidate_for_review(
+                db, row, include_evidence_context=True
+            ),
             "decisions": [
                 {
                     "id": review.id,
@@ -3028,6 +3187,184 @@ def get_character_profile_candidate(
                     "created_at": review.created_at,
                 }
                 for review in reviews
+            ],
+        }
+
+
+@app.get(
+    "/api/v1/projects/{project_id}/characters/{character_key}"
+    "/profile-candidates/{candidate_id}/source-neighbors"
+)
+def list_character_profile_candidate_source_neighbors(
+    project_id: str,
+    character_key: str,
+    candidate_id: str,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    try:
+        normalized = normalize_character_key(character_key)
+    except ValueError:
+        raise HTTPException(404, "角色候选不存在") from None
+    with SessionLocal() as db:
+        row = _candidate_in_workspace(
+            db,
+            project_id=project_id,
+            candidate_id=candidate_id,
+            character_key=normalized,
+            workspace_id=context.workspace_id,
+        )
+        if row is None:
+            raise HTTPException(404, "角色候选不存在")
+        source_run = db.get(AnalysisRunRow, row.source_run_id)
+        if (
+            source_run is None
+            or source_run.project_id != project_id
+            or source_run.status != "completed"
+        ):
+            raise HTTPException(409, "来源分析尚未完整完成")
+        run_inputs = {
+            item.id: item
+            for item in db.scalars(
+                select(AnalysisRunInputRow).where(
+                    AnalysisRunInputRow.run_id == row.source_run_id
+                )
+            ).all()
+        }
+        verified, reason = _verified_candidate_frozen_inputs(
+            db, row, run_inputs=run_inputs
+        )
+        if verified is None:
+            raise HTTPException(409, reason or "候选来源无法核对")
+        source_anchors = {
+            (item["input_id"], item["line_start"], item["line_end"])
+            for item in row.evidence
+        }
+        evidence_meta = {
+            (item["input_id"], item["line_start"], item["line_end"]): item
+            for item in _candidate_evidence_for_review(db, row, verified)
+        }
+        group_totals = {anchor: 0 for anchor in source_anchors}
+        possible = list(
+            db.scalars(
+                select(CharacterTraitCandidateRow)
+                .where(
+                    CharacterTraitCandidateRow.project_id == project_id,
+                    CharacterTraitCandidateRow.character_key == normalized,
+                    CharacterTraitCandidateRow.source_run_id == row.source_run_id,
+                )
+                .order_by(
+                    CharacterTraitCandidateRow.created_at,
+                    CharacterTraitCandidateRow.id,
+                )
+                .limit(MAX_CANDIDATES_PER_SOURCE_RUN + 1)
+            ).all()
+        )
+        if len(possible) > MAX_CANDIDATES_PER_SOURCE_RUN:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_source_neighbor_limit",
+                    "message": "同一来源运行的候选过多，无法完整核对同源归纳",
+                },
+            )
+        related: list[dict] = []
+        for other in possible:
+            if other.id == row.id:
+                continue
+            other_inputs, _ = _verified_candidate_frozen_inputs(
+                db, other, run_inputs=run_inputs
+            )
+            if other_inputs is None:
+                continue
+            shared = sorted(
+                source_anchors.intersection(
+                    (item["input_id"], item["line_start"], item["line_end"])
+                    for item in other.evidence
+                )
+            )
+            if not shared:
+                continue
+            for anchor in shared:
+                group_totals[anchor] += 1
+            related.append(
+                {
+                    "id": other.id,
+                    "character_key": other.character_key,
+                    "source_run_id": other.source_run_id,
+                    "trait_type": other.trait_type,
+                    "trait_key": other.trait_key,
+                    "value": other.value,
+                    "polarity": other.polarity,
+                    "review_state": other.review_state,
+                    "shared_evidence": [
+                        {
+                            "input_id": input_id,
+                            "document_id": run_inputs[input_id].document_id,
+                            "document_name": run_inputs[input_id].document_name,
+                            "document_version": run_inputs[input_id].document_version,
+                            "line_start": line_start,
+                            "line_end": line_end,
+                            "context_verified": bool(
+                                evidence_meta[(input_id, line_start, line_end)].get(
+                                    "context_verified"
+                                )
+                            ),
+                            **(
+                                {
+                                    "story_scope": evidence_meta[
+                                        (input_id, line_start, line_end)
+                                    ]["story_scope"]
+                                }
+                                if evidence_meta[(input_id, line_start, line_end)].get(
+                                    "context_verified"
+                                )
+                                else {}
+                            ),
+                        }
+                        for input_id, line_start, line_end in shared
+                    ],
+                }
+            )
+        return {
+            "candidate_id": row.id,
+            "character_key": normalized,
+            "source_run_id": row.source_run_id,
+            "limit": limit,
+            "offset": offset,
+            "total": len(related),
+            "has_more": offset + limit < len(related),
+            "items": related[offset : offset + limit],
+            "source_groups": [
+                {
+                    "input_id": item["input_id"],
+                    "document_id": item["document_id"],
+                    "document_name": item["document_name"],
+                    "document_version": item["document_version"],
+                    "line_start": item["line_start"],
+                    "line_end": item["line_end"],
+                    "total": group_totals[
+                        (item["input_id"], item["line_start"], item["line_end"])
+                    ],
+                    "context_verified": bool(
+                        evidence_meta[
+                            (item["input_id"], item["line_start"], item["line_end"])
+                        ].get("context_verified")
+                    ),
+                    **(
+                        {
+                            "story_scope": evidence_meta[
+                                (item["input_id"], item["line_start"], item["line_end"])
+                            ]["story_scope"]
+                        }
+                        if evidence_meta[
+                            (item["input_id"], item["line_start"], item["line_end"])
+                        ].get("context_verified")
+                        else {}
+                    ),
+                }
+                for item in row.evidence
             ],
         }
 
@@ -3097,7 +3434,7 @@ def link_legacy_preference_candidate(
                     "message": "只能为待审核的有对象偏好候选选择旧特征",
                 },
             )
-        source_is_current, stale_reason = _candidate_source_is_current(db, row)
+        source_is_current, stale_reason, _ = _candidate_source_is_current(db, row)
         if not source_is_current:
             raise HTTPException(
                 409,
@@ -3259,7 +3596,7 @@ def decide_character_profile_candidate(
                 "decision_id": existing_review.id,
                 "deduplicated": True,
             }
-        source_is_current, stale_reason = _candidate_source_is_current(db, row)
+        source_is_current, stale_reason, _ = _candidate_source_is_current(db, row)
         if not source_is_current:
             raise HTTPException(
                 409,
