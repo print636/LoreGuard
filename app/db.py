@@ -587,11 +587,55 @@ class FeedbackRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
+class CharacterTraitAxisRow(Base):
+    """Immutable, author-created project-local comparison identity (v1 only)."""
+
+    __tablename__ = "character_trait_axes"
+    __table_args__ = (
+        UniqueConstraint(
+            "id", "project_id", name="uq_character_trait_axis_project_identity"
+        ),
+        UniqueConstraint(
+            "project_id", "trait_type", "definition_sha256",
+            name="uq_character_trait_axis_definition",
+        ),
+        CheckConstraint(
+            "trait_type = 'core_personality'",
+            name="ck_character_trait_axis_type",
+        ),
+        CheckConstraint("version = 1", name="ck_character_trait_axis_version"),
+        CheckConstraint(
+            "length(definition_sha256) = 64",
+            name="ck_character_trait_axis_definition_hash",
+        ),
+        Index("ix_character_trait_axes_project_created", "project_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    trait_type: Mapped[str] = mapped_column(String(32), default="core_personality")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    display_name: Mapped[str] = mapped_column(String(80))
+    definition: Mapped[str] = mapped_column(String(200))
+    definition_sha256: Mapped[str] = mapped_column(String(64))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
 class CharacterTraitCandidateRow(Base):
     """Evidence-bound candidate; confirmed rows double as profile entries."""
 
     __tablename__ = "character_trait_candidates"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["approved_axis_id", "project_id"],
+            ["character_trait_axes.id", "character_trait_axes.project_id"],
+            ondelete="RESTRICT",
+            name="fk_character_trait_candidate_axis_project",
+        ),
         UniqueConstraint(
             "project_id",
             "source_run_id",
@@ -632,6 +676,11 @@ class CharacterTraitCandidateRow(Base):
             "lock_version >= 0", name="ck_character_trait_candidate_lock_version"
         ),
         CheckConstraint(
+            "(approved_axis_id IS NULL AND approved_axis_version IS NULL) OR "
+            "(approved_axis_id IS NOT NULL AND approved_axis_version = 1)",
+            name="ck_character_trait_candidate_axis_pair",
+        ),
+        CheckConstraint(
             "valid_from_release_ordinal IS NULL OR valid_from_release_ordinal >= 0",
             name="ck_character_trait_candidate_valid_from",
         ),
@@ -662,6 +711,11 @@ class CharacterTraitCandidateRow(Base):
     character_display_name: Mapped[str] = mapped_column(String(160))
     trait_type: Mapped[str] = mapped_column(String(32))
     trait_key: Mapped[str] = mapped_column(String(160))
+    # Bound only by an authenticated author decision. Never populated by extraction.
+    approved_axis_id: Mapped[str | None] = mapped_column(
+        ForeignKey("character_trait_axes.id", ondelete="RESTRICT"), nullable=True
+    )
+    approved_axis_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Pre-migration candidates have no recoverable object anchor.
     comparison_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     value: Mapped[str] = mapped_column(Text)
@@ -704,6 +758,12 @@ class CharacterTraitReviewRow(Base):
 
     __tablename__ = "character_trait_reviews"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["approved_axis_id", "project_id"],
+            ["character_trait_axes.id", "character_trait_axes.project_id"],
+            ondelete="RESTRICT",
+            name="fk_character_trait_review_axis_project",
+        ),
         UniqueConstraint(
             "candidate_id",
             "idempotency_key",
@@ -716,6 +776,11 @@ class CharacterTraitReviewRow(Base):
         CheckConstraint(
             "expected_lock_version >= 0",
             name="ck_character_trait_review_expected_version",
+        ),
+        CheckConstraint(
+            "(approved_axis_id IS NULL AND approved_axis_version IS NULL) OR "
+            "(approved_axis_id IS NOT NULL AND approved_axis_version = 1)",
+            name="ck_character_trait_review_axis_pair",
         ),
         Index(
             "ix_character_trait_reviews_project_candidate_created",
@@ -732,6 +797,10 @@ class CharacterTraitReviewRow(Base):
         ForeignKey("character_trait_candidates.id", ondelete="CASCADE"), index=True
     )
     decision: Mapped[str] = mapped_column(String(24))
+    approved_axis_id: Mapped[str | None] = mapped_column(
+        ForeignKey("character_trait_axes.id", ondelete="RESTRICT"), nullable=True
+    )
+    approved_axis_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expected_lock_version: Mapped[int] = mapped_column(Integer)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     comment: Mapped[str] = mapped_column(Text, default="")

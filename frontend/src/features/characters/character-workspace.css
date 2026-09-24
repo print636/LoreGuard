@@ -14,6 +14,7 @@
 .characterWorkspace button,
 .characterWorkspace a,
 .characterWorkspace input,
+.characterWorkspace select,
 .characterWorkspace textarea {
   touch-action: manipulation;
 }
@@ -21,6 +22,7 @@
 .characterWorkspace a:focus-visible,
 .characterWorkspace button:focus-visible,
 .characterWorkspace input:focus-visible,
+.characterWorkspace select:focus-visible,
 .characterWorkspace textarea:focus-visible,
 .characterWorkspace [tabindex="-1"]:focus-visible {
   outline: 2px solid var(--cyan);
@@ -348,6 +350,13 @@
 .candidateStatement p { margin: 0; color: var(--text-2); line-height: 1.7; }
 .characterScopeList { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
 
+.candidateTraitMetadata { margin-top: 15px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: rgba(9, 7, 22, .2); }
+.candidateTraitMetadata dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 18px; margin: 0; }
+.candidateTraitMetadata dl > div { min-width: 0; }
+.candidateTraitMetadata dt { color: var(--muted); font-size: 12px; }
+.candidateTraitMetadata dd { margin: 2px 0 0; overflow-wrap: anywhere; color: var(--text-2); line-height: 1.55; }
+.candidateTraitMetadata > p { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+
 .candidateLimitations { margin-top: 16px; padding: 13px 15px; border-left: 3px solid var(--warning); background: rgba(255, 189, 130, .06); }
 .candidateLimitations h4 { margin: 0; }
 .candidateLimitations ul { margin: 8px 0 0; padding-left: 20px; color: var(--text-2); line-height: 1.65; }
@@ -371,6 +380,41 @@
 .candidateDecision > div { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 10px; }
 .candidateDecision button { min-height: 42px; }
 .candidateDecision .characterConfirm { color: #170f2a; border-color: var(--lavender); background: var(--lavender); }
+
+.candidateAxisBinding { margin: 0 0 18px; padding: 14px; border: 1px solid var(--line-strong); border-radius: 10px; background: rgba(16, 13, 36, .55); }
+.candidateAxisBinding h4 { margin: 0 0 7px; color: var(--text); font-size: 16px; }
+.candidateAxisBinding > p { margin: 0 0 12px; color: var(--text-2); line-height: 1.6; }
+.candidateAxisMode { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.candidateAxisMode button { min-height: 44px; color: var(--text-2); }
+.candidateAxisMode button.active { color: var(--text); border-color: var(--lavender); background: rgba(183, 162, 255, .12); }
+.candidateAxisSelect,
+.candidateAxisCreate { display: grid; gap: 7px; min-width: 0; }
+.candidateAxisSelect label,
+.candidateAxisCreate label { margin: 0; font-size: 14px; }
+.candidateAxisSelect select,
+.candidateAxisCreate input,
+.candidateAxisCreate textarea { width: 100%; min-width: 0; min-height: 44px; padding: 9px 11px; color: var(--text); border: 1px solid var(--line-strong); border-radius: 8px; background: var(--field); font: inherit; }
+.candidateAxisCreate textarea { min-height: 96px; resize: vertical; }
+.candidateAxisSelect [aria-invalid="true"],
+.candidateAxisCreate [aria-invalid="true"] { border-color: var(--danger); }
+.candidateAxisHint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.candidateAxisDefinition { padding: 10px 12px; border-left: 3px solid var(--lavender); background: rgba(183, 162, 255, .06); }
+.candidateAxisDefinition b { color: var(--text); }
+.candidateAxisDefinition p { margin: 4px 0 0; color: var(--text-2); line-height: 1.6; }
+.candidateFieldError { margin: 0; color: var(--danger); font-size: 13px; line-height: 1.5; }
+.candidateAxisCreate > button { justify-self: start; min-height: 44px; margin-top: 5px; }
+.candidateAxisError,
+.candidateAxisErrorSummary { margin: 10px 0; padding: 10px 12px; border-left: 3px solid var(--danger); background: rgba(255, 127, 173, .07); color: var(--text-2); }
+.candidateAxisError p,
+.candidateAxisErrorSummary p { margin: 0 0 8px; line-height: 1.6; }
+.candidateAxisError button { min-height: 44px; }
+.candidateAxisErrorSummary b { color: var(--text); }
+.candidateAxisErrorSummary ul { margin: 5px 0 0; padding-left: 20px; }
+.candidateAxisErrorSummary a { color: var(--cyan); }
+.candidateAxisPagination { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 10px 0; padding: 10px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.candidateAxisPagination p { flex: 1 1 240px; margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.55; }
+.candidateAxisPagination button { min-height: 44px; }
+.candidateAxisCreated { margin: 12px 0 0 !important; color: var(--success) !important; }
 
 .characterDriftList { display: grid; gap: 16px; }
 .characterDriftList > li > article { display: block; padding: 18px; border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 12px; background: rgba(16, 13, 36, .48); }
@@ -428,6 +472,8 @@
   .candidateDetail.selected { display: block; }
   .candidateMobileBack { display: inline-flex; min-height: 44px; align-items: center; margin-bottom: 14px; }
   .candidateDecision > div { display: grid; grid-template-columns: 1fr 1fr; }
+  .candidateTraitMetadata dl { grid-template-columns: 1fr; }
+  .candidateAxisMode button { flex: 1 1 130px; }
   .candidateDecision button,
   .characterReportLink { min-height: 44px; justify-content: center; }
   .characterEvidenceList li { padding: 10px; }

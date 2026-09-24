@@ -10,6 +10,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import MetaData, Table, create_engine, inspect, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.schema import CreateIndex
 
@@ -20,10 +21,78 @@ from app.narrative_context import payload_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0014_trait_comparison_key"
+HEAD_REVISION = "0015_character_trait_axes"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
+    def test_author_axis_migration_round_trips_on_sqlite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            url = f"sqlite:///{(Path(directory) / 'approved-axis.db').as_posix()}"
+            self.upgrade(url)
+            engine = create_engine(url)
+            inspector = inspect(engine)
+            self.assertTrue(inspector.has_table("character_trait_axes"))
+            for table_name in ("character_trait_candidates", "character_trait_reviews"):
+                self.assertIn(
+                    "approved_axis_id",
+                    {item["name"] for item in inspector.get_columns(table_name)},
+                )
+            with engine.connect() as connection:
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+                connection.commit()
+                connection.exec_driver_sql(
+                    "INSERT INTO users "
+                    "(id, email, display_name, password_hash, is_active, created_at) "
+                    "VALUES ('axis-author', 'axis-author@example.invalid', "
+                    "'Axis Author', 'test-hash', 1, '2026-09-24 00:00:00')"
+                )
+                connection.exec_driver_sql(
+                    "INSERT INTO projects "
+                    "(id, workspace_id, name, description, created_at) "
+                    "VALUES ('axis-project', "
+                    "'00000000-0000-0000-0000-000000000001', "
+                    "'Axis Project', '', '2026-09-24 00:00:00')"
+                )
+                connection.exec_driver_sql(
+                    "INSERT INTO character_trait_axes "
+                    "(id, project_id, trait_type, version, display_name, "
+                    "definition, definition_sha256, created_by_user_id, created_at) "
+                    "VALUES ('axis-one', 'axis-project', 'core_personality', 1, "
+                    "'主动社交', '面对陌生人时是否主动交谈', "
+                    "lower(hex(randomblob(32))), 'axis-author', "
+                    "'2026-09-24 00:00:00')"
+                )
+                connection.commit()
+                with self.assertRaises(IntegrityError):
+                    connection.exec_driver_sql(
+                        "UPDATE character_trait_axes "
+                        "SET definition = '另一个含义' WHERE id = 'axis-one'"
+                    )
+                connection.rollback()
+                connection.exec_driver_sql(
+                    "DELETE FROM users WHERE id = 'axis-author'"
+                )
+                connection.commit()
+                axis_row = connection.exec_driver_sql(
+                    "SELECT definition, created_by_user_id "
+                    "FROM character_trait_axes WHERE id = 'axis-one'"
+                ).one()
+                self.assertEqual(axis_row, ("面对陌生人时是否主动交谈", None))
+            engine.dispose()
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            config.attributes["database_url"] = url
+            command.downgrade(config, "0014_trait_comparison_key")
+            engine = create_engine(url)
+            inspector = inspect(engine)
+            self.assertFalse(inspector.has_table("character_trait_axes"))
+            for table_name in ("character_trait_candidates", "character_trait_reviews"):
+                self.assertNotIn(
+                    "approved_axis_id",
+                    {item["name"] for item in inspector.get_columns(table_name)},
+                )
+            engine.dispose()
+
     def test_trait_comparison_key_migration_preserves_legacy_rows_and_snapshot_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "trait-comparison.db"
@@ -101,7 +170,8 @@ class EmbeddingMigrationTests(unittest.TestCase):
             self.assertEqual(comparison_column["type"].length, 200)
             with engine.connect() as connection:
                 candidate = connection.exec_driver_sql(
-                    "SELECT comparison_key, candidate_fingerprint "
+                    "SELECT comparison_key, candidate_fingerprint, "
+                    "approved_axis_id, approved_axis_version "
                     "FROM character_trait_candidates WHERE id = 'candidate-legacy'"
                 ).one()
                 frozen = connection.execute(
@@ -109,6 +179,21 @@ class EmbeddingMigrationTests(unittest.TestCase):
                     .where(snapshot_table.c.id == "snapshot-legacy")
                 ).one()
             self.assertIsNone(candidate.comparison_key)
+            self.assertIsNone(candidate.approved_axis_id)
+            self.assertIsNone(candidate.approved_axis_version)
+            self.assertTrue(inspect(engine).has_table("character_trait_axes"))
+            with engine.begin() as connection:
+                with self.assertRaises(IntegrityError):
+                    connection.exec_driver_sql(
+                        "UPDATE character_trait_candidates "
+                        "SET approved_axis_version = 1 WHERE id = 'candidate-legacy'"
+                    )
+            with engine.connect() as connection:
+                still_legacy = connection.exec_driver_sql(
+                    "SELECT approved_axis_id, approved_axis_version "
+                    "FROM character_trait_candidates WHERE id = 'candidate-legacy'"
+                ).one()
+            self.assertEqual(still_legacy, (None, None))
             self.assertEqual(candidate.candidate_fingerprint, "f" * 64)
             self.assertEqual(frozen.payload, legacy_payload)
             self.assertEqual(frozen.payload_sha256, legacy_hash)

@@ -1631,6 +1631,37 @@ def test_targeted_schema_retry_requests_exact_fields_and_recovers_clean_package(
     assert '"reason":"schema_validation"' in retry_prompt
 
 
+def test_approved_axis_id_echo_cannot_become_model_authored_observation():
+    draft_chunk, original_target, row = _targeted_schema_case()
+    axis_id = "11111111-1111-4111-8111-111111111111"
+    definition = "是否主动与陌生人展开交谈"
+    target = CharacterSignalTarget.model_validate(
+        {
+            **original_target.model_dump(),
+            "approved_axis_id": axis_id,
+            "approved_axis_version": 1,
+            "approved_axis_definition": definition,
+            "approved_axis_definition_sha256": hashlib.sha256(
+                definition.encode("utf-8")
+            ).hexdigest(),
+        }
+    )
+    provider = SequenceProvider(
+        json.dumps({"records": [{**row, "approved_axis_id": axis_id}]}, ensure_ascii=False),
+        '{"records":[]}',
+    )
+    result = CharacterSignalExtractor(provider, settings=settings()).extract_targeted(
+        draft_chunk, (target,)
+    )
+    assert result.signals == ()
+    assert result.diagnostics.reason_counts == {
+        "regenerated_from_forbidden_server_field": 1
+    }
+    first_prompt = provider.calls[0][1]
+    assert definition in first_prompt
+    assert axis_id not in first_prompt
+
+
 def test_targeted_schema_retry_stays_fail_closed_if_pollution_continues():
     draft_chunk, target, row = _targeted_schema_case()
     polluted = json.dumps(

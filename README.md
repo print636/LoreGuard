@@ -19,6 +19,17 @@ The recommended path is `baseline_build` -> human confirmation of character-prof
 2. Run `baseline_build` to freeze only confirmed canon, character profiles and published history as background. Draft, unconfirmed and retired inputs are excluded with visible reasons. If the default-off character-consistency stage is enabled, it may produce candidates; a human must confirm or reject them.
 3. Run `draft_review` with confirmed draft or in-review chapters as targets. The server—not the client—derives compatible confirmed background, and freezes `target`/`background` roles with document versions and context snapshots. Background-only findings are not presented as draft issues.
 
+For new `core_personality` candidates, the character workbench now lets the author
+choose or create a project-scoped, immutable v1 comparison axis before confirming
+the candidate. Axis creation and candidate confirmation are separate actions;
+the binding affects future runs only. The model's raw `trait_key` and source
+evidence remain visible. A clean, single-target draft extraction can match a
+different raw label to the approved axis, while reuse of one source line for two
+axes is treated as ambiguous. Legacy unbound candidates retain their old path.
+See the [approved-axis v1 contract](docs/character-approved-axis-rfc.md) for
+the exact API and limits. This has not passed a separate cross-story real-model
+quality gate.
+
 Context inference is single-document and limited to 30,000 characters and 2,000 lines; larger inputs require manual context assignment. It is not a story rewrite, bulk classifier, authority decision, or production-accuracy claim. See the [V1 workflow and API contract](docs/guided-review-batch-v1.md) and the [full Chinese guide](README.zh-CN.md).
 
 Relevant API entry points are:
@@ -28,6 +39,7 @@ Relevant API entry points are:
 - `POST /api/v1/projects/{project_id}/analysis-runs` with `mode=baseline_build|draft_review|full_review`, optional draft targets and a sensitivity level;
 - `GET /api/v1/analysis-runs/{run_id}` to inspect `review_batch` coverage and frozen `input_documents[].batch_role`.
 - `GET /api/v1/analysis-runs/{run_id}/export.md` to download a completed run's evidence-first Markdown report with current feedback labels. The export uses all issues, regardless of the browser's current filters, and is workspace-scoped.
+- `GET` / `POST /api/v1/projects/{project_id}/character-trait-axes` to list or create immutable project axes; candidate confirmation accepts `approved_axis_id` and `expected_axis_version` together for `core_personality`.
 
 An omitted analysis body or `{}` retains the legacy `full_review` behavior for existing clients. Retry preserves the frozen batch; recheck advances only the logical draft targets to their current active versions and re-derives the background.
 
@@ -106,9 +118,10 @@ token-admission events were empty. A different frozen OOC story stopped at
 baseline candidate selection on a preceding build. Product defaults remain
 100k per run, 100k daily, 60k
 for the character stage and 22k per signal; the character stage defaults off.
-The latest runs used a locally raised 10m daily limit. The separate
-[author-approved axis RFC](docs/character-approved-axis-rfc.md) is a proposal,
-not an implemented remedy. None of these results establishes cross-story or
+The latest runs in that checkpoint used a locally raised 10m daily limit.
+The [author-approved axis v1](docs/character-approved-axis-rfc.md) was
+implemented afterward; it does not retroactively change the frozen transfer
+Oracle or those runs. None of these results establishes cross-story or
 production OOC quality. See the checkpoint for the full chronology.
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose

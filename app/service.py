@@ -22,6 +22,7 @@ from .db import (
     AnalysisRunInputNarrativeContextRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
+    CharacterTraitAxisRow,
     CharacterTraitCandidateRow,
     DocumentContextRow,
     DocumentRow,
@@ -660,7 +661,52 @@ def _draft_target_release_ordinals(
     return tuple(sorted(result))
 
 
-def _historical_trait_snapshot_payload(candidate, review) -> dict[str, Any]:
+def _approved_axis_snapshot_fields(db, candidate, review) -> dict[str, Any]:
+    """Freeze an author-approved axis without changing any legacy payload."""
+
+    axis_id = candidate.approved_axis_id
+    axis_version = candidate.approved_axis_version
+    if (
+        axis_id != review.approved_axis_id
+        or axis_version != review.approved_axis_version
+    ):
+        raise ValueError("approved character axis does not match confirmation review")
+    if axis_id is None and axis_version is None:
+        return {}
+    if not axis_id or type(axis_version) is not int or axis_version < 1:
+        raise ValueError("incomplete approved character axis binding")
+    axis = db.get(CharacterTraitAxisRow, axis_id)
+    if (
+        axis is None
+        or axis.project_id != candidate.project_id
+        or axis.trait_type != candidate.trait_type
+        or axis.trait_type != "core_personality"
+        or axis.version != axis_version
+        or not isinstance(axis.definition, str)
+        or not 1 <= len(axis.definition) <= 200
+        or axis.definition != " ".join(axis.definition.split())
+        or not isinstance(axis.display_name, str)
+        or not 1 <= len(axis.display_name) <= 80
+        or sha256(axis.definition.encode("utf-8")).hexdigest()
+        != axis.definition_sha256
+    ):
+        raise ValueError("approved character axis binding is invalid")
+    return {
+        "approved_axis_id": axis.id,
+        "approved_axis_version": axis.version,
+        "approved_axis_display_name": axis.display_name,
+        "approved_axis_definition": axis.definition,
+        "approved_axis_definition_sha256": axis.definition_sha256,
+    }
+
+
+def _confirmed_trait_snapshot_payload(db, candidate, review) -> dict[str, Any]:
+    payload = candidate_snapshot_payload(candidate, review)
+    payload.update(_approved_axis_snapshot_fields(db, candidate, review))
+    return payload
+
+
+def _historical_trait_snapshot_payload(candidate, review, db=None) -> dict[str, Any]:
     """Snapshot a formerly confirmed, explicitly version-bounded profile row."""
 
     lower = candidate.valid_from_release_ordinal
@@ -677,7 +723,7 @@ def _historical_trait_snapshot_payload(candidate, review) -> dict[str, Any]:
         raise ValueError("candidate scope hash mismatch")
     if payload_sha256(candidate.evidence) != candidate.evidence_sha256:
         raise ValueError("candidate evidence hash mismatch")
-    return {
+    payload = {
         "schema_version": CHARACTER_TRAIT_SCHEMA_VERSION,
         "candidate_id": candidate.id,
         "confirmation_review_id": review.id,
@@ -702,6 +748,11 @@ def _historical_trait_snapshot_payload(candidate, review) -> dict[str, Any]:
         "generator_version": candidate.generator_version,
         "candidate_lock_version": candidate.lock_version,
     }
+    if db is not None:
+        payload.update(_approved_axis_snapshot_fields(db, candidate, review))
+    elif candidate.approved_axis_id is not None:
+        raise ValueError("approved character axis requires snapshot database")
+    return payload
 
 
 def _capture_confirmed_traits(
@@ -767,9 +818,9 @@ def _capture_confirmed_traits(
         if review.project_id != run.project_id:
             raise ValueError("confirmed character profile crosses projects")
         payload = (
-            candidate_snapshot_payload(candidate, review)
+            _confirmed_trait_snapshot_payload(db, candidate, review)
             if candidate.review_state == "confirmed"
-            else _historical_trait_snapshot_payload(candidate, review)
+            else _historical_trait_snapshot_payload(candidate, review, db=db)
         )
         db.add(
             AnalysisRunCharacterTraitInputRow(
@@ -1206,7 +1257,7 @@ def current_project_source_signature(
                 "candidate_id": candidate.id,
                 "candidate_lock_version": candidate.lock_version,
                 "payload_sha256": payload_sha256(
-                    candidate_snapshot_payload(candidate, reviews[candidate.id])
+                    _confirmed_trait_snapshot_payload(db, candidate, reviews[candidate.id])
                 ),
                 "ordinal": ordinal,
             }

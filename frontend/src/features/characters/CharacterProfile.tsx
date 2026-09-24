@@ -43,6 +43,9 @@ export default function CharacterProfile({
                   <div>
                     <span>{profileOriginNames[item.origin]}</span>
                     <span>{item.evidence_count} 条证据</span>
+                    {item.dimension === "core_personality" && (
+                      <span>{item.approved_axis_id ? "已绑定作者轴" : "未绑定作者轴"}</span>
+                    )}
                     {item.scopes.slice(0, 2).map((scope) => (
                       <span key={scope.scope_id}>{scope.label}</span>
                     ))}

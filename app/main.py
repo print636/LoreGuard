@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from collections.abc import Callable
@@ -45,6 +46,7 @@ from .db import (
     AnalysisRunInputNarrativeContextRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
+    CharacterTraitAxisRow,
     CharacterTraitCandidateRow,
     CharacterTraitReviewRow,
     DocumentContextRow,
@@ -71,6 +73,7 @@ from .character_traits import (
     validate_character_trait_supersession,
 )
 from .character_trait_extraction import stable_trait_identity, trait_keys_compatible
+from .character_consistency_stage import _safe_context_label as _safe_axis_author_text
 from .document_diff import build_document_diff
 from .docx_import import DocxImportError, extract_docx_text
 from .domain import CertaintyLevel, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
@@ -263,6 +266,16 @@ class CharacterTraitDecisionIn(BaseModel):
     decision: Literal["confirm", "reject"]
     expected_revision: int = Field(ge=0)
     comment: str = Field(default="", max_length=2_000)
+    approved_axis_id: str | None = Field(default=None, min_length=1, max_length=36)
+    expected_axis_version: int | None = Field(default=None, ge=1)
+
+
+class CharacterTraitAxisCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trait_type: Literal["core_personality"] = "core_personality"
+    display_name: str = Field(min_length=1, max_length=80)
+    definition: str = Field(min_length=1, max_length=200)
 
 
 class CharacterTraitSupersessionLinkIn(BaseModel):
@@ -899,6 +912,19 @@ def serialize_narrative_context_revision(
     return payload
 
 
+def serialize_character_trait_axis(row: CharacterTraitAxisRow) -> dict:
+    return {
+        "id": row.id,
+        "project_id": row.project_id,
+        "trait_type": row.trait_type,
+        "version": row.version,
+        "display_name": row.display_name,
+        "definition": row.definition,
+        "definition_sha256": row.definition_sha256,
+        "created_at": row.created_at,
+    }
+
+
 def serialize_character_trait_candidate(row: CharacterTraitCandidateRow) -> dict:
     return {
         "id": row.id,
@@ -908,6 +934,8 @@ def serialize_character_trait_candidate(row: CharacterTraitCandidateRow) -> dict
         "character_display_name": row.character_display_name,
         "trait_type": row.trait_type,
         "trait_key": row.trait_key,
+        "approved_axis_id": row.approved_axis_id,
+        "approved_axis_version": row.approved_axis_version,
         "comparison_key": row.comparison_key,
         "value": row.value,
         "polarity": row.polarity,
@@ -2484,6 +2512,110 @@ async def upload_document(
         return {**serialize_document(row, db=db), "superseded_document_ids": superseded}
 
 
+@app.get("/api/v1/projects/{project_id}/character-trait-axes")
+def list_character_trait_axes(
+    project_id: str,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    with SessionLocal() as db:
+        if not _project_in_workspace(db, project_id, context.workspace_id):
+            raise HTTPException(404, "项目不存在")
+        conditions = (
+            CharacterTraitAxisRow.project_id == project_id,
+            CharacterTraitAxisRow.trait_type == "core_personality",
+        )
+        total = db.scalar(
+            select(func.count()).select_from(CharacterTraitAxisRow).where(*conditions)
+        ) or 0
+        rows = list(
+            db.scalars(
+                select(CharacterTraitAxisRow)
+                .where(*conditions)
+                .order_by(CharacterTraitAxisRow.created_at, CharacterTraitAxisRow.id)
+                .limit(limit)
+                .offset(offset)
+            ).all()
+        )
+        return {
+            "items": [serialize_character_trait_axis(row) for row in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
+
+@app.post("/api/v1/projects/{project_id}/character-trait-axes", status_code=201)
+def create_character_trait_axis(
+    project_id: str,
+    payload: CharacterTraitAxisCreateIn,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    display_name = " ".join(payload.display_name.split())
+    definition = " ".join(payload.definition.split())
+    if not _safe_axis_author_text(display_name) or not _safe_axis_author_text(
+        definition
+    ):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "character_trait_axis_text_unsafe",
+                "message": "比较轴名称或定义为空、含敏感格式或不适合模型上下文",
+            },
+        )
+    with SessionLocal() as db:
+        project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if project is None:
+            raise HTTPException(404, "项目不存在")
+        definition_sha256 = hashlib.sha256(definition.encode("utf-8")).hexdigest()
+        existing = db.scalar(
+            select(CharacterTraitAxisRow).where(
+                CharacterTraitAxisRow.project_id == project_id,
+                CharacterTraitAxisRow.trait_type == "core_personality",
+                CharacterTraitAxisRow.definition_sha256 == definition_sha256,
+            )
+        )
+        if existing is not None:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_axis_duplicate",
+                    "message": "相同定义的比较轴已存在，请从轴列表选择",
+                    "existing_axis_id": existing.id,
+                },
+            )
+        axis = CharacterTraitAxisRow(
+            project_id=project_id,
+            trait_type="core_personality",
+            version=1,
+            display_name=display_name,
+            definition=definition,
+            definition_sha256=definition_sha256,
+            created_by_user_id=context.user_id,
+        )
+        db.add(axis)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_axis_duplicate",
+                    "message": "相同定义的比较轴已存在，请刷新列表",
+                },
+            ) from None
+        return serialize_character_trait_axis(axis)
+
+
 def _candidate_in_workspace(
     db,
     *,
@@ -2527,8 +2659,21 @@ def _release_ranges_overlap(
 
 
 def _confirmation_trait_identity_matches(
-    first: CharacterTraitCandidateRow, second: CharacterTraitCandidateRow
+    first: CharacterTraitCandidateRow,
+    second: CharacterTraitCandidateRow,
+    *,
+    intended_axis_id: str | None = None,
 ) -> bool:
+    if first.trait_type == "core_personality":
+        first_axis_id = intended_axis_id or first.approved_axis_id
+        second_axis_id = second.approved_axis_id
+        if first_axis_id is not None or second_axis_id is not None:
+            # A one-sided binding does not silently approve the legacy label.
+            return (
+                first_axis_id is not None
+                and second_axis_id is not None
+                and first_axis_id == second_axis_id
+            )
     if first.trait_type in _OBJECT_BEARING_TRAIT_DIMENSIONS:
         try:
             first_key = _validated_comparison_key(
@@ -3041,6 +3186,22 @@ def decide_character_profile_candidate(
     context: AuthContext = Depends(require_csrf),
 ) -> dict:
     idempotency_key = _normalize_idempotency_key(idempotency_key_header)
+    if (payload.approved_axis_id is None) != (payload.expected_axis_version is None):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "character_trait_axis_version_required",
+                "message": "选择比较轴时须同时提交轴 ID 与版本",
+            },
+        )
+    if payload.decision != "confirm" and payload.approved_axis_id is not None:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "character_trait_axis_not_applicable",
+                "message": "只有确认角色特征时才能绑定比较轴",
+            },
+        )
     try:
         normalized = normalize_character_key(character_key)
     except ValueError:
@@ -3082,6 +3243,9 @@ def decide_character_profile_candidate(
                 or existing_review.expected_lock_version
                 != payload.expected_revision
                 or existing_review.comment != payload.comment
+                or existing_review.approved_axis_id != payload.approved_axis_id
+                or existing_review.approved_axis_version
+                != payload.expected_axis_version
             ):
                 raise HTTPException(
                     409,
@@ -3114,6 +3278,46 @@ def decide_character_profile_candidate(
                     "review_state": row.review_state,
                 },
             )
+        approved_axis = None
+        if payload.approved_axis_id is not None:
+            if row.trait_type != "core_personality":
+                raise HTTPException(
+                    422,
+                    detail={
+                        "code": "character_trait_axis_dimension_mismatch",
+                        "message": "当前比较轴仅支持核心性格候选",
+                    },
+                )
+            approved_axis = db.scalar(
+                select(CharacterTraitAxisRow).where(
+                    CharacterTraitAxisRow.id == payload.approved_axis_id,
+                    CharacterTraitAxisRow.project_id == project_id,
+                )
+            )
+            if approved_axis is None:
+                raise HTTPException(
+                    404,
+                    detail={
+                        "code": "character_trait_axis_not_found",
+                        "message": "比较轴不存在",
+                    },
+                )
+            if approved_axis.trait_type != row.trait_type:
+                raise HTTPException(
+                    422,
+                    detail={
+                        "code": "character_trait_axis_dimension_mismatch",
+                        "message": "比较轴与候选维度不一致",
+                    },
+                )
+            if approved_axis.version != payload.expected_axis_version:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_axis_version_conflict",
+                        "message": "比较轴版本已变化，请刷新后重试",
+                    },
+                )
         if payload.decision == "confirm":
             confirmed = list(
                 db.scalars(
@@ -3129,7 +3333,9 @@ def decide_character_profile_candidate(
             conflicts = [
                 other
                 for other in confirmed
-                if _confirmation_trait_identity_matches(row, other)
+                if _confirmation_trait_identity_matches(
+                    row, other, intended_axis_id=payload.approved_axis_id
+                )
                 if other.id != row.supersedes_candidate_id
                 and (
                     other.value != row.value
@@ -3166,6 +3372,24 @@ def decide_character_profile_candidate(
                 try:
                     if replaced is None:
                         raise ValueError("superseded candidate is missing")
+                    if row.trait_type == "core_personality" and (
+                        payload.approved_axis_id is not None
+                        or replaced.approved_axis_id is not None
+                    ):
+                        if (
+                            payload.approved_axis_id is None
+                            or replaced.approved_axis_id
+                            != payload.approved_axis_id
+                            or replaced.approved_axis_version
+                            != payload.expected_axis_version
+                        ):
+                            raise HTTPException(
+                                409,
+                                detail={
+                                    "code": "character_trait_axis_supersession_mismatch",
+                                    "message": "已批准轴与待替代特征不一致；不能自动替代",
+                                },
+                            )
                     validate_character_trait_supersession(
                         project_id=project_id,
                         character_key=row.character_key,
@@ -3196,6 +3420,8 @@ def decide_character_profile_candidate(
                         project_id=project_id,
                         candidate_id=replaced.id,
                         decision="supersede",
+                        approved_axis_id=replaced.approved_axis_id,
+                        approved_axis_version=replaced.approved_axis_version,
                         expected_lock_version=replaced.lock_version,
                         idempotency_key=None,
                         comment=f"由候选 {row.id} 替代",
@@ -3219,6 +3445,8 @@ def decide_character_profile_candidate(
                     "confirmed" if payload.decision == "confirm" else "rejected"
                 ),
                 lock_version=payload.expected_revision + 1,
+                approved_axis_id=(approved_axis.id if approved_axis else None),
+                approved_axis_version=(approved_axis.version if approved_axis else None),
                 reviewed_at=utc_now_naive(),
                 reviewed_by_user_id=context.user_id,
             )
@@ -3236,6 +3464,8 @@ def decide_character_profile_candidate(
             project_id=project_id,
             candidate_id=row.id,
             decision=payload.decision,
+            approved_axis_id=(approved_axis.id if approved_axis else None),
+            approved_axis_version=(approved_axis.version if approved_axis else None),
             expected_lock_version=payload.expected_revision,
             idempotency_key=idempotency_key,
             comment=payload.comment,

@@ -951,7 +951,12 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
                 column.name for column in Base.metadata.tables[table_name].columns
             }
             if table_name == "character_trait_candidates":
-                expected_columns -= {"authority_tier", "comparison_key"}
+                expected_columns -= {
+                    "authority_tier", "comparison_key",
+                    "approved_axis_id", "approved_axis_version",
+                }
+            if table_name == "character_trait_reviews":
+                expected_columns -= {"approved_axis_id", "approved_axis_version"}
             if table_name == "document_narrative_context_revisions":
                 expected_columns -= {
                     "inference_reasoning",
@@ -972,7 +977,7 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
         } == {
             column.name
             for column in Base.metadata.tables["character_trait_candidates"].columns
-        } - {"comparison_key"}
+        } - {"comparison_key", "approved_axis_id", "approved_axis_version"}
         engine.dispose()
 
         command.downgrade(config, "0008_document_concurrency")

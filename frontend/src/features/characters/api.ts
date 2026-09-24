@@ -3,6 +3,8 @@ import type {
   CandidateDecisionIn,
   CandidateDecisionOut,
   CandidatePage,
+  CharacterTraitAxis,
+  CharacterTraitAxisPage,
   CharacterDetail,
   CharacterDimension,
   CharacterPage,
@@ -90,6 +92,12 @@ function integer(value: unknown, fallback = 0): number {
 
 function nullableInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+function positiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1
     ? value
     : null;
 }
@@ -302,6 +310,17 @@ export function normalizeProfileCandidate(
   const explicitlyReviewable =
     typeof source.reviewable === "boolean" ? source.reviewable : true;
   const revision = nullableInteger(source.revision);
+  const rawAxisId = source.approved_axis_id;
+  const approvedAxisId = optionalText(rawAxisId);
+  const rawAxisVersion = source.approved_axis_version;
+  const approvedAxisVersion = positiveInteger(rawAxisVersion);
+  if (
+    (rawAxisId !== undefined && rawAxisId !== null && !approvedAxisId) ||
+    (rawAxisVersion !== undefined && rawAxisVersion !== null && approvedAxisVersion === null) ||
+    Boolean(approvedAxisId) !== Boolean(approvedAxisVersion)
+  ) {
+    throw new TypeError("角色归纳候选的作者轴绑定无效");
+  }
   const reviewable = Boolean(
     explicitlyReviewable &&
       status === "pending" &&
@@ -335,6 +354,24 @@ export function normalizeProfileCandidate(
     origin,
     contexts: Array.from(new Set(stringList(source.contexts))),
     statement,
+    model_trait_key: optionalText(source.trait_key),
+    polarity:
+      source.polarity === "positive" ||
+      source.polarity === "negative" ||
+      source.polarity === "neutral" ||
+      source.polarity === "unclear"
+        ? source.polarity
+        : null,
+    comparison_key: optionalText(source.comparison_key),
+    authority_tier:
+      source.authority_tier === "core_canon" ||
+      source.authority_tier === "formal_record"
+        ? source.authority_tier
+        : null,
+    valid_from_release_ordinal: nullableInteger(source.valid_from_release_ordinal),
+    valid_until_release_ordinal: nullableInteger(source.valid_until_release_ordinal),
+    approved_axis_id: approvedAxisId,
+    approved_axis_version: approvedAxisVersion,
     confidence: fraction(source.confidence),
     rationale: text(
       source.rationale,
@@ -380,6 +417,7 @@ function normalizeProfileItem(value: unknown): CharacterProfileItem | null {
       source.dimension ?? source.trait_type,
     ),
     statement,
+    approved_axis_id: optionalText(source.approved_axis_id),
     origin:
       source.origin === "explicit_profile" || source.origin === "explicit_setting"
         ? "explicit_profile"
@@ -388,6 +426,90 @@ function normalizeProfileItem(value: unknown): CharacterProfileItem | null {
     evidence_count: integer(source.evidence_count, evidence.length),
     confirmed_at: optionalText(source.confirmed_at ?? source.reviewed_at),
   };
+}
+
+export function characterTraitAxesPath(projectId: string): string {
+  return `${projectRoot(projectId)}/character-trait-axes`;
+}
+
+export function normalizeCharacterTraitAxis(
+  value: unknown,
+  projectId: string,
+): CharacterTraitAxis {
+  const source = requiredRecord(value, "作者轴");
+  const id = text(source.id);
+  const name = text(source.display_name);
+  const definition = text(source.definition);
+  const version = positiveInteger(source.version);
+  const digest = text(source.definition_sha256);
+  if (
+    !id ||
+    source.project_id !== projectId ||
+    source.trait_type !== "core_personality" ||
+    !version ||
+    !name ||
+    !definition ||
+    !/^[a-f0-9]{64}$/.test(digest)
+  ) {
+    throw new TypeError("作者轴格式无效或不属于当前项目");
+  }
+  return {
+    id,
+    project_id: projectId,
+    trait_type: "core_personality",
+    version,
+    display_name: name,
+    definition,
+    definition_sha256: digest,
+    created_at: optionalText(source.created_at),
+  };
+}
+
+export async function fetchCharacterTraitAxes(
+  projectId: string,
+  input: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<CharacterTraitAxisPage> {
+  const limit = input.limit ?? 100;
+  const offset = input.offset ?? 0;
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  const source = requiredRecord(
+    await apiJson<unknown>(`${characterTraitAxesPath(projectId)}?${params}`, { signal }),
+    "作者轴列表",
+  );
+  const rawItems = requiredItems(source, "作者轴列表");
+  if (
+    nullableInteger(source.total) === null ||
+    positiveInteger(source.limit) === null ||
+    nullableInteger(source.offset) === null ||
+    source.limit !== limit ||
+    source.offset !== offset ||
+    rawItems.length > limit ||
+    (rawItems.length === 0 && offset < (source.total as number)) ||
+    (source.total as number) < offset + rawItems.length
+  ) {
+    throw new TypeError("作者轴分页信息无效");
+  }
+  const items = rawItems.map((item) => normalizeCharacterTraitAxis(item, projectId));
+  if (new Set(items.map((item) => item.id)).size !== items.length) {
+    throw new TypeError("作者轴列表包含重复标识");
+  }
+  return { items, total: source.total as number, limit, offset };
+}
+
+export async function createCharacterTraitAxis(
+  projectId: string,
+  input: { display_name: string; definition: string },
+): Promise<CharacterTraitAxis> {
+  // The creation endpoint does not yet offer server-side idempotency. Never
+  // replay an uncertain request automatically or a transport loss could create
+  // two different author axes.
+  const payload = await apiJson<unknown>(characterTraitAxesPath(projectId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trait_type: "core_personality", ...input }),
+  });
+  return normalizeCharacterTraitAxis(payload, projectId);
 }
 
 function pageFields(

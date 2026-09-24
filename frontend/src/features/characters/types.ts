@@ -51,6 +51,7 @@ export type CharacterProfileItem = {
   dimension: CharacterDimension;
   statement: string;
   origin: "explicit_profile" | "confirmed_inference";
+  approved_axis_id: string | null;
   scopes: NarrativeScopeRef[];
   evidence_count: number;
   confirmed_at: string | null;
@@ -82,6 +83,14 @@ export type ProfileCandidate = {
   origin: "explicit_setting" | "history_inference" | "unknown";
   contexts: string[];
   statement: string;
+  model_trait_key: string | null;
+  polarity: "positive" | "negative" | "neutral" | "unclear" | null;
+  comparison_key: string | null;
+  authority_tier: "core_canon" | "formal_record" | null;
+  valid_from_release_ordinal: number | null;
+  valid_until_release_ordinal: number | null;
+  approved_axis_id: string | null;
+  approved_axis_version: number | null;
   confidence: number;
   rationale: string;
   limitations: string[];
@@ -124,6 +133,26 @@ export type CandidateDecisionIn = {
   decision: CandidateDecision;
   comment: string;
   expected_revision: number;
+  approved_axis_id?: string;
+  expected_axis_version?: number;
+};
+
+export type CharacterTraitAxis = {
+  id: string;
+  project_id: string;
+  trait_type: "core_personality";
+  version: number;
+  display_name: string;
+  definition: string;
+  definition_sha256: string;
+  created_at: string | null;
+};
+
+export type CharacterTraitAxisPage = {
+  items: CharacterTraitAxis[];
+  total: number;
+  limit: number;
+  offset: number;
 };
 
 export type CandidateDecisionOut = {

@@ -297,7 +297,10 @@ class CharacterConsistencyStage:
                 )
             for chunk in chunks:
                 planned_chunks.append((source, chunk))
-        partial = len(planned_chunks) > settings.character_consistency_max_chunks_per_run
+        partial = (
+            len(planned_chunks) > settings.character_consistency_max_chunks_per_run
+            or bool(reason_counts["invalid_confirmed_trait_snapshot"])
+        )
         chunk_cap = settings.character_consistency_max_chunks_per_run
         if partial and any(source.source_kind == "draft" for source, _ in planned_chunks):
             # Reserve the first chunk of each draft before filling remaining
@@ -355,6 +358,43 @@ class CharacterConsistencyStage:
                 )
 
         all_signals: dict[str, CharacterSignal] = {}
+        # A model record never carries an approved-axis ID. Only a clean,
+        # validated one-target pass can bind its evidence to a frozen axis.
+        axis_bindings_by_signal: dict[str, set[tuple[str, int, str]]] = defaultdict(set)
+        axis_bindings_by_line: dict[
+            tuple[str, str, int], set[tuple[str, int, str]]
+        ] = defaultdict(set)
+
+        def bind_approved_axis(
+            signal: CharacterSignal, target: CharacterSignalTarget
+        ) -> None:
+            axis_key = target.approved_axis_identity
+            if axis_key is None:
+                return
+            axis_bindings_by_signal[signal.id].add(axis_key)
+            actor = _key(signal.character)
+            for line in range(
+                signal.evidence.line_start, signal.evidence.line_end + 1
+            ):
+                axis_bindings_by_line[
+                    (actor, signal.evidence.document_id, line)
+                ].add(axis_key)
+
+        def bound_observations(
+            target: CharacterSignalTarget,
+            observations: tuple[CharacterSignal, ...],
+        ) -> tuple[CharacterSignal, ...]:
+            axis_key = target.approved_axis_identity
+            if axis_key is None:
+                return observations
+            return tuple(
+                row for row in observations
+                if _trusted_axis_binding(
+                    row,
+                    axis_bindings_by_signal=axis_bindings_by_signal,
+                    axis_bindings_by_line=axis_bindings_by_line,
+                ) == axis_key
+            )
         selected_draft_chunk_count = sum(
             source.source_kind == "draft" for source, _ in selected_chunks
         )
@@ -483,13 +523,13 @@ class CharacterConsistencyStage:
                     continue
                 if _target_has_sufficient_recall_evidence(
                     target,
-                    extraction.draft_observations,
+                    bound_observations(target, extraction.draft_observations),
                 ):
                     continue
                 undercovered.append(
                     _target_with_existing_evidence_ranges(
                         target,
-                        extraction.draft_observations,
+                        bound_observations(target, extraction.draft_observations),
                     )
                 )
             targeted_eligible_targets += len(undercovered)
@@ -580,6 +620,8 @@ class CharacterConsistencyStage:
                         successful_model_calls += 1
                     partial = True
                 for signal in targeted.signals:
+                    if targeted.diagnostics.outcome == "completed":
+                        bind_approved_axis(signal, target)
                     if all(existing.id != signal.id for existing in chunk_observations):
                         chunk_observations.append(signal)
                     if signal.id not in all_signals:
@@ -605,10 +647,12 @@ class CharacterConsistencyStage:
             if initial_round_finished:
                 for target_index, target in completed_targets:
                     target = _target_with_existing_evidence_ranges(
-                        target, tuple(chunk_observations)
+                        target,
+                        bound_observations(target, tuple(chunk_observations)),
                     )
                     if _target_has_sufficient_recall_evidence(
-                        target, tuple(chunk_observations)
+                        target,
+                        bound_observations(target, tuple(chunk_observations)),
                     ):
                         continue
                     candidate_ranges, truncated_lines = (
@@ -719,6 +763,8 @@ class CharacterConsistencyStage:
                         successful_model_calls += 1
                     partial = True
                 for signal in verification.signals:
+                    if verification.diagnostics.outcome == "completed":
+                        bind_approved_axis(signal, target)
                     if all(existing.id != signal.id for existing in chunk_observations):
                         chunk_observations.append(signal)
                     if signal.id not in all_signals:
@@ -729,6 +775,14 @@ class CharacterConsistencyStage:
                 targeted_fully_processed_draft_chunks += 1
 
         signals = tuple(all_signals.values())
+        ambiguous_axis_evidence = sum(
+            len(keys) > 1 for keys in axis_bindings_by_line.values()
+        )
+        if ambiguous_axis_evidence:
+            partial = True
+            reason_counts["approved_axis_ambiguous_evidence"] += (
+                ambiguous_axis_evidence
+            )
         pending = list(build_pending_trait_candidates(signals))
         if len(pending) > settings.character_consistency_max_candidates_per_run:
             reason_counts["candidate_limit"] += len(pending) - (
@@ -831,7 +885,13 @@ class CharacterConsistencyStage:
             draft_scopes: list[NarrativeScopeV1] = []
             for observation in resolved_drafts.get(character_key, ()):
                 axis_match = _observation_matches_baseline(
-                    baseline_entry, observation
+                    baseline_entry,
+                    observation,
+                    approved_axis_binding=_trusted_axis_binding(
+                        observation,
+                        axis_bindings_by_signal=axis_bindings_by_signal,
+                        axis_bindings_by_line=axis_bindings_by_line,
+                    ),
                 )
                 if axis_match is None:
                     partial = True
@@ -878,7 +938,10 @@ class CharacterConsistencyStage:
                     observation.model_copy(
                         update={
                             "character": baseline.character,
-                            "trait_key": baseline.trait_key,
+                            **(
+                                {} if baseline.approved_axis_identity is not None
+                                else {"trait_key": baseline.trait_key}
+                            ),
                         }
                     )
                 )
@@ -925,6 +988,10 @@ class CharacterConsistencyStage:
                 support_evidence=support,
                 scope_compatibility="compatible",
                 material_coverage="partial" if partial else "complete",
+                approved_axis_bound_observation_ids=(
+                    tuple(row.id for row in matches)
+                    if baseline.approved_axis_identity is not None else ()
+                ),
             )
             prepared = prepare_character_drift(case)
             drift_considered += 1
@@ -1252,6 +1319,13 @@ class CharacterConsistencyStage:
                         "valid_until_release_ordinal"
                     ),
                     evidence=evidence,
+                    approved_axis_id=payload.get("approved_axis_id"),
+                    approved_axis_version=payload.get("approved_axis_version"),
+                    approved_axis_display_name=payload.get("approved_axis_display_name"),
+                    approved_axis_definition=payload.get("approved_axis_definition"),
+                    approved_axis_definition_sha256=payload.get(
+                        "approved_axis_definition_sha256"
+                    ),
                 )
             except Exception:
                 reasons["invalid_confirmed_trait_snapshot"] += 1
@@ -1343,6 +1417,32 @@ def _signal_matches_target(
             observation_object=signal.key_object,
         )
     )
+
+
+def _trusted_axis_binding(
+    signal: CharacterSignal,
+    *,
+    axis_bindings_by_signal: dict[str, set[tuple[str, int, str]]],
+    axis_bindings_by_line: dict[
+        tuple[str, str, int], set[tuple[str, int, str]]
+    ],
+) -> tuple[str, int, str] | None:
+    by_signal = axis_bindings_by_signal.get(signal.id, set())
+    # The model may quote different substrings of one line for two targets.
+    # Keying by the whole source line, not trait_key/statement/text, makes
+    # such cross-axis reuse explicitly ambiguous. Overlapping ranges share a
+    # line and are ambiguous too, at a conservative recall cost.
+    by_line: set[tuple[str, int, str]] = set()
+    actor = _key(signal.character)
+    for line in range(signal.evidence.line_start, signal.evidence.line_end + 1):
+        by_line.update(
+            axis_bindings_by_line.get(
+                (actor, signal.evidence.document_id, line), set()
+            )
+        )
+    if len(by_signal) != 1 or by_signal != by_line:
+        return None
+    return next(iter(by_signal))
 
 
 def _target_has_sufficient_recall_evidence(
@@ -1587,7 +1687,12 @@ def _safe_server_context(
         identity for identity, variants in hint_variants.items() if len(variants) > 1
     } | unverified_object_keys
 
-    applicable: list[tuple[str, str, str, str, str, str]] = []
+    applicable: list[
+        tuple[
+            str, str, str, str, str, str,
+            tuple[str, int, str] | None, str | None,
+        ]
+    ] = []
     seen: set[tuple[str, str, str, str]] = set()
     for entry in eligible_entries:
         _, baseline, _, character_key = entry
@@ -1596,9 +1701,16 @@ def _safe_server_context(
             continue
         seen.add(identity)
         if identity in ambiguous_hint_keys:
-            applicable.append(("", "", "", "", "", ""))
+            applicable.append(("", "", "", "", "", "", None, None))
             continue
-        comparison_key = identity[2]
+        # The approved ID is the *internal* comparison identity. The model
+        # still receives a legacy-shaped neutral trait label/key so it cannot
+        # claim an axis ID in its output. A second raw label on the same
+        # approved axis therefore collapses to this first safe hint.
+        comparison_key = (
+            stable_trait_identity(baseline.dimension, baseline.trait_key)
+            if baseline.approved_axis_identity is not None else identity[2]
+        )
         labels = (
             baseline.character,
             baseline.dimension,
@@ -1606,14 +1718,24 @@ def _safe_server_context(
             comparison_key,
             baseline.polarity,
         )
-        if not all(_safe_context_label(value) for value in labels):
+        axis_key = baseline.approved_axis_identity
+        axis_definition = baseline.approved_axis_definition if axis_key else None
+        if not all(_safe_context_label(value) for value in labels) or (
+            axis_definition is not None
+            and not _safe_context_label(axis_definition)
+        ):
             # Count the applicable baseline but never serialize a suspicious
             # label.  The resulting partial marker prevents a false clean bill.
-            applicable.append(("", "", "", "", "", ""))
+            applicable.append(("", "", "", "", "", "", None, None))
             continue
-        applicable.append((*labels, _safe_baseline_hint(baseline.statement)))  # type: ignore[arg-type]
+        applicable.append(
+            (*labels, _safe_baseline_hint(baseline.statement), axis_key, axis_definition)
+        )
 
     eligible_count = len(applicable)
+    selected = [row for row in applicable if row[0]][
+        :_MAX_CONFIRMED_TRAITS_IN_SERVER_CONTEXT
+    ]
     items = [
         {
             "character": character,
@@ -1621,21 +1743,8 @@ def _safe_server_context(
             "trait_key": trait_key,
             "comparison_key": comparison_key,
         }
-        for character, dimension, trait_key, comparison_key, _, _ in applicable
-        if character
-    ][:_MAX_CONFIRMED_TRAITS_IN_SERVER_CONTEXT]
-    target_metadata_by_identity = {
-        (character, dimension, trait_key, comparison_key): (polarity, baseline_hint)
-        for (
-            character,
-            dimension,
-            trait_key,
-            comparison_key,
-            polarity,
-            baseline_hint,
-        ) in applicable
-        if character
-    }
+        for character, dimension, trait_key, comparison_key, _, _, _, _ in selected
+    ]
 
     while True:
         state = "complete" if len(items) == eligible_count else "partial"
@@ -1653,30 +1762,31 @@ def _safe_server_context(
             targets = tuple(
                 CharacterSignalTarget.model_validate(
                     {
-                        **item,
+                        "character": character,
+                        "dimension": dimension,
+                        "trait_key": trait_key,
+                        "comparison_key": comparison_key,
                         "baseline_polarity": baseline_polarity,
                         "requested_polarity": (
-                            "negative"
-                            if baseline_polarity == "positive"
-                            else "positive"
+                            "negative" if baseline_polarity == "positive" else "positive"
                         ),
                         "baseline_hint": baseline_hint,
+                        **(
+                            {
+                                "approved_axis_id": axis_key[0],
+                                "approved_axis_version": axis_key[1],
+                                "approved_axis_definition_sha256": axis_key[2],
+                                "approved_axis_definition": axis_definition,
+                            }
+                            if axis_key is not None else {}
+                        ),
                     }
                 )
-                for item in items
-                if (
-                    target_metadata := target_metadata_by_identity[
-                        (
-                            item["character"],
-                            item["dimension"],
-                            item["trait_key"],
-                            item["comparison_key"],
-                        )
-                    ]
-                )
-                and (baseline_polarity := target_metadata[0])
-                in {"positive", "negative"}
-                and (baseline_hint := target_metadata[1])
+                for (
+                    character, dimension, trait_key, comparison_key,
+                    baseline_polarity, baseline_hint, axis_key, axis_definition,
+                ) in selected
+                if baseline_polarity in {"positive", "negative"} and baseline_hint
             )
             return _SafeServerContext(
                 payload=serialized,
@@ -1708,6 +1818,7 @@ def _safe_server_context(
                 ambiguous_traits=len(ambiguous_hint_keys),
             )
         items.pop()
+        selected.pop()
 
 
 def _safe_context_label(value: object) -> bool:
@@ -1946,6 +2057,15 @@ def _same_shadow_axis(
 
     lower_baseline = lower[1]
     higher_baseline = higher[1]
+    if (
+        lower_baseline.approved_axis_identity is not None
+        or higher_baseline.approved_axis_identity is not None
+    ):
+        return (
+            lower_baseline.approved_axis_identity is not None
+            and lower_baseline.approved_axis_identity
+            == higher_baseline.approved_axis_identity
+        )
     if lower_baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS:
         frozen_key = _frozen_comparison_identity(lower)
         return (
@@ -1966,11 +2086,18 @@ def _same_shadow_axis(
 
 
 def _observation_matches_baseline(
-    entry: BaselineEntry, observation: CharacterSignal
+    entry: BaselineEntry,
+    observation: CharacterSignal,
+    *,
+    approved_axis_binding: tuple[str, int, str] | None = None,
 ) -> bool | None:
     baseline = entry[1]
     if observation.dimension != baseline.dimension:
         return False
+    if baseline.approved_axis_identity is not None:
+        # This binding is populated only after a clean, validated, one-target
+        # recall call. A primary model key never creates approved identity.
+        return approved_axis_binding == baseline.approved_axis_identity
     if baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS:
         frozen_key = _frozen_comparison_identity(entry)
         if not frozen_key:
@@ -2035,7 +2162,13 @@ def _baseline_hint_identity(
     return (
         character_key,
         baseline.dimension,
-        frozen_key or stable_trait_identity(baseline.dimension, baseline.trait_key),
+        (
+            f"approved-axis:{baseline.approved_axis_identity}"
+            if baseline.approved_axis_identity is not None
+            else frozen_key or stable_trait_identity(
+                baseline.dimension, baseline.trait_key
+            )
+        ),
         (
             stable_trait_identity(baseline.dimension, baseline.trait_key)
             if frozen_key and baseline.dimension != "preference"
@@ -2303,6 +2436,20 @@ def _to_issue(
             ),
             "dimension": prepared.case.baseline.dimension,
             "trait_key": prepared.case.baseline.trait_key,
+            **(
+                {
+                    "approved_axis_id": prepared.case.baseline.approved_axis_id,
+                    "approved_axis_version": (
+                        prepared.case.baseline.approved_axis_version
+                    ),
+                    "approved_axis_definition_sha256": (
+                        prepared.case.baseline.approved_axis_definition_sha256
+                    ),
+                    "observation_axis_binding": "server_targeted_evidence",
+                }
+                if prepared.case.baseline.approved_axis_identity is not None
+                else {}
+            ),
             "confirmed_candidate_id": confirmed_candidate_id,
             "subtype": promoted.subtype,
             "judgement": judgement,
@@ -2398,7 +2545,12 @@ def _safe_case_trace(
         and baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS
         else ""
     )
-    if frozen_key:
+    if baseline.approved_axis_identity is not None:
+        comparison_key = (
+            f"approved_axis:{baseline.approved_axis_id}:"
+            f"{baseline.approved_axis_version}"
+        )
+    elif frozen_key:
         comparison_key = frozen_key
     elif _CONTEXT_SECRET_OR_URL.search(baseline.trait_key):
         # Legacy snapshots may lack a usable object axis. Preserve the old
@@ -2431,6 +2583,15 @@ def _safe_case_trace(
         "character_key": _safe_trace_identifier(character_key, max_chars=64),
         "dimension": baseline.dimension,
         "comparison_key": _safe_trace_identifier(comparison_key, max_chars=128),
+        **(
+            {
+                "approved_axis_definition_sha256": (
+                    baseline.approved_axis_definition_sha256
+                ),
+                "observation_axis_binding": "server_targeted_evidence",
+            }
+            if baseline.approved_axis_identity is not None else {}
+        ),
         "confirmed_candidate_id_sha256": candidate_id_sha256,
         "matched_observation_count": max(0, min(matched_observation_count, 24)),
         "matched_observation_refs": _safe_observation_refs(matched_observations),

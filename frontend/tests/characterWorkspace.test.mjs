@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   characterApiPaths,
+  characterTraitAxesPath,
+  createCharacterTraitAxis,
+  fetchCharacter,
+  fetchCharacterTraitAxes,
   fetchCharacters,
   fetchDriftIssues,
   fetchProfileCandidates,
@@ -10,6 +14,17 @@ import {
   normalizeProfileCandidate,
   submitCandidateDecision,
 } from "../src/features/characters/api.ts";
+import {
+  appendAxisPage,
+  canCreateNewAxis,
+  selectedProjectAxis,
+  validateAxisDraft,
+} from "../src/features/characters/axisReview.ts";
+import {
+  advanceReviewScope,
+  isCurrentReviewRequest,
+  reviewScopeKey,
+} from "../src/features/characters/reviewScope.ts";
 import {
   candidateDecisionLabel,
   candidateReviewState,
@@ -289,4 +304,182 @@ test("candidate decisions send the expected revision with an idempotency key", a
     { decision: "confirm", comment: "证据充分", expected_revision: 3 },
   );
   assert.equal(result.candidate.status, "confirmed");
+});
+
+test("author axis list is project scoped and rejects malformed or cross-project records", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const axis = {
+    id: "axis-1",
+    project_id: "project-1",
+    trait_type: "core_personality",
+    version: 1,
+    display_name: "撤离路线协作",
+    definition: "涉及同伴安全的撤离路线决策是否征询当值伙伴",
+    definition_sha256: "a".repeat(64),
+    created_at: "2026-09-24T00:00:00",
+  };
+  assert.equal(characterTraitAxesPath("project a"), "/api/v1/projects/project%20a/character-trait-axes");
+  globalThis.fetch = async (url) => {
+    assert.equal(String(url), "/api/v1/projects/project-1/character-trait-axes?limit=100&offset=0");
+    return new Response(JSON.stringify({ items: [axis], total: 2, limit: 100, offset: 0 }), { status: 200 });
+  };
+  const page = await fetchCharacterTraitAxes("project-1");
+  assert.equal(page.items[0].display_name, axis.display_name);
+  assert.equal(page.total, 2);
+  assert.equal(selectedProjectAxis(page.items, "axis-1")?.version, 1);
+  assert.equal(selectedProjectAxis(page.items, "axis-missing"), null);
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    items: [{ ...axis, project_id: "another-project" }], total: 1, limit: 100, offset: 0,
+  }), { status: 200 });
+  await assert.rejects(fetchCharacterTraitAxes("project-1"), /不属于当前项目/);
+});
+
+test("author axis creation sends CSRF once and does not replay uncertain POST", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  context.after(() => { globalThis.fetch = originalFetch; globalThis.document = originalDocument; });
+  globalThis.document = { cookie: "loreguard_csrf=author-axis-token" };
+  let calls = 0;
+  globalThis.fetch = async (url, init) => {
+    calls += 1;
+    assert.equal(String(url), "/api/v1/projects/project-1/character-trait-axes");
+    assert.equal(new Headers(init.headers).get("X-CSRF-Token"), "author-axis-token");
+    assert.deepEqual(JSON.parse(init.body), {
+      trait_type: "core_personality",
+      display_name: "路线协作",
+      definition: "危急决策是否征询同伴",
+    });
+    throw new TypeError("connection lost");
+  };
+  await assert.rejects(createCharacterTraitAxis("project-1", {
+    display_name: "路线协作", definition: "危急决策是否征询同伴",
+  }), /connection lost/);
+  assert.equal(calls, 1);
+});
+
+test("axis draft validates on meaningful normalized content", () => {
+  const empty = validateAxisDraft(" \n ", "\t");
+  assert.match(empty.errors.display_name, /请输入/);
+  assert.match(empty.errors.definition, /请说明/);
+  const valid = validateAxisDraft("  路线   协作  ", " 决策\n是否征询同伴 ");
+  assert.deepEqual(valid.value, {
+    display_name: "路线 协作",
+    definition: "决策 是否征询同伴",
+  });
+  assert.deepEqual(valid.errors, { display_name: "", definition: "" });
+  assert.match(validateAxisDraft("轴".repeat(81), "定义").errors.display_name, /80/);
+  assert.match(validateAxisDraft("轴", "定".repeat(201)).errors.definition, /200/);
+});
+
+test("author-axis pagination fails closed on shifted duplicate pages or unreviewed local creation", () => {
+  const axis = {
+    id: "axis-1", project_id: "project-1", trait_type: "core_personality",
+    version: 1, display_name: "路线协作", definition: "是否征询同伴",
+    definition_sha256: "a".repeat(64), created_at: null,
+  };
+  assert.deepEqual(appendAxisPage([], { items: [axis], total: 2, limit: 1, offset: 0 }), [axis]);
+  assert.throws(
+    () => appendAxisPage([axis], { items: [axis], total: 2, limit: 1, offset: 1 }),
+    /分页出现重复项/,
+  );
+  const full = { loaded: true, loading: false, error: "", dirty: false, fetchedCount: 2, total: 2 };
+  assert.equal(canCreateNewAxis(full), true);
+  assert.equal(canCreateNewAxis({ ...full, fetchedCount: 1 }), false);
+  assert.equal(canCreateNewAxis({ ...full, dirty: true }), false);
+  assert.equal(canCreateNewAxis({ ...full, error: "列表变化" }), false);
+  assert.equal(canCreateNewAxis({ ...full, loaded: false }), false);
+});
+
+test("late decision success cannot overwrite another candidate or a returned old visit", async () => {
+  const firstKey = reviewScopeKey("project-1", "character-1", "candidate-1");
+  let current = { key: firstKey, generation: 0 };
+  const started = current;
+  let latestRequest = 1;
+  const startedRequest = latestRequest;
+  let resolveOld;
+  const oldResponse = new Promise((resolve) => { resolveOld = resolve; });
+  const view = { candidate: "candidate-1", announcement: "", busy: "confirm" };
+  const completed = oldResponse.then((candidate) => {
+    if (isCurrentReviewRequest(current, started, latestRequest, startedRequest)) {
+      view.candidate = candidate;
+      view.announcement = "已确认";
+    }
+  }).finally(() => {
+    if (isCurrentReviewRequest(current, started, latestRequest, startedRequest)) view.busy = "";
+  });
+
+  current = advanceReviewScope(current, reviewScopeKey("project-1", "character-1", "candidate-2"));
+  view.candidate = "candidate-2";
+  view.busy = "";
+  resolveOld("candidate-1-confirmed");
+  await completed;
+  assert.deepEqual(view, { candidate: "candidate-2", announcement: "", busy: "" });
+
+  current = advanceReviewScope(current, firstKey);
+  assert.equal(current.generation, 2);
+  assert.equal(isCurrentReviewRequest(current, started, latestRequest, startedRequest), false);
+  latestRequest += 1;
+  assert.equal(isCurrentReviewRequest(current, current, latestRequest, startedRequest), false);
+});
+
+test("late axis creation error and finally cannot leak across projects sharing a candidate ID", async () => {
+  const firstKey = reviewScopeKey("project-a", "character-1", "candidate-1");
+  const secondKey = reviewScopeKey("project-b", "character-1", "candidate-1");
+  assert.notEqual(firstKey, secondKey);
+  let current = { key: firstKey, generation: 0 };
+  const started = current;
+  const request = 4;
+  let rejectOld;
+  const oldRequest = new Promise((_resolve, reject) => { rejectOld = reject; });
+  const view = { axes: ["project-b-axis"], error: "", busy: true };
+  const completed = oldRequest.catch(() => {
+    if (isCurrentReviewRequest(current, started, request, request)) view.error = "旧项目错误";
+  }).finally(() => {
+    if (isCurrentReviewRequest(current, started, request, request)) view.busy = false;
+  });
+
+  current = advanceReviewScope(current, secondKey);
+  rejectOld(new Error("old project failed"));
+  await completed;
+  assert.deepEqual(view, { axes: ["project-b-axis"], error: "", busy: true });
+});
+
+test("author-confirmed candidate keeps raw model label and axis identity separate", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  context.after(() => { globalThis.fetch = originalFetch; globalThis.document = originalDocument; });
+  globalThis.document = { cookie: "loreguard_csrf=axis-confirm-token" };
+  const raw = {
+    id: "candidate-1", character_key: "林澈", trait_type: "core_personality",
+    trait_key: "consults_partner", value: "林澈总会征询伙伴。",
+    polarity: "positive", authority_tier: "core_canon",
+    origin: "explicit_setting", source_run_id: "run-1", scope_sha256: "snapshot-1",
+    revision: 3, review_state: "confirmed", approved_axis_id: "axis-1",
+    approved_axis_version: 1,
+    evidence: [{ document_id: "doc-1", document_name: "设定.md", document_version: 1,
+      line_start: 1, line_end: 1, text: "林澈总会征询伙伴。" }],
+  };
+  globalThis.fetch = async (_url, init) => {
+    assert.deepEqual(JSON.parse(init.body), {
+      decision: "confirm", comment: "证据充分", expected_revision: 3,
+      approved_axis_id: "axis-1", expected_axis_version: 1,
+    });
+    return new Response(JSON.stringify({ candidate: raw }), { status: 201 });
+  };
+  const result = await submitCandidateDecision("project-1", "林澈", "candidate-1", {
+    decision: "confirm", comment: "证据充分", expected_revision: 3,
+    approved_axis_id: "axis-1", expected_axis_version: 1,
+  });
+  assert.equal(result.candidate.model_trait_key, "consults_partner");
+  assert.equal(result.candidate.approved_axis_id, "axis-1");
+  assert.equal(result.candidate.polarity, "positive");
+  assert.equal(result.candidate.authority_tier, "core_canon");
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    character_key: "林澈", confirmed_traits: [{ ...raw, approved_axis_id: null, approved_axis_version: null }],
+  }), { status: 200 });
+  const profile = await fetchCharacter("project-1", "林澈");
+  assert.equal(profile.profile_items[0].approved_axis_id, null);
 });

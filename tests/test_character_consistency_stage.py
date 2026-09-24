@@ -27,15 +27,22 @@ from app.character_consistency_stage import (
     _target_has_sufficient_recall_evidence,
     _target_with_existing_evidence_ranges,
     _targeted_completion_reserve,
+    _trusted_axis_binding,
     _trait_applies_to_release,
 )
-from app.character_drift import CHARACTER_REVIEW_SYSTEM_PROMPT, ConfirmedTraitSnapshot
+from app.character_drift import (
+    CHARACTER_REVIEW_SYSTEM_PROMPT,
+    CharacterDriftCase,
+    ConfirmedTraitSnapshot,
+    prepare_character_drift,
+)
 from app.character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
     CharacterSignal,
     CharacterSignalChunk,
     CharacterSignalTarget,
+    _targeted_chunk_prompt,
 )
 from app.config import Settings
 from app.db import (
@@ -2653,6 +2660,293 @@ def _confirmed_trait(
             ),
         ),
     )
+
+
+def _approved_core_baseline(
+    *,
+    trait_key: str,
+    axis_id: str = "11111111-1111-4111-8111-111111111111",
+    authority: str = "formal_record",
+) -> ConfirmedTraitSnapshot:
+    definition = "涉及同伴安全的路线决策是否征询当值伙伴"
+    base = _confirmed_trait(
+        character="林澈",
+        dimension="core_personality",
+        trait_key=trait_key,
+        authority=authority,
+    )
+    return ConfirmedTraitSnapshot.model_validate(
+        {
+            **base.model_dump(),
+            "statement": "林澈作出撤离决策前会先征询同伴",
+            "approved_axis_id": axis_id,
+            "approved_axis_version": 1,
+            "approved_axis_display_name": "同伴协商",
+            "approved_axis_definition": definition,
+            "approved_axis_definition_sha256": hashlib.sha256(
+                definition.encode("utf-8")
+            ).hexdigest(),
+        }
+    )
+
+
+def test_approved_axis_deduplicates_different_raw_labels_without_exposing_id():
+    scope = NarrativeScopeV1()
+    first = _approved_core_baseline(trait_key="partner_consultation")
+    second = _approved_core_baseline(trait_key="collaborative_route_choice")
+    entries = [
+        (_snapshot_stub("first"), first, scope, "林澈"),
+        (_snapshot_stub("second"), second, scope, "林澈"),
+    ]
+    source = _FrozenDocument(
+        input_id="draft-input",
+        document=DocumentInput(
+            id="draft-axis", name="draft.md", content="林澈独自决定撤离路线。", role="chapter"
+        ),
+        document_version=1,
+        content_sha256="0" * 64,
+        ordinal=0,
+        source_kind="draft",
+        source_reason="draft",
+        scope=scope,
+        resolution_state="confirmed",
+        publication_status="draft",
+        authority_tier="draft",
+    )
+    context = _safe_server_context(source, baselines=entries)
+    assert context.eligible_traits == 1
+    assert context.included_traits == 1
+    assert len(context.targets) == 1
+    assert context.targets[0].approved_axis_identity == first.approved_axis_identity
+    assert first.approved_axis_id not in context.payload
+    assert first.approved_axis_definition not in context.payload
+    prompt = _targeted_chunk_prompt(
+        CharacterSignalChunk(
+            "draft-axis", "draft.md", "林澈独自决定撤离路线。", 1, "draft"
+        ),
+        context.targets,
+    )
+    assert first.approved_axis_definition in prompt
+    assert first.approved_axis_id not in prompt
+    assert '"approved_axis_id"' not in prompt
+
+
+def test_approved_axis_requires_server_binding_and_preserves_observation_label():
+    base = _approved_core_baseline(trait_key="partner_consultation")
+    entry = (_snapshot_stub("first"), base, NarrativeScopeV1(), "林澈")
+    alternate_label_baseline = _approved_core_baseline(
+        trait_key="collaborative_route_choice"
+    )
+    alternate_entry = (
+        _snapshot_stub("second"), alternate_label_baseline,
+        NarrativeScopeV1(), "林澈",
+    )
+    observation = CharacterSignal(
+        id="cs_" + "a" * 32,
+        character="林澈",
+        dimension="core_personality",
+        trait_key="new_model_label",
+        statement="林澈独自决定撤离路线",
+        polarity="negative",
+        stability="core",
+        observation_kind="decision",
+        source_kind="draft",
+        evidence=EvidenceSpan(
+            document_id="draft-axis",
+            document_name="draft.md",
+            line_start=1,
+            line_end=1,
+            text="林澈独自决定撤离路线。",
+        ),
+    )
+    assert _observation_matches_baseline(entry, observation) is False
+    assert _observation_matches_baseline(
+        entry, observation, approved_axis_binding=base.approved_axis_identity
+    ) is True
+    assert _observation_matches_baseline(
+        alternate_entry,
+        observation,
+        approved_axis_binding=base.approved_axis_identity,
+    ) is True
+    unbound = CharacterDriftCase(
+        id="cdc_unbound",
+        baseline=base,
+        observations=(observation,),
+        scope_compatibility="compatible",
+    )
+    assert prepare_character_drift(unbound).matching_observations == ()
+    bound = unbound.model_copy(
+        update={"approved_axis_bound_observation_ids": (observation.id,)}
+    )
+    assert prepare_character_drift(bound).matching_observations == (observation,)
+    assert prepare_character_drift(bound).matching_observations[0].trait_key == (
+        "new_model_label"
+    )
+    alternate_case = bound.model_copy(update={"baseline": alternate_label_baseline})
+    assert prepare_character_drift(alternate_case).matching_observations == (
+        observation,
+    )
+
+
+def test_approved_axis_shadowing_never_merges_different_or_legacy_axes():
+    scope = NarrativeScopeV1()
+    formal = (
+        _snapshot_stub("formal"),
+        _approved_core_baseline(trait_key="first_label"),
+        scope,
+        "林澈",
+    )
+    canon = (
+        _snapshot_stub("canon"),
+        _approved_core_baseline(trait_key="different_label", authority="core_canon"),
+        scope,
+        "林澈",
+    )
+    selected, shadowed = _select_authoritative_baselines([formal, canon])
+    assert shadowed == 1
+    assert selected == [canon]
+    different = (
+        _snapshot_stub("other"),
+        _approved_core_baseline(
+            trait_key="first_label",
+            authority="core_canon",
+            axis_id="22222222-2222-4222-8222-222222222222",
+        ),
+        scope,
+        "林澈",
+    )
+    assert _select_authoritative_baselines([formal, different])[1] == 0
+    legacy = (
+        _snapshot_stub("legacy"),
+        _confirmed_trait(
+            character="林澈", dimension="core_personality", trait_key="first_label"
+        ),
+        scope,
+        "林澈",
+    )
+    assert _select_authoritative_baselines([legacy, canon])[1] == 0
+
+
+def test_same_actor_source_line_bound_to_two_axes_is_ambiguous_even_with_other_text():
+    first = _approved_core_baseline(trait_key="first_label")
+    second = _approved_core_baseline(
+        trait_key="second_label",
+        axis_id="22222222-2222-4222-8222-222222222222",
+    )
+    first_signal = CharacterSignal(
+        id="cs_" + "a" * 32,
+        character="林澈",
+        dimension="core_personality",
+        trait_key="first_label",
+        statement="林澈独自决定路线",
+        polarity="negative",
+        stability="temporary",
+        observation_kind="decision",
+        source_kind="draft",
+        evidence=EvidenceSpan(
+            document_id="draft-axis", document_name="draft.md",
+            line_start=7, line_end=7, text="林澈独自决定路线。"
+        ),
+    )
+    second_signal = first_signal.model_copy(
+        update={
+            "id": "cs_" + "b" * 32,
+            "trait_key": "second_label",
+            "statement": "林澈没有征询伙伴",
+            "evidence": first_signal.evidence.model_copy(
+                update={"text": "没有征询伙伴。"}
+            ),
+        }
+    )
+    axes_by_signal = {
+        first_signal.id: {first.approved_axis_identity},
+        second_signal.id: {second.approved_axis_identity},
+    }
+    axes_by_line = {
+        ("林澈", "draft-axis", 7): {
+            first.approved_axis_identity,
+            second.approved_axis_identity,
+        }
+    }
+    for signal in (first_signal, second_signal):
+        assert _trusted_axis_binding(
+            signal,
+            axis_bindings_by_signal=axes_by_signal,
+            axis_bindings_by_line=axes_by_line,
+        ) is None
+
+
+def test_approved_axis_primary_key_match_still_requires_clean_targeted_binding():
+    with TestClient(app) as client:
+        project = _confirmed_directness_project(client)
+        lines = (
+            "祁雾用奉承话术迂回交流。",
+            "祁雾再次用奉承话术迂回交流。",
+        )
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content="\n".join(lines),
+            narrative_context=_context(publication="draft"),
+        )
+        run_id = _new_run(client, project["id"])
+        definition = "是否在交流中直接表达真实意见"
+        axis_id = "11111111-1111-4111-8111-111111111111"
+        with SessionLocal() as db:
+            row = db.scalar(
+                select(AnalysisRunCharacterTraitInputRow).where(
+                    AnalysisRunCharacterTraitInputRow.run_id == run_id
+                )
+            )
+            assert row is not None
+            payload = {
+                **row.payload,
+                "approved_axis_id": axis_id,
+                "approved_axis_version": 1,
+                "approved_axis_display_name": "直接表达",
+                "approved_axis_definition": definition,
+                "approved_axis_definition_sha256": hashlib.sha256(
+                    definition.encode("utf-8")
+                ).hexdigest(),
+            }
+            row.payload = payload
+            row.payload_sha256 = payload_sha256(payload)
+            db.commit()
+        records = tuple(
+            _record(
+                character="祁雾",
+                evidence=line,
+                polarity="negative",
+                kind="action",
+                dimension="core_personality",
+                trait_key="directness",
+                line=index,
+                statement=line.rstrip("。"),
+            )
+            for index, line in enumerate(lines, start=1)
+        )
+        provider = QueueProvider(
+            _response(),
+            _response(*records),  # raw labels already match; still unapproved
+            _response(*records),  # clean one-target call binds the axis
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "连续两次用奉承话术回避直说，与基线相反。",
+                    "citations": ["B1", "C1", "C2"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        result = _run_stage(run_id, provider)
+        assert result.diagnostics["counts"]["targeted_pass_scheduled_count"] == 1
+        assert result.diagnostics["counts"]["targeted_pass_completed_count"] == 1
+        assert result.diagnostics["counts"]["drift_reviewed"] == 1
+        assert result.diagnostics["case_trace"][0]["matched_observation_count"] == 2
+        assert result.diagnostics["case_trace"][0]["observation_axis_binding"] == (
+            "server_targeted_evidence"
+        )
+        assert any(definition in prompt for _, prompt in provider.calls)
+        assert all(axis_id not in prompt for _, prompt in provider.calls)
 
 
 def _snapshot_stub(candidate_id: str, comparison_key: str | None = None):

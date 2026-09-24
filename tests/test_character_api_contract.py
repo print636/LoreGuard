@@ -6,14 +6,17 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.character_traits import upsert_character_trait_candidate
 from app.db import (
     AnalysisDiagnosticRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
+    CharacterTraitAxisRow,
     CharacterTraitCandidateRow,
+    CharacterTraitReviewRow,
     SessionLocal,
 )
 from app.main import app, settings, write_limiter
@@ -144,6 +147,26 @@ def _decision_path(project_id: str, candidate_id: str) -> str:
         f"/api/v1/projects/{project_id}/characters/{quote('林澈', safe='')}"
         f"/profile-candidates/{candidate_id}/decisions"
     )
+
+
+def _create_axis(
+    client: TestClient,
+    project_id: str,
+    *,
+    definition: str = "面对陌生人时，是否主动开启交谈",
+    headers: dict[str, str] | None = None,
+) -> dict:
+    response = client.post(
+        f"/api/v1/projects/{project_id}/character-trait-axes",
+        json={
+            "trait_type": "core_personality",
+            "display_name": "社交主动性",
+            "definition": definition,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
 
 
 def _confirm(
@@ -1204,3 +1227,329 @@ def test_concurrent_confirmation_of_one_object_candidate_commits_once():
         ) == "character_trait_revision_conflict"
         with SessionLocal() as db:
             assert db.get(CharacterTraitCandidateRow, candidate_id).review_state == "confirmed"
+
+
+def test_author_axis_creation_is_project_scoped_immutable_and_exact_duplicates_conflict():
+    with TestClient(app) as client:
+        first, _ = _project_and_document(client)
+        second, _ = _project_and_document(client)
+        axis = _create_axis(client, first["id"], definition="  是否主动\n向陌生人搭话  ")
+        assert axis["version"] == 1
+        assert axis["definition"] == "是否主动 向陌生人搭话"
+        assert len(axis["definition_sha256"]) == 64
+        listed = client.get(f"/api/v1/projects/{first['id']}/character-trait-axes")
+        assert listed.status_code == 200, listed.text
+        assert listed.json()["items"] == [axis]
+        isolated = client.get(f"/api/v1/projects/{second['id']}/character-trait-axes")
+        assert isolated.status_code == 200
+        assert isolated.json()["items"] == []
+        duplicate = client.post(
+            f"/api/v1/projects/{first['id']}/character-trait-axes",
+            json={
+                "trait_type": "core_personality",
+                "display_name": "另一个显示名称",
+                "definition": "是否主动 向陌生人搭话",
+            },
+        )
+        assert duplicate.status_code == 409, duplicate.text
+        assert duplicate.json()["detail"]["code"] == "character_trait_axis_duplicate"
+        unsafe = client.post(
+            f"/api/v1/projects/{first['id']}/character-trait-axes",
+            json={
+                "trait_type": "core_personality",
+                "display_name": "社交主动性",
+                "definition": "https://example.invalid/secret",
+            },
+        )
+        assert unsafe.status_code == 422, unsafe.text
+        assert unsafe.json()["detail"]["code"] == "character_trait_axis_text_unsafe"
+        with SessionLocal() as db:
+            stored = db.get(CharacterTraitAxisRow, axis["id"])
+            assert stored.definition == axis["definition"]
+
+
+def test_author_axis_confirmation_binds_atomically_and_same_axis_blocks_different_raw_labels():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        axis = _create_axis(client, project["id"])
+        first = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="social_initiative", comparison_key=None,
+            value="主动与陌生人交谈", polarity="positive",
+        )
+        second = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="starts_conversations", comparison_key=None,
+            value="回避与陌生人交谈", polarity="negative",
+        )
+        with SessionLocal() as db:
+            original = db.get(CharacterTraitCandidateRow, first)
+            original_fields = (
+                original.trait_key, original.candidate_fingerprint,
+                original.evidence_sha256, original.evidence,
+            )
+        request = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": axis["id"], "expected_axis_version": 1,
+        }
+        headers = {"Idempotency-Key": f"approved-axis-{uuid4().hex}"}
+        accepted = client.post(
+            _decision_path(project["id"], first), json=request, headers=headers,
+        )
+        assert accepted.status_code == 201, accepted.text
+        assert accepted.json()["candidate"]["approved_axis_id"] == axis["id"]
+        assert accepted.json()["candidate"]["approved_axis_version"] == 1
+        replay = client.post(
+            _decision_path(project["id"], first), json=request, headers=headers,
+        )
+        assert replay.status_code == 201 and replay.json()["deduplicated"] is True
+        changed_payload = client.post(
+            _decision_path(project["id"], first),
+            json={**request, "approved_axis_id": None, "expected_axis_version": None},
+            headers=headers,
+        )
+        assert changed_payload.status_code == 409, changed_payload.text
+        assert changed_payload.json()["detail"]["code"] == "idempotency_key_conflict"
+        conflict = client.post(_decision_path(project["id"], second), json=request)
+        assert conflict.status_code == 409, conflict.text
+        assert conflict.json()["detail"]["code"] == "character_trait_confirmation_conflict"
+        with SessionLocal() as db:
+            current = db.get(CharacterTraitCandidateRow, first)
+            assert (
+                current.trait_key, current.candidate_fingerprint,
+                current.evidence_sha256, current.evidence,
+            ) == original_fields
+            assert current.approved_axis_id == axis["id"]
+            assert current.approved_axis_version == 1
+            pending = db.get(CharacterTraitCandidateRow, second)
+            assert pending.review_state == "pending"
+            assert pending.approved_axis_id is None
+            review = db.get(CharacterTraitReviewRow, accepted.json()["decision_id"])
+            assert review.approved_axis_id == axis["id"]
+            assert review.approved_axis_version == 1
+
+
+def test_author_axis_rejects_cross_project_wrong_type_version_and_stale_source():
+    with TestClient(app) as client:
+        first, document = _project_and_document(client)
+        second, _ = _project_and_document(client)
+        run = _completed_run(client, first["id"])
+        other_axis = _create_axis(client, second["id"])
+        candidate_id = _candidate(
+            first["id"], run["id"], trait_type="core_personality",
+            trait_key="social_initiative", comparison_key=None,
+        )
+        request = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": other_axis["id"], "expected_axis_version": 1,
+        }
+        foreign = client.post(_decision_path(first["id"], candidate_id), json=request)
+        assert foreign.status_code == 404, foreign.text
+        assert foreign.json()["detail"]["code"] == "character_trait_axis_not_found"
+        with SessionLocal() as db:
+            with pytest.raises(IntegrityError):
+                db.execute(
+                    update(CharacterTraitCandidateRow)
+                    .where(CharacterTraitCandidateRow.id == candidate_id)
+                    .values(
+                        approved_axis_id=other_axis["id"],
+                        approved_axis_version=1,
+                    )
+                )
+                db.commit()
+            db.rollback()
+        local_axis = _create_axis(client, first["id"])
+        wrong_version = client.post(
+            _decision_path(first["id"], candidate_id),
+            json={**request, "approved_axis_id": local_axis["id"], "expected_axis_version": 2},
+        )
+        assert wrong_version.status_code == 409, wrong_version.text
+        assert wrong_version.json()["detail"]["code"] == "character_trait_axis_version_conflict"
+        preference = _candidate(
+            first["id"], run["id"], trait_type="preference",
+            trait_key="food_preference", comparison_key="preference:蜜瓜",
+        )
+        wrong_type = client.post(
+            _decision_path(first["id"], preference),
+            json={**request, "approved_axis_id": local_axis["id"]},
+        )
+        assert wrong_type.status_code == 422, wrong_type.text
+        assert wrong_type.json()["detail"]["code"] == "character_trait_axis_dimension_mismatch"
+        rejected_with_axis = client.post(
+            _decision_path(first["id"], candidate_id),
+            json={**request, "decision": "reject", "approved_axis_id": local_axis["id"]},
+        )
+        assert rejected_with_axis.status_code == 422
+        replaced = client.post(
+            f"/api/v1/projects/{first['id']}/documents/text",
+            json={
+                "name": "character.md", "content": "林澈现在更常与陌生人交谈。",
+                "replace_document_id": document["id"],
+            },
+        )
+        assert replaced.status_code == 201, replaced.text
+        stale = client.post(
+            _decision_path(first["id"], candidate_id),
+            json={**request, "approved_axis_id": local_axis["id"]},
+        )
+        assert stale.status_code == 409, stale.text
+        assert stale.json()["detail"]["code"] == "character_trait_candidate_stale"
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            assert row.review_state == "pending" and row.approved_axis_id is None
+
+
+def test_author_axis_workspace_and_csrf_are_required_in_account_mode():
+    with patch.multiple(
+        settings,
+        auth_mode="required",
+        auth_secret_key="axis-api-test-secret-key-32-bytes",
+        auth_cookie_secure=False,
+        auth_cookie_samesite="lax",
+    ), TestClient(app) as owner, TestClient(app) as outsider:
+        registered_owner = owner.post(
+            "/api/v1/auth/register",
+            json={
+                "email": f"axis-owner-{uuid4().hex}@example.com",
+                "password": "correct horse battery staple",
+                "display_name": "Owner",
+            },
+        )
+        registered_other = outsider.post(
+            "/api/v1/auth/register",
+            json={
+                "email": f"axis-other-{uuid4().hex}@example.com",
+                "password": "correct horse battery staple",
+                "display_name": "Other",
+            },
+        )
+        assert registered_owner.status_code == 201, registered_owner.text
+        assert registered_other.status_code == 201, registered_other.text
+        owner_headers = {"X-CSRF-Token": registered_owner.headers["X-CSRF-Token"]}
+        other_headers = {"X-CSRF-Token": registered_other.headers["X-CSRF-Token"]}
+        project, _ = _project_and_document(owner, headers=owner_headers)
+        axis_url = f"/api/v1/projects/{project['id']}/character-trait-axes"
+        body = {
+            "trait_type": "core_personality", "display_name": "社交主动性",
+            "definition": "面对陌生人时是否主动交谈",
+        }
+        without_csrf = owner.post(axis_url, json=body)
+        assert without_csrf.status_code == 403, without_csrf.text
+        assert outsider.get(axis_url).status_code == 404
+        assert outsider.post(axis_url, json=body, headers=other_headers).status_code == 404
+        axis = _create_axis(owner, project["id"], headers=owner_headers)
+        run = _completed_run(owner, project["id"], headers=owner_headers)
+        candidate_id = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="social_initiative", comparison_key=None,
+        )
+        decision = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": axis["id"], "expected_axis_version": 1,
+        }
+        no_csrf_decision = owner.post(
+            _decision_path(project["id"], candidate_id), json=decision,
+        )
+        assert no_csrf_decision.status_code == 403
+        foreign_decision = outsider.post(
+            _decision_path(project["id"], candidate_id), json=decision,
+            headers=other_headers,
+        )
+        assert foreign_decision.status_code == 404
+        own_decision = owner.post(
+            _decision_path(project["id"], candidate_id), json=decision,
+            headers=owner_headers,
+        )
+        assert own_decision.status_code == 201, own_decision.text
+
+
+def test_concurrent_author_axis_confirmation_commits_one_binding():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        axis = _create_axis(client, project["id"])
+        candidate_id = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="social_initiative", comparison_key=None,
+        )
+        body = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": axis["id"], "expected_axis_version": 1,
+        }
+        ready = Barrier(2)
+
+        def decide():
+            ready.wait(timeout=5)
+            return client.post(_decision_path(project["id"], candidate_id), json=body)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(lambda _: decide(), range(2)))
+        assert sorted(response.status_code for response in responses) == [201, 409]
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            assert row.review_state == "confirmed"
+            assert row.approved_axis_id == axis["id"]
+            reviews = list(
+                db.scalars(
+                    select(CharacterTraitReviewRow).where(
+                        CharacterTraitReviewRow.candidate_id == candidate_id,
+                        CharacterTraitReviewRow.decision == "confirm",
+                    )
+                )
+            )
+            assert len(reviews) == 1 and reviews[0].approved_axis_id == axis["id"]
+
+
+def test_author_axis_supersession_requires_same_explicit_axis_and_preserves_old_binding():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        first_axis = _create_axis(client, project["id"])
+        second_axis = _create_axis(
+            client, project["id"], definition="面对熟人时是否主动开启交谈",
+        )
+        original_id = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="social_initiative", comparison_key=None,
+            value="主动交谈", polarity="positive",
+        )
+        original_decision = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": first_axis["id"], "expected_axis_version": 1,
+        }
+        assert client.post(
+            _decision_path(project["id"], original_id), json=original_decision,
+        ).status_code == 201
+        replacement_id = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="social_initiative", comparison_key=None,
+            value="不主动交谈", polarity="negative",
+            supersedes_candidate_id=original_id,
+        )
+        wrong_axis = client.post(
+            _decision_path(project["id"], replacement_id),
+            json={**original_decision, "approved_axis_id": second_axis["id"]},
+        )
+        assert wrong_axis.status_code == 409, wrong_axis.text
+        assert wrong_axis.json()["detail"]["code"] == (
+            "character_trait_axis_supersession_mismatch"
+        )
+        with SessionLocal() as db:
+            original = db.get(CharacterTraitCandidateRow, original_id)
+            replacement = db.get(CharacterTraitCandidateRow, replacement_id)
+            assert original.review_state == "confirmed"
+            assert original.approved_axis_id == first_axis["id"]
+            assert replacement.review_state == "pending"
+            assert replacement.approved_axis_id is None
+        accepted = client.post(
+            _decision_path(project["id"], replacement_id), json=original_decision,
+        )
+        assert accepted.status_code == 201, accepted.text
+        with SessionLocal() as db:
+            original = db.get(CharacterTraitCandidateRow, original_id)
+            replacement = db.get(CharacterTraitCandidateRow, replacement_id)
+            assert original.review_state == "superseded"
+            assert original.approved_axis_id == first_axis["id"]
+            assert replacement.review_state == "confirmed"
+            assert replacement.approved_axis_id == first_axis["id"]

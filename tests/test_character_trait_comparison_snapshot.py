@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +11,10 @@ from app.character_traits import (
     validate_character_trait_supersession,
 )
 from app.narrative_context import canonical_scope_payload, payload_sha256
-from app.service import _historical_trait_snapshot_payload
+from app.service import (
+    _confirmed_trait_snapshot_payload,
+    _historical_trait_snapshot_payload,
+)
 
 
 def _candidate(*, comparison_key: str | None = None) -> SimpleNamespace:
@@ -18,6 +22,7 @@ def _candidate(*, comparison_key: str | None = None) -> SimpleNamespace:
     evidence = [{"document_id": "document-1", "text": "林澈喜欢蜜瓜。"}]
     return SimpleNamespace(
         id="candidate-1",
+        project_id="project-1",
         review_state="confirmed",
         character_key="林澈",
         character_display_name="林澈",
@@ -39,7 +44,68 @@ def _candidate(*, comparison_key: str | None = None) -> SimpleNamespace:
         candidate_fingerprint="f" * 64,
         generator_version="test-v1",
         lock_version=1,
+        approved_axis_id=None,
+        approved_axis_version=None,
     )
+
+
+def test_approved_axis_snapshot_freezes_definition_and_checks_review_provenance():
+    candidate = _candidate()
+    candidate.trait_type = "core_personality"
+    candidate.trait_key = "companion_consultation"
+    candidate.approved_axis_id = "11111111-1111-4111-8111-111111111111"
+    candidate.approved_axis_version = 1
+    definition = "涉及同伴安全的路线决策是否征询当值伙伴"
+    axis = SimpleNamespace(
+        id=candidate.approved_axis_id,
+        project_id=candidate.project_id,
+        trait_type="core_personality",
+        version=1,
+        display_name="同伴协商",
+        definition=definition,
+        definition_sha256=hashlib.sha256(definition.encode("utf-8")).hexdigest(),
+    )
+    database = SimpleNamespace(get=lambda model, identifier: axis)
+    review = SimpleNamespace(
+        id="review-1",
+        decision="confirm",
+        approved_axis_id=candidate.approved_axis_id,
+        approved_axis_version=1,
+    )
+    payload = _confirmed_trait_snapshot_payload(database, candidate, review)
+    assert payload["approved_axis_id"] == axis.id
+    assert payload["approved_axis_version"] == 1
+    assert payload["approved_axis_display_name"] == "同伴协商"
+    assert payload["approved_axis_definition"] == definition
+    assert payload["approved_axis_definition_sha256"] == axis.definition_sha256
+    assert payload_sha256(payload) != payload_sha256(candidate_snapshot_payload(candidate, review))
+
+    review.approved_axis_id = "22222222-2222-4222-8222-222222222222"
+    with pytest.raises(ValueError, match="confirmation review"):
+        _confirmed_trait_snapshot_payload(database, candidate, review)
+    review.approved_axis_id = axis.id
+    axis.definition = "被改写的轴定义"
+    with pytest.raises(ValueError, match="axis binding is invalid"):
+        _confirmed_trait_snapshot_payload(database, candidate, review)
+    axis.definition = definition
+    candidate.review_state = "superseded"
+    candidate.valid_until_release_ordinal = 5
+    historical = _historical_trait_snapshot_payload(candidate, review, db=database)
+    assert historical["approved_axis_id"] == axis.id
+    assert historical["approved_axis_definition_sha256"] == axis.definition_sha256
+
+
+def test_legacy_snapshot_wrapper_does_not_add_axis_keys_or_change_hash():
+    candidate = _candidate()
+    review = SimpleNamespace(
+        id="review-1", decision="confirm",
+        approved_axis_id=None, approved_axis_version=None,
+    )
+    database = SimpleNamespace(get=lambda model, identifier: None)
+    expected = candidate_snapshot_payload(candidate, review)
+    actual = _confirmed_trait_snapshot_payload(database, candidate, review)
+    assert actual == expected
+    assert payload_sha256(actual) == payload_sha256(expected)
 
 
 def test_new_and_legacy_confirmed_snapshot_contracts_keep_distinct_hashes() -> None:

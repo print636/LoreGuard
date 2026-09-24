@@ -9,7 +9,9 @@ import {
 import { ApiError } from "../../api/client";
 import type { WorkspaceView } from "../../routing";
 import {
+  createCharacterTraitAxis,
   fetchCharacter,
+  fetchCharacterTraitAxes,
   fetchCharacters,
   fetchDriftIssues,
   fetchProfileCandidate,
@@ -17,6 +19,13 @@ import {
   submitCandidateDecision,
 } from "./api";
 import CandidateReview from "./CandidateReview";
+import { appendAxisPage } from "./axisReview";
+import {
+  advanceReviewScope,
+  isCurrentReviewRequest,
+  isCurrentReviewScope,
+  reviewScopeKey,
+} from "./reviewScope";
 import CharacterDriftList from "./CharacterDriftList";
 import CharacterProfile from "./CharacterProfile";
 import CharacterRoster from "./CharacterRoster";
@@ -35,6 +44,7 @@ import type {
   CharacterDetail,
   CharacterPage,
   CharacterReadiness,
+  CharacterTraitAxis,
   DriftIssuePage,
   ProfileCandidate,
 } from "./types";
@@ -55,12 +65,26 @@ type CharacterWorkspaceProps = {
 function requestError(error: unknown): string {
   if (error instanceof DOMException && error.name === "AbortError") return "";
   if (error instanceof ApiError) {
-    if (error.status === 409) {
-      return "档案已经在其他页面更新。页面不会覆盖新状态，请刷新后重新核对。";
-    }
+    const envelope = error.detail;
+    const detail = envelope && typeof envelope === "object" && "detail" in envelope
+      ? envelope.detail
+      : null;
+    const code = detail && typeof detail === "object" && "code" in detail
+      ? detail.code
+      : null;
+    if (code === "character_trait_axis_version_conflict") return "作者轴版本已变化，请刷新轴列表后重新选择。";
+    if (code === "character_trait_axis_not_found") return "所选作者轴不存在或不属于当前项目，请刷新轴列表。";
+    if (code === "character_trait_axis_dimension_mismatch") return "所选作者轴不适用于这条核心性格候选，请重新选择。";
+    if (code === "character_trait_candidate_stale") return "来源文档或叙事上下文已变化；请重新分析后审核。";
+    if (code === "character_trait_confirmation_conflict") return "同一作用域已有冲突的已确认特征；请核对角色档案与轴定义。";
+    if (code === "character_trait_supersession_conflict") return "待替代的角色特征已变化；请刷新后重新核对。";
+    if (error.status === 409) return "档案或作者轴已在其他页面更新；请刷新后重新核对。";
     if (error.status === 429) return "请求过于频繁，请稍后重试。";
     if (error.status === 404) return "这项角色资料不存在，或不属于当前项目。";
-    return error.message || "请求没有完成，请重试。";
+    if (error.status === 401) return "登录状态已失效，请重新登录后继续。";
+    if (error.status === 403) return "安全校验未通过，请刷新页面后重试。";
+    if (error.status === 422) return "提交内容未通过校验，请检查轴名称、定义与候选状态。";
+    return "请求没有完成，请稍后重试。";
   }
   if (error instanceof TypeError) {
     return "服务返回的角色资料格式不兼容。页面没有把它当作空结果，请重试或查看运行审计。";
@@ -95,6 +119,9 @@ export default function CharacterWorkspace({
     () => characterRouteStateFromSearch(routeSearch),
     [routeSearch],
   );
+  const scopeKey = reviewScopeKey(projectId, route.characterId, route.candidateId);
+  const reviewScopeRef = useRef({ key: scopeKey, generation: 0 });
+  reviewScopeRef.current = advanceReviewScope(reviewScopeRef.current, scopeKey);
   const [searchDraft, setSearchDraft] = useState(route.query);
   const [characterPage, setCharacterPage] = useState<CharacterPage | null>(null);
   const [characterDetail, setCharacterDetail] = useState<CharacterDetail | null>(null);
@@ -106,6 +133,17 @@ export default function CharacterWorkspace({
   const [sectionLoading, setSectionLoading] = useState(false);
   const [candidateLoading, setCandidateLoading] = useState(false);
   const [decisionBusy, setDecisionBusy] = useState<CandidateDecision | null>(null);
+  const [axisItems, setAxisItems] = useState<CharacterTraitAxis[]>([]);
+  const [axisTotal, setAxisTotal] = useState(0);
+  const [axisFetchedCount, setAxisFetchedCount] = useState(0);
+  const [axisLoaded, setAxisLoaded] = useState(false);
+  const [axisListDirty, setAxisListDirty] = useState(false);
+  const [axisLoading, setAxisLoading] = useState(false);
+  const [axisMoreBusy, setAxisMoreBusy] = useState(false);
+  const [axisCreateBusy, setAxisCreateBusy] = useState(false);
+  const [axisError, setAxisError] = useState("");
+  const [axisMoreError, setAxisMoreError] = useState("");
+  const [axisReload, setAxisReload] = useState(0);
   const [listError, setListError] = useState("");
   const [detailError, setDetailError] = useState("");
   const [sectionError, setSectionError] = useState("");
@@ -119,6 +157,23 @@ export default function CharacterWorkspace({
   const pageTitleRef = useRef<HTMLHeadingElement | null>(null);
   const detailTitleRef = useRef<HTMLHeadingElement | null>(null);
   const detailRegionRef = useRef<HTMLElement | null>(null);
+  const axisMoreRequestRef = useRef(0);
+  const axisCreateRequestRef = useRef(0);
+  const decisionRequestRef = useRef(0);
+  const axisCreatePendingRef = useRef(false);
+  const decisionPendingRef = useRef(false);
+
+  useEffect(() => {
+    // A previous candidate's mutation can still finish on the server. Its
+    // loading and feedback must not follow the user into another scope.
+    if (reviewScopeRef.current.key !== scopeKey) return;
+    axisCreatePendingRef.current = false;
+    decisionPendingRef.current = false;
+    setAxisCreateBusy(false);
+    setDecisionBusy(null);
+    setActionError("");
+    setAnnouncement("");
+  }, [scopeKey]);
 
   const prerequisiteReadiness: CharacterReadiness | null = projectId
     ? documentCount === 0
@@ -272,7 +327,6 @@ export default function CharacterWorkspace({
   useEffect(() => {
     setCandidate(null);
     setCandidateError("");
-    setActionError("");
     if (
       !projectId ||
       !route.characterId ||
@@ -284,6 +338,7 @@ export default function CharacterWorkspace({
       return;
     }
     const controller = new AbortController();
+    const startedScope = reviewScopeRef.current;
     setCandidateLoading(true);
     void fetchProfileCandidate(
       projectId,
@@ -291,13 +346,20 @@ export default function CharacterWorkspace({
       route.candidateId,
       controller.signal,
     )
-      .then(setCandidate)
+      .then((loaded) => {
+        if (!controller.signal.aborted && isCurrentReviewScope(reviewScopeRef.current, startedScope)) {
+          setCandidate(loaded);
+        }
+      })
       .catch((error) => {
+        if (controller.signal.aborted || !isCurrentReviewScope(reviewScopeRef.current, startedScope)) return;
         const message = requestError(error);
         if (message) setCandidateError(message);
       })
       .finally(() => {
-        if (!controller.signal.aborted) setCandidateLoading(false);
+        if (!controller.signal.aborted && isCurrentReviewScope(reviewScopeRef.current, startedScope)) {
+          setCandidateLoading(false);
+        }
       });
     return () => controller.abort();
   }, [
@@ -309,6 +371,115 @@ export default function CharacterWorkspace({
     candidateReload,
   ]);
 
+  useEffect(() => {
+    setAxisItems([]);
+    setAxisTotal(0);
+    setAxisFetchedCount(0);
+    setAxisLoaded(false);
+    setAxisListDirty(false);
+    axisMoreRequestRef.current += 1;
+    setAxisMoreBusy(false);
+    setAxisError("");
+    setAxisMoreError("");
+    if (
+      !projectId || !route.candidateId ||
+      candidate?.id !== route.candidateId ||
+      candidate.dimension !== "core_personality" ||
+      readiness !== "ready"
+    ) {
+      setAxisLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    const startedScope = reviewScopeRef.current;
+    setAxisLoading(true);
+    void fetchCharacterTraitAxes(projectId, { limit: 100, offset: 0 }, controller.signal)
+      .then((page) => {
+        if (controller.signal.aborted || !isCurrentReviewScope(reviewScopeRef.current, startedScope)) return;
+        setAxisItems(page.items);
+        setAxisTotal(page.total);
+        setAxisFetchedCount(page.items.length);
+        setAxisLoaded(true);
+      })
+      .catch((error) => {
+        if (controller.signal.aborted || !isCurrentReviewScope(reviewScopeRef.current, startedScope)) return;
+        const message = requestError(error);
+        if (message) setAxisError(message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && isCurrentReviewScope(reviewScopeRef.current, startedScope)) {
+          setAxisLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [projectId, route.candidateId, candidate?.id, candidate?.dimension, readiness, axisReload]);
+
+  async function loadMoreAxes() {
+    if (
+      axisLoading || axisMoreBusy || axisListDirty ||
+      axisFetchedCount >= axisTotal || !route.candidateId
+    ) return;
+    const startedScope = reviewScopeRef.current;
+    const requestId = ++axisMoreRequestRef.current;
+    setAxisMoreBusy(true);
+    setAxisMoreError("");
+    try {
+      const page = await fetchCharacterTraitAxes(projectId, { limit: 100, offset: axisFetchedCount });
+      if (!isCurrentReviewRequest(reviewScopeRef.current, startedScope, axisMoreRequestRef.current, requestId)) return;
+      let merged: CharacterTraitAxis[];
+      try {
+        merged = appendAxisPage(axisItems, page);
+      } catch {
+        setAxisLoaded(false);
+        setAxisError("轴列表在分页读取期间发生变化；请重新读取，避免遗漏已有轴。");
+        return;
+      }
+      setAxisItems(merged);
+      setAxisFetchedCount((count) => count + page.items.length);
+      setAxisTotal(page.total);
+    } catch (error) {
+      if (isCurrentReviewRequest(reviewScopeRef.current, startedScope, axisMoreRequestRef.current, requestId)) {
+        setAxisMoreError(requestError(error));
+      }
+    } finally {
+      if (isCurrentReviewRequest(reviewScopeRef.current, startedScope, axisMoreRequestRef.current, requestId)) {
+        setAxisMoreBusy(false);
+      }
+    }
+  }
+
+  async function createAxis(input: { display_name: string; definition: string }): Promise<CharacterTraitAxis> {
+    if (
+      !route.characterId || !route.candidateId ||
+      candidate?.id !== route.candidateId ||
+      candidate.character_id !== route.characterId ||
+      candidate.dimension !== "core_personality" ||
+      axisCreatePendingRef.current
+    ) {
+      throw new Error("请重新选择要审核的角色候选。");
+    }
+    const startedScope = reviewScopeRef.current;
+    const requestId = ++axisCreateRequestRef.current;
+    axisCreatePendingRef.current = true;
+    setAxisCreateBusy(true);
+    try {
+      const created = await createCharacterTraitAxis(projectId, input);
+      if (isCurrentReviewRequest(reviewScopeRef.current, startedScope, axisCreateRequestRef.current, requestId)) {
+        setAxisItems((current) => current.some((item) => item.id === created.id)
+          ? current : [...current, created]);
+        // The response confirms this one new axis, not a stable pagination
+        // snapshot. A parallel tab may have inserted another row meanwhile.
+        setAxisListDirty(true);
+      }
+      return created;
+    } finally {
+      if (isCurrentReviewRequest(reviewScopeRef.current, startedScope, axisCreateRequestRef.current, requestId)) {
+        axisCreatePendingRef.current = false;
+        setAxisCreateBusy(false);
+      }
+    }
+  }
+
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     navigate({
@@ -319,8 +490,26 @@ export default function CharacterWorkspace({
     });
   }
 
-  async function decide(decision: CandidateDecision, comment: string) {
-    if (!candidate || !route.characterId || decisionBusy) return;
+  async function decide(
+    decision: CandidateDecision,
+    comment: string,
+    selectedAxis: CharacterTraitAxis | null,
+  ) {
+    if (
+      !candidate || !route.characterId || !route.candidateId ||
+      candidate.id !== route.candidateId ||
+      candidate.character_id !== route.characterId ||
+      decisionBusy || decisionPendingRef.current
+    ) return;
+    if (decision === "confirm" && candidate.dimension === "core_personality" && !selectedAxis) {
+      setActionError("请先为核心性格候选选择或创建作者轴。");
+      return;
+    }
+    const startedScope = reviewScopeRef.current;
+    const requestId = ++decisionRequestRef.current;
+    const isCurrentRequest = () =>
+      isCurrentReviewRequest(reviewScopeRef.current, startedScope, decisionRequestRef.current, requestId);
+    decisionPendingRef.current = true;
     try {
       setDecisionBusy(decision);
       setActionError("");
@@ -333,26 +522,44 @@ export default function CharacterWorkspace({
           decision,
           comment: comment.trim(),
           expected_revision: candidate.revision,
+          ...(decision === "confirm" && selectedAxis
+            ? {
+                approved_axis_id: selectedAxis.id,
+                expected_axis_version: selectedAxis.version,
+              }
+            : {}),
         },
       );
+      if (!isCurrentRequest()) return;
       setCandidate(result.candidate);
       setAnnouncement(
         decision === "confirm"
-          ? "归纳已确认并写入角色档案。"
+          ? "归纳已确认并写入角色档案；作者轴只影响之后创建的分析，既有报告不会改写。"
           : "归纳已驳回，决定已保留在审核记录中。",
       );
       setListReload((value) => value + 1);
       setDetailReload((value) => value + 1);
       setSectionReload((value) => value + 1);
     } catch (error) {
+      if (!isCurrentRequest()) return;
       const message = requestError(error);
       setActionError(message);
       if (error instanceof ApiError && error.status === 409) {
         setCandidateReload((value) => value + 1);
         setDetailReload((value) => value + 1);
+        if (
+          error.detail && typeof error.detail === "object" &&
+          "detail" in error.detail &&
+          error.detail.detail && typeof error.detail.detail === "object" &&
+          "code" in error.detail.detail &&
+          error.detail.detail.code === "character_trait_axis_version_conflict"
+        ) setAxisReload((value) => value + 1);
       }
     } finally {
-      setDecisionBusy(null);
+      if (isCurrentRequest()) {
+        decisionPendingRef.current = false;
+        setDecisionBusy(null);
+      }
     }
   }
 
@@ -519,14 +726,31 @@ export default function CharacterWorkspace({
                     )}
                     {route.section === "candidates" && (
                       <CandidateReview
+                        key={reviewScopeKey(projectId, route.characterId, null)}
+                        scopeKey={scopeKey}
                         page={candidatePage}
-                        selected={candidate}
+                        selected={
+                          candidate?.id === route.candidateId &&
+                          candidate.character_id === route.characterId
+                            ? candidate : null
+                        }
                         selectedId={route.candidateId}
                         loading={sectionLoading}
                         detailLoading={candidateLoading}
                         error={sectionError}
                         detailError={candidateError}
                         decisionBusy={decisionBusy}
+                        axes={axisItems}
+                        axisTotal={axisTotal}
+                        axisFetchedCount={axisFetchedCount}
+                        axisLoaded={axisLoaded}
+                        axisListDirty={axisListDirty}
+                        axisLoading={axisLoading}
+                        axisMoreBusy={axisMoreBusy}
+                        axisCreateBusy={axisCreateBusy}
+                        axisError={axisError}
+                        axisMoreError={axisMoreError}
+                        axisRefreshKey={axisReload}
                         pageNumber={route.page}
                         hrefForCandidate={(candidateId) => pathFor({ ...route, candidateId })}
                         onSelect={(candidateId) => navigate({ candidateId })}
@@ -534,7 +758,10 @@ export default function CharacterWorkspace({
                         onRetry={() => setSectionReload((value) => value + 1)}
                         onRetryDetail={() => setCandidateReload((value) => value + 1)}
                         onBack={() => navigate({ candidateId: null })}
-                        onDecision={(decision, comment) => void decide(decision, comment)}
+                        onRetryAxes={() => setAxisReload((value) => value + 1)}
+                        onLoadMoreAxes={() => void loadMoreAxes()}
+                        onCreateAxis={createAxis}
+                        onDecision={(decision, comment, axis) => void decide(decision, comment, axis)}
                       />
                     )}
                     {route.section === "drift" && (
