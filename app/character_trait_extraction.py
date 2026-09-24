@@ -2001,6 +2001,53 @@ def _v4_preference_object_direction(
     return "negative" if match.group("negative") else "positive"
 
 
+def _single_direct_formal_preference_claim(
+    source: str, character: str,
+) -> tuple[SignalPolarity, str] | None:
+    """Parse only an unambiguous, one-assertion formal preference sentence.
+
+    The legacy binder still handles prose, lists and multiple assertions as
+    before.  In this narrow form, however, a prefix of a compound object is
+    provably not the stated object, and the predicate fixes polarity.
+    """
+
+    if "\n" in source or re.search(r'[，,；;：:！？!?"“”‘’\'（）()【】\[\]]', source):
+        return None
+    normalized = _compact(unicodedata.normalize("NFKC", source)).casefold()
+    if "。" in normalized or "." in normalized:
+        return None
+    actor = _compact(unicodedata.normalize("NFKC", character)).casefold()
+    if not actor:
+        return None
+    match = re.fullmatch(
+        rf"{re.escape(actor)}{_V4_DIRECT_PREFERENCE_MODIFIERS}"
+        rf"{_V4_DIRECT_PREFERENCE_PREDICATE}"
+        r"(?P<object>[\u4e00-\u9fffA-Za-z0-9]{1,48})",
+        normalized,
+    )
+    if match is None:
+        return None
+    whole_object = match.group("object")
+    list_joiner = re.search(
+        r"(?<=[\u4e00-\u9fffA-Za-z0-9])"
+        r"(?:以及|或者|还有|还是|和|或|与|及|跟)"
+        r"(?=[\u4e00-\u9fffA-Za-z0-9])",
+        whole_object,
+    )
+    second_predicate = re.search(
+        r"(?:不喜欢|不爱|喜欢|喜爱|偏爱|偏好|钟爱|讨厌|厌恶|爱吃|爱喝)",
+        whole_object,
+    )
+    if list_joiner or second_predicate:
+        # These may contain a second claim or a separate liked object. Leave
+        # their interpretation to the legacy path rather than the narrow guard.
+        return None
+    return (
+        "negative" if match.group("negative") else "positive",
+        whole_object,
+    )
+
+
 def _v4_explicit_named_adjacent_core_label(label: str, character: str) -> bool:
     """Permit a later anaphoric core label despite prior same-line actors only
     when its own text explicitly identifies this record's character.
@@ -2179,6 +2226,28 @@ def _bind_record(
         v4_clause.text if v4_clause is not None else evidence_text
     ):
         raise ValueError("key_object_support")
+    if (
+        v4_clause is None
+        and chunk.source_kind == "formal_character_profile"
+        and dimension == "preference"
+    ):
+        direct_claim = _single_direct_formal_preference_claim(
+            evidence_text, record.character
+        )
+        if direct_claim is not None:
+            direction, whole_object = direct_claim
+            model_object = _compact(
+                unicodedata.normalize("NFKC", record.key_object)
+            ).casefold()
+            if model_object != whole_object:
+                raise ValueError("key_object_support")
+            if record.polarity != direction:
+                raise ValueError("statement_support")
+            statement_claim = _single_direct_formal_preference_claim(
+                record.statement, record.character
+            )
+            if statement_claim is not None and statement_claim != direct_claim:
+                raise ValueError("statement_support")
     if not _statement_supported(
         record, v4_clause.text if v4_clause is not None else evidence_text
     ):

@@ -267,6 +267,145 @@ def test_same_line_same_object_paraphrase_still_deduplicates():
     assert len(result.pending_candidates) == 1
 
 
+@pytest.mark.parametrize(
+    "source",
+    (
+        "林澈喜欢蜜瓜和苹果。",
+        "林澈喜欢蜜瓜或苹果。",
+        "林澈喜欢蜜瓜、苹果。",
+    ),
+)
+def test_default_formal_preference_list_keeps_separate_object_records(source: str):
+    rows = [
+        valid_signal_record(
+            trait_key="food_preference",
+            statement=f"林澈喜欢{key_object}",
+            key_object=key_object,
+            evidence=source,
+        )
+        for key_object in ("蜜瓜", "苹果")
+    ]
+    provider = FakeProvider(json.dumps({"records": rows}, ensure_ascii=False))
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "direct-formal-list", "profile.md", source, 10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert {signal.key_object for signal in result.signals} == {"蜜瓜", "苹果"}
+    assert {candidate.comparison_key for candidate in result.pending_candidates} == {
+        "preference:蜜瓜", "preference:苹果",
+    }
+
+
+@pytest.mark.parametrize(
+    ("source", "apple_statement", "apple_polarity"),
+    (
+        ("林澈喜欢蜜瓜也喜欢苹果。", "林澈喜欢苹果", "positive"),
+        ("林澈喜欢蜜瓜但讨厌苹果。", "林澈讨厌苹果", "negative"),
+    ),
+)
+def test_default_formal_multiple_predicates_keep_separate_claims(
+    source: str, apple_statement: str, apple_polarity: str,
+):
+    melon = valid_signal_record(
+        trait_key="food_preference", statement="林澈喜欢蜜瓜",
+        key_object="蜜瓜", evidence=source,
+    )
+    apple = valid_signal_record(
+        trait_key="food_preference", statement=apple_statement,
+        key_object="苹果", polarity=apple_polarity, evidence=source,
+    )
+    provider = FakeProvider(json.dumps({"records": [melon, apple]}, ensure_ascii=False))
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "direct-formal-multiple", "profile.md", source, 10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert {(signal.key_object, signal.polarity) for signal in result.signals} == {
+        ("蜜瓜", "positive"), ("苹果", apple_polarity),
+    }
+
+
+@pytest.mark.parametrize(
+    ("source", "statement", "key_object", "polarity", "expected_reason"),
+    (
+        ("林澈喜欢蜜瓜味糖。", "林澈喜欢蜜瓜", "蜜瓜", "positive", "key_object_support"),
+        ("林澈喜欢热茶杯。", "林澈喜欢热茶", "热茶", "positive", "key_object_support"),
+        (
+            "林澈长期稳定偏好蜜瓜。", "林澈长期稳定偏好蜜瓜",
+            "蜜瓜", "negative", "statement_support",
+        ),
+        ("林澈喜欢蜜瓜味糖。", "林澈喜欢蜜瓜", "蜜瓜味糖", "positive", "statement_support"),
+        ("林澈喜欢蜜瓜。", "林澈不喜欢蜜瓜", "蜜瓜", "negative", "statement_support"),
+        ("林澈不喜欢蜜瓜。", "林澈喜欢蜜瓜", "蜜瓜", "positive", "statement_support"),
+    ),
+)
+def test_default_formal_direct_preference_rejects_compound_prefix_and_wrong_direction(
+    source: str, statement: str, key_object: str, polarity: str, expected_reason: str,
+):
+    row = valid_signal_record(
+        statement=statement,
+        key_object=key_object,
+        polarity=polarity,
+        evidence=source,
+    )
+    provider = FakeProvider(json.dumps({"records": [row]}, ensure_ascii=False))
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "direct-formal-reject", "profile.md", source, 10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {expected_reason: 2}
+
+
+@pytest.mark.parametrize(
+    ("source", "key_object", "polarity"),
+    (
+        ("林澈喜欢蜜瓜。", "蜜瓜", "positive"),
+        ("林澈不喜欢蜜瓜。", "蜜瓜", "negative"),
+        ("林澈长期稳定偏好蜜瓜。", "蜜瓜", "positive"),
+        ("林澈长期稳定的饮食偏好是蜜瓜。", "蜜瓜", "positive"),
+        ("林澈喜欢蜜瓜味糖。", "蜜瓜味糖", "positive"),
+        ("林澈喜欢热茶杯。", "热茶杯", "positive"),
+    ),
+)
+def test_default_formal_direct_preference_keeps_whole_object_and_direction(
+    source: str, key_object: str, polarity: str,
+):
+    row = valid_signal_record(
+        statement=source.rstrip("。"),
+        key_object=key_object,
+        polarity=polarity,
+        evidence=source,
+    )
+    provider = FakeProvider(json.dumps({"records": [row]}, ensure_ascii=False))
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "direct-formal-keep", "profile.md", source, 10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].key_object == key_object
+    assert result.signals[0].polarity == polarity
+
+
 def test_signal_extractor_rejects_invalid_json_without_leaking_content():
     provider = FakeProvider("not-json")
     result = CharacterSignalExtractor(provider, settings=settings()).extract(
