@@ -54,6 +54,12 @@ EvidenceMismatchKind = Literal[
     "source_excerpt",
     "other",
 ]
+CoreLabelScopeKind = Literal[
+    "selected_other_assertion",
+    "selected_literal_unbound",
+    "anchor_unresolved",
+    "other",
+]
 
 # The server context contains identifiers only, never source prose.  Keep a
 # hard ceiling here as a second boundary in addition to the stage builder's
@@ -485,6 +491,11 @@ class CharacterSignalDiagnostics(BaseModel):
     evidence_mismatch_counts: dict[EvidenceMismatchKind, int] = Field(
         default_factory=dict
     )
+    core_label_scope_counts: dict[CoreLabelScopeKind, int] = Field(
+        default_factory=dict
+    )
+    # Accepted formal signals only; this is separate from rejected scope events.
+    accepted_model_core_without_literal_label_count: int = Field(default=0, ge=0)
     prompt_tokens: int = Field(default=0, ge=0)
     completion_tokens: int = Field(default=0, ge=0)
     charged_tokens: int = Field(default=0, ge=0)
@@ -527,6 +538,7 @@ class _ValidatedSignalPackage:
     ignored_duplicate_records: int = 0
     reason_counts: dict[str, int] | None = None
     evidence_mismatch_counts: dict[EvidenceMismatchKind, int] | None = None
+    core_label_scope_counts: dict[CoreLabelScopeKind, int] | None = None
     failures: tuple[_SignalValidationFailure, ...] = ()
 
     @property
@@ -920,8 +932,10 @@ class CharacterSignalExtractor:
                 clean = validation.signals
                 reasons: Counter[str] = Counter()
                 mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
+                core_scope_counts: Counter[CoreLabelScopeKind] = Counter()
                 for attempt in validation_attempts:
                     mismatch_counts.update(attempt.evidence_mismatch_counts or {})
+                    core_scope_counts.update(attempt.core_label_scope_counts or {})
                 for earlier in validation_attempts[:-1]:
                     for reason, count in (earlier.reason_counts or {}).items():
                         reasons[f"regenerated_from_{reason}"] += count
@@ -952,6 +966,18 @@ class CharacterSignalExtractor:
                         ),
                         reason_counts=dict(sorted(reasons.items())),
                         evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
+                        core_label_scope_counts=dict(sorted(core_scope_counts.items())),
+                        accepted_model_core_without_literal_label_count=sum(
+                            signal.source_kind == "formal_character_profile"
+                            and (
+                                signal.dimension == "core_personality"
+                                or signal.stability == "core"
+                            )
+                            and re.search(
+                                r"核心(?:性格|人格)", signal.evidence.text
+                            ) is None
+                            for signal in clean
+                        ),
                         prompt_tokens=total_prompt_tokens,
                         completion_tokens=total_completion_tokens,
                         charged_tokens=total_charged_tokens,
@@ -1009,6 +1035,7 @@ def _validate_signal_package(
 
     reasons: Counter[str] = Counter()
     mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
+    core_scope_counts: Counter[CoreLabelScopeKind] = Counter()
     signals: list[CharacterSignal] = []
     accepted_groups: set[tuple[str, str, str, str, str, str, int, int]] = set()
     accepted_signal_ids: set[str] = set()
@@ -1048,6 +1075,8 @@ def _validate_signal_package(
             reasons[safe_reason] += 1
             if safe_reason == "evidence_mismatch":
                 mismatch_counts[_classify_evidence_mismatch(record, chunk)] += 1
+            elif safe_reason == "core_label_scope":
+                core_scope_counts[_classify_core_label_scope(record, chunk)] += 1
             failures.append(_SignalValidationFailure(record_index, safe_reason))
             continue
 
@@ -1129,6 +1158,7 @@ def _validate_signal_package(
         ignored_duplicate_records=ignored_duplicate_records,
         reason_counts=dict(sorted(reasons.items())),
         evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
+        core_label_scope_counts=dict(sorted(core_scope_counts.items())),
         failures=tuple(failures),
     )
 
@@ -1328,9 +1358,11 @@ def _failed_package_result(
 ) -> CharacterSignalExtractionResult:
     reasons: Counter[str] = Counter()
     mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
+    core_scope_counts: Counter[CoreLabelScopeKind] = Counter()
     for attempt in attempts:
         reasons.update(attempt.reason_counts or {})
         mismatch_counts.update(attempt.evidence_mismatch_counts or {})
+        core_scope_counts.update(attempt.core_label_scope_counts or {})
     if extra_reason:
         reasons[extra_reason] += 1
     return _empty_result(
@@ -1346,6 +1378,7 @@ def _failed_package_result(
         charged_tokens=charged_tokens,
         reason_counts=dict(sorted(reasons.items())),
         evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
+        core_label_scope_counts=dict(sorted(core_scope_counts.items())),
         token_admission=token_admission,
     )
 
@@ -1628,6 +1661,35 @@ def _classify_evidence_mismatch(
     ):
         return "source_excerpt"
     return "other"
+
+
+def _classify_core_label_scope(
+    record: _RawCharacterSignal, chunk: CharacterSignalChunk
+) -> CoreLabelScopeKind:
+    """Classify an already rejected record without changing its admission."""
+
+    try:
+        lines = chunk.content.splitlines()
+        start = record.source_line_start - chunk.global_line_start
+        end = record.source_line_end - chunk.global_line_start + 1
+        if start < 0 or end > len(lines) or start >= end:
+            return "other"
+        canonical_evidence = "\n".join(lines[start:end]).strip()
+        if re.search(r"核心(?:性格|人格)", canonical_evidence) is None:
+            return "other"
+        bound, selected = _core_label_bound_to_record(record, canonical_evidence)
+        if bound:
+            return "other"
+        if not selected:
+            return "anchor_unresolved"
+        if re.search(r"核心(?:性格|人格)", selected):
+            # This includes guarded negation, quotation and hypothesis; it is
+            # not proof that the parser made a mistake.
+            return "selected_literal_unbound"
+        return "selected_other_assertion"
+    except Exception:
+        # A diagnostic must never turn a rejected row into a run failure.
+        return "other"
 
 
 def _bind_record(record: _RawCharacterSignal, chunk: CharacterSignalChunk) -> CharacterSignal:
@@ -3368,6 +3430,7 @@ def _empty_result(
     charged_tokens: int = 0,
     reason_counts: dict[str, int] | None = None,
     evidence_mismatch_counts: dict[EvidenceMismatchKind, int] | None = None,
+    core_label_scope_counts: dict[CoreLabelScopeKind, int] | None = None,
     token_admission: CharacterSignalTokenAdmission | None = None,
 ) -> CharacterSignalExtractionResult:
     return CharacterSignalExtractionResult(
@@ -3380,6 +3443,7 @@ def _empty_result(
             ignored_duplicate_records=ignored_duplicate_records,
             reason_counts=reason_counts or {},
             evidence_mismatch_counts=evidence_mismatch_counts or {},
+            core_label_scope_counts=core_label_scope_counts or {},
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             charged_tokens=charged_tokens,

@@ -431,6 +431,7 @@ def test_signal_extractor_does_not_borrow_core_label_across_comma():
 
     assert result.signals == ()
     assert result.diagnostics.reason_counts == {"core_label_scope": 2}
+    assert sum(result.diagnostics.core_label_scope_counts.values()) == 2
 
 
 def _duplicate_interaction_records() -> tuple[str, dict, dict]:
@@ -3083,7 +3084,74 @@ def test_core_label_on_same_line_cannot_promote_independent_model_core_claim(
     assert result.diagnostics.reason_counts == {
         "regenerated_from_core_label_scope": 1
     }
+    assert result.diagnostics.core_label_scope_counts == {
+        "selected_other_assertion": 1
+    }
+    assert result.diagnostics.accepted_model_core_without_literal_label_count == 0
     assert '"reason":"core_label_scope"' in provider.calls[1][1]
+
+
+def test_core_label_scope_subtypes_and_retry_accounting_are_observation_only():
+    evidence = "甲的核心性格可能是谨慎核对。"
+    record = valid_signal_record(
+        character="甲", dimension="core_personality",
+        trait_key="record_verification", statement="甲的核心性格可能是谨慎核对",
+        stability="core", key_object="", source_line_start=20,
+        source_line_end=20, evidence=evidence,
+    )
+    response = json.dumps({"records": [record]}, ensure_ascii=False)
+    provider = SequenceProvider(response, response)
+    chunk = CharacterSignalChunk(
+        "hypothetical-core", "profile.md", evidence, 20,
+        "formal_character_profile",
+    )
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(chunk)
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"core_label_scope": 2}
+    assert result.diagnostics.core_label_scope_counts == {
+        "selected_literal_unbound": 2
+    }
+    assert sum(result.diagnostics.core_label_scope_counts.values()) == sum(
+        result.diagnostics.reason_counts.get(key, 0)
+        for key in ("core_label_scope", "regenerated_from_core_label_scope")
+    )
+    assert result.diagnostics.prompt_tokens == 34
+    assert result.diagnostics.completion_tokens == 18
+    assert result.diagnostics.charged_tokens >= 52
+    assert result.diagnostics.charged_tokens <= settings().character_signal_token_budget
+    assert provider.calls[0] == (CHARACTER_SIGNAL_SYSTEM_PROMPT, _chunk_prompt(chunk))
+    assert provider.calls[1] == (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT,
+        _regeneration_prompt(
+            _chunk_prompt(chunk), ("core_label_scope",),
+            failures=(_SignalValidationFailure(0, "core_label_scope"),),
+        ),
+    )
+
+
+def test_accepted_model_core_without_literal_label_is_separate_observation():
+    evidence = "甲一直谨慎核对记录。"
+    record = valid_signal_record(
+        character="甲", dimension="core_personality",
+        trait_key="record_verification", statement="甲一直谨慎核对记录",
+        stability="core", key_object="", source_line_start=20,
+        source_line_end=20, evidence=evidence,
+    )
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "unlabeled-model-core", "profile.md", evidence, 20,
+        "formal_character_profile",
+    ))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.diagnostics.reason_counts == {}
+    assert result.diagnostics.core_label_scope_counts == {}
+    assert result.diagnostics.accepted_model_core_without_literal_label_count == 1
 
 
 def test_core_label_does_not_promote_separate_stable_preference():
@@ -3173,6 +3241,9 @@ def test_unrelated_example_cannot_inherit_core_even_if_model_says_core():
     assert result.diagnostics.reason_counts == {
         "regenerated_from_core_label_scope": 1
     }
+    assert result.diagnostics.core_label_scope_counts == {
+        "selected_other_assertion": 1
+    }
 
 
 def test_comma_separated_preference_does_not_borrow_stability_label():
@@ -3232,6 +3303,9 @@ def test_same_statement_in_two_assertions_cannot_borrow_core_label():
     assert result.signals == ()
     assert result.diagnostics.reason_counts == {
         "regenerated_from_core_label_scope": 1
+    }
+    assert result.diagnostics.core_label_scope_counts == {
+        "anchor_unresolved": 1
     }
 
 

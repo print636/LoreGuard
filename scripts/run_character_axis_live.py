@@ -101,6 +101,10 @@ SAFE_EVIDENCE_MISMATCH_CATEGORIES = frozenset({
     "presentation_difference", "unique_other_line", "multiline_omission",
     "source_excerpt", "other",
 })
+SAFE_CORE_LABEL_SCOPE_CATEGORIES = frozenset({
+    "selected_other_assertion", "selected_literal_unbound",
+    "anchor_unresolved", "other",
+})
 SAFE_EVIDENCE_MISMATCH_ROLES = frozenset({
     "chapter", "canon", "character_profile", "reference", "unknown",
 })
@@ -111,6 +115,37 @@ SAFE_EVIDENCE_MISMATCH_OUTCOMES = frozenset({
     "disabled", "completed", "partial", "degraded", "skipped",
 })
 TERMINAL = {"completed", "failed", "cancelled"}
+SAFE_PUBLIC_STAGE_OUTCOMES = frozenset({
+    "disabled", "skipped", "degraded", "partial", "completed",
+})
+SAFE_PUBLIC_STAGE_REASONS = frozenset({
+    "feature_disabled", "invalid_remaining_budget", "run_token_budget",
+    "no_eligible_frozen_documents", "model_stage_unavailable",
+    "bounded_partial", "completed", "internal_failure",
+})
+SAFE_PUBLIC_MATERIAL_COVERAGE = frozenset({
+    "unknown", "partial", "complete",
+})
+SAFE_PUBLIC_CASE_OUTCOMES = frozenset({
+    "conflict", "needs_confirmation", "no_issue", "unverifiable",
+})
+SAFE_PUBLIC_REVIEW_VERDICTS = frozenset({
+    "contradicts", "explained", "needs_confirmation", "insufficient_evidence",
+})
+PUBLIC_RUN_COUNTER_LIMITS = {
+    "prompt_tokens": 100_000_000,
+    "completion_tokens": 100_000_000,
+    "planned_chunks": 1_000_000,
+    "processed_chunks": 1_000_000,
+    "draft_observations": 1_000_000,
+    "targeted_record_rejection_events": 1_000_000,
+}
+PUBLIC_STAGE_USAGE_LIMITS = {
+    "attempted_calls": 1_000_000,
+    "input_tokens": 100_000_000,
+    "completion_tokens": 100_000_000,
+    "charged_tokens": 100_000_000,
+}
 # Each official fixture has its own committed digest. Custom fixtures require
 # an explicit CLI digest and remain ineligible for strict quality claims.
 PINNED_MANIFEST_SHA256: str | None = (
@@ -604,6 +639,57 @@ def _safe_evidence_mismatch_diagnostics(
     )
 
 
+def _safe_core_label_scope_diagnostics(
+    stage: dict[str, Any], safe_reasons: dict[str, int],
+    *, safe_signal_histogram: list[dict[str, str | int]] | None,
+    signal_count: object,
+) -> tuple[dict[str, int] | None, int | None]:
+    """Project bounded categories against the independently validated signal count."""
+    raw_counts = stage.get("core_label_scope_counts")
+    raw_reasons = stage.get("reason_counts")
+    accepted_unlabeled = stage.get(
+        "accepted_model_core_without_literal_label_count"
+    )
+    if (
+        not isinstance(raw_counts, dict)
+        or not isinstance(raw_reasons, dict)
+        or not set(raw_counts) <= SAFE_CORE_LABEL_SCOPE_CATEGORIES
+        or any(type(value) is not int or not 1 <= value <= 1_000_000
+               for value in raw_counts.values())
+        or type(accepted_unlabeled) is not int
+        or not 0 <= accepted_unlabeled <= 1_000_000
+        or safe_signal_histogram is None
+        or type(signal_count) is not int
+        or not 0 <= signal_count <= 100_000
+    ):
+        return None, None
+    formal_core_upper_bound = sum(
+        row["count"] for row in safe_signal_histogram
+        if row["source_kind"] == "formal_character_profile"
+        and (row["stability"] == "core" or row["dimension"] == "core_personality")
+    )
+    if (
+        formal_core_upper_bound > signal_count
+        or accepted_unlabeled > formal_core_upper_bound
+        or accepted_unlabeled > signal_count
+    ):
+        return None, None
+    for key in ("core_label_scope", "regenerated_from_core_label_scope"):
+        value = raw_reasons.get(key, 0)
+        if (
+            type(value) is not int or not 0 <= value <= 1_000_000
+            or value != safe_reasons.get(key, 0)
+        ):
+            return None, None
+    expected = (
+        safe_reasons.get("core_label_scope", 0)
+        + safe_reasons.get("regenerated_from_core_label_scope", 0)
+    )
+    if sum(raw_counts.values()) != expected or expected > 1_000_000:
+        return None, None
+    return {key: raw_counts[key] for key in sorted(raw_counts)}, accepted_unlabeled
+
+
 def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     """Whitelist only model, character-stage, and build identity fields.
 
@@ -732,6 +818,13 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
     mismatch_counts, mismatch_chunks, mismatch_omitted = (
         _safe_evidence_mismatch_diagnostics(stage)
     )
+    core_scope_counts, accepted_unlabeled_core = (
+        _safe_core_label_scope_diagnostics(
+            stage, safe_reasons,
+            safe_signal_histogram=signal_histogram,
+            signal_count=counts.get("signal_count"),
+        )
+    )
     accepted_draft_refs = _safe_accepted_draft_refs(
         stage, known_documents=known_documents
     )
@@ -788,6 +881,8 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
         "evidence_mismatch_counts": mismatch_counts,
         "evidence_mismatch_chunks": mismatch_chunks,
         "evidence_mismatch_chunks_omitted_count": mismatch_omitted,
+        "core_label_scope_counts": core_scope_counts,
+        "accepted_model_core_without_literal_label_count": accepted_unlabeled_core,
         "stage_usage": {key: usage.get(key) for key in ("attempted_calls", "input_tokens", "completion_tokens", "charged_tokens")},
         "reason_counts": safe_reasons,
         "unreported_reason_entries": len(reasons) - len(safe_reasons),
@@ -1352,6 +1447,13 @@ def _score_case(case: dict[str, Any], state: dict[str, Any], suite: VerifiedSuit
         else trace.get("review_verdict") == "explained" if gold == "explained"
         else outcome != "conflict"
     )
+    raw_review_verdict = trace.get("review_verdict")
+    public_review_verdict = _safe_public_enum(
+        raw_review_verdict, SAFE_PUBLIC_REVIEW_VERDICTS
+    )
+    review_verdict_contract = (
+        raw_review_verdict is None or public_review_verdict is not None
+    )
     if gold == "conflict":
         visible_check = len(visible) == 1 and visible[0].get("judgement") == "contradicts"
     elif outcome in {"no_issue", "unverifiable"}:
@@ -1371,7 +1473,8 @@ def _score_case(case: dict[str, Any], state: dict[str, Any], suite: VerifiedSuit
         else None
     )
     passed = all((
-        outcome_check, review_check, visible_check, role_check, evidence_check,
+        outcome_check, review_check, review_verdict_contract,
+        visible_check, role_check, evidence_check,
         visible_issue_evidence in {"matched", "not_required"},
         len(independent) >= case["min_independent_observations"],
         forbidden_hits == 0, not actor_unavailable, coverage_check,
@@ -1381,8 +1484,8 @@ def _score_case(case: dict[str, Any], state: dict[str, Any], suite: VerifiedSuit
         "case_id": case["case_id"], "gold_class": gold,
         "evaluation_state": "case_result_available",
         "candidate_confirmed": True, "trace_unique": True,
-        "actual_outcome": outcome,
-        "review_verdict": trace.get("review_verdict"),
+        "actual_outcome": _safe_public_enum(outcome, SAFE_PUBLIC_CASE_OUTCOMES),
+        "review_verdict": public_review_verdict,
         "matched_observations": len(independent),
         "baseline_axis_snapshot_matched": baseline_axis_snapshot_matched,
         "axis_applicability_valid": axis_applicability_valid,
@@ -1405,10 +1508,36 @@ def _score_case(case: dict[str, Any], state: dict[str, Any], suite: VerifiedSuit
     }
 
 
+def _safe_public_enum(value: object, allowed: frozenset[str] | set[str]) -> str | None:
+    return value if type(value) is str and value in allowed else None
+
+
+def _safe_public_counter(value: object, *, maximum: int) -> int | None:
+    return value if type(value) is int and 0 <= value <= maximum else None
+
+
+def _safe_public_stage_usage(value: object) -> dict[str, int] | None:
+    if not isinstance(value, dict) or set(value) != set(PUBLIC_STAGE_USAGE_LIMITS):
+        return None
+    safe = {
+        key: _safe_public_counter(value[key], maximum=maximum)
+        for key, maximum in PUBLIC_STAGE_USAGE_LIMITS.items()
+    }
+    return safe if all(number is not None for number in safe.values()) else None
+
+
+def _safe_public_elapsed(value: object) -> float | int | None:
+    if type(value) is int:
+        return value if 0 <= value <= 1_000_000 else None
+    if type(value) is float and math.isfinite(value) and 0 <= value <= 1_000_000:
+        return value
+    return None
+
+
 def _public_run(summary: dict[str, Any] | None) -> dict[str, Any] | None:
     if summary is None:
         return None
-    return {
+    public = {
         key: summary.get(key)
         for key in (
             "status", "runtime_provenance_sha256", "elapsed_seconds", "prompt_tokens", "completion_tokens",
@@ -1418,10 +1547,32 @@ def _public_run(summary: dict[str, Any] | None) -> dict[str, Any] | None:
             "accepted_signal_histogram", "candidate_eligibility",
             "evidence_mismatch_counts", "evidence_mismatch_chunks",
             "evidence_mismatch_chunks_omitted_count",
+            "core_label_scope_counts",
+            "accepted_model_core_without_literal_label_count",
             "stage_usage", "reason_counts", "unreported_reason_entries",
             "token_admission_events",
         )
     }
+    # The summary is assembled from HTTP responses and persisted diagnostics.
+    # Even fields normally populated by server enums or integers must not
+    # become a prose, URL, or credential channel in the published report.
+    public["status"] = _safe_public_enum(summary.get("status"), TERMINAL)
+    public["stage_outcome"] = _safe_public_enum(
+        summary.get("stage_outcome"), SAFE_PUBLIC_STAGE_OUTCOMES
+    )
+    public["stage_reason"] = _safe_public_enum(
+        summary.get("stage_reason"), SAFE_PUBLIC_STAGE_REASONS
+    )
+    public["material_coverage"] = _safe_public_enum(
+        summary.get("material_coverage"), SAFE_PUBLIC_MATERIAL_COVERAGE
+    )
+    public["elapsed_seconds"] = _safe_public_elapsed(
+        summary.get("elapsed_seconds")
+    )
+    for key, maximum in PUBLIC_RUN_COUNTER_LIMITS.items():
+        public[key] = _safe_public_counter(summary.get(key), maximum=maximum)
+    public["stage_usage"] = _safe_public_stage_usage(summary.get("stage_usage"))
+    return public
 
 
 def _score_trial(
@@ -1548,8 +1699,17 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
     limits = limits if isinstance(limits, dict) else {}
     alias = provider.get("model_alias")
     return {
-        "schema_version": provenance.get("schema_version"),
-        "build_revision": build.get("git_revision") if _safe_key(build.get("git_revision")) else None,
+        "schema_version": (
+            "loreguard-runtime-provenance-v3"
+            if provenance.get("schema_version") == "loreguard-runtime-provenance-v3"
+            else None
+        ),
+        "build_revision": (
+            build.get("git_revision")
+            if isinstance(build.get("git_revision"), str)
+            and GIT_HASH.fullmatch(build["git_revision"])
+            else None
+        ),
         "service_artifact_sha256": (
             build.get("service_artifact_sha256")
             if isinstance(build.get("service_artifact_sha256"), str)
@@ -2019,6 +2179,16 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "evidence_mismatch_counts": (
                 "各次模型抽取尝试中的证据拒收/重试后恢复事件分类计数；"
                 "不是独立原文行数、最终失败次数或剧情错误数"
+            ),
+            "core_label_scope_counts": (
+                "正式角色设定抽取中，核心标签作用域拒收事件的固定类别计数；"
+                "含重试后恢复事件，与两个 core_label_scope 原因码之和守恒；"
+                "不是独立原文行数、模型准确率或解析器错误数；旧报告缺字段为 unavailable"
+            ),
+            "accepted_model_core_without_literal_label_count": (
+                "阶段最终按服务端信号 ID 去重后，正式设定中模型声明 core 但证据未出现"
+                "字面核心标签的接纳信号数；不同于抽取器的分块局部观察数，独立于拒收计数，"
+                "仅供观察，不代表该声明被验证正确；缺少可信信号总数/类别直方图时为 unavailable"
             ),
             "evidence_mismatch_chunks": (
                 "每个分块或目标抽取调用汇总其各次模型尝试中的证据拒收/恢复事件；"

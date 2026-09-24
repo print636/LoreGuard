@@ -49,6 +49,8 @@ from app.character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
     CharacterSignal,
     CharacterSignalChunk,
+    CharacterSignalDiagnostics,
+    CharacterSignalExtractionResult,
     CharacterSignalTarget,
     _targeted_chunk_prompt,
 )
@@ -86,6 +88,8 @@ def test_empty_character_stage_has_empty_mismatch_diagnostics():
     assert diagnostics["evidence_mismatch_counts"] == {}
     assert diagnostics["evidence_mismatch_chunks"] == []
     assert diagnostics["evidence_mismatch_chunks_omitted_count"] == 0
+    assert diagnostics["core_label_scope_counts"] == {}
+    assert diagnostics["accepted_model_core_without_literal_label_count"] == 0
 
 
 class CapturingQueueProvider(QueueProvider):
@@ -498,6 +502,98 @@ def _record(
 
 def _response(*records: dict) -> str:
     return json.dumps({"records": list(records)}, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("recover", (False, True))
+def test_stage_core_label_scope_counts_survive_safe_serialization(recover: bool):
+    line = "甲的核心性格是谨慎核对。甲喜欢热茶。"
+    unrelated = _record(
+        character="甲", evidence=line, polarity="positive",
+        kind="explicit_declaration", dimension="core_personality",
+        trait_key="tea_preference", statement="甲喜欢热茶",
+    )
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"作用域诊断-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="profile.md", role="character_profile",
+            content=line, narrative_context=_context(publication="published"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(
+                _response(unrelated),
+                _response() if recover else _response(unrelated),
+            ),
+        )
+
+    diagnostics = json.loads(json.dumps(result.diagnostics, ensure_ascii=False))
+    assert diagnostics["reason_counts"]["source_formal"] == 1
+    assert diagnostics["reason_counts"].get("core_label_scope", 0) == (
+        0 if recover else 2
+    )
+    assert diagnostics["reason_counts"].get(
+        "regenerated_from_core_label_scope", 0
+    ) == (1 if recover else 0)
+    assert diagnostics["core_label_scope_counts"] == {
+        "selected_other_assertion": 1 if recover else 2
+    }
+    assert sum(diagnostics["core_label_scope_counts"].values()) == sum(
+        diagnostics["reason_counts"].get(key, 0)
+        for key in ("core_label_scope", "regenerated_from_core_label_scope")
+    )
+    assert diagnostics["accepted_model_core_without_literal_label_count"] == 0
+
+
+def test_stage_unlabeled_core_observation_uses_final_deduplicated_signals():
+    line = "甲始终谨慎核对记录。"
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"去重诊断-{uuid4().hex}"}
+        ).json()
+        first = _create_document(
+            client, project["id"], name="profile-a.md", role="character_profile",
+            content=line, narrative_context=_context(publication="published"),
+        )
+        _create_document(
+            client, project["id"], name="profile-b.md", role="character_profile",
+            content=line, narrative_context=_context(publication="published"),
+        )
+        signal = CharacterSignal(
+            id="cs_" + "a" * 32, character="甲",
+            dimension="core_personality", trait_key="record_verification",
+            statement="甲始终谨慎核对记录", polarity="positive",
+            stability="core", observation_kind="explicit_declaration",
+            source_kind="formal_character_profile",
+            evidence=EvidenceSpan(
+                document_id=first["id"], document_name="profile-a.md",
+                line_start=1, line_end=1, text=line,
+            ),
+        )
+        per_chunk = CharacterSignalExtractionResult(
+            signals=(signal,),
+            diagnostics=CharacterSignalDiagnostics(
+                outcome="completed", attempted_calls=1,
+                raw_records=1, accepted_records=1, rejected_records=0,
+                accepted_model_core_without_literal_label_count=1,
+            ),
+        )
+        with patch(
+            "app.character_consistency_stage.CharacterSignalExtractor.extract",
+            return_value=per_chunk,
+        ) as mock_extract:
+            result = _run_stage(
+                _new_run(client, project["id"]), QueueProvider(),
+            )
+
+    assert mock_extract.call_count == 2
+    assert result.diagnostics["counts"]["signal_count"] == 1
+    assert result.diagnostics["accepted_model_core_without_literal_label_count"] == 1
+    assert result.diagnostics["accepted_signal_histogram"] == [{
+        "source_kind": "formal_character_profile", "stability": "core",
+        "dimension": "core_personality", "count": 1,
+    }]
 
 
 @pytest.mark.parametrize("event_limit", (128, 1))

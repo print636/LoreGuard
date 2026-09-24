@@ -540,6 +540,57 @@ def test_visible_false_positive_is_counted_even_when_case_trace_is_missing():
     assert trial["counts"]["false_positive_unknown_cases"] == 1
 
 
+def test_hard_negative_requires_valid_or_absent_review_verdict():
+    candidate_id = "44444444-4444-4444-8444-444444444444"
+    suite = axis_live.VerifiedSuite(
+        name="dev", world_id="world-dev", case_count=1, files={}, hashes={},
+        plan={"candidate_decisions": [{
+            "candidate_key": "wanted", "trait_type": "behavior_boundary",
+            "approved_axis_key": None,
+        }], "approved_axes": []},
+    )
+    case = {
+        "case_id": "safe-hard-negative", "candidate_key": "wanted",
+        "gold_class": "hard_negative", "allowed_final_outcomes": ["no_issue"],
+        "required_citation_roles": [], "min_independent_observations": 0,
+        "evidence": {key: [] for key in ("B", "C", "G", "X", "forbidden")},
+    }
+    trace = {
+        "confirmed_candidate_id_sha256": axis_live._candidate_id_sha256(
+            candidate_id
+        ),
+        "final_outcome": "no_issue", "review_verdict": None,
+        "citation_roles": [], "matched_observation_refs": [],
+        "citation_refs": None,
+    }
+    state = {
+        "trial": 1,
+        "selected": {"wanted": {
+            "id": candidate_id, "approved_axis_id": None, "evidence": [],
+        }},
+        "draft": {"case_trace": [trace], "visible_issue_cases": []},
+    }
+    assert axis_live._score_case(case, state, suite)["passed"] is True
+    trace["review_verdict"] = "explained"
+    normal = axis_live._score_case(case, state, suite)
+    assert normal["passed"] is True
+    assert normal["actual_outcome"] == "no_issue"
+    assert normal["review_verdict"] == "explained"
+
+    marker = "sk-SYNTHETIC-NOT-A-KEY"
+    trace["review_verdict"] = marker
+    rejected = axis_live._score_trial(suite, state, [case])
+    assert rejected["case_scores"][0]["passed"] is False
+    assert rejected["case_scores"][0]["review_verdict"] is None
+    assert marker not in json.dumps(rejected)
+
+    trace["review_verdict"] = {"api_key": marker}
+    malformed = axis_live._score_case(case, state, suite)
+    assert malformed["passed"] is False
+    assert malformed["review_verdict"] is None
+    assert marker not in json.dumps(malformed)
+
+
 def test_custom_fixture_cannot_claim_strict_pass(tmp_path, monkeypatch):
     root, digest = _fixture(tmp_path)
     monkeypatch.setattr(axis_live, "_code_state", lambda: {
@@ -1229,6 +1280,132 @@ def test_strict_dirty_blocks_http_but_dev_diagnostic_runs_one_world(
     assert diagnostic["preflight_verified_suites"] == ["dev", "transfer"]
 
 
+def test_dev_diagnostic_runtime_summary_rejects_untrusted_health_identity(
+    tmp_path, monkeypatch,
+):
+    root, digest = _fixture(tmp_path)
+    monkeypatch.setattr(axis_live, "DATASET", root)
+    monkeypatch.setattr(axis_live, "PINNED_MANIFEST_SHA256", digest)
+    monkeypatch.setattr(axis_live, "_code_state", lambda: {
+        "git_head": "a" * 40, "worktree_clean": False,
+    })
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(axis_live.httpx, "Client", FakeClient)
+    monkeypatch.setattr(axis_live, "_execute_trial", lambda *_a, **_k: None)
+    monkeypatch.setattr(axis_live, "_load_oracle", lambda _suite: [])
+    args = argparse.Namespace(
+        dataset=str(root), manifest_sha256=digest, output_json=None,
+        preflight_only=False, base_url="http://127.0.0.1:8000",
+        run_timeout_seconds=1, diagnostic_dev_one_trial=True,
+    )
+
+    normal = _runtime_provenance()
+    hostile = _runtime_provenance()
+    marker = "sk-SYNTHETIC-NOT-A-KEY"
+    private_url = "https://private.invalid/key"
+    hostile["schema_version"] = private_url
+    hostile["build"]["git_revision"] = marker
+    health = {"model": {"configured": True}, "runtime_provenance": hostile}
+    monkeypatch.setattr(axis_live, "_request", lambda *_a, **_k: health)
+
+    rejected, code = axis_live.run(args)
+    assert code == 1
+    assert rejected["runtime"]["schema_version"] is None
+    assert rejected["runtime"]["build_revision"] is None
+    serialized = json.dumps(rejected)
+    assert marker not in serialized
+    assert private_url not in serialized
+
+    health["runtime_provenance"] = normal
+    accepted, code = axis_live.run(args)
+    assert code == 1
+    assert accepted["runtime"]["schema_version"] == normal["schema_version"]
+    assert accepted["runtime"]["build_revision"] == normal["build"]["git_revision"]
+
+
+def test_dev_report_projects_trace_outcome_and_verdict_to_fixed_enums(
+    tmp_path, monkeypatch,
+):
+    root, digest = _fixture(tmp_path)
+    monkeypatch.setattr(axis_live, "DATASET", root)
+    monkeypatch.setattr(axis_live, "PINNED_MANIFEST_SHA256", digest)
+    monkeypatch.setattr(axis_live, "_code_state", lambda: {
+        "git_head": "a" * 40, "worktree_clean": False,
+    })
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(axis_live.httpx, "Client", FakeClient)
+    monkeypatch.setattr(axis_live, "_request", lambda *_a, **_k: {
+        "model": {"configured": True},
+        "runtime_provenance": _runtime_provenance(),
+    })
+    candidate_id = "11111111-1111-4111-8111-111111111111"
+    case = {
+        "case_id": "synthetic_case", "candidate_key": "wanted",
+        "gold_class": "hard_negative", "allowed_final_outcomes": ["no_issue"],
+        "required_citation_roles": [], "min_independent_observations": 0,
+        "evidence": {key: [] for key in ("B", "C", "G", "X", "forbidden")},
+    }
+    monkeypatch.setattr(axis_live, "_load_oracle", lambda _suite: [case])
+    trace_values = {"final_outcome": "sk-SYNTHETIC-NOT-A-KEY",
+                    "review_verdict": "https://private.invalid/key"}
+
+    def fake_trial(_client, _suite, _trial, state, **_kwargs):
+        trace = axis_live._safe_case_trace_summary({
+            "confirmed_candidate_id_sha256": axis_live._candidate_id_sha256(
+                candidate_id
+            ),
+            "character_key": "Actor", "matched_observation_refs": [],
+            "citation_roles": [], **trace_values,
+        })
+        state["selected"] = {"wanted": {
+            "id": candidate_id, "approved_axis_id": None, "evidence": [],
+        }}
+        state["draft"] = {"case_trace": [trace], "visible_issue_cases": []}
+
+    monkeypatch.setattr(axis_live, "_execute_trial", fake_trial)
+    args = argparse.Namespace(
+        dataset=str(root), manifest_sha256=digest, output_json=None,
+        preflight_only=False, base_url="http://127.0.0.1:8000",
+        run_timeout_seconds=1, diagnostic_dev_one_trial=True,
+    )
+
+    rejected, code = axis_live.run(args)
+    assert code == 1
+    trial = rejected["suites"]["dev"]["trials"][0]
+    assert trial["case_scores"][0]["actual_outcome"] is None
+    assert trial["case_scores"][0]["review_verdict"] is None
+    serialized = json.dumps(rejected)
+    assert trace_values["final_outcome"] not in serialized
+    assert trace_values["review_verdict"] not in serialized
+
+    trace_values.update(final_outcome="no_issue", review_verdict="explained")
+    accepted, code = axis_live.run(args)
+    assert code == 1
+    normal_case = accepted["suites"]["dev"]["trials"][0]["case_scores"][0]
+    assert normal_case["actual_outcome"] == "no_issue"
+    assert normal_case["review_verdict"] == "explained"
+
+
 @pytest.mark.parametrize(
     "failure_code", ["baseline_admission_failed", "candidate_review_failed"]
 )
@@ -1474,6 +1651,12 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
                     },
                 }],
                 "evidence_mismatch_chunks_omitted_count": 0,
+                "core_label_scope_counts": {
+                    "selected_other_assertion": 2,
+                    "selected_literal_unbound": 1,
+                    "anchor_unresolved": 2,
+                },
+                "accepted_model_core_without_literal_label_count": 0,
                 "source_text": "sk-secret never report",
                 "source_url": "https://private.invalid/key",
                 "counts": {
@@ -1541,6 +1724,12 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
         },
     }]
     assert summary["evidence_mismatch_chunks_omitted_count"] == 0
+    assert summary["core_label_scope_counts"] == {
+        "anchor_unresolved": 2,
+        "selected_literal_unbound": 1,
+        "selected_other_assertion": 2,
+    }
+    assert summary["accepted_model_core_without_literal_label_count"] == 0
     assert summary["reason_counts"] == {
         "candidate_limit": 2,
         "source_formal": 2,
@@ -1555,6 +1744,9 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
     assert summary["unreported_reason_entries"] == 1
     assert "sk-secret" not in repr(summary)
     assert "private.invalid" not in repr(axis_live._public_run(summary))
+    assert axis_live._public_run(summary)["core_label_scope_counts"] == (
+        summary["core_label_scope_counts"]
+    )
     raw_trace["citation_refs_incomplete"] = True
     incomplete = axis_live._run_summary(
         object(), {"id": "run-id"}, known_documents={"history.md", "draft.md"}
@@ -1652,6 +1844,178 @@ def test_evidence_mismatch_projection_fails_closed_on_untrusted_payload(monkeypa
     assert "private.invalid" not in json.dumps(public)
 
 
+def test_public_run_drops_untrusted_scalar_values_from_http_summary(monkeypatch):
+    marker = "sk-SYNTHETIC-NOT-A-KEY"
+    private_url = "https://private.invalid/key"
+
+    def fake_request(_client, _method, _path, route, **_kwargs):
+        if route == "diagnostics":
+            return {"character_consistency": {
+                "outcome": marker,
+                "reason_code": private_url,
+                "material_coverage": marker,
+                "counts": {
+                    "planned_chunks": marker,
+                    "processed_chunks": private_url,
+                    "draft_observation_count": {"source_text": marker},
+                    "targeted_record_rejected_count": marker,
+                },
+                "usage": {
+                    "attempted_calls": marker,
+                    "input_tokens": private_url,
+                    "completion_tokens": {"api_key": marker},
+                    "charged_tokens": marker,
+                },
+            }}
+        assert route == "issues"
+        return []
+
+    monkeypatch.setattr(axis_live, "_request", fake_request)
+    summary = axis_live._run_summary(
+        object(), {
+            "id": "synthetic-run", "status": marker,
+            "_elapsed_seconds": private_url,
+            "prompt_tokens": marker,
+            "completion_tokens": {"api_key": marker},
+        }, known_documents=set(),
+    )
+    public = axis_live._public_run(summary)
+    assert public is not None
+    for key in (
+        "status", "elapsed_seconds", "prompt_tokens", "completion_tokens",
+        "stage_outcome", "stage_reason", "material_coverage",
+        "planned_chunks", "processed_chunks", "draft_observations",
+        "targeted_record_rejection_events", "stage_usage",
+    ):
+        assert public[key] is None
+    serialized = json.dumps(public)
+    assert marker not in serialized
+    assert "private.invalid" not in serialized
+    assert "api_key" not in serialized
+    assert "run_id" not in public
+
+
+def test_public_run_preserves_normal_server_enums_and_bounded_usage():
+    summary = {
+        "status": "completed", "elapsed_seconds": 90.125,
+        "prompt_tokens": 1200, "completion_tokens": 300,
+        "stage_outcome": "partial", "stage_reason": "bounded_partial",
+        "material_coverage": "partial", "planned_chunks": 7,
+        "processed_chunks": 7, "draft_observations": 3,
+        "targeted_record_rejection_events": 2,
+        "stage_usage": {
+            "attempted_calls": 9, "input_tokens": 1100,
+            "completion_tokens": 280, "charged_tokens": 2000,
+        },
+    }
+    public = axis_live._public_run(summary)
+    assert public is not None
+    for key, value in summary.items():
+        assert public[key] == value
+    assert axis_live._public_run({**summary, "planned_chunks": True})[
+        "planned_chunks"
+    ] is None
+    assert axis_live._public_run({**summary, "elapsed_seconds": float("nan")})[
+        "elapsed_seconds"
+    ] is None
+    assert axis_live._public_run({**summary, "elapsed_seconds": 10 ** 1000})[
+        "elapsed_seconds"
+    ] is None
+    assert axis_live._public_run({**summary, "stage_usage": {
+        **summary["stage_usage"], "input_tokens": -1,
+    }})["stage_usage"] is None
+
+
+def test_core_label_scope_projection_is_bounded_and_old_data_unavailable():
+    valid = {
+        "accepted_signal_histogram": [{
+            "source_kind": "formal_character_profile", "stability": "core",
+            "dimension": "core_personality", "count": 3,
+        }],
+        "candidate_eligibility": {
+            "stable_or_core_formal_signals": 3,
+            "stable_or_core_history_signals": 0,
+            "prelimit_candidates": 0,
+        },
+        "core_label_scope_counts": {
+            "selected_other_assertion": 2, "anchor_unresolved": 1,
+        },
+        "accepted_model_core_without_literal_label_count": 3,
+        "reason_counts": {
+            "core_label_scope": 1,
+            "regenerated_from_core_label_scope": 2,
+        },
+    }
+    reasons = {
+        "core_label_scope": 1,
+        "regenerated_from_core_label_scope": 2,
+    }
+    safe_histogram, _ = axis_live._safe_accepted_signal_diagnostics(
+        valid, {"signal_count": 3}
+    )
+    assert safe_histogram is not None
+
+    def project(stage, safe_reasons=reasons, *, histogram=safe_histogram, total=3):
+        return axis_live._safe_core_label_scope_diagnostics(
+            stage, safe_reasons,
+            safe_signal_histogram=histogram, signal_count=total,
+        )
+
+    assert project(valid) == (
+        {"anchor_unresolved": 1, "selected_other_assertion": 2}, 3,
+    )
+    assert project({}) == (None, None)
+    assert project(valid, {}) == (None, None)
+    assert project(valid, histogram=None) == (None, None)
+    assert project(valid, total=None) == (None, None)
+    assert project(valid, total=2) == (None, None)
+    assert project({
+        "core_label_scope_counts": {},
+        "accepted_model_core_without_literal_label_count": 0,
+        "reason_counts": {},
+    }, {}, histogram=[], total=0) == ({}, 0)
+
+    lower_core = {
+        **valid,
+        "accepted_signal_histogram": [{
+            "source_kind": "formal_character_profile", "stability": "core",
+            "dimension": "core_personality", "count": 2,
+        }, {
+            "source_kind": "published_history", "stability": "stable",
+            "dimension": "preference", "count": 1,
+        }],
+        "candidate_eligibility": {
+            "stable_or_core_formal_signals": 2,
+            "stable_or_core_history_signals": 1,
+            "prelimit_candidates": 0,
+        },
+    }
+    lower_histogram, _ = axis_live._safe_accepted_signal_diagnostics(
+        lower_core, {"signal_count": 3}
+    )
+    assert lower_histogram is not None
+    assert project(valid, histogram=lower_histogram) == (None, None)
+
+    for bad in (
+        {"core_label_scope_counts": {"sk-secret": 3}},
+        {"core_label_scope_counts": {"anchor_unresolved": "sk-secret"}},
+        {"core_label_scope_counts": {"anchor_unresolved": True}},
+        {"core_label_scope_counts": {"anchor_unresolved": 0}},
+        {"core_label_scope_counts": {"anchor_unresolved": 2}},
+        {"accepted_model_core_without_literal_label_count": "sk-secret"},
+        {"accepted_model_core_without_literal_label_count": True},
+        {"accepted_model_core_without_literal_label_count": -1},
+        {"accepted_model_core_without_literal_label_count": 4},
+        {"reason_counts": {"core_label_scope": "sk-secret"}},
+        {"reason_counts": {"core_label_scope": True}},
+        {"reason_counts": {"core_label_scope": 1}},
+    ):
+        payload = {**valid, **bad}
+        assert project(payload) == (
+            None, None,
+        )
+
+
 def test_signal_histogram_projection_rejects_unbounded_or_untrusted_labels():
     valid = {
         "accepted_signal_histogram": [{
@@ -1715,6 +2079,8 @@ def test_each_run_summary_records_only_valid_worker_runtime_provenance_digest(mo
     assert summary["runtime_provenance_sha256"] == axis_live._runtime_provenance_digest(
         provenance
     )
+    assert summary["core_label_scope_counts"] is None
+    assert summary["accepted_model_core_without_literal_label_count"] is None
     assert "private-model-alias" not in repr(summary)
 
     diagnostics.pop("runtime_provenance")

@@ -147,6 +147,12 @@ _EVIDENCE_MISMATCH_KINDS = frozenset(
         "source_excerpt", "other",
     }
 )
+_CORE_LABEL_SCOPE_KINDS = frozenset(
+    {
+        "selected_other_assertion", "selected_literal_unbound",
+        "anchor_unresolved", "other",
+    }
+)
 _SAFE_DOCUMENT_ROLES = frozenset(
     {"chapter", "canon", "character_profile", "reference"}
 )
@@ -311,6 +317,7 @@ class CharacterConsistencyStage:
         usage = _Usage()
         reason_counts: Counter[str] = Counter()
         evidence_mismatch_counts: Counter[str] = Counter()
+        core_label_scope_counts: Counter[str] = Counter()
         evidence_mismatch_chunks: list[dict[str, Any]] = []
         evidence_mismatch_chunks_omitted = 0
         frozen = self._bind_frozen_documents(
@@ -619,6 +626,15 @@ class CharacterConsistencyStage:
                 "primary_extraction", extraction,
                 source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
             )
+            raw_core_counts = getattr(
+                extraction.diagnostics, "core_label_scope_counts", {}
+            )
+            if isinstance(raw_core_counts, dict):
+                core_label_scope_counts.update({
+                    key: value for key, value in raw_core_counts.items()
+                    if key in _CORE_LABEL_SCOPE_KINDS
+                    and type(value) is int and 0 < value <= 1_000_000
+                })
             signal_ignored_duplicates += (
                 extraction.diagnostics.ignored_duplicate_records
             )
@@ -907,6 +923,17 @@ class CharacterConsistencyStage:
                 targeted_fully_processed_draft_chunks += 1
 
         signals = tuple(all_signals.values())
+        # Count final server-deduplicated signals, not per-chunk clean model
+        # records. The extractor's local observation count remains diagnostic.
+        accepted_model_core_without_literal_label_count = sum(
+            signal.source_kind == "formal_character_profile"
+            and (
+                signal.dimension == "core_personality"
+                or signal.stability == "core"
+            )
+            and re.search(r"核心(?:性格|人格)", signal.evidence.text) is None
+            for signal in signals
+        )
         ambiguous_axis_evidence = sum(
             len(keys) > 1 for keys in axis_bindings_by_line.values()
         )
@@ -1359,6 +1386,10 @@ class CharacterConsistencyStage:
             evidence_mismatch_chunks=evidence_mismatch_chunks,
             evidence_mismatch_chunks_omitted_count=(
                 evidence_mismatch_chunks_omitted
+            ),
+            core_label_scope_counts=core_label_scope_counts,
+            accepted_model_core_without_literal_label_count=(
+                accepted_model_core_without_literal_label_count
             ),
         )
         return CharacterConsistencyStageResult(
@@ -3233,6 +3264,8 @@ def _diagnostics(
     evidence_mismatch_counts: Counter[str] | None = None,
     evidence_mismatch_chunks: list[dict[str, Any]] | None = None,
     evidence_mismatch_chunks_omitted_count: int = 0,
+    core_label_scope_counts: Counter[str] | None = None,
+    accepted_model_core_without_literal_label_count: int = 0,
     **counts: Any,
 ) -> dict[str, Any]:
     return {
@@ -3265,6 +3298,12 @@ def _diagnostics(
         "evidence_mismatch_chunks": list(evidence_mismatch_chunks or ()),
         "evidence_mismatch_chunks_omitted_count": (
             evidence_mismatch_chunks_omitted_count
+        ),
+        "core_label_scope_counts": dict(
+            sorted((core_label_scope_counts or {}).items())
+        ),
+        "accepted_model_core_without_literal_label_count": (
+            accepted_model_core_without_literal_label_count
         ),
         "usage": usage.safe_dict(),
         "boundary": (
@@ -3300,6 +3339,8 @@ def _empty_stage_result(outcome: str, reason_code: str) -> CharacterConsistencyS
             "evidence_mismatch_counts": {},
             "evidence_mismatch_chunks": [],
             "evidence_mismatch_chunks_omitted_count": 0,
+            "core_label_scope_counts": {},
+            "accepted_model_core_without_literal_label_count": 0,
             "usage": _Usage().safe_dict(),
             "boundary": (
                 "Optional frozen-input stage; model output cannot decide authority, "
