@@ -163,10 +163,21 @@ _SIGNAL_PACKAGE_VALIDATION_REASONS = frozenset(
 )
 
 _EXPLICIT_CORE_PERSONALITY = re.compile(
-    r"(?:这是|这属于|属于|被定义为|被设定为|被视为|构成).{0,16}核心(?:性格|人格)"
+    r"(?:这也?是|这属于|属于|被定义为|被设定为|被视为|构成).{0,16}核心(?:性格|人格)"
 )
 _NEGATED_CORE_PERSONALITY = re.compile(
     r"(?:不是|并非|不属于|不应视为|不能视为).{0,16}核心(?:性格|人格)"
+)
+_UNSAFE_CORE_PERSONALITY_CONTEXT = re.compile(
+    r"[\"“”‘’「」『』？?]|"
+    r"(?:如果|假如|假设|假定|倘若|若是|设想|猜测|可能|也许|或许|"
+    r"据说|据称|传闻|听说|候选文稿|候选设定|草稿|新稿|待审|待确认|"
+    r"待定|未定|提案)|"
+    r"核心(?:性格|人格)(?:已|已经|正在|将|会)?(?:改变|变化|变更|调整|修订|"
+    r"不是|并非|不再)"
+)
+_REPORTED_CORE_PERSONALITY = re.compile(
+    r"(?:说(?!话|明|服)|表示|声称|认为|宣称).{0,40}核心(?:性格|人格)"
 )
 _EXPLICIT_STABLE_PREFERENCE = re.compile(r"(?:长期)?稳定(?:的)?偏好")
 _EXPLICIT_STABLE_SPEECH = re.compile(
@@ -1537,12 +1548,14 @@ def _bind_record(record: _RawCharacterSignal, chunk: CharacterSignalChunk) -> Ch
         record.dimension,
         evidence_text,
         source_kind=chunk.source_kind,
+        character=record.character,
     )
     stability = _evidence_bound_stability(
         record.stability,
         evidence_text,
         source_kind=chunk.source_kind,
         dimension=dimension,
+        character=record.character,
     )
     observation_kind = _evidence_bound_observation_kind(
         record.observation_kind,
@@ -2176,6 +2189,7 @@ def _evidence_bound_dimension(
     evidence: str,
     *,
     source_kind: SignalSourceKind,
+    character: str,
 ) -> CharacterDimension:
     """Honor an explicit formal-profile type label over a model guess.
 
@@ -2189,10 +2203,7 @@ def _evidence_bound_dimension(
 
     if source_kind != "formal_character_profile":
         return model_dimension
-    compact = _compact(evidence)
-    if _NEGATED_CORE_PERSONALITY.search(compact):
-        return model_dimension
-    if _EXPLICIT_CORE_PERSONALITY.search(compact):
+    if _explicit_core_personality_label(evidence, character=character):
         return "core_personality"
     return model_dimension
 
@@ -2203,6 +2214,7 @@ def _evidence_bound_stability(
     *,
     source_kind: SignalSourceKind,
     dimension: CharacterDimension,
+    character: str,
 ) -> SignalStability:
     """Bind explicit formal-profile stability labels to the schema.
 
@@ -2215,10 +2227,7 @@ def _evidence_bound_stability(
     if source_kind != "formal_character_profile":
         return model_stability
     compact = _compact(evidence)
-    if (
-        _EXPLICIT_CORE_PERSONALITY.search(compact)
-        and not _NEGATED_CORE_PERSONALITY.search(compact)
-    ):
+    if _explicit_core_personality_label(evidence, character=character):
         return "core"
     if _NEGATED_STABLE_NON_CORE.search(compact):
         return model_stability
@@ -2227,6 +2236,136 @@ def _evidence_bound_stability(
     if dimension == "speech_pattern" and _EXPLICIT_STABLE_SPEECH.search(compact):
         return "stable"
     return model_stability
+
+
+def _explicit_core_personality_label(evidence: str, *, character: str) -> bool:
+    """Recognize only a present, authoritative label in a formal profile.
+
+    The named form must refer to this record's character. Hypotheses, reported
+    claims, quoted text, proposed drafts, and a changed trait are not a source
+    declaration even if they contain the same words.
+    """
+
+    def safe_label_context(source: str) -> bool:
+        compact_source = _compact(source)
+        return not (
+            _NEGATED_CORE_PERSONALITY.search(compact_source)
+            or _UNSAFE_CORE_PERSONALITY_CONTEXT.search(source)
+            or _REPORTED_CORE_PERSONALITY.search(compact_source)
+        )
+
+    # A single formal-profile document can describe several characters. Bind
+    # the "Name: core personality is ..." shorthand to this record's name and
+    # only its own sentence/semicolon clause; a different character's denial
+    # elsewhere in the same evidence span must not affect the named label.
+    source = re.sub(r"[ \t]+", "", evidence)
+    named_colon = re.compile(
+        rf"(?<![\u4e00-\u9fffA-Za-z0-9]){re.escape(_compact(character))}"
+        r"[：:]核心(?:性格|人格)是"
+        r"(?!否|不是|并非|可能|也许|或许|已经|正在|将会|改变|变化)"
+    )
+    for match in named_colon.finditer(source):
+        start = max(source.rfind(separator, 0, match.start()) for separator in "。！？；;\n") + 1
+        ends = [
+            position for separator in "。！？；;\n"
+            if (position := source.find(separator, match.end())) >= 0
+        ]
+        end = min(ends) if ends else len(source)
+        clause = source[start:end]
+        # A same-subject correction immediately after a semicolon belongs to
+        # this assertion; a newly named character's next section does not.
+        next_clause = source[end + 1 :].split("；", 1)[0].split(";", 1)[0].split("。", 1)[0]
+        adjacent_denial = bool(
+            end < len(source)
+            and re.match(
+                r"(?:但|不过|然而|其实|事实上)?(?:这|该|此)(?:并)?"
+                r"(?:不是|并非|不算|不属于).{0,16}核心(?:性格|人格)",
+                next_clause,
+            )
+        )
+        if safe_label_context(clause) and not adjacent_denial:
+            return True
+
+    compact = _compact(evidence)
+    if not safe_label_context(evidence):
+        return False
+    if _generic_core_label_bound(source, character=character):
+        return True
+    named_label = re.compile(
+        rf"(?<![\u4e00-\u9fffA-Za-z0-9]){re.escape(_compact(character))}"
+        r"(?:在(?:第[一二三四五六七八九十百千零〇两0-9]{1,4}"
+        r"(?:卷|章|幕)(?:开篇|初期|前期|结尾|后期|期间)?|"
+        r"故事(?:开篇|初期|前期|后期)|开篇|出场初期))?"
+        r"的核心(?:性格|人格)是"
+        r"(?!否|不是|并非|可能|也许|或许|已经|正在|将会|改变|变化)"
+    )
+    return named_label.search(compact) is not None
+
+
+def _generic_core_label_bound(source: str, *, character: str) -> bool:
+    """Bind an anaphoric core label only to one unambiguous short actor chain.
+
+    This deliberately is not named-entity recognition: uncertain independent
+    clauses fail closed. A profile with several actors should use the explicit
+    ``Name: core personality is ...`` or ``Name's core personality is ...``
+    forms instead of allowing ``this is her core personality`` to float.
+    """
+
+    labels = tuple(_EXPLICIT_CORE_PERSONALITY.finditer(source))
+    if len(labels) != 1 or len(source) > 400:
+        return False
+    label = labels[0]
+    phrase = label.group()
+    if phrase.startswith("这也是"):
+        owner = phrase[3:]
+    elif phrase.startswith("这是") or phrase.startswith("属于"):
+        owner = phrase[2:]
+    elif phrase.startswith("这属于"):
+        owner = phrase[3:]
+    else:
+        owner = ""
+    if owner and not (
+        owner.startswith(character)
+        or re.match(r"^[她他](?!们)(?:的|当时|长期|稳定)", owner)
+    ):
+        return False
+
+    before = [part for part in re.split(r"[，,；;。！？!?\n]", source[: label.start()]) if part]
+    after = [part for part in re.split(r"[，,；;。！？!?\n]", source[label.end() :]) if part]
+    if not before or len(before) + len(after) > 10:
+        return False
+
+    context = re.compile(r"^(?:在|面对|当|从)[^，,。；;\n]{1,24}(?:时|前|后|中)$")
+    continuation = re.compile(
+        r"^(?:习惯|尤其|并|也|还|始终|总是|通常|一向|会|不会|不再|"
+        r"很少|经常|回避|害怕|重视|喜欢|愿意|坚持)"
+    )
+    seen_subject = False
+    for clause in (*before, *after):
+        if clause.startswith(character):
+            if re.match(
+                rf"^{re.escape(character)}(?:和|与|同|跟|让|使|叫|请)"
+                r"[\u4e00-\u9fff]{1,4}",
+                clause,
+            ) or re.match(
+                rf"^{re.escape(character)}(?:的(?:朋友|搭档|队友|同伴|师父|助手)|"
+                r"看着|望着|看到|看见|听见|听到|注意到|得知)"
+                r"[\u4e00-\u9fff]{1,4}(?:谨慎|犹豫|内向|外向|喜欢|讨厌|"
+                r"回避|害怕|主动|很|非常|总是|会)",
+                clause,
+            ):
+                return False
+            seen_subject = True
+        elif context.fullmatch(clause):
+            continue
+        elif seen_subject and (
+            re.match(r"^[她他](?!们)", clause)
+            or continuation.match(clause)
+        ):
+            continue
+        else:
+            return False
+    return seen_subject
 
 
 def _evidence_bound_observation_kind(

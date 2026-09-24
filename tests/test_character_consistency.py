@@ -26,6 +26,8 @@ from app.character_trait_extraction import (
     _MAX_SIGNAL_REGENERATION_METADATA_CHARS,
     _SIGNAL_PACKAGE_VALIDATION_REASONS,
     _SignalValidationFailure,
+    _evidence_bound_dimension,
+    _evidence_bound_stability,
     _chunk_prompt,
     _matching_target,
     _regeneration_prompt,
@@ -2784,6 +2786,249 @@ def test_negated_core_personality_label_does_not_override_model_dimension():
 
     assert len(result.signals) == 1
     assert result.signals[0].dimension == "value"
+
+
+@pytest.mark.parametrize(
+    ("evidence", "character"),
+    (
+        ("桑衍的核心性格是重视搭档的知情权。", "桑衍"),
+        ("桑衍的核心人格是尊重搭档的自主决定。", "桑衍"),
+        ("许箬在第一卷开篇的核心性格是回避陌生水手的公开提问。", "许箬"),
+    ),
+)
+def test_named_formal_core_label_binds_dimension_and_stability(
+    evidence: str, character: str
+):
+    assert _evidence_bound_dimension(
+        "value", evidence, source_kind="formal_character_profile", character=character
+    ) == "core_personality"
+    assert _evidence_bound_stability(
+        "stable", evidence, source_kind="formal_character_profile",
+        dimension="core_personality", character=character,
+    ) == "core"
+
+
+def test_named_core_label_survives_full_signal_binding():
+    evidence = "桑衍的核心性格是重视搭档的知情权。"
+    record = valid_signal_record(
+        character="桑衍",
+        dimension="value",
+        trait_key="partner_information_right",
+        statement="桑衍的核心性格是重视搭档的知情权",
+        polarity="positive",
+        stability="stable",
+        key_object="搭档的知情权",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(
+        CharacterSignalChunk(
+            "named-core-profile", "profiles.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].dimension == "core_personality"
+    assert result.signals[0].stability == "core"
+
+
+@pytest.mark.parametrize(
+    ("character", "evidence"),
+    (
+        ("许砚灯", "许砚灯：核心人格是谨慎尽责。"),
+        ("曲霁", "曲霁：核心人格是对自己的失误主动担责。"),
+        ("温弦", "温弦：核心人格是畏惧公开反驳师父。"),
+        ("罗月", "罗月：核心人格是尊重口述者的自主权。"),
+        ("杭泊", "杭泊：核心人格是先照顾仍在危险中的队友。"),
+        ("许砚灯", "许砚灯: 核心性格是谨慎尽责。"),
+    ),
+)
+def test_named_colon_core_label_binds_only_the_named_character(
+    character: str, evidence: str
+):
+    assert _evidence_bound_dimension(
+        "value", evidence, source_kind="formal_character_profile", character=character
+    ) == "core_personality"
+    assert _evidence_bound_stability(
+        "stable", evidence, source_kind="formal_character_profile",
+        dimension="core_personality", character=character,
+    ) == "core"
+
+
+def test_colon_core_label_survives_full_signal_binding():
+    evidence = "许砚灯：核心人格是谨慎尽责；许砚灯始终坚持双人签名核验。"
+    record = valid_signal_record(
+        character="许砚灯",
+        dimension="value",
+        trait_key="signature_verification",
+        statement="许砚灯始终坚持双人签名核验",
+        polarity="positive",
+        stability="stable",
+        key_object="双人签名核验",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(
+        CharacterSignalChunk(
+            "colon-core-profile", "profiles.md", evidence, 20,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].dimension == "core_personality"
+    assert result.signals[0].stability == "core"
+
+
+@pytest.mark.parametrize(
+    ("evidence", "character"),
+    (
+        ("许砚灯：核心人格是谨慎尽责。", "曲霁"),
+        ("童画：长期稳定偏好是热椒饼；但这不是她的核心人格。", "童画"),
+        ("许砚灯：核心人格不是谨慎尽责。", "许砚灯"),
+        ("许砚灯：这不是他的核心人格。", "许砚灯"),
+        ("别人说，许砚灯：核心人格是谨慎尽责。", "许砚灯"),
+        ("“许砚灯：核心人格是谨慎尽责。”只是引文。", "许砚灯"),
+        ("假如，许砚灯：核心人格是谨慎尽责。", "许砚灯"),
+        ("在候选文稿中，许砚灯：核心人格是谨慎尽责。", "许砚灯"),
+        ("许砚灯：核心人格已经改变。", "许砚灯"),
+        ("许砚灯：核心人格是已经改变。", "许砚灯"),
+        ("许砚灯：核心人格是否谨慎尽责？", "许砚灯"),
+        ("许砚灯：核心人格是谨慎尽责；但这并非他的核心人格。", "许砚灯"),
+    ),
+)
+def test_named_colon_core_label_rejects_other_character_or_uncertain_context(
+    evidence: str, character: str
+):
+    assert _evidence_bound_dimension(
+        "value", evidence, source_kind="formal_character_profile", character=character
+    ) == "value"
+    assert _evidence_bound_stability(
+        "stable", evidence, source_kind="formal_character_profile",
+        dimension="value", character=character,
+    ) == "stable"
+
+
+def test_multi_character_profile_evidence_scopes_colon_label_to_own_clause():
+    evidence = (
+        "许砚灯：核心人格是谨慎尽责；"
+        "童画：长期稳定偏好是热椒饼，但这不是她的核心人格。"
+    )
+    assert _evidence_bound_dimension(
+        "value", evidence, source_kind="formal_character_profile", character="许砚灯"
+    ) == "core_personality"
+    assert _evidence_bound_dimension(
+        "preference", evidence, source_kind="formal_character_profile", character="童画"
+    ) == "preference"
+
+
+def test_colon_core_label_does_not_upgrade_published_history_or_draft():
+    evidence = "许砚灯：核心人格是谨慎尽责。"
+    for source_kind in ("published_history", "draft"):
+        assert _evidence_bound_dimension(
+            "value", evidence, source_kind=source_kind, character="许砚灯"
+        ) == "value"
+        assert _evidence_bound_stability(
+            "stable", evidence, source_kind=source_kind,
+            dimension="value", character="许砚灯",
+        ) == "stable"
+
+
+@pytest.mark.parametrize(
+    ("evidence", "character"),
+    (
+        ("甲在场，乙谨慎。这是乙稳定的核心性格。", "甲"),
+        ("甲在场，乙谨慎。这是她稳定的核心性格。", "甲"),
+        ("乙谨慎。这是乙稳定的核心性格；甲在场。", "甲"),
+        ("甲谨慎，乙也谨慎。这是她们的核心性格。", "甲"),
+        ("甲谨慎。这是乙稳定的核心性格。", "甲"),
+        ("甲谨慎，乙犹豫。这也是她的核心性格。", "甲"),
+        ("甲谨慎。乙犹豫。这是她的核心性格。", "甲"),
+        ("甲与乙交谈。这是他的核心性格。", "甲"),
+        ("甲看着乙谨慎。这是她的核心性格。", "甲"),
+        ("甲谨慎；“这是她的核心性格。”", "甲"),
+        ("甲谨慎，但这不是她的核心性格。", "甲"),
+        ("甲谨慎，别人说这是她的核心性格。", "甲"),
+    ),
+)
+def test_generic_core_label_rejects_other_actor_or_ambiguous_owner(
+    evidence: str, character: str
+):
+    assert _evidence_bound_dimension(
+        "value", evidence, source_kind="formal_character_profile", character=character
+    ) == "value"
+    assert _evidence_bound_stability(
+        "stable", evidence, source_kind="formal_character_profile",
+        dimension="value", character=character,
+    ) == "stable"
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    (
+        "祁雾重视同伴互动，这是她稳定的核心性格。",
+        "祁雾说话直来直往，这也是她的核心性格。",
+    ),
+)
+def test_generic_core_label_keeps_single_explicit_subject(evidence: str):
+    assert _evidence_bound_dimension(
+        "value", evidence, source_kind="formal_character_profile", character="祁雾"
+    ) == "core_personality"
+    assert _evidence_bound_stability(
+        "stable", evidence, source_kind="formal_character_profile",
+        dimension="core_personality", character="祁雾",
+    ) == "core"
+
+
+@pytest.mark.parametrize(
+    ("evidence", "character"),
+    (
+        ("桑衍的核心性格是重视搭档的知情权。", "许箬"),
+        ("桑衍的核心性格不是重视搭档的知情权。", "桑衍"),
+        ("桑衍重视搭档，但这不是她的核心性格。", "桑衍"),
+        ("别人说桑衍的核心性格是重视搭档的知情权。", "桑衍"),
+        ("“桑衍的核心性格是重视搭档。”只是旁人的猜测。", "桑衍"),
+        ("假如桑衍的核心性格是重视搭档，她会提前告知。", "桑衍"),
+        ("在候选文稿中，桑衍的核心性格是重视搭档。", "桑衍"),
+        ("桑衍在传言中的核心性格是重视搭档。", "桑衍"),
+        ("桑衍的核心性格已经改变。", "桑衍"),
+        ("桑衍的核心性格是已经改变。", "桑衍"),
+        ("桑衍的核心性格是否重视搭档？", "桑衍"),
+    ),
+)
+def test_uncertain_or_other_character_core_label_never_upgrades(
+    evidence: str, character: str
+):
+    assert _evidence_bound_dimension(
+        "value", evidence, source_kind="formal_character_profile", character=character
+    ) == "value"
+    assert _evidence_bound_stability(
+        "stable", evidence, source_kind="formal_character_profile",
+        dimension="value", character=character,
+    ) == "stable"
+
+
+def test_named_core_label_does_not_upgrade_published_or_draft_text():
+    evidence = "桑衍的核心性格是尊重搭档的自主决定。"
+    for source_kind in ("published_history", "draft"):
+        assert _evidence_bound_dimension(
+            "value", evidence, source_kind=source_kind, character="桑衍"
+        ) == "value"
+        assert _evidence_bound_stability(
+            "stable", evidence, source_kind=source_kind,
+            dimension="value", character="桑衍",
+        ) == "stable"
 
 
 def test_signal_prompt_requires_single_draft_behavior_and_explicit_type_precedence():

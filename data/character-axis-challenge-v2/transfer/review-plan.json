@@ -1,0 +1,111 @@
+{
+  "schema_version": "character-axis-review-plan-v1",
+  "suite": "transfer",
+  "world_id": "v2_transfer_qijing_frosttide",
+  "approved_axes": [
+    {
+      "axis_key": "v2t_double_signoff",
+      "display_name": "公共幕门双签核验",
+      "definition": "角色开启公共幕门前，是否主动坚持由两名不同见证人完成鸣钥签名核验。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "v2t_own_error_accountability",
+      "display_name": "本人失误的责任归属",
+      "definition": "角色面对自己造成的巡检错误时是否如实承担责任，还是将本人过错归咎于助手。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "v2t_public_mentor_challenge",
+      "display_name": "当众质疑师父命令",
+      "definition": "角色面对可能伤害居民的师父命令时，是否敢在当事人和其他居民面前直接提出反对。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "v2t_private_record_copying",
+      "display_name": "未授权口述档案复制",
+      "definition": "角色是否在口述者尚未授权时亲自复制由自己保管的私人口述。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "v2t_teammate_evacuating",
+      "display_name": "危险中等待队友",
+      "definition": "角色在灰潮救援时，是否等仍在危险中的最后一名队友撤出后自己才离开。",
+      "trait_type": "core_personality"
+    }
+  ],
+  "candidate_decisions": [
+    {
+      "candidate_key": "v2t_signoff",
+      "character_key": "许砚灯",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 5,
+      "source_quote": "许砚灯始终坚持幕门鸣钥的双人签名核验",
+      "polarity": "positive",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "v2t_double_signoff"
+    },
+    {
+      "candidate_key": "v2t_accountability",
+      "character_key": "曲霁",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 7,
+      "source_quote": "曲霁会如实承认自己算错的巡检数据",
+      "polarity": "positive",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "v2t_own_error_accountability"
+    },
+    {
+      "candidate_key": "v2t_challenge_growth",
+      "character_key": "温弦",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 9,
+      "source_quote": "温弦通常不敢当众反驳师父的命令",
+      "polarity": "negative",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "v2t_public_mentor_challenge"
+    },
+    {
+      "candidate_key": "v2t_hot_pepper_cake",
+      "character_key": "童画",
+      "trait_type": "preference",
+      "source_document": "02-character-profiles.md",
+      "source_line": 11,
+      "source_quote": "童画喜欢趁热吃热椒饼",
+      "polarity": "positive",
+      "stability": "stable",
+      "key_object": "热椒饼",
+      "approved_axis_key": null
+    },
+    {
+      "candidate_key": "v2t_archive_consent",
+      "character_key": "罗月",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 13,
+      "source_quote": "罗月绝不在口述者未授权时复制由自己保管的私人口述档案",
+      "polarity": "negative",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "v2t_private_record_copying"
+    },
+    {
+      "candidate_key": "v2t_last_teammate",
+      "character_key": "杭泊",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 15,
+      "source_quote": "杭泊在救援时坚持等最后一名队友撤出",
+      "polarity": "positive",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "v2t_teammate_evacuating"
+    }
+  ]
+}

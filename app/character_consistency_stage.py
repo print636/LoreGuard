@@ -66,7 +66,7 @@ _EXCEPTION_PATTERN = re.compile(
     r"被操控|受到控制"
 )
 _NEGATED_OR_UNCERTAIN = re.compile(
-    r"没有|并未|未曾|从未|不存在|不是|并非|毫无|无任何|没提到|未提到|"
+    r"没有|并未|未曾|从未|尚未|尚无|未发布|未发生|未形成|不存在|不是|并非|毫无|无任何|没提到|未提到|"
     r"没有提到|未说明|可能|也许|或许|疑似|似乎|假如|如果|是否|"
     r"不能|不得|不会|不再|不曾|无法|难以|禁止|否认|拒绝|没|"
     r"不(?:会|能|再|曾|是|愿|想|肯|要|可|应|得)?(?:进行|发生|存在|选择)?"
@@ -85,6 +85,53 @@ _TEMPORARY_CHARACTER_STATE_OR_BEHAVIOR = re.compile(
     r"担任|充当|保持|改变|改用|隐藏|隐瞒|回避|沉默|失语|"
     r"失忆|昏迷|失控|受伤|生病|离开|停留|拒绝|接受|喜欢|"
     r"讨厌|信任|敌对|合作|服从)"
+)
+_MEDICAL_NONFACTUAL = re.compile(
+    r"如果|假如|若(?:在|有|被|遇|需|要|能|可|将)|假设|除非|"
+    r"可能|也许|或许|疑似|似乎|据说|传闻|"
+    r"没有|并未|未曾|从未|不曾|尚未|未执行|"
+    r"计划|打算|准备|应该|应当|将会|拒绝照做|"
+    r"规则|守则|条款|[？?「」『』“”]"
+)
+_MEDICAL_CONTEXT = re.compile(
+    r"(?:医师|医生|大夫).{0,120}(?:热|辛辣|辣)"
+)
+_RETROSPECTIVE_NONFACTUAL = re.compile(
+    r"排练|演练|戏本|剧本|台词|假装|梦境|梦中|据说|传闻|"
+    r"并未(?:说|表示|发言|承认)|没有(?:说|表示|发言|承认)|"
+    r"准备(?:说|表示|发言)|打算(?:说|表示|发言)|计划(?:说|表示|发言)"
+)
+_HARMFUL_COMPLIANCE_NONFACTUAL = re.compile(
+    r"如果|假如|若(?:在|有|被|遇|需|要|能|可|将)|假设|除非|"
+    r"可能|也许|或许|疑似|似乎|据说|传闻|排练|演练|"
+    r"戏本|剧本|台词|假装|梦境|梦中|"
+    r"并未照办|没有照办|未曾照办|并未服从|没有服从|未曾服从|"
+    r"没有(?:造成|导致|伤到|伤害)|并未(?:造成|导致|伤到|伤害)|"
+    r"(?:没有|并未|未曾).{0,20}(?:被迫转移|受伤|被抬走|死亡|伤亡)"
+)
+_GENERIC_OTHER_ACTOR_OR_OBSERVER = re.compile(
+    r"看见|看到|看着|目睹|见到|见证|听见|听说|听到|听闻|"
+    r"发现|观察|察觉|获悉|得知|知道|旁观|围观|在场|在旁|身旁|旁边|"
+    r"认为|觉得|声称|宣称|说(?!谎)|介绍|记下|记录|提醒|支持|"
+    r"命令|要求|指示|迫使|让|使|叫|请|教|指导|帮助|协助|"
+    r"陪同|带着|牵着|替|把|和|与|同|跟|及|、|"
+    r"(?:的)?(?:同伴|伙伴|朋友|助手|学生|师父|队员|其他人|另一人|别人)|"
+    r"被.{0,16}(?:要求|命令|迫使|劝|使)"
+)
+_GENERIC_OBJECT_PREFIX = re.compile(
+    r"(?:看见|目睹|见到|听见|听说|发现|观察|命令|要求|指示|"
+    r"迫使|让|使|叫|请|教|指导|帮助|协助|陪同|带着|牵着|替)$"
+)
+_GENERIC_SELF_ACTION_LEAD = re.compile(
+    r"^(?:的确|确实|曾经|曾|已经|正在|始终|一直|逐渐|渐渐|"
+    r"暂时|临时|当时|随后|主动|自愿|独自|亲自|因|经|受|"
+    r"完成|参加|接受|遭遇|克服|改变|变得|学会|训练|"
+    r"伪装|假装|佯装|撒谎|说谎|演戏|潜伏|梦中|失忆|"
+    r"昏迷|失控|回避|拒绝|被操控|被控制)"
+)
+_UNPUBLISHED_GROWTH_CLAIM = re.compile(
+    r"(?:尚未|尚无|并未|没有|未曾|未)(?:发布|记录|发生|形成|出现)"
+    r".{0,120}(?:成长|改变|转变|训练)"
 )
 _MAX_CONFIRMED_TRAITS_IN_SERVER_CONTEXT = 12
 _MAX_CASE_TRACE_OBSERVATION_REFS = 12
@@ -790,6 +837,35 @@ class CharacterConsistencyStage:
                 ambiguous_axis_evidence
             )
         pending = list(build_pending_trait_candidates(signals))
+        prelimit_candidates = len(pending)
+        accepted_signal_buckets = Counter(
+            (signal.source_kind, signal.stability, signal.dimension)
+            for signal in signals
+        )
+        accepted_signal_histogram = [
+            {
+                "source_kind": source_kind,
+                "stability": stability,
+                "dimension": dimension,
+                "count": count,
+            }
+            for (source_kind, stability, dimension), count in sorted(
+                accepted_signal_buckets.items()
+            )
+        ]
+        candidate_eligibility = {
+            "stable_or_core_formal_signals": sum(
+                signal.source_kind == "formal_character_profile"
+                and signal.stability in {"stable", "core"}
+                for signal in signals
+            ),
+            "stable_or_core_history_signals": sum(
+                signal.source_kind == "published_history"
+                and signal.stability in {"stable", "core"}
+                for signal in signals
+            ),
+            "prelimit_candidates": prelimit_candidates,
+        }
         if len(pending) > settings.character_consistency_max_candidates_per_run:
             reason_counts["candidate_limit"] += len(pending) - (
                 settings.character_consistency_max_candidates_per_run
@@ -894,6 +970,8 @@ class CharacterConsistencyStage:
             )
             matches: list[CharacterSignal] = []
             draft_scopes: list[NarrativeScopeV1] = []
+            draft_ordinals: list[int] = []
+            draft_document_ids: list[str] = []
             for observation in resolved_drafts.get(character_key, ()):
                 axis_match = _observation_matches_baseline(
                     baseline_entry,
@@ -957,6 +1035,8 @@ class CharacterConsistencyStage:
                     )
                 )
                 draft_scopes.append(source.scope)
+                draft_ordinals.append(source.ordinal)
+                draft_document_ids.append(source.document.id)
             if not matches:
                 case_trace.append(
                     _safe_case_trace(
@@ -977,11 +1057,15 @@ class CharacterConsistencyStage:
                 reason_counts["observation_limit"] += len(matches) - 24
                 matches = matches[:24]
                 draft_scopes = draft_scopes[:24]
+                draft_ordinals = draft_ordinals[:24]
+                draft_document_ids = draft_document_ids[:24]
                 partial = True
             support = _find_support_evidence(
                 baseline=baseline,
                 baseline_scope=baseline_scope,
                 draft_scopes=tuple(draft_scopes),
+                draft_ordinals=tuple(draft_ordinals),
+                draft_document_ids=tuple(draft_document_ids),
                 documents=frozen,
                 limit=settings.character_drift_max_support_evidence,
             )
@@ -1184,6 +1268,8 @@ class CharacterConsistencyStage:
             sensitivity=settings.character_consistency_sensitivity,
             material_coverage="partial" if partial else "complete",
             case_trace=case_trace,
+            accepted_signal_histogram=accepted_signal_histogram,
+            candidate_eligibility=candidate_eligibility,
             accepted_draft_observation_refs=accepted_draft_observation_refs,
             accepted_draft_observation_total=accepted_draft_observation_total,
             accepted_draft_observation_refs_truncated=(
@@ -2299,10 +2385,18 @@ def _find_support_evidence(
     baseline: ConfirmedTraitSnapshot,
     baseline_scope: NarrativeScopeV1,
     draft_scopes: tuple[NarrativeScopeV1, ...],
+    draft_ordinals: tuple[int, ...],
+    draft_document_ids: tuple[str, ...],
     documents: list[_FrozenDocument],
     limit: int,
 ) -> tuple[SupportEvidence, ...]:
-    if limit <= 0:
+    if (
+        limit <= 0 or not draft_scopes
+        or len(draft_scopes) != len(draft_ordinals)
+        or len(draft_scopes) != len(draft_document_ids)
+        or any(type(ordinal) is not int or ordinal < 0 for ordinal in draft_ordinals)
+        or any(not isinstance(document_id, str) or not document_id for document_id in draft_document_ids)
+    ):
         return ()
     character = _key(baseline.character)
     baseline_ranges = tuple(
@@ -2312,7 +2406,21 @@ def _find_support_evidence(
     result: list[SupportEvidence] = []
     seen: set[tuple[str, int]] = set()
     for source in sorted(documents, key=lambda row: row.ordinal):
-        if source.scope is None or source.resolution_state != "confirmed":
+        if (
+            source.source_kind not in {"formal_character_profile", "published_history"}
+            or source.publication_status != "published"
+            or source.authority_tier not in {"core_canon", "formal_record"}
+            or source.scope is None or source.resolution_state != "confirmed"
+            or any(source.ordinal >= draft_ordinal for draft_ordinal in draft_ordinals)
+            or (
+                source.scope.release is not None
+                and any(
+                    draft_scope.release is None
+                    or source.scope.release.ordinal > draft_scope.release.ordinal
+                    for draft_scope in draft_scopes
+                )
+            )
+        ):
             continue
         if (
             scope_relation(
@@ -2335,7 +2443,15 @@ def _find_support_evidence(
             for draft_scope in draft_scopes
         ):
             continue
-        for line_number, line in enumerate(source.document.content.splitlines(), start=1):
+        source_lines = source.document.content.splitlines()
+        public_retrospective_lines = tuple(
+            line_number
+            for line_number, line in enumerate(source_lines, start=1)
+            if 0 < len(line.strip()) <= 2_000 and _actual_public_retrospective_statement(
+                line.strip(), character=baseline.character
+            )
+        )
+        for line_number, line in enumerate(source_lines, start=1):
             stripped = line.strip()
             if not stripped or len(stripped) > 2_000 or character not in _key(stripped):
                 continue
@@ -2348,7 +2464,21 @@ def _find_support_evidence(
                 for document_id, line_start, line_end in baseline_ranges
             ):
                 continue
-            kind = _explicit_support_kind(stripped)
+            kind = _explicit_support_kind(stripped, character=baseline.character)
+            if (
+                kind is None
+                and _actual_harmful_compliance(
+                    stripped, character=baseline.character
+                )
+                # The accident is only a causal background, not growth by
+                # itself. Require the same character's later, actual public
+                # retrospective statement in this published source.
+                and any(
+                    line_number < later <= line_number + 6
+                    for later in public_retrospective_lines
+                )
+            ):
+                kind = "causal_bridge"
             if kind is None or (source.document.id, line_number) in seen:
                 continue
             seen.add((source.document.id, line_number))
@@ -2365,6 +2495,12 @@ def _find_support_evidence(
                         else "原文明示可能存在伪装或临时情境"
                     ),
                     explicit=True,
+                    source_kind=source.source_kind,
+                    publication_status=source.publication_status,
+                    authority_tier=source.authority_tier,
+                    resolution_state=source.resolution_state,
+                    source_ordinal=source.ordinal,
+                    eligible_draft_document_ids=tuple(sorted(set(draft_document_ids))),
                     evidence=EvidenceSpan(
                         document_id=source.document.id,
                         document_name=source.document.name,
@@ -2379,7 +2515,7 @@ def _find_support_evidence(
     return tuple(result)
 
 
-def _explicit_support_kind(line: str) -> str | None:
+def _explicit_support_kind(line: str, *, character: str | None = None) -> str | None:
     """Return support only for an affirmative clause, never a lexical hit.
 
     Narrative prose often says that no growth or disguise was described.  A
@@ -2389,23 +2525,282 @@ def _explicit_support_kind(line: str) -> str | None:
     false negatives over unsupported explanations.
     """
 
+    if _UNPUBLISHED_GROWTH_CLAIM.search(line):
+        return None
+
+    # This checks an already delivered public retrospective statement. Its
+    # embedded future pledge is not treated as a performed future action.
+    if character and _actual_public_retrospective_statement(
+        line, character=character
+    ):
+        return "causal_bridge"
+
+    if character and _actual_same_actor_training_bridge(
+        line, character=character
+    ):
+        return "causal_bridge"
+
     # Conditions and rules often span comma-delimited clauses ("if X, then
     # Y"). Reject the whole line so the consequent cannot masquerade as an
     # event that actually occurred.
-    if _CONDITIONAL_OR_RULE.search(line):
+    if _has_unresolved_support_condition(line):
         return None
 
+    if character and _MEDICAL_CONTEXT.search(line):
+        # A prescription is not itself an exception. Do not let the generic
+        # temporary-behavior pattern accept an unperformed medical instruction.
+        return "exception" if _explicit_medical_exception(
+            line, character=character
+        ) else None
+
+    previous_clause = ""
     for clause in re.split(r"[，,。；;！？!?\n]+", line):
         candidate = clause.strip()
         if not candidate or _NEGATED_OR_UNCERTAIN.search(candidate):
+            previous_clause = ""
             continue
-        if _TEMPORARY_CHARACTER_STATE_OR_BEHAVIOR.search(candidate):
-            return "exception"
-        if _EXCEPTION_PATTERN.search(candidate):
-            return "exception"
-        if _BRIDGE_PATTERN.search(candidate):
-            return "causal_bridge"
+        for pattern, kind in (
+            (_TEMPORARY_CHARACTER_STATE_OR_BEHAVIOR, "exception"),
+            (_EXCEPTION_PATTERN, "exception"),
+            (_BRIDGE_PATTERN, "causal_bridge"),
+        ):
+            for hit in pattern.finditer(candidate):
+                if character is None or _actor_owns_generic_support(
+                    candidate, character=character, support_start=hit.start(),
+                    support_end=hit.end(),
+                ):
+                    return kind
+        if character:
+            purpose = re.fullmatch(
+                rf"{re.escape(character)}为(?:接替|潜入|躲避|掩护|侦查|执行任务).{{0,24}}",
+                previous_clause,
+            )
+            if purpose and re.match(
+                r"^(?:自愿|主动|亲自)?(?:完成|参加|接受).{0,50}训练",
+                candidate,
+            ):
+                return "causal_bridge"
+            if purpose and re.match(
+                r"^(?:暂时|临时)?(?:假装|伪装|佯装)", candidate
+            ):
+                return "exception"
+        previous_clause = candidate
     return None
+
+
+def _has_unresolved_support_condition(line: str) -> bool:
+    """Only a bounded elapsed-time `只在前两周` is not a hypothetical rule."""
+
+    for match in _CONDITIONAL_OR_RULE.finditer(line):
+        if match.group() == "只在" and re.match(
+            r"(?:前|头|最初|第一).{0,6}(?:周|天|月|年)",
+            line[match.end():],
+        ):
+            continue
+        return True
+    return False
+
+
+def _actual_same_actor_training_bridge(line: str, *, character: str) -> bool:
+    """Narrowly retain completed training and its observed outcome for one actor."""
+
+    actor_name = character.strip()
+    if (
+        not actor_name
+        or _has_unresolved_support_condition(line)
+        or re.search(r"排练|演练|戏本|剧本|台词|打算|计划|准备|可能|也许|或许", line)
+    ):
+        return False
+    actor = re.escape(actor_name)
+    prior_state_and_training = re.search(
+        rf"(?:^|[，,。；;])\s*{actor}(?:的确|确实)?"
+        r"(?:不敢|不肯|无法|回避).{0,80}。"
+        r"(?:[^。；，,]{1,12}(?:之前|之后|过后|以后|当日|那天|时|后|前)[，,])?"
+        r"[他她](?:自愿|主动|亲自)(?:参加|完成|接受)"
+        r"[^。；;]{0,60}训练",
+        line,
+    )
+    if prior_state_and_training is not None:
+        return True
+    observed_outcome = re.search(
+        r"^\s*(?:训练末日|训练结束|训练完成|完成训练).{0,24}[，,]"
+        rf"{actor}(?:独自|主动|亲自).{{0,85}}"
+        r"(?:讲解|通报|说明|主持|回答|回应|发言)",
+        line,
+    )
+    return observed_outcome is not None
+
+
+def _actor_owns_generic_support(
+    clause: str, *, character: str, support_start: int, support_end: int,
+) -> bool:
+    """Keep a lexical G/X hit only when the named character is its agent."""
+
+    actor_name = character.strip()
+    if not actor_name:
+        return False
+    for match in re.finditer(re.escape(actor_name), clause[:support_end]):
+        if match.end() > support_start:
+            continue
+        prefix = clause[:match.start()].strip()
+        if prefix and (
+            len(prefix) > 30
+            or _GENERIC_OBJECT_PREFIX.search(prefix)
+            or not re.search(r"(?:时|后|中|前|日|期间|之后|之际)$", prefix)
+        ):
+            continue
+        between = clause[match.end():support_end]
+        if (
+            _GENERIC_SELF_ACTION_LEAD.match(between)
+            and not _GENERIC_OTHER_ACTOR_OR_OBSERVER.search(between)
+        ):
+            return True
+    return False
+
+
+def _actual_public_retrospective_statement(line: str, *, character: str) -> bool:
+    """Recognize an actual public admission of changed stance, not a pledge's act."""
+
+    actor_name = character.strip()
+    if not actor_name:
+        return False
+    match = re.search(r"(?P<prefix>.*?)：「(?P<speech>[^」]{1,300})」", line)
+    if match is None:
+        return False
+    prefix = match.group("prefix")
+    speech = match.group("speech")
+    actor = re.escape(actor_name)
+    if (
+        _RETROSPECTIVE_NONFACTUAL.search(prefix)
+        or _CONDITIONAL_OR_RULE.search(prefix)
+        or not re.search(r"复盘会|听证会|议事会|公开会议|公听会", prefix)
+        or not re.search(r"当众|公开|当着.{1,32}的面", prefix)
+        or not re.search(
+            rf"{actor}(?:当着.{{1,32}}的面|当众|公开)"
+            r".{0,16}(?:说|表示|声明|指出|承认|反驳)$",
+            prefix,
+        )
+    ):
+        return False
+    past = re.search(
+        r"(?:以前|过去|此前|原先).{0,28}(?:不敢|未敢|不愿|没有勇气)"
+        r".{0,22}(?:反对|反驳|提出异议|质疑)", speech
+    )
+    harm = re.search(
+        r"(?:这次|此次|那次|当时).{0,36}(?:服从|照办|执行)"
+        r".{0,32}(?:伤到|伤害|伤及|害了|造成.{0,12}伤)", speech
+    )
+    public_pledge = re.search(
+        r"(?:以后|今后|从此).{0,90}(?:我会|我将|我要)"
+        r".{0,32}(?:提出反对|反对|反驳|质疑|提出异议)", speech
+    )
+    if not (
+        past and harm and public_pledge
+        and past.end() <= harm.start() < public_pledge.start()
+    ):
+        return False
+    if re.search(
+        r"没有|并非|不是|未曾|不曾|假如|如果|可能|也许|或许|"
+        r"据说|传闻|只是演练|只是排练",
+        speech[:past.start()] + speech[past.end():harm.end()],
+    ):
+        return False
+    if re.search(r"并非|不是|未曾|不曾|假如|如果|只是演练|只是排练", speech[:harm.end()]):
+        return False
+    if re.search(r"不会|不反对|并不反对|只是排练|只是演练", speech[harm.end():]):
+        return False
+    # A future condition is permitted only after the affirmative past
+    # admission. It never establishes that the promised opposition happened.
+    return _CONDITIONAL_OR_RULE.search(speech[:harm.end()]) is None
+
+
+def _actual_harmful_compliance(line: str, *, character: str) -> bool:
+    """Identify a completed harmful obedience event only as paired context."""
+
+    actor_name = character.strip()
+    if not actor_name or _HARMFUL_COMPLIANCE_NONFACTUAL.search(line):
+        return False
+    actor = re.escape(actor_name)
+    obedience = re.search(
+        rf"(?:命令|要求|指示).{{0,40}}{actor}.{{0,80}}"
+        rf"{actor}.{{0,12}}(?:照办|服从|照做|执行)",
+        line,
+    )
+    if obedience is None:
+        return False
+    return re.search(
+        r"(?:结果|导致|造成|致使).{0,80}"
+        r"(?:居民|群众|旁人|人员|孩子|旅客|工人|[一二三四五六七八九十百千万0-9余多名个]{1,8}人)"
+        r".{0,36}(?:被迫转移|受伤|被抬走|死亡|伤亡|失去意识|呼吸困难)",
+        line[obedience.end():],
+    ) is not None
+
+
+def _explicit_medical_exception(line: str, *, character: str) -> bool:
+    """Require one patient's actual temporary hot/spicy food restriction."""
+
+    actor_name = character.strip()
+    if not actor_name or re.search(r"[「」『』“”]|戏本|台词|引语", line):
+        return False
+    actor = re.escape(actor_name)
+    clinician = re.search(r"医师|医生|大夫", line)
+    if clinician is None or not re.search(
+        rf"{actor}.{{0,40}}(?:高烧|发烧|灼伤|受伤|病倒|患病|治疗|复诊)",
+        line[:clinician.start()],
+    ):
+        return False
+    order_text = line[clinician.start():clinician.start() + 160]
+    directive = re.search(r"要求|嘱咐|叮嘱|明确写下|明确记录|医嘱|规定", order_text)
+    if directive is None:
+        return False
+    restriction = re.search(
+        r"(?:暂停|停止|停喝|停吃|避开|暂避|禁食|禁饮|禁用|禁热|禁辣|不吃|不喝)"
+        r"[^，,。；;！？!?、\n]{0,28}",
+        order_text[directive.end():],
+    )
+    if restriction is None:
+        return False
+    restricted = restriction.group()
+    if not (
+        re.search(r"热|辛辣|辣", restricted)
+        and (re.search(r"饮|喝|食|吃|饼|茶|汤|露|辣", restricted)
+             or "禁热禁辣" in restricted)
+    ):
+        return False
+    restriction_end = clinician.start() + directive.end() + restriction.end()
+    instruction = line[clinician.start():restriction_end]
+    direct_patient = actor_name in instruction
+    passive_patient = re.search(
+        rf"{actor}.{{0,14}}(?:高烧|发烧|灼伤|受伤|病倒|患病)"
+        r"[，,\s]{0,2}被(?:医师|医生|大夫)",
+        line[:clinician.end()],
+    ) is not None
+    if not (direct_patient or passive_patient):
+        return False
+    if not re.search(
+        r"当日|当天|今天|暂时|临时|三天内|三日内|治疗期|复查前|退烧前",
+        line[clinician.start():restriction_end],
+    ):
+        return False
+    compliance_window = line[restriction_end:restriction_end + 96]
+    compliance = re.search(
+        rf"{actor}.{{0,14}}(?:照做|遵照医嘱|遵从医嘱|"
+        rf"按医嘱(?:执行|避开|暂停|停止|停喝|停吃)|"
+        rf"停喝热饮|停止喝热饮|改喝常温水|"
+        rf"(?:依医嘱|遵医嘱|按医嘱).{{0,24}}(?:热|辛辣|辣)"
+        rf".{{0,12}}(?:放回|退回|避开|停吃|停喝))",
+        compliance_window,
+    )
+    if compliance is None:
+        return False
+    following = compliance_window[compliance.end():compliance.end() + 24]
+    if re.search(r"的说法|被否认|未证实|并未发生|只是传闻|不实", following):
+        return False
+    relevant = line[
+        line.rfind(actor_name, 0, clinician.start()):
+        restriction_end + compliance.end()
+    ]
+    return _MEDICAL_NONFACTUAL.search(relevant) is None
 
 
 def _to_issue(
@@ -2745,6 +3140,8 @@ def _diagnostics(
     reasons: Counter[str],
     material_coverage: str = "unknown",
     case_trace: list[dict[str, Any]] | None = None,
+    accepted_signal_histogram: list[dict[str, str | int]] | None = None,
+    candidate_eligibility: dict[str, int] | None = None,
     accepted_draft_observation_refs: list[dict[str, Any]] | None = None,
     accepted_draft_observation_total: int = 0,
     accepted_draft_observation_refs_truncated: bool = False,
@@ -2760,6 +3157,12 @@ def _diagnostics(
         "material_coverage": material_coverage,
         "counts": counts,
         "case_trace": list(case_trace or ()),
+        "accepted_signal_histogram": list(accepted_signal_histogram or ()),
+        "candidate_eligibility": candidate_eligibility or {
+            "stable_or_core_formal_signals": 0,
+            "stable_or_core_history_signals": 0,
+            "prelimit_candidates": 0,
+        },
         "accepted_draft_observation_refs": list(
             accepted_draft_observation_refs or ()
         ),
@@ -2789,6 +3192,12 @@ def _empty_stage_result(outcome: str, reason_code: str) -> CharacterConsistencyS
             "material_coverage": "unknown",
             "counts": {},
             "case_trace": [],
+            "accepted_signal_histogram": [],
+            "candidate_eligibility": {
+                "stable_or_core_formal_signals": 0,
+                "stable_or_core_history_signals": 0,
+                "prelimit_candidates": 0,
+            },
             "accepted_draft_observation_refs": [],
             "accepted_draft_observation_total": 0,
             "accepted_draft_observation_refs_truncated": False,

@@ -1,0 +1,34 @@
+{
+  "schema_version": "character-axis-fixture-manifest-v1",
+  "dataset_boundary": {
+    "developer_visible": true,
+    "blind_holdout": false,
+    "production_quality": false
+  },
+  "suites": {
+    "dev": {
+      "world_id": "tidelight-harbor",
+      "case_count": 5,
+      "files": {
+        "01-world-setting.md": "7b7b2788eb87bbfaab9aa02187481114393c5469e0c72ccb344043f90875b83c",
+        "02-character-profiles.md": "2f5bd60ed15b4d73a7a3d2678c2e92fbc875acadd96f8aa71c07c2eb9cfa9bbc",
+        "03-published-history-v1.0.md": "596b4f29ffa78eeaa2d841de8c8c17c2559f8b175ded68317284e2bbd857c8c3",
+        "04-draft-event-v1.1.md": "6be94adf5b7447df3a4017cb531fda8f9051b3a7be3fd7897ed772a9cc598f92",
+        "review-plan.json": "cca244556fe794a47fe772b78987b6b1c71095c3bd5958cd405a6e94fdf03f6a",
+        "oracle.json": "eb079400f09e70d007b5c1f10a2a1fa7775a84ee6dfffcb2fcd77cbaae6228c3"
+      }
+    },
+    "transfer": {
+      "world_id": "v2_transfer_qijing_frosttide",
+      "case_count": 6,
+      "files": {
+        "01-world-setting.md": "acd288ecd1c083c1e6ea71ca654d79bef03c23cbffb3b97285059c8a966edf93",
+        "02-character-profiles.md": "5950532e5a7a719f5a0e1cd2aa9d119149073c60072262158d8584833975bfc5",
+        "03-published-history-v1.0.md": "323cb2c9442678777803aadabe01bf7866cbb8501e6d29a80a7eeca12b9c0282",
+        "04-draft-event-v1.1.md": "4e3bb54a87dae78ebd868a84821fbc4a4ca2de6f9eda6cf4f060c7e881942bb7",
+        "review-plan.json": "45030527efbc67867c101963926566149475c7ba9ad95cff2cb5d4347b4a73b8",
+        "oracle.json": "873ff9da96f5f75971ed92dd8465bbeaa1d76677e54471859d5e351d82db0b93"
+      }
+    }
+  }
+}

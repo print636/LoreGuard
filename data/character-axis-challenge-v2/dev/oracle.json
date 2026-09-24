@@ -1,0 +1,92 @@
+{
+  "schema_version": "character-axis-oracle-v1",
+  "suite": "dev",
+  "world_id": "tidelight-harbor",
+  "developer_visible": true,
+  "expected_cases": [
+    {
+      "case_id": "dev_repeated_undisclosed_route_risk",
+      "candidate_key": "dev_risk_notice",
+      "gold_class": "conflict",
+      "allowed_final_outcomes": ["conflict"],
+      "required_citation_roles": ["B", "C"],
+      "min_independent_observations": 2,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 4}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 3}, {"document_name": "04-draft-event-v1.1.md", "line": 4}],
+        "G": [],
+        "X": [],
+        "forbidden": []
+      },
+      "notes": "北渠与南湾相隔四日，两次日常换路均无封港令或救援保密任务；桑衍均已知风险却向共同值守搭档隐瞒，旧主线没有同轴成长桥。"
+    },
+    {
+      "case_id": "dev_published_public_leadership_growth",
+      "candidate_key": "dev_public_briefing",
+      "gold_class": "explained",
+      "allowed_final_outcomes": ["no_issue"],
+      "required_citation_roles": ["B", "C", "G"],
+      "min_independent_observations": 2,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 7}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 10}, {"document_name": "04-draft-event-v1.1.md", "line": 11}],
+        "G": [{"document_name": "03-published-history-v1.0.md", "line": 3}, {"document_name": "03-published-history-v1.0.md", "line": 4}],
+        "X": [],
+        "forbidden": []
+      },
+      "notes": "正式档案明确旧时段基线，已发布六周训练及独立主持结果构成同一语义轴上已发生的成长；新稿有两次独立公开说明。"
+    },
+    {
+      "case_id": "dev_published_medical_exception",
+      "candidate_key": "dev_hot_ginger_plum",
+      "gold_class": "explained",
+      "allowed_final_outcomes": ["no_issue"],
+      "required_citation_roles": ["B", "C", "X"],
+      "min_independent_observations": 1,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 10}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 13}],
+        "G": [],
+        "X": [{"document_name": "03-published-history-v1.0.md", "line": 5}],
+        "forbidden": []
+      },
+      "notes": "本次高烧与医师要求已经发生，且与已发布病历中的实际暂停热饮处置相同；次日恢复，不是长期偏好逆转。"
+    },
+    {
+      "case_id": "dev_other_actor_forces_signature",
+      "candidate_key": "dev_partner_signature",
+      "gold_class": "hard_negative",
+      "allowed_final_outcomes": ["no_issue", "unverifiable", "needs_confirmation"],
+      "required_citation_roles": [],
+      "min_independent_observations": 0,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 13}],
+        "C": [],
+        "G": [],
+        "X": [],
+        "forbidden": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 6, "character_key": "陆珩", "role": "C", "polarity": "positive"}
+        ]
+      },
+      "notes": "陆珩递交空白表并提醒等待本人；独立事件行明确叶箫是冒签者，不能把交接表单或邻行核尺等同于陆珩冒签。"
+    },
+    {
+      "case_id": "dev_staged_villain_confession",
+      "candidate_key": "dev_shift_error",
+      "gold_class": "hard_negative",
+      "allowed_final_outcomes": ["no_issue", "unverifiable", "needs_confirmation"],
+      "required_citation_roles": [],
+      "min_independent_observations": 0,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 16}],
+        "C": [],
+        "G": [],
+        "X": [],
+        "forbidden": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 14, "character_key": "陈姝", "role": "C", "polarity": "positive"}
+        ]
+      },
+      "notes": "陈姝读的是未进入主线的反派戏本台词；真实复盘明确由她自己担责。"
+    }
+  ]
+}

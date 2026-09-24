@@ -1,0 +1,93 @@
+{
+  "schema_version": "character-axis-review-plan-v1",
+  "suite": "dev",
+  "world_id": "tidelight-harbor",
+  "approved_axes": [
+    {
+      "axis_key": "dev_partner_risk_notice",
+      "display_name": "向共同值守搭档告知风险",
+      "definition": "非保密的日常航路调整中，是否向共同值守搭档说明会影响其航船的已知风险。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "dev_public_route_briefing",
+      "display_name": "独自面向陌生水手说明航路",
+      "definition": "面对陌生水手的公开航路说明及临时追问，是否独自主持并应答。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "dev_partner_signature",
+      "display_name": "冒用搭档签名确认换班",
+      "definition": "是否未经搭档本人授权，冒用其签名替对方确认换班。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "dev_shift_error_to_novice",
+      "display_name": "向新人推卸自身错误",
+      "definition": "面对港务审计时，是否把自己的错误推给刚入港的新人。",
+      "trait_type": "core_personality"
+    }
+  ],
+  "candidate_decisions": [
+    {
+      "candidate_key": "dev_risk_notice",
+      "character_key": "桑衍",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 4,
+      "source_quote": "先向共同值守的搭档说明会影响其航船的风险",
+      "polarity": "positive",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "dev_partner_risk_notice"
+    },
+    {
+      "candidate_key": "dev_public_briefing",
+      "character_key": "许箬",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 7,
+      "source_quote": "不敢独自面对陌生水手主持航路说明",
+      "polarity": "negative",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "dev_public_route_briefing"
+    },
+    {
+      "candidate_key": "dev_hot_ginger_plum",
+      "character_key": "荀木",
+      "trait_type": "preference",
+      "source_document": "02-character-profiles.md",
+      "source_line": 10,
+      "source_quote": "喜欢热姜梅露",
+      "polarity": "positive",
+      "stability": "stable",
+      "key_object": "热姜梅露",
+      "approved_axis_key": null
+    },
+    {
+      "candidate_key": "dev_partner_signature",
+      "character_key": "陆珩",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 13,
+      "source_quote": "不会冒用搭档签名替对方确认换班",
+      "polarity": "negative",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "dev_partner_signature"
+    },
+    {
+      "candidate_key": "dev_shift_error",
+      "character_key": "陈姝",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 16,
+      "source_quote": "不会把自己的错误推给刚入港的新人",
+      "polarity": "negative",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "dev_shift_error_to_novice"
+    }
+  ]
+}

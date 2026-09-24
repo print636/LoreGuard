@@ -1,0 +1,129 @@
+{
+  "schema_version": "character-axis-oracle-v1",
+  "suite": "transfer",
+  "world_id": "v2_transfer_qijing_frosttide",
+  "developer_visible": true,
+  "expected_cases": [
+    {
+      "case_id": "v2t_self_error_scape_goats",
+      "candidate_key": "v2t_accountability",
+      "gold_class": "conflict",
+      "allowed_final_outcomes": ["conflict"],
+      "required_citation_roles": ["B", "C"],
+      "min_independent_observations": 2,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 7}],
+        "C": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 5},
+          {"document_name": "04-draft-event-v1.1.md", "line": 19}
+        ],
+        "G": [],
+        "X": [],
+        "forbidden": []
+      },
+      "notes": "正式核心人格要求曲霁承认本人失误；草稿中东街与北坡两份不同巡检材料均由她自己算错，却两次把责任写给不同助手，旧稿没有转折解释。"
+    },
+    {
+      "case_id": "v2t_medicinal_preference_exception",
+      "candidate_key": "v2t_hot_pepper_cake",
+      "gold_class": "explained",
+      "allowed_final_outcomes": ["no_issue"],
+      "required_citation_roles": ["B", "C", "X"],
+      "min_independent_observations": 1,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 11}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 11}],
+        "G": [],
+        "X": [{"document_name": "03-published-history-v1.0.md", "line": 13}],
+        "forbidden": []
+      },
+      "notes": "童画在草稿中仍明确喜欢热椒饼，只因已发布治疗记录中的三天禁热禁辣而暂不吃，属于有时间边界的身体限制而非偏好反转。"
+    },
+    {
+      "case_id": "v2t_guardian_double_signoff",
+      "candidate_key": "v2t_signoff",
+      "gold_class": "conflict",
+      "allowed_final_outcomes": ["conflict"],
+      "required_citation_roles": ["B", "C"],
+      "min_independent_observations": 2,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 5}],
+        "C": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 7},
+          {"document_name": "04-draft-event-v1.1.md", "line": 17}
+        ],
+        "G": [],
+        "X": [],
+        "forbidden": []
+      },
+      "notes": "许砚灯在两个不同幕门、不同时间亲自略去第二签解锁；已发布设定和历史均未给他改变谨慎人格的桥接事件。"
+    },
+    {
+      "case_id": "v2t_public_growth_after_harm",
+      "candidate_key": "v2t_challenge_growth",
+      "gold_class": "explained",
+      "allowed_final_outcomes": ["no_issue"],
+      "required_citation_roles": ["B", "C", "G"],
+      "min_independent_observations": 1,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 9}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 9}],
+        "G": [
+          {"document_name": "03-published-history-v1.0.md", "line": 9},
+          {"document_name": "03-published-history-v1.0.md", "line": 11}
+        ],
+        "X": [],
+        "forbidden": []
+      },
+      "notes": "北台事故造成具体伤害，温弦在已发布复盘会上公开宣告以后会反对伤人命令；新稿的公开反对正是该成长的后续，需同时指向损害与转折两条历史证据。"
+    },
+    {
+      "case_id": "v2t_other_actor_copies_interview",
+      "candidate_key": "v2t_archive_consent",
+      "gold_class": "hard_negative",
+      "allowed_final_outcomes": ["no_issue", "needs_confirmation", "unverifiable"],
+      "required_citation_roles": [],
+      "min_independent_observations": 0,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 13}],
+        "C": [],
+        "G": [],
+        "X": [],
+        "forbidden": [
+          {
+            "document_name": "04-draft-event-v1.1.md",
+            "line": 13,
+            "character_key": "罗月",
+            "role": "C",
+            "polarity": "positive"
+          }
+        ]
+      },
+      "notes": "复制者是苏栈，罗月发现后明确阻止；即使同一行出现罗月和私人口述，也不得把苏栈的未授权复制归到罗月的核心人格轴上。"
+    },
+    {
+      "case_id": "v2t_unplayed_branch_quote",
+      "candidate_key": "v2t_last_teammate",
+      "gold_class": "hard_negative",
+      "allowed_final_outcomes": ["no_issue", "needs_confirmation", "unverifiable"],
+      "required_citation_roles": [],
+      "min_independent_observations": 0,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 15}],
+        "C": [],
+        "G": [],
+        "X": [],
+        "forbidden": [
+          {
+            "document_name": "04-draft-event-v1.1.md",
+            "line": 23,
+            "character_key": "杭泊",
+            "role": "C",
+            "polarity": null
+          }
+        ]
+      },
+      "notes": "杭泊在已写成的主线中等待队友；相反动作只出现在明确划掉、未采纳的条件句里，任何方向的角色行为证据都不应来自该句。"
+    }
+  ]
+}

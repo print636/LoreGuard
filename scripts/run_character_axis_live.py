@@ -47,6 +47,7 @@ from scripts.run_evidence_investigator_live import (
 
 
 DATASET = ROOT / "data" / "character-axis-challenge-v1"
+DATASET_V2 = ROOT / "data" / "character-axis-challenge-v2"
 SUITES = ("dev", "transfer")
 BASELINE_FILES = (
     ("01-world-setting.md", "canon"),
@@ -62,6 +63,8 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 GIT_HASH = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 SAFE_KEY = re.compile(r"[A-Za-z0-9_.:-]{1,100}\Z")
 SAFE_REASON_KEYS = frozenset({
+    "source_formal", "source_history",
+    "regenerated_from_evidence_mismatch", "statement_support",
     "lower_authority_baseline_shadowed", "invalid_confirmed_trait_snapshot",
     "chunk_limit", "confirmed_trait_hint_ambiguous",
     "confirmed_trait_context_truncated", "stage_token_budget",
@@ -77,11 +80,28 @@ SAFE_REASON_KEYS = frozenset({
     "drift_release_unknown", "drift_release_inapplicable",
     "observation_limit", "below_sensitivity_threshold", "baseline_limit",
 })
+SAFE_SIGNAL_SOURCE_KINDS = frozenset({
+    "formal_character_profile", "published_history", "draft",
+})
+SAFE_SIGNAL_STABILITIES = frozenset({
+    "core", "stable", "temporary", "situational", "unknown",
+})
+SAFE_SIGNAL_DIMENSIONS = frozenset({
+    "core_personality", "preference", "value", "speech_pattern",
+    "behavior_boundary", "contextual_behavior", "current_state",
+})
+SAFE_CANDIDATE_ELIGIBILITY_KEYS = frozenset({
+    "stable_or_core_formal_signals", "stable_or_core_history_signals",
+    "prelimit_candidates",
+})
 TERMINAL = {"completed", "failed", "cancelled"}
-# Filled from the committed fixture manifest after its final freeze. An
-# explicit CLI digest is also supported for a separately pinned dataset.
+# Each official fixture has its own committed digest. Custom fixtures require
+# an explicit CLI digest and remain ineligible for strict quality claims.
 PINNED_MANIFEST_SHA256: str | None = (
     "650dad19bf54fad726b5c0f2f5dfb94d05fc4462babbbb558b0e9aaf40f61140"
+)
+PINNED_MANIFEST_SHA256_V2 = (
+    "3d428f156d2b5fd752a46eddb8a23ebeefff83cb221c2d02eaa8ac87891755b3"
 )
 
 
@@ -409,6 +429,84 @@ def _safe_accepted_draft_refs(
     return refs
 
 
+def _safe_accepted_signal_diagnostics(
+    stage: dict[str, Any], counts: dict[str, Any],
+) -> tuple[list[dict[str, str | int]] | None, dict[str, int] | None]:
+    """Keep only bounded enum/count aggregates, never model text or identity."""
+    raw_histogram = stage.get("accepted_signal_histogram")
+    raw_eligibility = stage.get("candidate_eligibility")
+    if (
+        not isinstance(raw_histogram, list)
+        or len(raw_histogram) > (
+            len(SAFE_SIGNAL_SOURCE_KINDS)
+            * len(SAFE_SIGNAL_STABILITIES)
+            * len(SAFE_SIGNAL_DIMENSIONS)
+        )
+        or not isinstance(raw_eligibility, dict)
+        or set(raw_eligibility) != SAFE_CANDIDATE_ELIGIBILITY_KEYS
+    ):
+        return None, None
+    if any(
+        type(value) is not int or not 0 <= value <= 100_000
+        for value in raw_eligibility.values()
+    ):
+        return None, None
+    histogram: list[dict[str, str | int]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in raw_histogram:
+        if not isinstance(row, dict) or set(row) != {
+            "source_kind", "stability", "dimension", "count"
+        }:
+            return None, None
+        source_kind = row["source_kind"]
+        stability = row["stability"]
+        dimension = row["dimension"]
+        count = row["count"]
+        if (
+            type(source_kind) is not str or source_kind not in SAFE_SIGNAL_SOURCE_KINDS
+            or type(stability) is not str or stability not in SAFE_SIGNAL_STABILITIES
+            or type(dimension) is not str or dimension not in SAFE_SIGNAL_DIMENSIONS
+            or type(count) is not int or not 1 <= count <= 100_000
+        ):
+            return None, None
+        identity = (source_kind, stability, dimension)
+        if identity in seen:
+            return None, None
+        seen.add(identity)
+        histogram.append({
+            "source_kind": source_kind, "stability": stability,
+            "dimension": dimension, "count": count,
+        })
+    signal_count = counts.get("signal_count")
+    if signal_count is None and not histogram:
+        pass  # Empty/degraded stage has no counts, but still uses this schema.
+    elif (
+        type(signal_count) is not int or not 0 <= signal_count <= 100_000
+        or sum(row["count"] for row in histogram) != signal_count
+    ):
+        return None, None
+    formal = sum(
+        row["count"] for row in histogram
+        if row["source_kind"] == "formal_character_profile"
+        and row["stability"] in {"core", "stable"}
+    )
+    history = sum(
+        row["count"] for row in histogram
+        if row["source_kind"] == "published_history"
+        and row["stability"] in {"core", "stable"}
+    )
+    if (
+        raw_eligibility["stable_or_core_formal_signals"] != formal
+        or raw_eligibility["stable_or_core_history_signals"] != history
+        or raw_eligibility["prelimit_candidates"] > formal + history
+    ):
+        return None, None
+    return sorted(
+        histogram,
+        key=lambda row: (row["source_kind"], row["stability"], row["dimension"]),
+    ), dict(raw_eligibility)
+
+
 def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     """Whitelist only model, character-stage, and build identity fields.
 
@@ -518,6 +616,13 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
     usage = usage if isinstance(usage, dict) else {}
     reasons = stage.get("reason_counts")
     reasons = reasons if isinstance(reasons, dict) else {}
+    safe_reasons = {
+        key: value for key, value in reasons.items()
+        if key in SAFE_REASON_KEYS and type(value) is int and 0 <= value <= 1_000_000
+    }
+    signal_histogram, candidate_eligibility = _safe_accepted_signal_diagnostics(
+        stage, counts
+    )
     accepted_draft_refs = _safe_accepted_draft_refs(
         stage, known_documents=known_documents
     )
@@ -569,12 +674,11 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
         ),
         "accepted_draft_observation_refs_complete": accepted_draft_refs is not None,
         "targeted_record_rejection_events": counts.get("targeted_record_rejected_count"),
+        "accepted_signal_histogram": signal_histogram,
+        "candidate_eligibility": candidate_eligibility,
         "stage_usage": {key: usage.get(key) for key in ("attempted_calls", "input_tokens", "completion_tokens", "charged_tokens")},
-        "reason_counts": {
-            key: value for key, value in reasons.items()
-            if key in SAFE_REASON_KEYS and type(value) is int and 0 <= value <= 1_000_000
-        },
-        "unreported_reason_entries": sum(key not in SAFE_REASON_KEYS for key in reasons),
+        "reason_counts": safe_reasons,
+        "unreported_reason_entries": len(reasons) - len(safe_reasons),
         "token_admission_events": _safe_token_admission_events(stage.get("token_admission_events")),
         "case_trace": safe_trace,
         "accepted_draft_observation_refs": accepted_draft_refs,
@@ -641,9 +745,30 @@ def _reference_has_line(evidence: object, *, document: str, line: int, source_qu
     return False
 
 
+def _normalized_clause(value: object) -> str:
+    """Normalize presentation only; preserve words and negation direction."""
+    if not isinstance(value, str):
+        return ""
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFKC", value).casefold()
+        if not character.isspace()
+        and not unicodedata.category(character).startswith(("P", "Z"))
+    )
+
+
 def _candidate_matches(row: dict[str, Any], selector: dict[str, Any]) -> bool:
+    source_quote = _normalized_clause(selector.get("source_quote"))
+    # The API exposes the extracted model statement as `value`. Evidence is
+    # the whole source line, which can contain several unrelated clauses.
+    statement = _normalized_clause(row.get("value"))
+    trait_key = row.get("trait_key")
     if (
-        row.get("reviewable") is not True
+        not source_quote
+        or source_quote not in statement
+        or not isinstance(trait_key, str)
+        or not trait_key.strip()
+        or row.get("reviewable") is not True
         or row.get("character_key") != selector["character_key"]
         or row.get("trait_type") != selector["trait_type"]
         or row.get("polarity") != selector["polarity"]
@@ -660,14 +785,13 @@ def _candidate_matches(row: dict[str, Any], selector: dict[str, Any]) -> bool:
     elif row.get("origin") != "explicit_setting":
         return False
     key_object = selector["key_object"]
-    if key_object is not None:
-        # For object-bearing dimensions the server's frozen comparison key
-        # comes from the model-validated source object, independent of its
-        # free-form trait_key. A different modifier remains a distinct object.
-        expected_key = stable_trait_identity(selector["trait_type"], "", key_object)
-        if row.get("comparison_key") != expected_key:
-            return False
-    return True
+    # The key is checked only for internal consistency. It is model-authored
+    # for objectless traits and must never become a free-form gold selector.
+    # For object-bearing traits, the frozen key retains the exact object fence.
+    expected_key = stable_trait_identity(
+        selector["trait_type"], trait_key, key_object or ""
+    )
+    return row.get("comparison_key") == expected_key
 
 
 def _review_candidates(
@@ -989,8 +1113,13 @@ def _score_case(case: dict[str, Any], state: dict[str, Any], suite: VerifiedSuit
         if case["gold_class"] != "conflict" else 0
     )
     if trace is None or candidate is None:
+        evaluation_state = (
+            "pipeline_not_reached" if state.get("draft") is None
+            else "case_result_unavailable"
+        )
         return {
             "case_id": case["case_id"], "gold_class": case["gold_class"],
+            "evaluation_state": evaluation_state,
             "candidate_confirmed": candidate is not None,
             "trace_unique": len(traces) == 1,
             "actual_outcome": None,
@@ -1000,7 +1129,7 @@ def _score_case(case: dict[str, Any], state: dict[str, Any], suite: VerifiedSuit
             "visible_false_positive_count": visible_false_positive_count,
             "trace_false_positive": None,
             "false_positive_unknown": case["gold_class"] != "conflict" and not visible_false_positive_count,
-            "false_negative": case["gold_class"] == "conflict",
+            "false_negative": None,
             "target_dimension_suspect_attribution_hits": forbidden_hits,
             "target_dimension_attribution_unavailable": actor_unavailable,
             "actor_recall_assessable": bool(case["evidence"]["C"]),
@@ -1066,6 +1195,7 @@ def _score_case(case: dict[str, Any], state: dict[str, Any], suite: VerifiedSuit
     ))
     return {
         "case_id": case["case_id"], "gold_class": gold,
+        "evaluation_state": "case_result_available",
         "candidate_confirmed": True, "trace_unique": True,
         "actual_outcome": outcome,
         "review_verdict": trace.get("review_verdict"),
@@ -1101,6 +1231,7 @@ def _public_run(summary: dict[str, Any] | None) -> dict[str, Any] | None:
             "stage_outcome", "stage_reason", "material_coverage", "planned_chunks",
             "processed_chunks", "draft_observations", "accepted_draft_observation_total",
             "accepted_draft_observation_refs_complete", "targeted_record_rejection_events",
+            "accepted_signal_histogram", "candidate_eligibility",
             "stage_usage", "reason_counts", "unreported_reason_entries",
             "token_admission_events",
         )
@@ -1113,9 +1244,15 @@ def _score_trial(
     baseline = state.get("baseline")
     draft = state.get("draft")
     scores = [_score_case(case, state, suite) for case in cases]
-    review = state.get("candidate_review") or {}
+    raw_review = state.get("candidate_review")
+    review = raw_review if isinstance(raw_review, dict) else {}
     admission = state.get("baseline_admission") or {}
     selected = state.get("selected") or {}
+    unselected = review.get("unselected_reviewable")
+    unselected_count = (
+        unselected if type(unselected) is int and 0 <= unselected <= 100_000 else None
+    )
+    expected_count = len(suite.plan["candidate_decisions"])
     known_case_digests = {
         _candidate_id_sha256(selected[case["candidate_key"]]["id"])
         for case in cases if case["candidate_key"] in selected
@@ -1147,8 +1284,12 @@ def _score_trial(
     passed = (
         state.get("failure") is None
         and admission.get("admitted") is True
-        and review.get("unique_matches") == review.get("expected")
-        and len(selected) == len(suite.plan["candidate_decisions"])
+        and type(review.get("expected")) is int
+        and review["expected"] == expected_count
+        and type(review.get("unique_matches")) is int
+        and review["unique_matches"] == expected_count
+        and unselected_count == 0
+        and len(selected) == expected_count
         and complete
         and all(row["passed"] for row in scores)
         and unexpected_conflicts == 0
@@ -1167,10 +1308,14 @@ def _score_trial(
         "counts": {
             "cases_passed": sum(row["passed"] for row in scores),
             "cases_total": len(scores),
+            "unselected_reviewable_candidates": unselected_count,
             "false_positives": visible_false_positives + trace_only_false_positives,
             "visible_false_positives": visible_false_positives,
             "false_positive_unknown_cases": sum(row.get("false_positive_unknown") is True for row in scores),
-            "false_negatives": sum(row["false_negative"] for row in scores),
+            "false_negatives": sum(row.get("false_negative") is True for row in scores),
+            "unevaluated_cases": sum(
+                row.get("evaluation_state") != "case_result_available" for row in scores
+            ),
             "abstained": sum(row["abstained"] for row in scores),
             "target_dimension_suspect_attribution_hits": sum(row.get("target_dimension_suspect_attribution_hits", 0) for row in scores),
             "target_dimension_attribution_unavailable_cases": sum(row.get("target_dimension_attribution_unavailable") is True for row in scores),
@@ -1315,11 +1460,18 @@ def _suite_report(
             "candidate_matches": sum((trial["candidate_review"] or {}).get("unique_matches", 0) for trial in trials),
             "candidate_expected": len(suite.plan["candidate_decisions"]) * 3,
             "candidate_reviewable": sum((trial["candidate_review"] or {}).get("reviewable", 0) for trial in trials),
+            "unselected_reviewable_candidates": sum(
+                trial["counts"]["unselected_reviewable_candidates"] or 0 for trial in trials
+            ),
+            "unselected_reviewable_unknown_trials": sum(
+                trial["counts"]["unselected_reviewable_candidates"] is None for trial in trials
+            ),
             "axes_bound": sum(trial["axis_count"] for trial in trials),
             "false_positives": sum(trial["counts"]["false_positives"] for trial in trials),
             "visible_false_positives": sum(trial["counts"]["visible_false_positives"] for trial in trials),
             "false_positive_unknown_cases": sum(trial["counts"]["false_positive_unknown_cases"] for trial in trials),
             "false_negatives": sum(trial["counts"]["false_negatives"] for trial in trials),
+            "unevaluated_cases": sum(trial["counts"]["unevaluated_cases"] for trial in trials),
             "abstained": sum(trial["counts"]["abstained"] for trial in trials),
             "target_dimension_suspect_attribution_hits": sum(trial["counts"]["target_dimension_suspect_attribution_hits"] for trial in trials),
             "target_dimension_attribution_unavailable_cases": sum(
@@ -1370,17 +1522,29 @@ def _emit_report(report: dict[str, Any], output_json: str | None) -> None:
 
 
 def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-    official_dataset = Path(args.dataset).resolve() == DATASET.resolve()
-    dataset_kind = "pinned_challenge" if official_dataset else "custom"
+    requested_dataset = Path(args.dataset)
+    resolved_dataset = requested_dataset.resolve()
+    if resolved_dataset == DATASET.resolve():
+        official_digest = PINNED_MANIFEST_SHA256
+        dataset_kind = "pinned_challenge"
+    elif resolved_dataset == DATASET_V2.resolve():
+        official_digest = PINNED_MANIFEST_SHA256_V2
+        dataset_kind = "pinned_challenge_v2"
+    else:
+        official_digest = None
+        dataset_kind = "custom"
+    official_dataset = official_digest is not None
     mode = "developer_diagnostic" if args.diagnostic_dev_one_trial else "strict"
     try:
         # Fail on an invalid report path before spending model tokens.
         if args.output_json:
             _resolve_output_json(args.output_json)
-        if official_dataset and args.manifest_sha256 != PINNED_MANIFEST_SHA256:
+        supplied_digest = args.manifest_sha256
+        if official_dataset and supplied_digest is not None and supplied_digest != official_digest:
             raise SafeFailure("official_manifest_digest_override", "fixture_preflight")
+        expected_digest = official_digest if official_dataset else supplied_digest
         fixture = verify_fixture(
-            Path(args.dataset), expected_manifest_sha256=args.manifest_sha256
+            requested_dataset, expected_manifest_sha256=expected_digest
         )
     except Exception as exc:
         return {
@@ -1574,6 +1738,10 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                     "dataset_sha256": suite.hashes,
                     "case_count": suite.case_count,
                     "trials": [trial],
+                    "aggregate": {
+                        "false_negatives": trial["counts"]["false_negatives"],
+                        "unevaluated_cases": trial["counts"]["unevaluated_cases"],
+                    },
                     "diagnostic_completed": trial["draft_complete"],
                     "passed": False,
                 }
@@ -1639,9 +1807,25 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 "可见 contradicts issue 数加仅在内部 trace 观测到的冲突数；"
                 "trace 缺失且无可见冲突的案例另计为 false_positive_unknown_cases"
             ),
+            "false_negatives": (
+                "仅对已取得可评分 case result 的预注册 conflict 案统计；"
+                "未进入草稿或缺少 case result 的案例另计 unevaluated_cases，绝不追认为漏报"
+            ),
             "reason_counts": (
                 "仅展示服务端静态原因码白名单；动态或未知键只计入 unreported_reason_entries，"
                 "不输出其文本"
+            ),
+            "accepted_signal_histogram": (
+                "已接纳信号的 source_kind×stability×dimension 有界枚举计数；不含姓名、"
+                "正文、trait_key 或源行，且不代表原始模型记录或被拒收记录"
+            ),
+            "candidate_eligibility": (
+                "正式/历史 core 或 stable 信号数与真实候选构建后的限额前候选数；"
+                "不公开历史精确分组，不能仅凭本简表推断每条信号被滤除的原因"
+            ),
+            "unselected_reviewable_candidates": (
+                "基线运行产生、但不在预注册作者审核计划内的可审核候选数；字段缺失或无效"
+                "时记为未知并使试验不通过，不得只凭计划内候选匹配判通过"
             ),
             "provenance_gate": (
                 "核对本地源码包摘要、Git HEAD、API 与十二次 worker 阶段摘要及运行后稳定性；"
@@ -1658,8 +1842,14 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default=str(DATASET))
-    parser.add_argument("--manifest-sha256", default=PINNED_MANIFEST_SHA256)
+    parser.add_argument(
+        "--dataset", default=str(DATASET),
+        help="official v1 (default), official v2, or an explicitly pinned custom fixture",
+    )
+    parser.add_argument(
+        "--manifest-sha256",
+        help="required for custom fixtures; official fixtures use their built-in pins",
+    )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--run-timeout-seconds", type=float, default=1800.0)
     parser.add_argument("--preflight-only", action="store_true")

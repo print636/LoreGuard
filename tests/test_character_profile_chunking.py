@@ -57,6 +57,51 @@ def test_named_profile_sections_preserve_every_line_and_global_offsets(
         )
 
 
+def test_named_profile_sections_accept_bounded_occupation_suffixes():
+    content = (
+        "# 角色档案\n\n"
+        "## 桑衍｜港务调度\n桑衍先向搭档说明风险。\n\n"
+        "## 许箬 | 领航员\n许箬在开篇回避公开提问。"
+    )
+    chunks = chunk_character_profile_document(_profile(content), 8_000)
+
+    assert len(chunks) == 2
+    assert [chunk.global_line_start for chunk in chunks] == [1, 6]
+    assert [chunk.global_line_end for chunk in chunks] == [5, 7]
+    assert "\n".join(chunk.content for chunk in chunks) == "\n".join(content.splitlines())
+
+
+@pytest.mark.parametrize(
+    "first_heading",
+    (
+        "第一章｜领航员",
+        "桑衍｜夜航",
+        "桑衍与许箬｜领航员",
+        "世界观｜港务调度",
+    ),
+)
+def test_non_person_or_non_occupation_h2_keeps_ordinary_chunking(first_heading: str):
+    content = (
+        f"# 角色档案\n## {first_heading}\n{first_heading}记录了夜航。\n"
+        "## 许箬｜领航员\n许箬回避公开提问。"
+    )
+    document = _profile(content)
+    assert chunk_character_profile_document(document, 8_000) == chunk_document(
+        document, 8_000, overlap_lines=0
+    )
+
+
+def test_same_person_with_two_occupation_headings_is_ambiguous():
+    content = (
+        "# 角色档案\n## 桑衍｜港务调度\n桑衍说明风险。\n"
+        "## 桑衍｜领航员\n桑衍负责领航。"
+    )
+    document = _profile(content)
+    assert chunk_character_profile_document(document, 8_000) == chunk_document(
+        document, 8_000, overlap_lines=0
+    )
+
+
 @pytest.mark.parametrize(
     "content",
     (

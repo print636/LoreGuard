@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import shutil
 
 import pytest
 
@@ -190,7 +191,8 @@ def test_candidate_selector_uses_source_and_object_not_raw_model_label():
     }
     candidate = {
         "reviewable": True, "character_key": "Actor", "trait_type": "preference",
-        "trait_key": "unregistered free-form label", "polarity": "positive",
+        "trait_key": "unregistered free-form label", "value": "Actor likes pear drink",
+        "polarity": "positive",
         "stability": "stable", "origin": "explicit_setting",
         "comparison_key": axis_live.stable_trait_identity("preference", "", "pear drink"),
         "evidence": [{
@@ -207,11 +209,56 @@ def test_candidate_selector_uses_source_and_object_not_raw_model_label():
     )
 
 
+def test_candidate_selector_rejects_other_clause_on_same_profile_line():
+    selector = {
+        "character_key": "桑衍", "trait_type": "core_personality",
+        "source_document": "02-character-profiles.md", "source_line": 4,
+        "source_quote": "先向共同值守的搭档说明会影响其航船的风险",
+        "polarity": "positive", "stability": "core", "key_object": None,
+    }
+    profile_line = (
+        "桑衍的核心性格是先向共同值守的搭档说明会影响其航船的风险；"
+        "桑衍做决定很快。"
+    )
+    candidate = {
+        "reviewable": True, "character_key": "桑衍",
+        "trait_type": "core_personality", "trait_key": "risk_notice",
+        "comparison_key": axis_live.stable_trait_identity("core_personality", "risk_notice"),
+        "value": "桑衍做决定很快", "polarity": "positive",
+        "stability": "core", "origin": "explicit_setting",
+        "evidence": [{
+            "document_name": "02-character-profiles.md", "line_start": 4,
+            "line_end": 4, "text": profile_line,
+        }],
+    }
+    assert not axis_live._candidate_matches(candidate, selector)
+    assert axis_live._candidate_matches({
+        **candidate,
+        "value": "桑衍先向共同值守的搭档说明会影响其航船的风险。",
+    }, selector)
+    assert axis_live._candidate_matches({
+        **candidate,
+        "value": "桑衍先向共同值守的搭档说明，会影响其航船的风险。",
+    }, selector)
+    assert not axis_live._candidate_matches({
+        **candidate, "value": "桑衍向搭档说明航船风险",
+    }, selector)
+    assert not axis_live._candidate_matches({
+        **candidate, "value": "桑衍先向共同值守的搭档说明会影响其航船的风险",
+        "comparison_key": "core_personality:another_trait",
+    }, selector)
+    assert not axis_live._candidate_matches({
+        **candidate, "value": None,
+    }, selector)
+
+
 def test_ambiguous_source_anchor_aborts_before_axis_creation(tmp_path, monkeypatch):
     root, digest = _fixture(tmp_path)
     suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
     row = {
         "reviewable": True, "character_key": "Actor", "trait_type": "core_personality",
+        "trait_key": "decision_axis", "value": "source anchor",
+        "comparison_key": axis_live.stable_trait_identity("core_personality", "decision_axis"),
         "polarity": "positive", "stability": "core", "origin": "explicit_setting",
         "evidence": [{
             "document_name": "02-character-profiles.md", "line_start": 1,
@@ -528,6 +575,75 @@ def test_partial_draft_never_passes_even_if_case_score_passes():
     result = axis_live._score_trial(suite, state, [])
     assert result["draft_complete"] is False
     assert result["passed"] is False
+
+
+@pytest.mark.parametrize(
+    ("unselected", "reported_count"),
+    [(0, 0), (1, 1), (None, None), ("0", None), (False, None), (-1, None)],
+)
+def test_strict_trial_fails_closed_on_unselected_reviewable_candidates(
+    unselected, reported_count,
+):
+    suite = axis_live.VerifiedSuite(
+        name="dev", world_id="world-dev", case_count=0, files={}, hashes={},
+        plan={"candidate_decisions": [], "approved_axes": []},
+    )
+    review = {"expected": 0, "unique_matches": 0, "reviewable": 0}
+    if unselected is not None:
+        review["unselected_reviewable"] = unselected
+    state = {
+        "trial": 1,
+        "project_id_sha256": "a" * 64,
+        "baseline_admission": {"admitted": True},
+        "candidate_review": review,
+        "selected": {},
+        "draft": {
+            "status": "completed", "stage_outcome": "completed",
+            "material_coverage": "complete", "planned_chunks": 1,
+            "processed_chunks": 1,
+            "stage_usage": {"attempted_calls": 1},
+            "visible_issue_cases": [],
+        },
+    }
+    result = axis_live._score_trial(suite, state, [])
+    assert result["counts"]["unselected_reviewable_candidates"] == reported_count
+    assert result["passed"] is (unselected == 0 and type(unselected) is int)
+    if unselected == 0 and type(unselected) is int:
+        malformed = axis_live._score_trial(
+            suite, {**state, "candidate_review": "invalid"}, []
+        )
+        assert malformed["counts"]["unselected_reviewable_candidates"] is None
+        assert malformed["passed"] is False
+
+
+def test_suite_report_exposes_extra_candidates_and_unknown_counts():
+    suite = axis_live.VerifiedSuite(
+        name="dev", world_id="world-dev", case_count=0, files={}, hashes={},
+        plan={"candidate_decisions": [], "approved_axes": []},
+    )
+    states = []
+    for trial, unselected in ((1, 0), (2, 2), (3, "invalid")):
+        states.append({
+            "trial": trial,
+            "project_id_sha256": axis_live._sha256(f"project-{trial}"),
+            "baseline_admission": {"admitted": True},
+            "candidate_review": {
+                "expected": 0, "unique_matches": 0,
+                "reviewable": 0, "unselected_reviewable": unselected,
+            },
+            "selected": {},
+            "draft": {
+                "status": "completed", "stage_outcome": "completed",
+                "material_coverage": "complete", "planned_chunks": 1,
+                "processed_chunks": 1, "stage_usage": {"attempted_calls": 1},
+                "visible_issue_cases": [],
+            },
+        })
+    report = axis_live._suite_report(suite, states, [])
+    assert report["passed"] is False
+    assert report["aggregate"]["unselected_reviewable_candidates"] == 2
+    assert report["aggregate"]["unselected_reviewable_unknown_trials"] == 1
+    assert [row["passed"] for row in report["trials"]] == [True, False, False]
 
 
 def test_safe_failure_drops_exception_text():
@@ -919,6 +1035,70 @@ def test_strict_dirty_blocks_http_but_dev_diagnostic_runs_one_world(
     assert diagnostic["preflight_verified_suites"] == ["dev", "transfer"]
 
 
+@pytest.mark.parametrize(
+    "failure_code", ["baseline_admission_failed", "candidate_review_failed"]
+)
+def test_dev_failure_before_draft_is_unevaluated_not_false_negative(
+    monkeypatch, failure_code,
+):
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_request(_client, _method, _path, route, **_kwargs):
+        assert route == "health"
+        return {
+            "model": {"configured": True},
+            "runtime_provenance": {"capabilities": {"character_consistency": True}},
+        }
+
+    def fake_trial(_client, _suite, _trial, state, **_kwargs):
+        state["baseline"] = {
+            "status": "completed", "stage_outcome": "partial",
+            "material_coverage": "partial",
+        }
+        state["baseline_admission"] = {
+            "admitted": failure_code != "baseline_admission_failed"
+        }
+        raise axis_live.SafeFailure(failure_code, "baseline")
+
+    monkeypatch.setattr(axis_live.httpx, "Client", FakeClient)
+    monkeypatch.setattr(axis_live, "_request", fake_request)
+    monkeypatch.setattr(axis_live, "_execute_trial", fake_trial)
+    monkeypatch.setattr(axis_live, "_code_state", lambda: {
+        "git_head": "a" * 40, "worktree_clean": False,
+    })
+    report, code = axis_live.run(argparse.Namespace(
+        dataset=str(axis_live.DATASET),
+        manifest_sha256=axis_live.PINNED_MANIFEST_SHA256,
+        output_json=None, preflight_only=False,
+        base_url="http://127.0.0.1:8000", run_timeout_seconds=1,
+        diagnostic_dev_one_trial=True,
+    ))
+    assert code == 1
+    assert report["passed"] is False
+    trial = report["suites"]["dev"]["trials"][0]
+    assert trial["failure"]["code"] == failure_code
+    assert trial["draft"] is None
+    assert trial["counts"]["false_negatives"] == 0
+    assert trial["counts"]["unevaluated_cases"] == 5
+    assert report["suites"]["dev"]["aggregate"] == {
+        "false_negatives": 0, "unevaluated_cases": 5,
+    }
+    assert all(
+        row["evaluation_state"] == "pipeline_not_reached"
+        and row["false_negative"] is None
+        and row["passed"] is False
+        for row in trial["case_scores"]
+    )
+
+
 def test_checked_in_fixture_matches_pinned_manifest_and_gold_contract():
     assert axis_live.PINNED_MANIFEST_SHA256 == (
         "650dad19bf54fad726b5c0f2f5dfb94d05fc4462babbbb558b0e9aaf40f61140"
@@ -928,6 +1108,108 @@ def test_checked_in_fixture_matches_pinned_manifest_and_gold_contract():
     assert {name: len(axis_live._load_oracle(suite)) for name, suite in fixture.suites.items()} == {
         "dev": 5, "transfer": 5,
     }
+
+
+def test_v2_checked_in_fixture_matches_its_own_pin_and_gold_contract():
+    assert axis_live.PINNED_MANIFEST_SHA256_V2 == (
+        "3d428f156d2b5fd752a46eddb8a23ebeefff83cb221c2d02eaa8ac87891755b3"
+    )
+    assert axis_live.PINNED_MANIFEST_SHA256_V2 != axis_live.PINNED_MANIFEST_SHA256
+    fixture = axis_live.verify_fixture(
+        axis_live.DATASET_V2,
+        expected_manifest_sha256=axis_live.PINNED_MANIFEST_SHA256_V2,
+    )
+    assert fixture.manifest_sha256 == axis_live.PINNED_MANIFEST_SHA256_V2
+    assert {name: len(axis_live._load_oracle(suite)) for name, suite in fixture.suites.items()} == {
+        "dev": 5, "transfer": 6,
+    }
+    assert fixture.suites["dev"].world_id != fixture.suites["transfer"].world_id
+
+
+def test_both_official_fixtures_use_their_own_pin_without_http(monkeypatch):
+    monkeypatch.setattr(axis_live.httpx, "Client", lambda **_k: pytest.fail("unexpected HTTP"))
+    for dataset, digest, kind in (
+        (axis_live.DATASET, axis_live.PINNED_MANIFEST_SHA256, "pinned_challenge"),
+        (axis_live.DATASET_V2, axis_live.PINNED_MANIFEST_SHA256_V2, "pinned_challenge_v2"),
+    ):
+        report, code = axis_live.run(argparse.Namespace(
+            dataset=str(dataset), manifest_sha256=None,
+            output_json=None, preflight_only=True,
+            diagnostic_dev_one_trial=False,
+            base_url="http://127.0.0.1:8000", run_timeout_seconds=1,
+        ))
+        assert code == 0
+        assert report["dataset_kind"] == kind
+        assert report["manifest_sha256"] == digest
+        assert report["preflight_verified"] is True
+        assert report["passed"] is False
+
+
+def test_v2_official_digest_override_and_unpinned_custom_fail_before_http(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(axis_live.httpx, "Client", lambda **_k: pytest.fail("unexpected HTTP"))
+    wrong, code = axis_live.run(argparse.Namespace(
+        dataset=str(axis_live.DATASET_V2),
+        manifest_sha256=axis_live.PINNED_MANIFEST_SHA256,
+        output_json=None, preflight_only=True,
+        diagnostic_dev_one_trial=False,
+        base_url="http://127.0.0.1:8000", run_timeout_seconds=1,
+    ))
+    assert code == 1
+    assert wrong["failure"]["code"] == "official_manifest_digest_override"
+    custom, _digest = _fixture(tmp_path)
+    unpinned, code = axis_live.run(argparse.Namespace(
+        dataset=str(custom), manifest_sha256=None,
+        output_json=None, preflight_only=True,
+        diagnostic_dev_one_trial=False,
+        base_url="http://127.0.0.1:8000", run_timeout_seconds=1,
+    ))
+    assert code == 1
+    assert unpinned["dataset_kind"] == "custom"
+    assert unpinned["failure"]["code"] == "manifest_digest_required"
+
+
+def test_v2_is_strict_eligible_but_still_obeys_clean_worktree_gate(monkeypatch):
+    monkeypatch.setattr(axis_live.httpx, "Client", lambda **_k: pytest.fail("unexpected HTTP"))
+    monkeypatch.setattr(axis_live, "_code_state", lambda: {
+        "git_head": "a" * 40, "worktree_clean": False,
+    })
+    report, code = axis_live.run(argparse.Namespace(
+        dataset=str(axis_live.DATASET_V2), manifest_sha256=None,
+        output_json=None, preflight_only=False,
+        diagnostic_dev_one_trial=False,
+        base_url="http://127.0.0.1:8000", run_timeout_seconds=1,
+    ))
+    assert code == 1
+    assert report["dataset_kind"] == "pinned_challenge_v2"
+    assert report["failure"]["code"] == "strict_worktree_not_clean"
+
+
+def test_v2_file_hash_and_source_anchor_are_checked_before_scoring(tmp_path):
+    copied = tmp_path / "v2-copy"
+    shutil.copytree(axis_live.DATASET_V2, copied)
+    draft = copied / "dev" / axis_live.DRAFT_FILE
+    draft.write_bytes(draft.read_bytes() + b"\nchanged after freeze")
+    with pytest.raises(axis_live.SafeFailure, match="fixture_file_hash_mismatch"):
+        axis_live.verify_fixture(
+            copied, expected_manifest_sha256=axis_live.PINNED_MANIFEST_SHA256_V2
+        )
+
+    anchor_copy = tmp_path / "v2-anchor-copy"
+    shutil.copytree(axis_live.DATASET_V2, anchor_copy)
+    plan_path = anchor_copy / "dev" / "review-plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["candidate_decisions"][0]["source_quote"] = "this quote is absent from the source"
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    manifest_path = anchor_copy / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["suites"]["dev"]["files"]["review-plan.json"] = _hash(plan_path.read_bytes())
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(axis_live.SafeFailure, match="review_plan_source_anchor"):
+        axis_live.verify_fixture(
+            anchor_copy, expected_manifest_sha256=_hash(manifest_path.read_bytes())
+        )
 
 
 def test_preflight_only_is_verified_but_not_a_quality_pass(monkeypatch):
@@ -971,8 +1253,32 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
                 }],
                 "accepted_draft_observation_total": 1,
                 "accepted_draft_observation_refs_truncated": False,
-                "counts": {"targeted_record_rejected_count": 3},
-                "reason_counts": {"candidate_limit": 2, "sk-secret": 1},
+                "accepted_signal_histogram": [{
+                    "source_kind": "formal_character_profile",
+                    "stability": "stable", "dimension": "behavior_boundary",
+                    "count": 1,
+                }, {
+                    "source_kind": "published_history",
+                    "stability": "temporary", "dimension": "contextual_behavior",
+                    "count": 1,
+                }],
+                "candidate_eligibility": {
+                    "stable_or_core_formal_signals": 1,
+                    "stable_or_core_history_signals": 0,
+                    "prelimit_candidates": 1,
+                },
+                "counts": {
+                    "targeted_record_rejected_count": 3,
+                    "signal_count": 2,
+                },
+                "reason_counts": {
+                    "candidate_limit": 2,
+                    "source_formal": 2,
+                    "source_history": 1,
+                    "regenerated_from_evidence_mismatch": 5,
+                    "statement_support": 4,
+                    "sk-secret": 1,
+                },
             }}
         if route == "issues":
             return [{
@@ -998,7 +1304,25 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
         "document_name": "draft.md", "line_start": 2, "line_end": 2,
     }]
     assert summary["targeted_record_rejection_events"] == 3
-    assert summary["reason_counts"] == {"candidate_limit": 2}
+    assert summary["accepted_signal_histogram"] == [{
+        "source_kind": "formal_character_profile", "stability": "stable",
+        "dimension": "behavior_boundary", "count": 1,
+    }, {
+        "source_kind": "published_history", "stability": "temporary",
+        "dimension": "contextual_behavior", "count": 1,
+    }]
+    assert summary["candidate_eligibility"] == {
+        "stable_or_core_formal_signals": 1,
+        "stable_or_core_history_signals": 0,
+        "prelimit_candidates": 1,
+    }
+    assert summary["reason_counts"] == {
+        "candidate_limit": 2,
+        "source_formal": 2,
+        "source_history": 1,
+        "regenerated_from_evidence_mismatch": 5,
+        "statement_support": 4,
+    }
     assert summary["unreported_reason_entries"] == 1
     assert "sk-secret" not in repr(summary)
     raw_trace["citation_refs_incomplete"] = True
@@ -1006,6 +1330,49 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
         object(), {"id": "run-id"}, known_documents={"history.md", "draft.md"}
     )
     assert incomplete["case_trace"][0]["citation_refs"] is None
+
+
+def test_signal_histogram_projection_rejects_unbounded_or_untrusted_labels():
+    valid = {
+        "accepted_signal_histogram": [{
+            "source_kind": "formal_character_profile", "stability": "stable",
+            "dimension": "behavior_boundary", "count": 1,
+        }],
+        "candidate_eligibility": {
+            "stable_or_core_formal_signals": 1,
+            "stable_or_core_history_signals": 0,
+            "prelimit_candidates": 1,
+        },
+    }
+    assert axis_live._safe_accepted_signal_diagnostics(
+        valid, {"signal_count": 1}
+    ) == (valid["accepted_signal_histogram"], valid["candidate_eligibility"])
+    for field, value in (
+        ("source_kind", "sk-secret"),
+        ("source_kind", ["formal_character_profile"]),
+        ("stability", "secret"),
+        ("dimension", "secret"),
+        ("count", True),
+    ):
+        invalid = json.loads(json.dumps(valid))
+        invalid["accepted_signal_histogram"][0][field] = value
+        assert axis_live._safe_accepted_signal_diagnostics(
+            invalid, {"signal_count": 1}
+        ) == (None, None)
+    unexpected = json.loads(json.dumps(valid))
+    unexpected["accepted_signal_histogram"][0]["text"] = "sk-secret"
+    assert axis_live._safe_accepted_signal_diagnostics(
+        unexpected, {"signal_count": 1}
+    ) == (None, None)
+    assert axis_live._safe_accepted_signal_diagnostics(
+        valid, {"signal_count": 2}
+    ) == (None, None)
+    assert axis_live._safe_accepted_signal_diagnostics(valid, {}) == (None, None)
+    inflated = json.loads(json.dumps(valid))
+    inflated["candidate_eligibility"]["prelimit_candidates"] = 2
+    assert axis_live._safe_accepted_signal_diagnostics(
+        inflated, {"signal_count": 1}
+    ) == (None, None)
 
 
 def test_each_run_summary_records_only_valid_worker_runtime_provenance_digest(monkeypatch):

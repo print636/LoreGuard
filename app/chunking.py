@@ -9,7 +9,20 @@ if TYPE_CHECKING:
     from .pipeline import DocumentInput
 
 
-_PROFILE_H2 = re.compile(r"^##[ \t]+([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·・]{0,19})[ \t]*$")
+_PROFILE_H2 = re.compile(
+    r"^##[ \t]+([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·・]{0,19})"
+    r"(?:[ \t]*[｜|][ \t]*([\u4e00-\u9fff]{2,16}))?[ \t]*$"
+)
+_PROFILE_ROLE_TITLE = re.compile(
+    r"[\u4e00-\u9fff]{1,14}"
+    r"(?:员|师|官|长|士|者|人|文书|调度|顾问|经理|主管|店主|"
+    r"主编|导演|演员|策划|教授|学生|学徒)"
+)
+_PROFILE_NON_PERSON_NAME = re.compile(
+    r"(?:第[一二三四五六七八九十百千零〇两0-9]+[章节幕卷回篇话集]|"
+    r"序章|终章|番外|前言|后记|楔子|尾声|附录|角色[甲乙丙丁]|"
+    r".{1,10}(?:和|与|及|同).{1,10})"
+)
 _PROFILE_H1 = re.compile(r"^#[ \t]+(.+?)[ \t]*$")
 _PROFILE_FENCE = re.compile(r"^[ \t]*(?:```|~~~)")
 _PROFILE_GENERIC_HEADINGS = frozenset(
@@ -114,6 +127,12 @@ def chunk_character_profile_document(
             return chunk_document(document, max_chars, overlap_lines=0)
         name = match.group(1)
         if unicodedata.normalize("NFKC", name).casefold() in _PROFILE_GENERIC_HEADINGS:
+            return chunk_document(document, max_chars, overlap_lines=0)
+        role_title = match.group(2)
+        if role_title and (
+            _PROFILE_ROLE_TITLE.fullmatch(role_title) is None
+            or _PROFILE_NON_PERSON_NAME.fullmatch(name)
+        ):
             return chunk_document(document, max_chars, overlap_lines=0)
         names.append(name)
     normalized_names = [unicodedata.normalize("NFKC", name).casefold() for name in names]

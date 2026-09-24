@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import quote
@@ -14,6 +15,7 @@ from sqlalchemy import select
 
 from app.character_consistency_stage import (
     CharacterConsistencyStage,
+    failed_character_consistency_stage,
     _FrozenDocument,
     _classify_frozen_source,
     _baseline_shadowed_at_scope,
@@ -480,6 +482,99 @@ def test_same_line_distinct_preference_objects_reach_stage_candidates():
     assert {candidate.comparison_key for candidate in candidates} == {
         "preference:蜜瓜",
         "preference:葡萄",
+    }
+
+
+def test_accepted_signal_diagnostics_are_content_free_and_explain_history_singleton():
+    profile_line = "林澈长期喜欢蜜瓜。"
+    history_line = "林澈每次回城都喝梨汤。"
+    profile_record = _record(
+        evidence=profile_line,
+        polarity="positive",
+        kind="explicit_declaration",
+        statement="林澈长期喜欢蜜瓜",
+    )
+    history_record = {
+        **_record(
+            evidence=history_line,
+            polarity="positive",
+            kind="action",
+            trait_key="drink_preference",
+            statement="林澈每次回城都喝梨汤",
+        ),
+        "key_object": "梨汤",
+    }
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"无内容诊断-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client,
+            project["id"],
+            name="profile.md",
+            role="character_profile",
+            content=profile_line,
+            narrative_context=_context(publication="published"),
+        )
+        _create_document(
+            client,
+            project["id"],
+            name="history.md",
+            role="chapter",
+            content=history_line,
+            narrative_context=_context(publication="published"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(_response(profile_record), _response(history_record)),
+        )
+
+    diagnostics = result.diagnostics
+    assert diagnostics["counts"]["signal_count"] == 2
+    assert diagnostics["counts"]["pending_candidate_count"] == 1
+    histogram = diagnostics["accepted_signal_histogram"]
+    assert histogram == [
+        {
+            "source_kind": "formal_character_profile",
+            "stability": "stable",
+            "dimension": "preference",
+            "count": 1,
+        },
+        {
+            "source_kind": "published_history",
+            "stability": "stable",
+            "dimension": "preference",
+            "count": 1,
+        },
+    ]
+    assert sum(bucket["count"] for bucket in histogram) == diagnostics["counts"][
+        "signal_count"
+    ]
+    assert diagnostics["candidate_eligibility"] == {
+        "stable_or_core_formal_signals": 1,
+        "stable_or_core_history_signals": 1,
+        "prelimit_candidates": 1,
+    }
+    aggregate = json.dumps(
+        {
+            "accepted_signal_histogram": histogram,
+            "candidate_eligibility": diagnostics["candidate_eligibility"],
+        },
+        ensure_ascii=False,
+    )
+    assert all(
+        content not in aggregate
+        for content in ("林澈", "蜜瓜", "梨汤", "drink_preference", profile_line, history_line)
+    )
+
+
+def test_empty_failure_diagnostics_keep_content_free_signal_fields():
+    diagnostics = failed_character_consistency_stage().diagnostics
+    assert diagnostics["accepted_signal_histogram"] == []
+    assert diagnostics["candidate_eligibility"] == {
+        "stable_or_core_formal_signals": 0,
+        "stable_or_core_history_signals": 0,
+        "prelimit_candidates": 0,
     }
 
 
@@ -1313,6 +1408,12 @@ def test_primary_invalid_packages_fail_closed_and_mark_material_partial():
         assert result.diagnostics["reason_counts"]["schema_validation"] == 2
         assert result.diagnostics["usage"]["attempted_calls"] == 2
         assert result.diagnostics["counts"]["pending_candidate_count"] == 0
+        assert result.diagnostics["accepted_signal_histogram"] == []
+        assert result.diagnostics["candidate_eligibility"] == {
+            "stable_or_core_formal_signals": 0,
+            "stable_or_core_history_signals": 0,
+            "prelimit_candidates": 0,
+        }
 
 
 def test_isolated_character_profile_keeps_other_character_after_failed_section():
@@ -2410,6 +2511,407 @@ def test_support_classifier_rejects_conditions_and_non_character_temporary_nouns
     assert _explicit_support_kind(line) == expected
 
 
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("甲在场，乙完成六周训练后已经克服恐惧。", None),
+        ("甲看见乙暂时伪装成守卫。", None),
+        ("甲目睹乙逐渐改变。", None),
+        ("甲要求乙暂时伪装成守卫。", None),
+        ("乙要求甲暂时伪装成守卫。", None),
+        ("甲的同伴乙完成六周训练后已经克服恐惧。", None),
+        ("甲和乙一起暂时伪装成守卫。", None),
+        ("甲在场。乙完成六周训练后已经克服恐惧。", None),
+        ("甲知道乙完成六周训练后已经克服恐惧。", None),
+        ("甲说乙暂时伪装成守卫。", None),
+        ("甲、乙暂时伪装成守卫。", None),
+        ("甲完成六周训练后已经克服恐惧。", "causal_bridge"),
+        ("甲暂时伪装成守卫。", "exception"),
+        ("甲受伤后暂时失忆。", "exception"),
+        ("训练后甲逐渐改变了待人方式。", "causal_bridge"),
+        ("甲为潜入宴会，假装成侍者并故意表现得健谈。", "exception"),
+    ],
+)
+def test_generic_support_requires_target_as_event_agent(
+    line: str, expected: str | None,
+):
+    assert _explicit_support_kind(line, character="甲") == expected
+
+
+def test_support_search_never_exposes_other_actor_generic_g_or_x_handles():
+    scope = NarrativeScopeV1()
+    baseline = _confirmed_trait(character="甲", dimension="core_personality")
+    source = _FrozenDocument(
+        input_id="history-input",
+        document=DocumentInput(
+            id="history", name="history.md", role="chapter",
+            content=(
+                "甲在场，乙完成六周训练后已经克服恐惧。\n"
+                "甲看见乙暂时伪装成守卫。\n"
+                "甲完成六周训练后已经克服恐惧。\n"
+                "甲暂时伪装成守卫。"
+            ),
+        ),
+        document_version=1, content_sha256="0" * 64, ordinal=0,
+        source_kind="published_history", source_reason="published_history",
+        scope=scope, resolution_state="confirmed",
+        publication_status="published", authority_tier="formal_record",
+    )
+    support = _find_support_evidence(
+        baseline=baseline, baseline_scope=scope,
+        draft_scopes=(scope,), draft_ordinals=(1,),
+        draft_document_ids=("draft",), documents=[source], limit=8,
+    )
+    assert [(row.evidence.line_start, row.kind) for row in support] == [
+        (3, "causal_bridge"), (4, "exception"),
+    ]
+
+
+def test_published_training_and_medical_support_remain_actor_bound():
+    root = Path(__file__).resolve().parents[1] / "data"
+    for version, suite, character, expected in (
+        ("v1", "dev", "沈禾", {3: "causal_bridge", 4: "causal_bridge"}),
+        ("v2", "dev", "许箬", {3: "causal_bridge", 4: "causal_bridge"}),
+        ("v2", "dev", "荀木", {5: "exception"}),
+        ("v2", "transfer", "温弦", {11: "causal_bridge"}),
+        ("v2", "transfer", "童画", {13: "exception"}),
+    ):
+        rows = (
+            root / f"character-axis-challenge-{version}" / suite
+            / "03-published-history-v1.0.md"
+        ).read_text(encoding="utf-8").splitlines()
+        for line_number, kind in expected.items():
+            assert _explicit_support_kind(
+                rows[line_number - 1], character=character,
+            ) == kind
+
+    transfer_rows = (
+        root / "character-axis-challenge-v2" / "transfer"
+        / "03-published-history-v1.0.md"
+    ).read_text(encoding="utf-8").splitlines()
+    for character in ("许砚灯", "曲霁", "罗月", "杭泊"):
+        assert _explicit_support_kind(
+            transfer_rows[2], character=character,
+        ) is None
+
+
+def test_transfer_published_harm_is_g_only_with_same_actor_public_review():
+    history = (
+        Path(__file__).resolve().parents[1]
+        / "data/character-axis-challenge-v2/transfer/03-published-history-v1.0.md"
+    ).read_text(encoding="utf-8")
+    scope = NarrativeScopeV1()
+    source = _FrozenDocument(
+        input_id="history-input",
+        document=DocumentInput(
+            id="history", name="03-published-history-v1.0.md",
+            role="chapter", content=history,
+        ),
+        document_version=1, content_sha256="0" * 64, ordinal=0,
+        source_kind="published_history", source_reason="published_history",
+        scope=scope, resolution_state="confirmed",
+        publication_status="published", authority_tier="formal_record",
+    )
+    support = _find_support_evidence(
+        baseline=_confirmed_trait(character="温弦", dimension="core_personality"),
+        baseline_scope=scope, draft_scopes=(scope,), draft_ordinals=(1,),
+        draft_document_ids=("draft",), documents=[source], limit=8,
+    )
+    assert [(row.evidence.line_start, row.kind) for row in support] == [
+        (9, "causal_bridge"), (11, "causal_bridge"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        (
+            "去年夜航时，荀木曾因高烧被医师当面要求当日暂停所有热饮，"
+            "先喝常温水。荀木照做，退烧后又恢复了喝热饮的习惯。",
+            "exception",
+        ),
+        (
+            "荀木高烧，医生当面要求荀木当天暂停热饮。荀木照做，退烧后恢复。",
+            "exception",
+        ),
+        ("如果荀木高烧被医师要求当日暂停热饮，荀木就会照做。", None),
+        ("荀木高烧被医师要求当日暂停热饮，荀木可能照做。", None),
+        ("荀木高烧被医师要求当日暂停热饮，荀木没有照做。", None),
+        ("荀木高烧被医师要求当日暂停热饮，荀木照做的说法并未证实。", None),
+        ("荀木高烧被医师要求当日暂停热饮，尚未说明荀木是否照做。", None),
+        ("医嘱要求荀木当日暂停热饮，荀木照做。", None),
+        ("规则规定荀木高烧时应该暂停热饮。", None),
+        ("荀木高烧被医师要求当日暂停热饮。", None),
+        ("荀木高烧，医师要求苏弦当日暂停热饮，荀木照做。", None),
+        ("戏本台词：「荀木高烧被医师要求当日暂停热饮，荀木照做。」", None),
+    ],
+)
+def test_medical_support_requires_same_actor_real_order_and_compliance(
+    line: str, expected: str | None,
+):
+    assert _explicit_support_kind(line, character="荀木") == expected
+
+
+def test_medical_support_accepts_prior_spicy_food_treatment_only_after_compliance():
+    treatment = (
+        "童画在事故救援中被热灰灼伤咽喉。医师在治疗记录里明确写下："
+        "从当天起三天内，童画要避开热和辛辣食物，三天后复查；"
+    )
+    assert _explicit_support_kind(
+        treatment + "童画照做，治疗期间暂不吃热椒饼。记录没有说她不再喜欢热椒饼。",
+        character="童画",
+    ) == "exception"
+    assert _explicit_support_kind(
+        treatment + "记录没有说她不再喜欢热椒饼。",
+        character="童画",
+    ) is None
+
+
+def test_medical_support_accepts_actual_published_transfer_compliance_form():
+    history = (
+        "童画在事故救援中被热灰灼伤咽喉。医师在治疗记录里明确写下："
+        "从当天起三天内，童画要避开热和辛辣食物，三天后复查；"
+        "童画当天就依医嘱把刚出炉的热椒饼放回摊位，只喝温水；"
+        "记录没有说她不再喜欢热椒饼。市集草稿发生在治疗后的第二天。"
+    )
+    assert _explicit_support_kind(history, character="童画") == "exception"
+    assert _explicit_support_kind(
+        history.replace("童画当天就依医嘱把刚出炉的热椒饼放回摊位，只喝温水；", ""),
+        character="童画",
+    ) is None
+
+
+def test_public_retrospective_statement_is_actual_speech_not_future_action():
+    event = (
+        "顾衡为了尽快恢复贸易路口，命令温弦先开一处未经检查的次级幕门。"
+        "温弦当时照办，结果粉尘涌入避难廊，十余名居民被迫转移；"
+        "她亲眼看见一个孩子因呼吸困难被担架抬走。"
+    )
+    statement = (
+        "事故复盘会上，温弦当着顾衡和居民的面说：「我以前不敢公开反对师父；"
+        "这次服从错误命令伤到了人。以后如果命令会把居民送进灰潮，"
+        "我会在现场直接提出反对，哪怕是顾衡下的命令。」"
+        "顾衡没有把这句话解释成玩笑，也没有要求她收回。"
+    )
+    # Harmful compliance by itself is background, not evidence of growth.
+    assert _explicit_support_kind(event, character="温弦") is None
+    assert _explicit_support_kind(statement, character="温弦") == "causal_bridge"
+    assert _explicit_support_kind(statement, character="顾衡") is None
+    for unsupported in (
+        statement.replace("事故复盘会上", "排练会上"),
+        statement.replace("温弦当着顾衡和居民的面说", "温弦打算当着顾衡和居民的面说"),
+        statement.replace("温弦当着顾衡和居民的面说", "温弦并未当着顾衡和居民的面说"),
+        statement.replace("这次服从错误命令伤到了人。", "如果服从错误命令可能伤到人。"),
+        statement.replace("我以前不敢", "我以前并非不敢"),
+        statement.replace("这次服从错误命令伤到了人。", "这次服从错误命令没有伤到人。"),
+        statement.replace("我会在现场直接提出反对", "我会在现场不反对"),
+        statement.replace("事故复盘会上，温弦当着顾衡和居民的面说：", "温弦在私下说："),
+    ):
+        assert _explicit_support_kind(unsupported, character="温弦") is None
+
+
+def test_harmful_compliance_support_requires_later_same_source_public_statement():
+    event = (
+        "总监命令温弦开启未经检查的幕门。温弦当时照办，"
+        "结果十余名居民被迫转移。"
+    )
+    statement = (
+        "事故复盘会上，温弦当着总监和居民的面说：「我以前不敢公开反对上级；"
+        "这次服从错误命令伤到了人。以后如果命令会伤人，我会当面提出反对。」"
+    )
+    scope = NarrativeScopeV1.model_validate({
+        "release": {"key": "v1.0", "ordinal": 10}
+    })
+    draft_scope = NarrativeScopeV1.model_validate({
+        "release": {"key": "v1.1", "ordinal": 11}
+    })
+    baseline = _confirmed_trait(character="温弦", dimension="core_personality")
+
+    def found(content: str) -> list[int]:
+        source = _FrozenDocument(
+            input_id="history-input",
+            document=DocumentInput(
+                id="history", name="history.md", content=content, role="chapter"
+            ),
+            document_version=1, content_sha256="0" * 64, ordinal=1,
+            source_kind="published_history", source_reason="published_history",
+            scope=scope, resolution_state="confirmed",
+            publication_status="published", authority_tier="formal_record",
+        )
+        support = _find_support_evidence(
+            baseline=baseline, baseline_scope=scope,
+            draft_scopes=(draft_scope,), draft_ordinals=(2,),
+            draft_document_ids=("draft-document",), documents=[source], limit=8,
+        )
+        assert all(row.kind == "causal_bridge" for row in support)
+        return [row.evidence.line_start for row in support]
+
+    assert found(event + "\ninterlude\n" + statement) == [1, 3]
+    assert found(event) == []
+    assert found(event + "\n" + statement.replace("温弦当着", "另一人当着")) == []
+    assert found(event + "\n" + statement.replace("事故复盘会上", "排练会上")) == []
+    assert found(event.replace("温弦当时照办", "温弦没有照办") + "\n" + statement) == [2]
+    assert found(event.replace("结果十余名居民被迫转移", "结果十余名居民没有被迫转移") + "\n" + statement) == [2]
+    assert found(event.replace("命令温弦", "命令另一人") + "\n" + statement) == [2]
+    assert found(statement + "\n" + event) == [1]
+
+
+def test_support_search_accepts_only_prior_published_authoritative_sources():
+    history_line = (
+        "去年夜航时，荀木曾因高烧被医师当面要求当日暂停所有热饮。"
+        "荀木照做，退烧后恢复了喝热饮的习惯。"
+    )
+    baseline = _confirmed_trait(character="荀木", trait_key="hot_drink_preference")
+    old_scope = NarrativeScopeV1.model_validate({
+        "release": {"key": "v1.0", "ordinal": 10}
+    })
+    draft_scope = NarrativeScopeV1.model_validate({
+        "release": {"key": "v1.1", "ordinal": 11}
+    })
+    future_scope = NarrativeScopeV1.model_validate({
+        "release": {"key": "v1.2", "ordinal": 12}
+    })
+
+    def source(
+        name: str, *, kind: str, publication: str, authority: str,
+        ordinal: int, scope: NarrativeScopeV1 = old_scope,
+        content: str = history_line,
+    ) -> _FrozenDocument:
+        return _FrozenDocument(
+            input_id=f"input-{name}",
+            document=DocumentInput(
+                id=name, name=f"{name}.md", content=content,
+                role="chapter" if kind in {"draft", "published_history"} else "canon",
+            ),
+            document_version=1, content_sha256="0" * 64, ordinal=ordinal,
+            source_kind=kind, source_reason=kind, scope=scope,
+            resolution_state="confirmed", publication_status=publication,
+            authority_tier=authority,
+        )
+
+    sources = [
+        source("growth", kind="formal_character_profile", publication="published",
+               authority="core_canon", ordinal=0,
+               content="训练后荀木逐渐改变了待人方式。"),
+        source("medical", kind="published_history", publication="published",
+               authority="formal_record", ordinal=1),
+        source("self_draft", kind="draft", publication="draft",
+               authority="draft", ordinal=2),
+        source("mislabelled_draft", kind="draft", publication="published",
+               authority="formal_record", ordinal=0),
+        source("in_review", kind="formal_character_profile", publication="in_review",
+               authority="formal_record", ordinal=0),
+        source("retired", kind="published_history", publication="retired",
+               authority="formal_record", ordinal=0),
+        source("low_authority", kind="formal_character_profile", publication="published",
+               authority="reference", ordinal=0),
+        source("future_input", kind="published_history", publication="published",
+               authority="formal_record", ordinal=3),
+        source("future_release", kind="published_history", publication="published",
+               authority="formal_record", ordinal=0, scope=future_scope),
+    ]
+    support = _find_support_evidence(
+        baseline=baseline, baseline_scope=old_scope,
+        draft_scopes=(draft_scope,), draft_ordinals=(2,),
+        draft_document_ids=("draft-document",),
+        documents=sources, limit=12,
+    )
+    assert {(row.evidence.document_id, row.kind) for row in support} == {
+        ("growth", "causal_bridge"), ("medical", "exception"),
+    }
+    assert all(row.eligible_draft_document_ids == ("draft-document",) for row in support)
+    assert all(row.publication_status == "published" for row in support)
+
+
+@pytest.mark.parametrize("include_published_history", [False, True])
+def test_api_stage_never_promotes_same_draft_medical_defense_to_support(
+    monkeypatch, include_published_history: bool,
+):
+    profile_line = "荀木喜欢热姜梅露。"
+    medical_line = (
+        "去年夜航时，荀木曾因高烧被医师当面要求当日暂停所有热饮。"
+        "荀木照做，退烧后恢复了喝热姜梅露的习惯。"
+    )
+    draft_line = "荀木说讨厌热姜梅露。"
+    profile_record = {
+        **_record(
+            character="荀木", evidence=profile_line, polarity="positive",
+            kind="explicit_declaration", trait_key="hot_drink_preference",
+        ),
+        "key_object": "热姜梅露",
+    }
+    draft_record = {
+        **_record(
+            character="荀木", evidence=draft_line, polarity="negative",
+            kind="preference_expression", trait_key="hot_drink_preference",
+        ),
+        "key_object": "热姜梅露",
+    }
+    captured_support: list[tuple[SupportEvidence, ...]] = []
+    original_prepare = prepare_character_drift
+
+    def capture_prepare(case):
+        captured_support.append(case.support_evidence)
+        return original_prepare(case)
+
+    monkeypatch.setattr(
+        "app.character_consistency_stage.prepare_character_drift", capture_prepare
+    )
+    monkeypatch.setattr(
+        "app.character_consistency_stage.CharacterConsistencyReviewer.review",
+        lambda _self, _prepared: _trace_review(
+            ("B01", "C01", "X01") if include_published_history else ("B01", "C01"),
+            verdict="explained" if include_published_history else "needs_confirmation",
+        ),
+    )
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"医疗来源门-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="profile.md", role="character_profile",
+            content=profile_line, narrative_context=_context(publication="published"),
+        )
+        seed = _new_run(client, project["id"])
+        _run_stage(seed, QueueProvider(_response(profile_record)))
+        _confirm_only_candidate(client, project["id"], seed)
+        if include_published_history:
+            _create_document(
+                client, project["id"], name="medical-history.md", role="chapter",
+                content=medical_line, narrative_context=_context(publication="published"),
+            )
+        draft_document = _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content=f"{draft_line}\n{medical_line}",
+            narrative_context=_context(publication="draft"),
+        )
+        responses = [_response(profile_record)]
+        if include_published_history:
+            responses.append(_response())
+        responses.append(_response(draft_record))
+        result = _run_stage(_new_run(client, project["id"]), QueueProvider(*responses))
+
+    assert captured_support
+    supports = captured_support[-1]
+    if include_published_history:
+        assert [(row.evidence.document_name, row.kind) for row in supports] == [
+            ("medical-history.md", "exception")
+        ]
+        assert supports[0].eligible_draft_document_ids == (draft_document["id"],)
+    else:
+        assert supports == ()
+    trace = result.diagnostics["case_trace"][0]
+    if include_published_history:
+        assert trace["review_verdict"] == "explained"
+        assert [row for row in trace["citation_refs"] if row["role"] == "X"] == [{
+            "handle": "X01", "role": "X", "document_name": "medical-history.md",
+            "line_start": 1, "line_end": 1,
+        }]
+    else:
+        assert trace["review_verdict"] == "needs_confirmation"
+        assert all(row["role"] != "X" for row in trace["citation_refs"])
+
+
 def test_support_search_never_reuses_baseline_evidence_line():
     scope = NarrativeScopeV1()
     baseline = _confirmed_trait(dimension="core_personality", trait_key="社交主动性").model_copy(
@@ -2448,6 +2950,8 @@ def test_support_search_never_reuses_baseline_evidence_line():
         baseline=baseline,
         baseline_scope=scope,
         draft_scopes=(scope,),
+        draft_ordinals=(1,),
+        draft_document_ids=("draft",),
         documents=[source],
         limit=8,
     ) == ()
@@ -4262,6 +4766,8 @@ def test_shadowed_history_trait_still_supplies_published_growth_evidence():
         baseline=profile,
         baseline_scope=scope,
         draft_scopes=(scope,),
+        draft_ordinals=(2,),
+        draft_document_ids=("draft",),
         documents=[published_history],
         limit=8,
     )
