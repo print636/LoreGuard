@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -76,9 +77,23 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     assert result["character_consistency_limits"][
         "signal_max_completion_tokens"
     ] == 4_096
+    assert result["character_consistency_limits"]["signal_max_records"] == 48
+    assert result["character_consistency_limits"][
+        "signal_targeted_max_targets_per_chunk"
+    ] == 12
+    assert result["character_consistency_limits"][
+        "signal_provider_max_completion_tokens"
+    ] == 1_024
+    assert result["character_consistency_limits"][
+        "signal_provider_max_response_bytes"
+    ] == 64_000
     assert result["character_consistency_limits"][
         "drift_provider_max_attempts"
     ] == 2
+    assert result["character_consistency_limits"]["drift_token_budget"] == 4_000
+    assert result["character_consistency_limits"][
+        "drift_provider_max_completion_tokens"
+    ] == 1_000
     assert result["character_consistency_limits"][
         "signal_total_deadline_seconds"
     ] == 60
@@ -91,6 +106,58 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     assert "https://" not in serialized
     assert "/v1" not in serialized
     assert "relay.example" not in serialized
+    assert live_runner._safe_runtime_provenance(result) == result
+
+
+def _character_limits_digest(settings: Settings) -> str:
+    limits = safe_runtime_provenance(settings)["character_consistency_limits"]
+    encoded = json.dumps(
+        limits, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def test_character_runtime_fingerprint_tracks_stage_and_effective_provider_limits():
+    baseline = configured_settings()
+    baseline_limits = safe_runtime_provenance(baseline)["character_consistency_limits"]
+    baseline_digest = _character_limits_digest(baseline)
+    variants = (
+        {"character_signal_max_records": 47},
+        {"character_signal_targeted_max_targets_per_chunk": 11},
+        {"character_signal_timeout_seconds": 20},
+        {"character_signal_max_response_bytes": 32_000},
+        {"character_drift_max_evidence_chars": 7_000},
+        {"character_drift_token_budget": 3_000},
+        {"character_drift_timeout_seconds": 20},
+        {"character_drift_max_completion_tokens": 900},
+        {"character_drift_max_response_bytes": 16_000},
+        {"provider_total_deadline_seconds": 20},
+        {"provider_max_completion_tokens": 512},
+        {"provider_max_response_bytes": 16_000},
+        {"per_run_token_budget": 90_000},
+        {"daily_token_budget": 200_000},
+    )
+    for override in variants:
+        assert _character_limits_digest(configured_settings(**override)) != baseline_digest, override
+
+    constrained = safe_runtime_provenance(configured_settings(
+        provider_total_deadline_seconds=12,
+        provider_max_completion_tokens=512,
+        provider_max_response_bytes=1_024,
+    ))["character_consistency_limits"]
+    assert constrained["signal_total_deadline_seconds"] == 12.0
+    assert constrained["drift_total_deadline_seconds"] == 12.0
+    assert constrained["signal_provider_timeout_seconds"] == 12.0
+    assert constrained["drift_provider_timeout_seconds"] == 12.0
+    assert constrained["signal_provider_max_completion_tokens"] == 512
+    assert constrained["drift_provider_max_completion_tokens"] == 512
+    assert constrained["signal_provider_max_response_bytes"] == 1_024
+    assert constrained["drift_provider_max_response_bytes"] == 1_024
+    assert type(baseline_limits["signal_timeout_seconds"]) is float
+    assert type(baseline_limits["drift_timeout_seconds"]) is float
+    assert type(baseline_limits["per_run_token_budget"]) is int
+    assert type(baseline_limits["daily_token_budget"]) is int
 
 
 def test_runtime_provenance_marks_unversioned_build_without_inventing_revision():

@@ -17,7 +17,9 @@ from .character_drift import (
     CharacterDriftCase,
     CharacterReviewResult,
     ConfirmedTraitSnapshot,
+    PreparedCharacterDrift,
     SupportEvidence,
+    _evidence_rows,
     prepare_character_drift,
     promote_character_drift,
 )
@@ -86,6 +88,10 @@ _TEMPORARY_CHARACTER_STATE_OR_BEHAVIOR = re.compile(
 )
 _MAX_CONFIRMED_TRAITS_IN_SERVER_CONTEXT = 12
 _MAX_CASE_TRACE_OBSERVATION_REFS = 12
+_MAX_CASE_TRACE_CITATION_REFS = 8
+_MAX_CASE_TRACE_LINE = 10_000_000
+_CASE_TRACE_CITATION_HANDLE = re.compile(r"^[BCGX][0-9]{2}$")
+_MAX_ACCEPTED_DRAFT_OBSERVATION_REFS = 64
 _MAX_TOKEN_ADMISSION_EVENTS = 24
 _OBJECT_BEARING_TRAIT_DIMENSIONS = frozenset(
     {"preference", "value", "behavior_boundary", "current_state"}
@@ -827,6 +833,11 @@ class CharacterConsistencyStage:
         draft_signals = tuple(
             row for row in signals if row.source_kind == "draft"
         )
+        (
+            accepted_draft_observation_refs,
+            accepted_draft_observation_total,
+            accepted_draft_observation_refs_truncated,
+        ) = _safe_accepted_draft_observation_refs(draft_signals)
         eligible_draft_count = sum(row.source_kind == "draft" for row in eligible)
         if eligible_draft_count and not draft_signals:
             # A completed targeted pass is allowed to say that the named
@@ -1035,6 +1046,7 @@ class CharacterConsistencyStage:
                     baseline_entry=baseline_entry,
                     matched_observation_count=len(prepared.matching_observations),
                     matched_observations=prepared.matching_observations,
+                    prepared=prepared,
                     prepare_reason=prepared.reason,
                     review=review,
                     final_outcome=promoted.outcome,
@@ -1172,6 +1184,11 @@ class CharacterConsistencyStage:
             sensitivity=settings.character_consistency_sensitivity,
             material_coverage="partial" if partial else "complete",
             case_trace=case_trace,
+            accepted_draft_observation_refs=accepted_draft_observation_refs,
+            accepted_draft_observation_total=accepted_draft_observation_total,
+            accepted_draft_observation_refs_truncated=(
+                accepted_draft_observation_refs_truncated
+            ),
             token_admission_events=token_admission_events,
         )
         return CharacterConsistencyStageResult(
@@ -1371,7 +1388,7 @@ def _classify_frozen_source(
         )
     if role == "chapter" and publication in {"published", "retired"}:
         return "published_history", "history", scope, resolution, publication, "formal_record"
-    if role == "chapter" and publication == "draft":
+    if role == "chapter" and publication in {"draft", "in_review"}:
         return "draft", "draft", scope, resolution, publication, "draft"
     return None, "reference", scope, resolution, publication, "reference"
 
@@ -2513,6 +2530,112 @@ def _safe_observation_refs(
     ]
 
 
+def _safe_accepted_draft_observation_refs(
+    signals: tuple[CharacterSignal, ...],
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Summarize every unique, validated draft signal before alias matching.
+
+    Only the stage's accepted signal set reaches this function. Suspicious
+    identifiers are omitted rather than exposing a redacted alias as if it
+    were an exact actor/document match for later evaluation.
+    """
+
+    draft_signals = tuple(row for row in signals if row.source_kind == "draft")
+    refs: list[dict[str, Any]] = []
+    for row in draft_signals:
+        if len(refs) >= _MAX_ACCEPTED_DRAFT_OBSERVATION_REFS:
+            break
+        character_key = _safe_trace_identifier(_key(row.character), max_chars=64)
+        document_name = _safe_trace_document_name(row.evidence.document_name)
+        start, end = row.evidence.line_start, row.evidence.line_end
+        if (
+            character_key.startswith("redacted_")
+            or document_name != row.evidence.document_name
+            or type(start) is not int
+            or type(end) is not int
+            or not 1 <= start <= end <= _MAX_CASE_TRACE_LINE
+        ):
+            continue
+        refs.append(
+            {
+                "character_key": character_key,
+                "dimension": row.dimension,
+                "polarity": row.polarity,
+                "observation_kind": row.observation_kind,
+                "document_name": document_name,
+                "line_start": start,
+                "line_end": end,
+            }
+        )
+    return refs, len(draft_signals), len(refs) < len(draft_signals)
+
+
+def _safe_citation_refs(
+    prepared: PreparedCharacterDrift | None,
+    review: CharacterReviewResult | None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Resolve reviewed handles against the *same* bounded evidence table.
+
+    Never derive a coordinate from a model explanation or from a guessed handle.
+    The reviewer builds B/C/G/X labels through ``_evidence_rows``; this trace
+    copies only the citation handle, role, safe file label, and line numbers.
+    """
+
+    decision = review.decision if review is not None else None
+    if decision is None:
+        return [], bool(
+            review is not None
+            and review.diagnostics.reason == "invalid_model_response"
+        )
+    if prepared is None or review.diagnostics.outcome != "completed":
+        return [], True
+    try:
+        citations = decision.citations
+        if not citations or len(set(citations)) != len(citations):
+            return [], True
+        evidence_rows, _ = _evidence_rows(prepared)
+        by_handle = {row["id"]: row for row in evidence_rows}
+        refs: list[dict[str, Any]] = []
+        for handle in citations:
+            if not isinstance(handle, str) or not _CASE_TRACE_CITATION_HANDLE.fullmatch(handle):
+                return [], True
+            row = by_handle.get(handle)
+            if row is None:
+                return [], True
+            if row.get("role") != {
+                "B": "baseline",
+                "C": "current",
+                "G": "bridge",
+                "X": "exception",
+            }[handle[0]]:
+                return [], True
+            document_name = row.get("document")
+            line_start = row.get("line_start")
+            line_end = row.get("line_end")
+            if (
+                not isinstance(document_name, str)
+                or _safe_trace_document_name(document_name) != document_name
+                or type(line_start) is not int
+                or type(line_end) is not int
+                or not 1 <= line_start <= line_end <= _MAX_CASE_TRACE_LINE
+            ):
+                return [], True
+            refs.append(
+                {
+                    "handle": handle,
+                    "role": handle[0],
+                    "document_name": document_name,
+                    "line_start": line_start,
+                    "line_end": line_end,
+                }
+            )
+        return refs[:_MAX_CASE_TRACE_CITATION_REFS], (
+            len(refs) > _MAX_CASE_TRACE_CITATION_REFS
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return [], True
+
+
 def _safe_case_trace(
     *,
     character_key: str,
@@ -2520,6 +2643,7 @@ def _safe_case_trace(
     baseline_entry: BaselineEntry | None = None,
     matched_observation_count: int,
     matched_observations: tuple[CharacterSignal, ...] = (),
+    prepared: PreparedCharacterDrift | None = None,
     prepare_reason: str,
     review: CharacterReviewResult | None,
     final_outcome: str,
@@ -2527,6 +2651,7 @@ def _safe_case_trace(
     promote_reason: str,
 ) -> dict[str, Any]:
     decision = review.decision if review is not None else None
+    citation_refs, citation_refs_incomplete = _safe_citation_refs(prepared, review)
     roles = (
         sorted(
             {
@@ -2604,6 +2729,8 @@ def _safe_case_trace(
         ),
         "review_verdict": decision.verdict if decision is not None else None,
         "citation_roles": roles,
+        "citation_refs": citation_refs,
+        "citation_refs_incomplete": citation_refs_incomplete,
         "final_outcome": final_outcome,
         "visible": bool(visible),
         "promote_reason": promote_reason,
@@ -2618,6 +2745,9 @@ def _diagnostics(
     reasons: Counter[str],
     material_coverage: str = "unknown",
     case_trace: list[dict[str, Any]] | None = None,
+    accepted_draft_observation_refs: list[dict[str, Any]] | None = None,
+    accepted_draft_observation_total: int = 0,
+    accepted_draft_observation_refs_truncated: bool = False,
     token_admission_events: list[dict[str, int | str | None]] | None = None,
     **counts: Any,
 ) -> dict[str, Any]:
@@ -2630,6 +2760,13 @@ def _diagnostics(
         "material_coverage": material_coverage,
         "counts": counts,
         "case_trace": list(case_trace or ()),
+        "accepted_draft_observation_refs": list(
+            accepted_draft_observation_refs or ()
+        ),
+        "accepted_draft_observation_total": accepted_draft_observation_total,
+        "accepted_draft_observation_refs_truncated": bool(
+            accepted_draft_observation_refs_truncated
+        ),
         "token_admission_events": list(token_admission_events or ()),
         "reason_counts": dict(sorted(reasons.items())),
         "usage": usage.safe_dict(),
@@ -2652,6 +2789,9 @@ def _empty_stage_result(outcome: str, reason_code: str) -> CharacterConsistencyS
             "material_coverage": "unknown",
             "counts": {},
             "case_trace": [],
+            "accepted_draft_observation_refs": [],
+            "accepted_draft_observation_total": 0,
+            "accepted_draft_observation_refs_truncated": False,
             "token_admission_events": [],
             "reason_counts": {},
             "usage": _Usage().safe_dict(),

@@ -314,21 +314,38 @@ _CHARACTER_CONSISTENCY_SENSITIVITIES = frozenset(
     {"conservative", "balanced", "exploratory"}
 )
 _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS = {
-    "stage_token_budget": (256, 100_000),
+    "stage_token_budget": (256, 150_000),
     "max_chunks_per_run": (1, 128),
     "max_candidates_per_run": (1, 256),
     "signal_max_chunk_chars": (256, 12_000),
+    "signal_max_records": (1, 64),
+    "signal_targeted_max_targets_per_chunk": (1, 12),
     "signal_provider_max_attempts": (1, 4),
     "signal_package_max_attempts": (1, 2),
-    "signal_token_budget": (256, 22_000),
+    "signal_token_budget": (256, 40_000),
     "signal_max_completion_tokens": (64, 8_192),
+    "signal_max_response_bytes": (1_024, 128_000),
+    "signal_provider_max_completion_tokens": (1, 8_192),
+    "signal_provider_max_response_bytes": (1, 128_000),
     "drift_max_observations": (1, 24),
     "drift_max_support_evidence": (0, 16),
+    "drift_max_evidence_chars": (256, 16_000),
+    "drift_token_budget": (256, 8_000),
+    "drift_max_completion_tokens": (64, 1_500),
+    "drift_max_response_bytes": (1_024, 64_000),
     "drift_provider_max_attempts": (1, 4),
+    "drift_provider_max_completion_tokens": (1, 1_500),
+    "drift_provider_max_response_bytes": (1, 64_000),
+    "per_run_token_budget": (0, MAX_SAFE_COUNTER),
+    "daily_token_budget": (0, MAX_SAFE_COUNTER),
 }
 _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS = {
+    "signal_timeout_seconds": (0.0, 30.0),
     "signal_total_deadline_seconds": (0.0, 60.0),
+    "signal_provider_timeout_seconds": (0.0, 30.0),
+    "drift_timeout_seconds": (0.0, 30.0),
     "drift_total_deadline_seconds": (0.0, 60.0),
+    "drift_provider_timeout_seconds": (0.0, 30.0),
 }
 _CHARACTER_CONSISTENCY_LIMIT_KEYS = frozenset(
     {

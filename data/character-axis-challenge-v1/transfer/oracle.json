@@ -1,0 +1,93 @@
+{
+  "schema_version": "character-axis-oracle-v1",
+  "suite": "transfer",
+  "world_id": "folded-cloud-post",
+  "developer_visible": true,
+  "expected_cases": [
+    {
+      "case_id": "transfer_unexplained_companion_abandonment",
+      "candidate_key": "transfer_companion",
+      "gold_class": "conflict",
+      "allowed_final_outcomes": ["conflict"],
+      "required_citation_roles": ["B", "C"],
+      "min_independent_observations": 2,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 4}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 3}, {"document_name": "04-draft-event-v1.1.md", "line": 4}],
+        "G": [],
+        "X": [],
+        "forbidden": []
+      },
+      "notes": "两次不同日期独自过桥弃下搭档，主线无险情或已发布成长依据。"
+    },
+    {
+      "case_id": "transfer_published_route_training",
+      "candidate_key": "transfer_guidance",
+      "gold_class": "explained",
+      "allowed_final_outcomes": ["no_issue"],
+      "required_citation_roles": ["B", "C", "G"],
+      "min_independent_observations": 2,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 7}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 6}, {"document_name": "04-draft-event-v1.1.md", "line": 7}],
+        "G": [{"document_name": "03-published-history-v1.0.md", "line": 3}, {"document_name": "03-published-history-v1.0.md", "line": 4}],
+        "X": [],
+        "forbidden": []
+      },
+      "notes": "已发布训练既有持续过程又有成功结果，新稿行为与训练同轴。"
+    },
+    {
+      "case_id": "transfer_ambiguous_seal_actor",
+      "candidate_key": "transfer_seal",
+      "gold_class": "abstain",
+      "allowed_final_outcomes": ["unverifiable", "needs_confirmation"],
+      "required_citation_roles": [],
+      "min_independent_observations": 0,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 10}],
+        "C": [],
+        "G": [],
+        "X": [],
+        "forbidden": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 9, "character_key": "鹤宁", "role": "C", "polarity": "positive"},
+          {"document_name": "04-draft-event-v1.1.md", "line": 10, "character_key": "鹤宁", "role": "C", "polarity": null}
+        ]
+      },
+      "notes": "两名角色同场，跨句的「他」无唯一可核验先行词；不能把拆函确定归属鹤宁。"
+    },
+    {
+      "case_id": "transfer_single_emergency_warning",
+      "candidate_key": "transfer_warning",
+      "gold_class": "hard_negative",
+      "allowed_final_outcomes": ["needs_confirmation"],
+      "required_citation_roles": [],
+      "min_independent_observations": 1,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 13}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 11}],
+        "G": [],
+        "X": [],
+        "forbidden": []
+      },
+      "notes": "断索险情中的一次喝止及随后的恢复，不足以上升为稳定人格改变。"
+    },
+    {
+      "case_id": "transfer_unplayed_branch_quote",
+      "candidate_key": "transfer_letter",
+      "gold_class": "hard_negative",
+      "allowed_final_outcomes": ["no_issue", "unverifiable", "needs_confirmation"],
+      "required_citation_roles": [],
+      "min_independent_observations": 0,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 16}],
+        "C": [],
+        "G": [],
+        "X": [],
+        "forbidden": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 13, "character_key": "段冬", "role": "C", "polarity": null}
+        ]
+      },
+      "notes": "未启用旁支戏本中的反派条件台词不是主线行为；主线段冬仍按规程存函。"
+    }
+  ]
+}

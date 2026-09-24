@@ -15,11 +15,13 @@ from sqlalchemy import select
 from app.character_consistency_stage import (
     CharacterConsistencyStage,
     _FrozenDocument,
+    _classify_frozen_source,
     _baseline_shadowed_at_scope,
     _observation_matches_baseline,
     _explicit_support_kind,
     _find_support_evidence,
     _safe_case_trace,
+    _safe_accepted_draft_observation_refs,
     _safe_baseline_hint,
     _safe_server_context,
     _select_authoritative_baselines,
@@ -33,7 +35,11 @@ from app.character_consistency_stage import (
 from app.character_drift import (
     CHARACTER_REVIEW_SYSTEM_PROMPT,
     CharacterDriftCase,
+    CharacterReviewDiagnostics,
+    CharacterReviewResult,
     ConfirmedTraitSnapshot,
+    ModelDriftDecision,
+    SupportEvidence,
     prepare_character_drift,
 )
 from app.character_trait_extraction import (
@@ -288,6 +294,81 @@ def _new_run(client: TestClient, project_id: str) -> str:
         run.status = "running"
         db.commit()
     return run_id
+
+
+@pytest.mark.parametrize(
+    ("role", "publication", "resolution", "expected_kind", "expected_reason"),
+    [
+        ("chapter", "draft", "confirmed", "draft", "draft"),
+        ("chapter", "in_review", "confirmed", "draft", "draft"),
+        ("chapter", "published", "confirmed", "published_history", "history"),
+        ("chapter", "retired", "confirmed", "published_history", "history"),
+        ("chapter", "unknown", "confirmed", None, "reference"),
+        ("reference", "in_review", "confirmed", None, "reference"),
+        ("chapter", "in_review", "inferred", None, "inferred"),
+    ],
+)
+def test_frozen_source_classification_includes_reviewing_chapters_only_at_confirmed_scope(
+    role: str,
+    publication: str,
+    resolution: str,
+    expected_kind: str | None,
+    expected_reason: str,
+):
+    context = _context(publication=publication, branch="route-a", exclusive_group="routes")
+    context["resolution_state"] = resolution
+    kind, reason, scope, actual_resolution, actual_publication, _ = (
+        _classify_frozen_source({"document_role": role}, context)
+    )
+    assert (kind, reason, actual_resolution, actual_publication) == (
+        expected_kind, expected_reason, resolution, publication,
+    )
+    assert scope is not None
+    assert scope.branch is not None
+    assert scope.branch.path == ["main", "route-a"]
+
+
+def test_in_review_target_survives_api_selection_and_frozen_stage_binding_without_model():
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"审阅中文稿目标-{uuid4().hex}"},
+        ).json()
+        target = _create_document(
+            client, project["id"], name="reviewing.md", role="chapter",
+            content="林澈在演讲前突然主动和陌生人攀谈。",
+            narrative_context=_context(
+                publication="in_review", branch="route-a", exclusive_group="routes"
+            ),
+        )
+        incompatible_history = _create_document(
+            client, project["id"], name="other-route.md", role="chapter",
+            content="另一条分支的历史章节。",
+            narrative_context=_context(
+                publication="published", branch="route-b", exclusive_group="routes"
+            ),
+        )
+        with patch("app.main.dispatch_analysis"):
+            created = client.post(
+                f"/api/v1/projects/{project['id']}/analysis-runs",
+                json={"mode": "draft_review", "target_document_ids": [target["id"]]},
+            )
+        assert created.status_code == 202, created.text
+        with SessionLocal() as db:
+            documents, metadata = _load_verified_snapshot(db, created.json()["id"])
+            assert [row.id for row in documents] == [target["id"]]
+            assert incompatible_history["id"] not in [row.id for row in documents]
+            reasons: Counter[str] = Counter()
+            frozen = CharacterConsistencyStage(settings=_settings())._bind_frozen_documents(
+                db,
+                run_id=created.json()["id"],
+                documents=documents,
+                metadata=metadata,
+                reasons=reasons,
+            )
+        assert len(frozen) == 1
+        assert frozen[0].source_kind == "draft"
+        assert frozen[0].publication_status == "in_review"
+        assert reasons["source_draft"] == 1
 
 
 def _run_stage(
@@ -912,6 +993,11 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
                 "review_outcome": "completed",
                 "review_verdict": "contradicts",
                 "citation_roles": ["B", "C"],
+                "citation_refs": [
+                    {"handle": "B01", "role": "B", "document_name": "profile.md", "line_start": 1, "line_end": 1},
+                    {"handle": "C01", "role": "C", "document_name": "draft.md", "line_start": 1, "line_end": 1},
+                ],
+                "citation_refs_incomplete": False,
                 "final_outcome": "conflict",
                 "visible": True,
                 "promote_reason": "model_contradicts",
@@ -2491,6 +2577,8 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
             "review_outcome": "not_run",
             "review_verdict": None,
             "citation_roles": [],
+            "citation_refs": [],
+            "citation_refs_incomplete": False,
             "final_outcome": "needs_confirmation",
             "visible": False,
             "promote_reason": "single_behavior_is_not_drift",
@@ -2660,6 +2748,395 @@ def _confirmed_trait(
             ),
         ),
     )
+
+
+def _citation_trace_case(
+    *,
+    observation_count: int = 1,
+    bridge_line: int = 7,
+    bridge_document_name: str = "bridge.md",
+):
+    observations = tuple(
+        CharacterSignal(
+            id=f"cs_{index:032x}",
+            character="林澈",
+            dimension="preference",
+            trait_key="食物偏好:蜜瓜",
+            statement="机密模型陈述：林澈厌恶蜜瓜",
+            polarity="negative",
+            stability="stable",
+            observation_kind="preference_expression",
+            key_object="蜜瓜",
+            source_kind="draft",
+            evidence=EvidenceSpan(
+                document_id=f"draft-{index}",
+                document_name="draft.md",
+                line_start=index + 1,
+                line_end=index + 1,
+                text="机密草稿原文：林澈说讨厌蜜瓜。",
+            ),
+        )
+        for index in range(observation_count)
+    )
+    support = (
+        SupportEvidence(
+            id="se_trace_bridge",
+            kind="causal_bridge",
+            summary="机密成长摘要",
+            explicit=True,
+            evidence=EvidenceSpan(
+                document_id="bridge-document",
+                document_name=bridge_document_name,
+                line_start=bridge_line,
+                line_end=bridge_line,
+                text="机密成长原文",
+            ),
+        ),
+        SupportEvidence(
+            id="se_trace_exception",
+            kind="exception",
+            summary="机密例外摘要",
+            explicit=True,
+            evidence=EvidenceSpan(
+                document_id="exception-document",
+                document_name="exception.md",
+                line_start=11,
+                line_end=11,
+                text="机密例外原文",
+            ),
+        ),
+    )
+    return prepare_character_drift(
+        CharacterDriftCase(
+            id="cdc_trace_citations",
+            baseline=_confirmed_trait(),
+            observations=observations,
+            support_evidence=support,
+            scope_compatibility="compatible",
+            material_coverage="complete",
+        )
+    )
+
+
+def _trace_review(citations: tuple[str, ...], *, verdict: str = "explained"):
+    return CharacterReviewResult(
+        decision=ModelDriftDecision(
+            verdict=verdict,
+            explanation="有足够的历史证据解释当前表现。",
+            citations=citations,
+        ),
+        diagnostics=CharacterReviewDiagnostics(outcome="completed", reason="completed"),
+    )
+
+
+def _citation_case_trace(prepared, review):
+    return _safe_case_trace(
+        character_key="林澈",
+        baseline=prepared.case.baseline,
+        matched_observation_count=len(prepared.matching_observations),
+        matched_observations=prepared.matching_observations,
+        prepared=prepared,
+        prepare_reason=prepared.reason,
+        review=review,
+        final_outcome="no_issue",
+        visible=False,
+        promote_reason="model_explained" if review is not None else "review_unavailable",
+    )
+
+
+def test_case_trace_explained_citations_resolve_frozen_bridge_and_exception_coordinates():
+    prepared = _citation_trace_case()
+    trace = _citation_case_trace(
+        prepared, _trace_review(("B01", "C01", "G01", "X01"))
+    )
+    assert trace["review_verdict"] == "explained"
+    assert trace["citation_roles"] == ["B", "C", "G", "X"]
+    assert trace["citation_refs"] == [
+        {"handle": "B01", "role": "B", "document_name": "profile.md", "line_start": 1, "line_end": 1},
+        {"handle": "C01", "role": "C", "document_name": "draft.md", "line_start": 1, "line_end": 1},
+        {"handle": "G01", "role": "G", "document_name": "bridge.md", "line_start": 7, "line_end": 7},
+        {"handle": "X01", "role": "X", "document_name": "exception.md", "line_start": 11, "line_end": 11},
+    ]
+    assert trace["citation_refs_incomplete"] is False
+    serialized = json.dumps(trace, ensure_ascii=False)
+    assert "机密" not in serialized
+    assert '"text"' not in serialized
+    assert '"summary"' not in serialized
+
+
+def test_explained_review_without_visible_issue_retains_frozen_growth_citation_ref():
+    profile_line = "林澈喜欢蜜瓜。"
+    growth_line = "训练后林澈逐渐改变了待人方式。"
+    draft_line = "林澈明确说自己讨厌蜜瓜。"
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"解释引用坐标-{uuid4().hex}"},
+        ).json()
+        _create_document(
+            client, project["id"], name="profile.md", role="character_profile",
+            content=profile_line, narrative_context=_context(publication="published"),
+        )
+        seed = _new_run(client, project["id"])
+        _run_stage(
+            seed,
+            QueueProvider(
+                _response(
+                    _record(
+                        evidence=profile_line, polarity="positive",
+                        kind="explicit_declaration", trait_key="melon_preference",
+                    )
+                )
+            ),
+        )
+        _confirm_only_candidate(client, project["id"], seed)
+        _create_document(
+            client, project["id"], name="growth.md", role="chapter",
+            content=growth_line, narrative_context=_context(publication="published"),
+        )
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content=draft_line, narrative_context=_context(publication="draft"),
+        )
+        provider = QueueProvider(
+            _response(
+                _record(
+                    evidence=profile_line, polarity="positive",
+                    kind="explicit_declaration", trait_key="melon_preference",
+                )
+            ),
+            _response(),
+            _response(
+                _record(
+                    evidence=draft_line, polarity="negative",
+                    kind="preference_expression", trait_key="melon_preference",
+                )
+            ),
+            json.dumps(
+                {
+                    "verdict": "explained",
+                    "explanation": "已发布的历史经历解释了当前表现。",
+                    "citations": ["B01", "C01", "G01"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        result = _run_stage(_new_run(client, project["id"]), provider)
+
+    assert result.issues == ()
+    trace = result.diagnostics["case_trace"][0]
+    assert trace["review_verdict"] == "explained"
+    assert trace["final_outcome"] == "no_issue"
+    assert trace["citation_refs_incomplete"] is False
+    assert {item["handle"]: item for item in trace["citation_refs"]}["G01"] == {
+        "handle": "G01", "role": "G", "document_name": "growth.md",
+        "line_start": 1, "line_end": 1,
+    }
+    assert growth_line not in json.dumps(trace, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "citations",
+    [
+        ("B01", "C01", "G99"),
+        ("B01", "C01", "Q01"),
+        ("B1", "C01", "G01"),
+        ("B01", "B01", "C01", "G01"),
+    ],
+)
+def test_case_trace_bad_or_duplicate_citation_handle_fails_closed(citations):
+    trace = _citation_case_trace(_citation_trace_case(), _trace_review(citations))
+    assert trace["citation_refs"] == []
+    assert trace["citation_refs_incomplete"] is True
+
+
+@pytest.mark.parametrize(
+    ("bridge_line", "bridge_document_name"),
+    [
+        (0, "bridge.md"),
+        (10_000_001, "bridge.md"),
+        (7, "sk-1234567890abcdef.md"),
+    ],
+)
+def test_case_trace_citation_coordinate_or_name_out_of_bounds_fails_closed(
+    bridge_line: int, bridge_document_name: str,
+):
+    trace = _citation_case_trace(
+        _citation_trace_case(
+            bridge_line=bridge_line,
+            bridge_document_name=bridge_document_name,
+        ),
+        _trace_review(("B01", "C01", "G01")),
+    )
+    assert trace["citation_refs"] == []
+    assert trace["citation_refs_incomplete"] is True
+    assert "sk-1234567890abcdef" not in json.dumps(trace, ensure_ascii=False)
+
+
+def test_case_trace_citation_refs_are_bounded_and_marked_incomplete_if_truncated():
+    prepared = _citation_trace_case(observation_count=7)
+    # The validated provider contract permits at most eight citations. This
+    # synthetic over-limit result still must not grow persisted diagnostics.
+    oversized = ModelDriftDecision.model_construct(
+        verdict="explained",
+        explanation="有足够的历史证据解释当前表现。",
+        citations=("B01", *tuple(f"C{index:02d}" for index in range(1, 8)), "G01"),
+    )
+    review = CharacterReviewResult.model_construct(
+        decision=oversized,
+        diagnostics=CharacterReviewDiagnostics(outcome="completed", reason="completed"),
+    )
+    trace = _citation_case_trace(prepared, review)
+    assert len(trace["citation_refs"]) == 8
+    assert [item["handle"] for item in trace["citation_refs"]] == [
+        "B01", "C01", "C02", "C03", "C04", "C05", "C06", "C07",
+    ]
+    assert trace["citation_refs_incomplete"] is True
+
+
+def test_case_trace_without_review_has_no_citation_refs_and_no_false_incomplete():
+    trace = _citation_case_trace(_citation_trace_case(), None)
+    assert trace["review_outcome"] == "not_run"
+    assert trace["citation_roles"] == []
+    assert trace["citation_refs"] == []
+    assert trace["citation_refs_incomplete"] is False
+
+
+def test_case_trace_invalid_model_response_marks_citation_refs_incomplete_without_guessing():
+    degraded = CharacterReviewResult(
+        decision=None,
+        diagnostics=CharacterReviewDiagnostics(
+            outcome="degraded", reason="invalid_model_response",
+            attempted_calls=1,
+        ),
+    )
+    trace = _citation_case_trace(_citation_trace_case(), degraded)
+    assert trace["review_outcome"] == "degraded"
+    assert trace["citation_refs"] == []
+    assert trace["citation_refs_incomplete"] is True
+
+
+def test_accepted_draft_refs_keep_unmatched_actor_but_exclude_rejected_false_actor():
+    profile_line = "林澈喜欢蜜瓜。"
+    draft_line = "苏弦喜欢蜜瓜。"
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"错归属诊断-{uuid4().hex}"},
+        ).json()
+        _create_document(
+            client, project["id"], name="profile.md", role="character_profile",
+            content=profile_line, narrative_context=_context(publication="published"),
+        )
+        seed = _new_run(client, project["id"])
+        _run_stage(
+            seed,
+            QueueProvider(
+                _response(
+                    _record(
+                        evidence=profile_line, polarity="positive",
+                        kind="explicit_declaration", trait_key="melon_preference",
+                    )
+                )
+            ),
+        )
+        _confirm_only_candidate(client, project["id"], seed)
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content=draft_line, narrative_context=_context(publication="draft"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(
+                _response(
+                    _record(
+                        evidence=profile_line, polarity="positive",
+                        kind="explicit_declaration", trait_key="melon_preference",
+                    )
+                ),
+                _response(
+                    _record(
+                        character="苏弦", evidence=draft_line,
+                        polarity="positive", kind="preference_expression",
+                        trait_key="melon_preference",
+                    ),
+                    _record(
+                        character="祁雾", evidence=draft_line,
+                        polarity="positive", kind="preference_expression",
+                        trait_key="melon_preference",
+                    ),
+                ),
+                _response(
+                    _record(
+                        character="苏弦", evidence=draft_line,
+                        polarity="positive", kind="preference_expression",
+                        trait_key="melon_preference",
+                    ),
+                ),
+            ),
+        )
+
+    diagnostics = result.diagnostics
+    assert diagnostics["accepted_draft_observation_total"] == 1
+    assert diagnostics["accepted_draft_observation_refs_truncated"] is False
+    assert diagnostics["accepted_draft_observation_refs"] == [{
+        "character_key": "苏弦",
+        "dimension": "preference",
+        "polarity": "positive",
+        "observation_kind": "preference_expression",
+        "document_name": "draft.md",
+        "line_start": 1,
+        "line_end": 1,
+    }]
+    assert diagnostics["reason_counts"]["regenerated_from_character_support"] == 1
+    assert diagnostics["case_trace"][0]["matched_observation_refs"] == []
+    assert diagnostics["case_trace"][0]["review_outcome"] == "not_run"
+    serialized = json.dumps(diagnostics["accepted_draft_observation_refs"], ensure_ascii=False)
+    assert draft_line not in serialized
+    assert "祁雾" not in serialized
+    assert "trait_key" not in serialized
+    assert "key_object" not in serialized
+
+
+def test_accepted_draft_refs_are_bounded_and_omit_unsafe_actor_or_filename():
+    signals = tuple(
+        CharacterSignal(
+            id=f"cs_{index:032x}",
+            character=("sk-1234567890abcdef" if index == 64 else "苏弦"),
+            dimension="preference",
+            trait_key="机密模型标签",
+            statement="机密模型陈述",
+            polarity="positive",
+            stability="stable",
+            observation_kind="preference_expression",
+            key_object="机密对象",
+            source_kind="draft",
+            evidence=EvidenceSpan(
+                document_id=f"draft-{index}",
+                document_name="draft.md",
+                line_start=index + 1,
+                line_end=index + 1,
+                text="机密证据原文",
+            ),
+        )
+        for index in range(65)
+    )
+    refs, total, truncated = _safe_accepted_draft_observation_refs(signals)
+    assert total == 65 and len(refs) == 64 and truncated is True
+    assert refs[0]["line_start"] == 1 and refs[-1]["line_start"] == 64
+    serialized = json.dumps(refs, ensure_ascii=False)
+    for secret in ("sk-1234567890abcdef", "机密模型标签", "机密模型陈述", "机密对象", "机密证据原文"):
+        assert secret not in serialized
+    unsafe_document = signals[0].model_copy(
+        update={
+            "evidence": signals[0].evidence.model_copy(
+                update={"document_name": "https://private.invalid/draft.md"}
+            )
+        }
+    )
+    refs, total, truncated = _safe_accepted_draft_observation_refs(
+        (signals[0], unsafe_document)
+    )
+    assert total == 2 and len(refs) == 1 and truncated is True
+    assert "private.invalid" not in json.dumps(refs, ensure_ascii=False)
 
 
 def _approved_core_baseline(

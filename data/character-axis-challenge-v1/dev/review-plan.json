@@ -1,0 +1,87 @@
+{
+  "schema_version": "character-axis-review-plan-v1",
+  "suite": "dev",
+  "world_id": "red-moss-station",
+  "approved_axes": [
+    {
+      "axis_key": "dev_valve_consultation",
+      "display_name": "日常母阀换路协商",
+      "definition": "没有警报时调整母阀去向，是否先与当值守闸人核对。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "dev_public_dispatch",
+      "display_name": "面对陌生工友公开调度",
+      "definition": "面对陌生工友时，是否独自完成公开调度并回答追问。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "dev_inventory_truth",
+      "display_name": "向同伴如实说明药剂余量",
+      "definition": "面对同伴核对药剂余量时，是否如实说明实际存量。",
+      "trait_type": "core_personality"
+    }
+  ],
+  "candidate_decisions": [
+    {
+      "candidate_key": "dev_valve",
+      "character_key": "祝迟",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 4,
+      "source_quote": "先与当值守闸人核对母阀去向",
+      "polarity": "positive",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "dev_valve_consultation"
+    },
+    {
+      "candidate_key": "dev_seal",
+      "character_key": "祝迟",
+      "trait_type": "behavior_boundary",
+      "source_document": "02-character-profiles.md",
+      "source_line": 5,
+      "source_quote": "从不亲手拆开已经锁定的母阀铅封",
+      "polarity": "negative",
+      "stability": "stable",
+      "key_object": "母阀铅封",
+      "approved_axis_key": null
+    },
+    {
+      "candidate_key": "dev_dispatch",
+      "character_key": "沈禾",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 8,
+      "source_quote": "害怕面对陌生工友公开调度",
+      "polarity": "negative",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "dev_public_dispatch"
+    },
+    {
+      "candidate_key": "dev_pear_drink",
+      "character_key": "黎蘅",
+      "trait_type": "preference",
+      "source_document": "02-character-profiles.md",
+      "source_line": 11,
+      "source_quote": "长期喜欢热梨露",
+      "polarity": "positive",
+      "stability": "stable",
+      "key_object": "热梨露",
+      "approved_axis_key": null
+    },
+    {
+      "candidate_key": "dev_inventory",
+      "character_key": "黎蘅",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 12,
+      "source_quote": "如实说明药剂余量",
+      "polarity": "positive",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "dev_inventory_truth"
+    }
+  ]
+}

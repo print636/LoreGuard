@@ -1,0 +1,93 @@
+{
+  "schema_version": "character-axis-review-plan-v1",
+  "suite": "transfer",
+  "world_id": "folded-cloud-post",
+  "approved_axes": [
+    {
+      "axis_key": "transfer_companion_check",
+      "display_name": "过桥前确认同行者",
+      "definition": "在平稳邮路离开索桥前，是否确认搭档已经跟上。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "transfer_public_guidance",
+      "display_name": "独自向陌生旅人讲解",
+      "definition": "面对陌生旅人时，是否独自讲解驿路并回应临时提问。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "transfer_calm_warning",
+      "display_name": "对熟悉搭档的提醒方式",
+      "definition": "面对熟悉搭档时，是否保持轻声提醒而不当众厉声喝斥。",
+      "trait_type": "core_personality"
+    },
+    {
+      "axis_key": "transfer_letter_protection",
+      "display_name": "保护已签收正函",
+      "definition": "在主线值守中，是否保护已签收的正函而不自行烧毁。",
+      "trait_type": "core_personality"
+    }
+  ],
+  "candidate_decisions": [
+    {
+      "candidate_key": "transfer_companion",
+      "character_key": "阿淮",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 4,
+      "source_quote": "确认同行者已经跟上",
+      "polarity": "positive",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "transfer_companion_check"
+    },
+    {
+      "candidate_key": "transfer_guidance",
+      "character_key": "云拂",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 7,
+      "source_quote": "不敢独自讲解驿路",
+      "polarity": "negative",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "transfer_public_guidance"
+    },
+    {
+      "candidate_key": "transfer_seal",
+      "character_key": "鹤宁",
+      "trait_type": "behavior_boundary",
+      "source_document": "02-character-profiles.md",
+      "source_line": 10,
+      "source_quote": "从不亲手拆开托付给他的封函",
+      "polarity": "negative",
+      "stability": "stable",
+      "key_object": "封函",
+      "approved_axis_key": null
+    },
+    {
+      "candidate_key": "transfer_warning",
+      "character_key": "萧沚",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 13,
+      "source_quote": "一贯轻声提醒",
+      "polarity": "positive",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "transfer_calm_warning"
+    },
+    {
+      "candidate_key": "transfer_letter",
+      "character_key": "段冬",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 16,
+      "source_quote": "保护已签收的正函",
+      "polarity": "positive",
+      "stability": "core",
+      "key_object": null,
+      "approved_axis_key": "transfer_letter_protection"
+    }
+  ]
+}

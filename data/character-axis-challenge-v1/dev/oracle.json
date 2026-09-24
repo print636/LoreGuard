@@ -1,0 +1,93 @@
+{
+  "schema_version": "character-axis-oracle-v1",
+  "suite": "dev",
+  "world_id": "red-moss-station",
+  "developer_visible": true,
+  "expected_cases": [
+    {
+      "case_id": "dev_unexplained_valve_change",
+      "candidate_key": "dev_valve",
+      "gold_class": "conflict",
+      "allowed_final_outcomes": ["conflict"],
+      "required_citation_roles": ["B", "C"],
+      "min_independent_observations": 2,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 4}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 3}, {"document_name": "04-draft-event-v1.1.md", "line": 4}],
+        "G": [],
+        "X": [],
+        "forbidden": []
+      },
+      "notes": "两次相隔七天的日常独自换路；正式设定与已发布历史均无已发生的转变依据。"
+    },
+    {
+      "case_id": "dev_other_actor_opens_seal",
+      "candidate_key": "dev_seal",
+      "gold_class": "hard_negative",
+      "allowed_final_outcomes": ["no_issue", "unverifiable", "needs_confirmation"],
+      "required_citation_roles": [],
+      "min_independent_observations": 0,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 5}],
+        "C": [],
+        "G": [],
+        "X": [],
+        "forbidden": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 5, "character_key": "祝迟", "role": "C", "polarity": "positive"},
+          {"document_name": "04-draft-event-v1.1.md", "line": 6, "character_key": "祝迟", "role": "C", "polarity": "positive"}
+        ]
+      },
+      "notes": "祝迟交接工具并要求处理；亲手拆铅封的行动者是杜谣，不得并入祝迟的个人行为。"
+    },
+    {
+      "case_id": "dev_published_dispatch_training",
+      "candidate_key": "dev_dispatch",
+      "gold_class": "explained",
+      "allowed_final_outcomes": ["no_issue"],
+      "required_citation_roles": ["B", "C", "G"],
+      "min_independent_observations": 2,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 8}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 9}, {"document_name": "04-draft-event-v1.1.md", "line": 10}],
+        "G": [{"document_name": "03-published-history-v1.0.md", "line": 3}, {"document_name": "03-published-history-v1.0.md", "line": 4}],
+        "X": [],
+        "forbidden": []
+      },
+      "notes": "正式档案写明早期状态；已发布的六周训练与成功通报构成同轴、已发生的因果桥梁。"
+    },
+    {
+      "case_id": "dev_temporary_hot_drink_exception",
+      "candidate_key": "dev_pear_drink",
+      "gold_class": "explained",
+      "allowed_final_outcomes": ["no_issue"],
+      "required_citation_roles": ["B", "C", "X"],
+      "min_independent_observations": 1,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 11}],
+        "C": [{"document_name": "04-draft-event-v1.1.md", "line": 11}],
+        "G": [],
+        "X": [{"document_name": "03-published-history-v1.0.md", "line": 5}],
+        "forbidden": []
+      },
+      "notes": "当夜晕厥、医嘱暂停热饮及次日恢复均有原文；一次有因拒饮不是稳定偏好逆转。"
+    },
+    {
+      "case_id": "dev_quoted_villain_confession",
+      "candidate_key": "dev_inventory",
+      "gold_class": "hard_negative",
+      "allowed_final_outcomes": ["no_issue", "unverifiable", "needs_confirmation"],
+      "required_citation_roles": [],
+      "min_independent_observations": 0,
+      "evidence": {
+        "B": [{"document_name": "02-character-profiles.md", "line": 12}],
+        "C": [],
+        "G": [],
+        "X": [],
+        "forbidden": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 12, "character_key": "黎蘅", "role": "C", "polarity": "negative"}
+        ]
+      },
+      "notes": "反派供词是排演引语；同一行还写明黎蘅向同伴核对真实存量。"
+    }
+  ]
+}

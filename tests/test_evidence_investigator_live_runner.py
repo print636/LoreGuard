@@ -69,15 +69,32 @@ def runtime_provenance():
             "max_chunks_per_run": 24,
             "max_candidates_per_run": 64,
             "signal_max_chunk_chars": 8000,
+            "signal_max_records": 48,
+            "signal_targeted_max_targets_per_chunk": 12,
             "signal_provider_max_attempts": 2,
             "signal_package_max_attempts": 2,
             "signal_token_budget": 22000,
             "signal_max_completion_tokens": 4096,
+            "signal_max_response_bytes": 64000,
+            "signal_provider_max_completion_tokens": 4096,
+            "signal_provider_max_response_bytes": 64000,
+            "signal_timeout_seconds": 30.0,
             "signal_total_deadline_seconds": 30.0,
+            "signal_provider_timeout_seconds": 30.0,
             "drift_max_observations": 12,
             "drift_max_support_evidence": 8,
+            "drift_max_evidence_chars": 8000,
+            "drift_token_budget": 4000,
+            "drift_max_completion_tokens": 1000,
+            "drift_max_response_bytes": 32000,
             "drift_provider_max_attempts": 2,
+            "drift_provider_max_completion_tokens": 1000,
+            "drift_provider_max_response_bytes": 32000,
+            "drift_timeout_seconds": 30.0,
             "drift_total_deadline_seconds": 30.0,
+            "drift_provider_timeout_seconds": 30.0,
+            "per_run_token_budget": 100000,
+            "daily_token_budget": 100000,
         },
         "investigator_limits": {
             "max_seeds": 1,
@@ -1364,6 +1381,78 @@ def test_runtime_provenance_parser_is_exact_and_fail_closed():
         "sensitivity"
     ] = "automatic"
     assert _safe_runtime_provenance(invalid_character_sensitivity) is None
+
+
+@pytest.mark.parametrize(
+    ("key", "valid_maximum"),
+    [
+        ("stage_token_budget", 150_000),
+        ("signal_token_budget", 40_000),
+    ],
+)
+def test_runtime_provenance_accepts_legal_character_budget_ceiling_and_rejects_above(
+    key, valid_maximum,
+):
+    value = runtime_provenance()
+    value["character_consistency_limits"][key] = valid_maximum
+    assert _safe_runtime_provenance(value) == value
+    value["character_consistency_limits"][key] = valid_maximum + 1
+    assert _safe_runtime_provenance(value) is None
+
+
+@pytest.mark.parametrize(
+    ("key", "minimum", "maximum"),
+    [
+        ("signal_max_records", 1, 64),
+        ("signal_targeted_max_targets_per_chunk", 1, 12),
+        ("signal_max_response_bytes", 1_024, 128_000),
+        ("signal_provider_max_completion_tokens", 1, 8_192),
+        ("signal_provider_max_response_bytes", 1, 128_000),
+        ("drift_max_evidence_chars", 256, 16_000),
+        ("drift_token_budget", 256, 8_000),
+        ("drift_max_completion_tokens", 64, 1_500),
+        ("drift_max_response_bytes", 1_024, 64_000),
+        ("drift_provider_max_completion_tokens", 1, 1_500),
+        ("drift_provider_max_response_bytes", 1, 64_000),
+        ("per_run_token_budget", 0, (1 << 63) - 1),
+        ("daily_token_budget", 0, (1 << 63) - 1),
+    ],
+)
+def test_runtime_provenance_new_character_integer_limits_fail_closed(
+    key, minimum, maximum,
+):
+    value = runtime_provenance()
+    limits = value["character_consistency_limits"]
+    limits.pop(key)
+    assert _safe_runtime_provenance(value) is None
+    for valid in (minimum, maximum):
+        limits[key] = valid
+        assert _safe_runtime_provenance(value) == value
+    for invalid in (minimum - 1, maximum + 1, True):
+        limits[key] = invalid
+        assert _safe_runtime_provenance(value) is None
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "signal_timeout_seconds",
+        "signal_provider_timeout_seconds",
+        "drift_timeout_seconds",
+        "drift_provider_timeout_seconds",
+    ],
+)
+def test_runtime_provenance_new_character_time_limits_fail_closed(key):
+    value = runtime_provenance()
+    limits = value["character_consistency_limits"]
+    limits.pop(key)
+    assert _safe_runtime_provenance(value) is None
+    for valid in (0.001, 30.0):
+        limits[key] = valid
+        assert _safe_runtime_provenance(value) == value
+    for invalid in (0.0, 30.001, float("nan"), True):
+        limits[key] = invalid
+        assert _safe_runtime_provenance(value) is None
 
 
 def _qualified_case(

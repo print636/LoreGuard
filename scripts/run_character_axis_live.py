@@ -1,0 +1,1687 @@
+"""Evaluate the author-approved character-axis workflow through the HTTP API.
+
+This is a developer-visible test, not a blind benchmark. The review plan is
+loaded before the model runs; the separate oracle is parsed only for scoring.
+No credential, story text, prompt, provider response, or endpoint is reported.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import re
+import subprocess
+import sys
+import time
+import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+from uuid import uuid4
+
+import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.character_trait_extraction import stable_trait_identity
+from scripts.run_character_consistency_live import (
+    _baseline_admission,
+    _candidate_id_sha256,
+    _resolve_output_json,
+    _safe_case_trace_summary,
+    _safe_token_admission_events,
+    _safe_visible_issue,
+)
+from scripts.run_evidence_investigator_live import (
+    _CAPABILITY_KEYS,
+    _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS,
+    _CHARACTER_CONSISTENCY_LIMIT_KEYS,
+    _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
+    _local_service_artifact_sha256,
+)
+
+
+DATASET = ROOT / "data" / "character-axis-challenge-v1"
+SUITES = ("dev", "transfer")
+BASELINE_FILES = (
+    ("01-world-setting.md", "canon"),
+    ("02-character-profiles.md", "character_profile"),
+    ("03-published-history-v1.0.md", "chapter"),
+)
+DRAFT_FILE = "04-draft-event-v1.1.md"
+FROZEN_FILES = frozenset(
+    [name for name, _ in BASELINE_FILES]
+    + [DRAFT_FILE, "review-plan.json", "oracle.json"]
+)
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+GIT_HASH = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+SAFE_KEY = re.compile(r"[A-Za-z0-9_.:-]{1,100}\Z")
+SAFE_REASON_KEYS = frozenset({
+    "lower_authority_baseline_shadowed", "invalid_confirmed_trait_snapshot",
+    "chunk_limit", "confirmed_trait_hint_ambiguous",
+    "confirmed_trait_context_truncated", "stage_token_budget",
+    "targeted_target_limit", "targeted_reviewer_budget_reserve",
+    "targeted_verification_candidate_line_limit",
+    "targeted_verification_reviewer_budget_reserve",
+    "approved_axis_ambiguous_evidence", "candidate_limit",
+    "candidate_scope", "candidate_persistence",
+    "targeted_no_supported_observation", "no_draft_signals",
+    "no_confirmed_character_traits", "ambiguous_character_alias",
+    "unmatched_character_alias", "object_baseline_identity_unavailable",
+    "drift_scope_unknown", "lower_authority_draft_scope_shadowed",
+    "drift_release_unknown", "drift_release_inapplicable",
+    "observation_limit", "below_sensitivity_threshold", "baseline_limit",
+})
+TERMINAL = {"completed", "failed", "cancelled"}
+# Filled from the committed fixture manifest after its final freeze. An
+# explicit CLI digest is also supported for a separately pinned dataset.
+PINNED_MANIFEST_SHA256: str | None = (
+    "650dad19bf54fad726b5c0f2f5dfb94d05fc4462babbbb558b0e9aaf40f61140"
+)
+
+
+class SafeFailure(RuntimeError):
+    def __init__(self, code: str, stage: str, **counts: int | str | bool):
+        super().__init__(code)
+        self.payload = {"code": code, "stage": stage, "details": counts}
+
+
+@dataclass(frozen=True)
+class VerifiedSuite:
+    name: str
+    world_id: str
+    case_count: int
+    files: dict[str, bytes]
+    hashes: dict[str, str]
+    plan: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class VerifiedFixture:
+    manifest_sha256: str
+    suites: dict[str, VerifiedSuite]
+
+
+def _sha256(data: bytes | str) -> str:
+    return hashlib.sha256(data.encode("utf-8") if isinstance(data, str) else data).hexdigest()
+
+
+def _json_object(data: bytes, *, stage: str) -> dict[str, Any]:
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise SafeFailure("invalid_json", stage) from exc
+    if not isinstance(value, dict):
+        raise SafeFailure("invalid_json_object", stage)
+    return value
+
+
+def _safe_key(value: Any) -> bool:
+    return isinstance(value, str) and SAFE_KEY.fullmatch(value) is not None
+
+
+def _source_lines(data: bytes) -> list[str]:
+    try:
+        return data.decode("utf-8").splitlines()
+    except UnicodeError as exc:
+        raise SafeFailure("invalid_document_encoding", "fixture_preflight") from exc
+
+
+def _validate_plan(plan: dict[str, Any], suite: VerifiedSuite) -> None:
+    if (
+        plan.get("schema_version") != "character-axis-review-plan-v1"
+        or plan.get("suite") != suite.name
+        or plan.get("world_id") != suite.world_id
+        or not isinstance(plan.get("approved_axes"), list)
+        or not isinstance(plan.get("candidate_decisions"), list)
+    ):
+        raise SafeFailure("review_plan_contract", "fixture_preflight")
+    axes: set[str] = set()
+    for row in plan["approved_axes"]:
+        if (
+            not isinstance(row, dict)
+            or not _safe_key(row.get("axis_key"))
+            or row["axis_key"] in axes
+            or row.get("trait_type") != "core_personality"
+            or not isinstance(row.get("display_name"), str)
+            or not 1 <= len(row["display_name"]) <= 80
+            or not isinstance(row.get("definition"), str)
+            or not 1 <= len(row["definition"]) <= 200
+        ):
+            raise SafeFailure("review_plan_axis_contract", "fixture_preflight")
+        axes.add(row["axis_key"])
+    keys: set[str] = set()
+    baseline_names = {name for name, _ in BASELINE_FILES}
+    for row in plan["candidate_decisions"]:
+        if not isinstance(row, dict):
+            raise SafeFailure("review_plan_candidate_contract", "fixture_preflight")
+        key = row.get("candidate_key")
+        source_name = row.get("source_document")
+        line = row.get("source_line")
+        source_quote = row.get("source_quote")
+        dimension = row.get("trait_type")
+        axis_key = row.get("approved_axis_key")
+        object_key = row.get("key_object")
+        if (
+            not _safe_key(key) or key in keys
+            or not isinstance(row.get("character_key"), str)
+            or not 1 <= len(row["character_key"]) <= 64
+            or dimension not in {
+                "core_personality", "speech_pattern", "preference", "value",
+                "behavior_boundary", "current_state", "contextual_behavior",
+            }
+            or source_name not in baseline_names
+            or type(line) is not int or line < 1
+            or not isinstance(source_quote, str) or not source_quote.strip()
+            or len(source_quote) > 200
+            or row.get("polarity") not in {"positive", "negative", "neutral"}
+            or row.get("stability") not in {"core", "stable"}
+            or (object_key is not None and (not isinstance(object_key, str) or not object_key.strip()))
+            or (dimension == "core_personality") != (axis_key in axes)
+            or (dimension != "core_personality" and axis_key is not None)
+        ):
+            raise SafeFailure("review_plan_candidate_contract", "fixture_preflight")
+        source_lines = _source_lines(suite.files[source_name])
+        if line > len(source_lines) or source_quote not in source_lines[line - 1]:
+            raise SafeFailure("review_plan_source_anchor", "fixture_preflight")
+        keys.add(key)
+    if not keys:
+        raise SafeFailure("review_plan_empty", "fixture_preflight")
+
+
+def verify_fixture(
+    dataset: Path = DATASET,
+    *,
+    expected_manifest_sha256: str | None = PINNED_MANIFEST_SHA256,
+) -> VerifiedFixture:
+    """Hash every frozen input before opening an HTTP client or scoring gold."""
+    if not isinstance(expected_manifest_sha256, str) or SHA256.fullmatch(expected_manifest_sha256) is None:
+        raise SafeFailure("manifest_digest_required", "fixture_preflight")
+    manifest_path = dataset / "manifest.json"
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+    except OSError as exc:
+        raise SafeFailure("manifest_unavailable", "fixture_preflight") from exc
+    manifest_hash = _sha256(manifest_bytes)
+    if manifest_hash != expected_manifest_sha256:
+        raise SafeFailure("manifest_hash_mismatch", "fixture_preflight")
+    manifest = _json_object(manifest_bytes, stage="fixture_preflight")
+    boundary = manifest.get("dataset_boundary")
+    entries = manifest.get("suites")
+    if (
+        manifest.get("schema_version") != "character-axis-fixture-manifest-v1"
+        or not isinstance(boundary, dict)
+        or boundary.get("developer_visible") is not True
+        or boundary.get("blind_holdout") is not False
+        or boundary.get("production_quality") is not False
+        or not isinstance(entries, dict)
+        or set(entries) != set(SUITES)
+    ):
+        raise SafeFailure("manifest_contract", "fixture_preflight")
+    verified: dict[str, VerifiedSuite] = {}
+    for suite_name in SUITES:
+        meta = entries[suite_name]
+        if (
+            not isinstance(meta, dict)
+            or not _safe_key(meta.get("world_id"))
+            or type(meta.get("case_count")) is not int
+            or not 1 <= meta["case_count"] <= 100
+            or not isinstance(meta.get("files"), dict)
+            or set(meta["files"]) != FROZEN_FILES
+        ):
+            raise SafeFailure("manifest_suite_contract", "fixture_preflight")
+        contents: dict[str, bytes] = {}
+        for filename in sorted(FROZEN_FILES):
+            expected_hash = meta["files"][filename]
+            if not isinstance(expected_hash, str) or SHA256.fullmatch(expected_hash) is None:
+                raise SafeFailure("manifest_file_hash_contract", "fixture_preflight")
+            path = dataset / suite_name / filename
+            try:
+                if path.is_symlink() or not path.is_file():
+                    raise OSError("invalid fixture file")
+                contents[filename] = path.read_bytes()
+            except OSError as exc:
+                raise SafeFailure("fixture_file_unavailable", "fixture_preflight") from exc
+            if _sha256(contents[filename]) != expected_hash:
+                raise SafeFailure("fixture_file_hash_mismatch", "fixture_preflight")
+        suite = VerifiedSuite(
+            name=suite_name,
+            world_id=meta["world_id"],
+            case_count=meta["case_count"],
+            files=contents,
+            hashes=dict(meta["files"]),
+            plan=_json_object(contents["review-plan.json"], stage="fixture_preflight"),
+        )
+        for name, _ in BASELINE_FILES:
+            _source_lines(contents[name])
+        _source_lines(contents[DRAFT_FILE])
+        _validate_plan(suite.plan, suite)
+        verified[suite_name] = suite
+    return VerifiedFixture(manifest_sha256=manifest_hash, suites=verified)
+
+
+def _request(client: httpx.Client, method: str, path: str, route: str, **kwargs: Any) -> Any:
+    try:
+        response = client.request(method, path, **kwargs)
+    except httpx.HTTPError as exc:
+        raise SafeFailure("http_transport", route) from exc
+    if response.status_code >= 400:
+        raise SafeFailure("http_status", route, status_code=response.status_code)
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise SafeFailure("http_json", route) from exc
+
+
+def _context(*, published: bool) -> dict[str, Any]:
+    return {
+        "resolution_state": "confirmed",
+        "publication_status": "published" if published else "draft",
+        "scope": {
+            "schema_version": 1,
+            "timeline_key": "main",
+            "release": {"key": "v1.0" if published else "v1.1", "ordinal": 10 if published else 11},
+            "branch": {"path": ["main"]},
+        },
+    }
+
+
+def _upload(client: httpx.Client, project_id: str, suite: VerifiedSuite, filename: str, role: str, *, published: bool) -> str:
+    try:
+        content = suite.files[filename].decode("utf-8")
+    except UnicodeError as exc:
+        raise SafeFailure("invalid_document_encoding", "upload") from exc
+    payload = _request(
+        client, "POST", f"/api/v1/projects/{project_id}/documents/text", "upload",
+        json={
+            "name": filename, "content": content, "document_role": role,
+            "story_scope": "main", "narrative_context": _context(published=published),
+        },
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("id"), str):
+        raise SafeFailure("document_response_contract", "upload")
+    return payload["id"]
+
+
+def _wait_run(client: httpx.Client, run_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+    started = time.monotonic()
+    while True:
+        value = _request(client, "GET", f"/api/v1/analysis-runs/{run_id}", "run_status")
+        if not isinstance(value, dict):
+            raise SafeFailure("run_response_contract", "run_status")
+        if value.get("status") in TERMINAL:
+            value["_elapsed_seconds"] = round(time.monotonic() - started, 3)
+            return value
+        if time.monotonic() - started >= timeout_seconds:
+            raise SafeFailure("run_timeout", "run_status")
+        time.sleep(1)
+
+
+def _start_run(client: httpx.Client, project_id: str, *, mode: str, target_id: str | None = None) -> str:
+    body: dict[str, Any] = {"mode": mode, "sensitivity": "balanced"}
+    if target_id is not None:
+        body["target_document_ids"] = [target_id]
+    response = _request(
+        client, "POST", f"/api/v1/projects/{project_id}/analysis-runs", "start_run",
+        headers={"Idempotency-Key": f"axis-live-{uuid4().hex}"}, json=body,
+    )
+    if not isinstance(response, dict) or not isinstance(response.get("id"), str):
+        raise SafeFailure("run_create_contract", "start_run")
+    return response["id"]
+
+
+def _safe_citation_refs(value: object, *, known_documents: set[str]) -> list[dict[str, Any]] | None:
+    """Return None for old/incomplete diagnostics; never infer missing refs."""
+    if not isinstance(value, list):
+        return None
+    refs: list[dict[str, Any]] = []
+    for row in value:
+        if not isinstance(row, dict):
+            return None
+        role = row.get("role")
+        name = row.get("document_name")
+        start = row.get("line_start")
+        end = row.get("line_end")
+        if (
+            role not in {"B", "C", "G", "X"}
+            or name not in known_documents
+            or type(start) is not int or type(end) is not int
+            or not 1 <= start <= end <= 10_000_000
+        ):
+            return None
+        refs.append({"role": role, "document_name": name, "line_start": start, "line_end": end})
+    return refs if len(refs) <= 8 else None
+
+
+def _actor_digest(value: str) -> str:
+    normalized = re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).casefold()
+    return _sha256(normalized)
+
+
+def _safe_accepted_draft_refs(
+    stage: dict[str, Any], *, known_documents: set[str],
+) -> list[dict[str, Any]] | None:
+    """Project the complete accepted-signal set without actor names or prose."""
+    value = stage.get("accepted_draft_observation_refs")
+    total = stage.get("accepted_draft_observation_total")
+    if (
+        not isinstance(value, list) or len(value) > 64
+        or type(total) is not int or total != len(value)
+        or stage.get("accepted_draft_observation_refs_truncated") is not False
+    ):
+        return None
+    refs: list[dict[str, Any]] = []
+    for row in value:
+        if not isinstance(row, dict):
+            return None
+        actor = row.get("character_key")
+        document = row.get("document_name")
+        start = row.get("line_start")
+        end = row.get("line_end")
+        dimension = row.get("dimension")
+        polarity = row.get("polarity")
+        if (
+            not isinstance(actor, str) or not 1 <= len(actor) <= 64
+            or actor.startswith("redacted_")
+            or document not in known_documents
+            or type(start) is not int or type(end) is not int
+            or not 1 <= start <= end <= 10_000_000
+            or dimension not in {
+                "core_personality", "preference", "value", "speech_pattern",
+                "behavior_boundary", "contextual_behavior", "current_state",
+            }
+            or polarity not in {"positive", "negative", "neutral", "unclear"}
+        ):
+            return None
+        refs.append({
+            "actor_sha256": _actor_digest(actor),
+            "dimension": dimension,
+            "polarity": polarity,
+            "document_name": document,
+            "line_start": start,
+            "line_end": end,
+        })
+    return refs
+
+
+def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
+    """Whitelist only model, character-stage, and build identity fields.
+
+    Unlike the investigator validator, this deliberately permits an
+    unconfigured embedding profile: character OOC does not require RAG.
+    """
+    if not isinstance(value, dict) or value.get("schema_version") != "loreguard-runtime-provenance-v3":
+        return None
+    build = value.get("build")
+    provider = value.get("chat_provider")
+    capabilities = value.get("capabilities")
+    limits = value.get("character_consistency_limits")
+    if not all(isinstance(row, dict) for row in (build, provider, capabilities, limits)):
+        return None
+    if set(build) != {"git_revision", "service_artifact_sha256"}:
+        return None
+    revision = build.get("git_revision")
+    artifact = build.get("service_artifact_sha256")
+    if (
+        not isinstance(revision, str) or GIT_HASH.fullmatch(revision) is None
+        or not isinstance(artifact, str) or SHA256.fullmatch(artifact) is None
+    ):
+        return None
+    if set(provider) != {
+        "model_alias", "endpoint_configuration_sha256", "temperature",
+        "thinking_configured", "thinking_mode",
+    }:
+        return None
+    alias = provider.get("model_alias")
+    endpoint = provider.get("endpoint_configuration_sha256")
+    thinking_mode = provider.get("thinking_mode")
+    if (
+        not isinstance(alias, str) or not 1 <= len(alias) <= 255
+        or alias != alias.strip() or any(ord(char) < 32 for char in alias)
+        or not isinstance(endpoint, str) or SHA256.fullmatch(endpoint) is None
+        or type(provider.get("temperature")) not in {int, float}
+        or provider["temperature"] != 0
+        or type(provider.get("thinking_configured")) is not bool
+        or thinking_mode not in {None, "disabled", "enabled"}
+        or provider["thinking_configured"] != (thinking_mode is not None)
+    ):
+        return None
+    if (
+        set(capabilities) != _CAPABILITY_KEYS
+        or any(type(flag) is not bool for flag in capabilities.values())
+        or set(limits) != _CHARACTER_CONSISTENCY_LIMIT_KEYS
+        or limits.get("sensitivity") not in {"conservative", "balanced", "exploratory"}
+    ):
+        return None
+    for key, (minimum, maximum) in _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS.items():
+        number = limits.get(key)
+        if type(number) is not int or not minimum <= number <= maximum:
+            return None
+    for key, (minimum, maximum) in _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS.items():
+        number = limits.get(key)
+        if (
+            type(number) not in {int, float}
+            or not math.isfinite(float(number))
+            or not minimum < float(number) <= maximum
+        ):
+            return None
+    for prefix in ("signal", "drift"):
+        if (
+            limits[f"{prefix}_provider_max_completion_tokens"]
+            > limits[f"{prefix}_max_completion_tokens"]
+            or limits[f"{prefix}_provider_max_response_bytes"]
+            > limits[f"{prefix}_max_response_bytes"]
+            or limits[f"{prefix}_provider_timeout_seconds"]
+            > min(
+                limits[f"{prefix}_timeout_seconds"],
+                limits[f"{prefix}_total_deadline_seconds"],
+            )
+        ):
+            return None
+    return {
+        "schema_version": value["schema_version"],
+        "build": dict(build),
+        "chat_provider": dict(provider),
+        "capabilities": dict(capabilities),
+        "character_consistency_limits": dict(limits),
+    }
+
+
+def _runtime_provenance_digest(value: object) -> str | None:
+    safe = _safe_character_runtime_provenance(value)
+    if safe is None:
+        return None
+    return _sha256(json.dumps(
+        safe, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ))
+
+
+def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: set[str]) -> dict[str, Any]:
+    run_id = run.get("id")
+    if not isinstance(run_id, str):
+        raise SafeFailure("run_response_contract", "run_summary")
+    diagnostics = _request(client, "GET", f"/api/v1/analysis-runs/{run_id}/diagnostics", "diagnostics")
+    issues = _request(client, "GET", f"/api/v1/analysis-runs/{run_id}/issues", "issues")
+    if not isinstance(diagnostics, dict) or not isinstance(issues, list):
+        raise SafeFailure("run_summary_contract", "run_summary")
+    stage = diagnostics.get("character_consistency")
+    stage = stage if isinstance(stage, dict) else {}
+    counts = stage.get("counts")
+    counts = counts if isinstance(counts, dict) else {}
+    usage = stage.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    reasons = stage.get("reason_counts")
+    reasons = reasons if isinstance(reasons, dict) else {}
+    accepted_draft_refs = _safe_accepted_draft_refs(
+        stage, known_documents=known_documents
+    )
+    raw_trace = stage.get("case_trace")
+    raw_trace = raw_trace if isinstance(raw_trace, list) else []
+    safe_trace = []
+    for row in raw_trace:
+        if not isinstance(row, dict):
+            continue
+        safe = _safe_case_trace_summary(row)
+        if row.get("observation_axis_binding") == "server_targeted_evidence":
+            safe["observation_axis_binding"] = "server_targeted_evidence"
+        definition_hash = row.get("approved_axis_definition_sha256")
+        if isinstance(definition_hash, str) and SHA256.fullmatch(definition_hash):
+            safe["approved_axis_definition_sha256"] = definition_hash
+        # The server addition is optional. Absence or incomplete binding must
+        # not be promoted into an exact G/X evidence score.
+        safe["citation_refs"] = _safe_citation_refs(
+            row.get("citation_refs"), known_documents=known_documents
+        ) if (
+            row.get("review_outcome") == "completed"
+            and row.get("citation_refs_incomplete") is False
+        ) else None
+        safe_trace.append(safe)
+    safe_issues = [
+        _safe_visible_issue(row, case_trace=safe_trace)
+        for row in issues if isinstance(row, dict) and row.get("category") == "character_drift"
+    ]
+    return {
+        "run_id": run_id,
+        "runtime_provenance_sha256": _runtime_provenance_digest(
+            diagnostics.get("runtime_provenance")
+        ),
+        "status": run.get("status"),
+        "elapsed_seconds": run.get("_elapsed_seconds"),
+        "prompt_tokens": run.get("prompt_tokens"),
+        "completion_tokens": run.get("completion_tokens"),
+        "stage_outcome": stage.get("outcome"),
+        "stage_reason": stage.get("reason_code"),
+        "material_coverage": stage.get("material_coverage"),
+        "planned_chunks": counts.get("planned_chunks"),
+        "processed_chunks": counts.get("processed_chunks"),
+        "draft_observations": counts.get("draft_observation_count"),
+        "accepted_draft_observation_total": (
+            stage.get("accepted_draft_observation_total")
+            if type(stage.get("accepted_draft_observation_total")) is int
+            and 0 <= stage["accepted_draft_observation_total"] <= 100_000
+            else None
+        ),
+        "accepted_draft_observation_refs_complete": accepted_draft_refs is not None,
+        "targeted_record_rejection_events": counts.get("targeted_record_rejected_count"),
+        "stage_usage": {key: usage.get(key) for key in ("attempted_calls", "input_tokens", "completion_tokens", "charged_tokens")},
+        "reason_counts": {
+            key: value for key, value in reasons.items()
+            if key in SAFE_REASON_KEYS and type(value) is int and 0 <= value <= 1_000_000
+        },
+        "unreported_reason_entries": sum(key not in SAFE_REASON_KEYS for key in reasons),
+        "token_admission_events": _safe_token_admission_events(stage.get("token_admission_events")),
+        "case_trace": safe_trace,
+        "accepted_draft_observation_refs": accepted_draft_refs,
+        "visible_issue_cases": safe_issues,
+    }
+
+
+def _list_pending(client: httpx.Client, project_id: str) -> list[dict[str, Any]]:
+    characters: list[str] = []
+    page = 1
+    while True:
+        roster = _request(
+            client, "GET", f"/api/v1/projects/{project_id}/characters", "characters",
+            params={"page": page, "page_size": 100},
+        )
+        if not isinstance(roster, dict) or not isinstance(roster.get("items"), list):
+            raise SafeFailure("character_roster_contract", "candidate_review")
+        for row in roster["items"]:
+            if not isinstance(row, dict) or not isinstance(row.get("character_key"), str):
+                raise SafeFailure("character_roster_contract", "candidate_review")
+            characters.append(row["character_key"])
+        if not roster.get("has_more"):
+            break
+        page += 1
+        if page > 20:
+            raise SafeFailure("character_roster_limit", "candidate_review")
+    candidates: list[dict[str, Any]] = []
+    for character in characters:
+        offset = 0
+        while True:
+            result = _request(
+                client, "GET",
+                f"/api/v1/projects/{project_id}/characters/{quote(character, safe='')}/profile-candidates",
+                "candidate_list", params={"state": "pending", "limit": 200, "offset": offset},
+            )
+            if not isinstance(result, dict) or not isinstance(result.get("items"), list):
+                raise SafeFailure("candidate_list_contract", "candidate_review")
+            candidates.extend(row for row in result["items"] if isinstance(row, dict))
+            if not result.get("has_more"):
+                break
+            offset += len(result["items"])
+            if offset > 5000 or not result["items"]:
+                raise SafeFailure("candidate_list_limit", "candidate_review")
+    return candidates
+
+
+def _reference_has_line(evidence: object, *, document: str, line: int, source_quote: str | None = None) -> bool:
+    if not isinstance(evidence, list):
+        return False
+    for row in evidence:
+        if not isinstance(row, dict):
+            continue
+        start = row.get("line_start")
+        end = row.get("line_end")
+        if (
+            row.get("document_name") == document
+            and type(start) is int and type(end) is int
+            and start <= line <= end
+            and (source_quote is None or (
+                isinstance(row.get("text"), str) and source_quote in row["text"]
+            ))
+        ):
+            return True
+    return False
+
+
+def _candidate_matches(row: dict[str, Any], selector: dict[str, Any]) -> bool:
+    if (
+        row.get("reviewable") is not True
+        or row.get("character_key") != selector["character_key"]
+        or row.get("trait_type") != selector["trait_type"]
+        or row.get("polarity") != selector["polarity"]
+        or row.get("stability") != selector["stability"]
+        or not _reference_has_line(
+            row.get("evidence"), document=selector["source_document"],
+            line=selector["source_line"], source_quote=selector["source_quote"],
+        )
+    ):
+        return False
+    if selector["source_document"] == "03-published-history-v1.0.md":
+        if row.get("origin") != "history_inference":
+            return False
+    elif row.get("origin") != "explicit_setting":
+        return False
+    key_object = selector["key_object"]
+    if key_object is not None:
+        # For object-bearing dimensions the server's frozen comparison key
+        # comes from the model-validated source object, independent of its
+        # free-form trait_key. A different modifier remains a distinct object.
+        expected_key = stable_trait_identity(selector["trait_type"], "", key_object)
+        if row.get("comparison_key") != expected_key:
+            return False
+    return True
+
+
+def _review_candidates(
+    client: httpx.Client, project_id: str, suite: VerifiedSuite,
+    state: dict[str, Any],
+) -> None:
+    plan = suite.plan
+    all_pending = _list_pending(client, project_id)
+    reviewable = [row for row in all_pending if row.get("reviewable") is True]
+    selectors = plan["candidate_decisions"]
+    chosen: dict[str, dict[str, Any]] = {}
+    reused: set[str] = set()
+    selection_checks: dict[str, dict[str, Any]] = {}
+    for selector in selectors:
+        matches = [row for row in reviewable if _candidate_matches(row, selector)]
+        key = selector["candidate_key"]
+        selection_checks[key] = {"match_count": len(matches), "unique": len(matches) == 1}
+        if len(matches) == 1:
+            candidate_id = matches[0].get("id")
+            if not isinstance(candidate_id, str) or candidate_id in reused:
+                selection_checks[key]["unique"] = False
+            else:
+                reused.add(candidate_id)
+                chosen[key] = matches[0]
+    state["candidate_review"] = {
+        "expected": len(selectors),
+        "reviewable": len(reviewable),
+        "unique_matches": sum(row["unique"] for row in selection_checks.values()),
+        "unselected_reviewable": len(reviewable) - len(reused),
+        "selectors": selection_checks,
+    }
+    if len(chosen) != len(selectors) or any(not row["unique"] for row in selection_checks.values()):
+        raise SafeFailure("candidate_not_unique", "candidate_review")
+
+    axes: dict[str, dict[str, Any]] = {}
+    for spec in plan["approved_axes"]:
+        result = _request(
+            client, "POST", f"/api/v1/projects/{project_id}/character-trait-axes", "axis_create",
+            json={
+                "trait_type": "core_personality",
+                "display_name": spec["display_name"],
+                "definition": spec["definition"],
+            },
+        )
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("id"), str)
+            or result.get("version") != 1
+            or result.get("definition_sha256") != _sha256(" ".join(spec["definition"].split()))
+        ):
+            raise SafeFailure("axis_create_contract", "axis_create")
+        axes[spec["axis_key"]] = result
+
+    selected: dict[str, dict[str, Any]] = {}
+    for selector in selectors:
+        candidate = chosen[selector["candidate_key"]]
+        character_key = quote(selector["character_key"], safe="")
+        candidate_id = candidate["id"]
+        body: dict[str, Any] = {
+            "decision": "confirm", "expected_revision": candidate.get("revision"),
+            "comment": "冻结作者审核计划：唯一来源锚点与角色、维度、方向、稳定性一致",
+        }
+        axis_key = selector["approved_axis_key"]
+        if axis_key is not None:
+            body["approved_axis_id"] = axes[axis_key]["id"]
+            body["expected_axis_version"] = 1
+        result = _request(
+            client, "POST",
+            f"/api/v1/projects/{project_id}/characters/{character_key}/profile-candidates/{quote(candidate_id, safe='')}/decisions",
+            "candidate_decision",
+            headers={"Idempotency-Key": f"axis-{uuid4().hex}"}, json=body,
+        )
+        confirmed = result.get("candidate") if isinstance(result, dict) else None
+        if (
+            not isinstance(confirmed, dict)
+            or confirmed.get("review_state") != "confirmed"
+            or confirmed.get("id") != candidate_id
+            or confirmed.get("approved_axis_id") != (axes[axis_key]["id"] if axis_key else None)
+        ):
+            raise SafeFailure("candidate_decision_contract", "candidate_review")
+        selected[selector["candidate_key"]] = confirmed
+    state["selected"] = selected
+    state["axis_count"] = len(axes)
+
+
+def _execute_trial(client: httpx.Client, suite: VerifiedSuite, trial: int, state: dict[str, Any], *, timeout_seconds: float) -> None:
+    project = _request(
+        client, "POST", "/api/v1/projects", "project_create",
+        json={
+            "name": f"axis-{suite.name}-T{trial}-{uuid4().hex[:8]}",
+            "description": "原创、开发者可见角色轴验收；非盲测",
+        },
+    )
+    if not isinstance(project, dict) or not isinstance(project.get("id"), str):
+        raise SafeFailure("project_create_contract", "project_create")
+    project_id = project["id"]
+    state["project_id_sha256"] = _sha256(project_id)
+    for name, role in BASELINE_FILES:
+        _upload(client, project_id, suite, name, role, published=True)
+    baseline_id = _start_run(client, project_id, mode="baseline_build")
+    baseline_run = _wait_run(client, baseline_id, timeout_seconds=timeout_seconds)
+    known_docs = {name for name, _ in BASELINE_FILES} | {DRAFT_FILE}
+    baseline = _run_summary(client, baseline_run, known_documents=known_docs)
+    state["baseline"] = baseline
+    state["baseline_admission"] = _baseline_admission(baseline)
+    if state["baseline_admission"]["admitted"] is not True:
+        raise SafeFailure("baseline_admission_failed", "baseline")
+    _review_candidates(client, project_id, suite, state)
+    draft_document_id = _upload(
+        client, project_id, suite, DRAFT_FILE, "chapter", published=False
+    )
+    draft_id = _start_run(client, project_id, mode="draft_review", target_id=draft_document_id)
+    draft_run = _wait_run(client, draft_id, timeout_seconds=timeout_seconds)
+    state["draft"] = _run_summary(client, draft_run, known_documents=known_docs)
+
+
+def _load_oracle(suite: VerifiedSuite) -> list[dict[str, Any]]:
+    oracle = _json_object(suite.files["oracle.json"], stage="oracle_scoring")
+    cases = oracle.get("expected_cases")
+    if (
+        oracle.get("schema_version") != "character-axis-oracle-v1"
+        or oracle.get("suite") != suite.name
+        or oracle.get("world_id") != suite.world_id
+        or oracle.get("developer_visible") is not True
+        or not isinstance(cases, list)
+        or len(cases) != suite.case_count
+    ):
+        raise SafeFailure("oracle_contract", "oracle_scoring")
+    candidate_keys = {row["candidate_key"] for row in suite.plan["candidate_decisions"]}
+    case_ids: set[str] = set()
+    for case in cases:
+        if not isinstance(case, dict):
+            raise SafeFailure("oracle_case_contract", "oracle_scoring")
+        evidence = case.get("evidence")
+        roles = case.get("required_citation_roles")
+        outcomes = case.get("allowed_final_outcomes")
+        if (
+            not _safe_key(case.get("case_id")) or case["case_id"] in case_ids
+            or case.get("candidate_key") not in candidate_keys
+            or case.get("gold_class") not in {"conflict", "explained", "hard_negative", "abstain"}
+            or not isinstance(outcomes, list) or not outcomes
+            or any(value not in {"conflict", "no_issue", "needs_confirmation", "unverifiable"} for value in outcomes)
+            or not isinstance(roles, list)
+            or any(value not in {"B", "C", "G", "X"} for value in roles)
+            or type(case.get("min_independent_observations")) is not int
+            or not 0 <= case["min_independent_observations"] <= 24
+            or not isinstance(evidence, dict)
+            or set(evidence) != {"B", "C", "G", "X", "forbidden"}
+        ):
+            raise SafeFailure("oracle_case_contract", "oracle_scoring")
+        for role in ("B", "C", "G", "X", "forbidden"):
+            refs = evidence[role]
+            if not isinstance(refs, list):
+                raise SafeFailure("oracle_evidence_contract", "oracle_scoring")
+            for ref in refs:
+                if not isinstance(ref, dict) or ref.get("document_name") not in suite.files or type(ref.get("line")) is not int:
+                    raise SafeFailure("oracle_evidence_contract", "oracle_scoring")
+                source_lines = _source_lines(suite.files[ref["document_name"]])
+                if not 1 <= ref["line"] <= len(source_lines):
+                    raise SafeFailure("oracle_evidence_contract", "oracle_scoring")
+                if role == "forbidden" and (
+                    not isinstance(ref.get("character_key"), str)
+                    or ref.get("role") not in {"C", "G", "X"}
+                    or ref.get("polarity") not in {"positive", "negative", "neutral", None}
+                ):
+                    raise SafeFailure("oracle_evidence_contract", "oracle_scoring")
+        case_ids.add(case["case_id"])
+    return cases
+
+
+def _ref_matches(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
+    start = actual.get("line_start")
+    end = actual.get("line_end")
+    return (
+        actual.get("document_name") == expected["document_name"]
+        and type(start) is int and type(end) is int
+        and start == expected["line"] == end
+    )
+
+
+def _evidence_scores(
+    case: dict[str, Any], candidate: dict[str, Any], trace: dict[str, Any],
+) -> dict[str, str]:
+    expected = case["evidence"]
+    baseline_refs = candidate.get("evidence")
+    baseline_refs = baseline_refs if isinstance(baseline_refs, list) else []
+    observation_refs = trace.get("matched_observation_refs")
+    observation_refs = observation_refs if isinstance(observation_refs, list) else []
+    citation_refs = trace.get("citation_refs")
+    scores: dict[str, str] = {}
+    for role, actual in (("B", baseline_refs), ("C", observation_refs)):
+        required = expected[role]
+        source_covered = (role != "C" or not actual) if not required else all(
+            any(_ref_matches(ref, anchor) for ref in actual)
+            for anchor in required
+        )
+        if role in case["required_citation_roles"] and citation_refs is None:
+            scores[role] = "unavailable"
+            continue
+        cited = (
+            [ref for ref in citation_refs if ref["role"] == role]
+            if citation_refs is not None else []
+        )
+        citation_covered = (
+            role not in case["required_citation_roles"]
+            or bool(cited)
+            and all(any(_ref_matches(ref, anchor) for ref in cited) for anchor in required)
+            and all(any(_ref_matches(ref, anchor) for anchor in required) for ref in cited)
+        )
+        scores[role] = "matched" if source_covered and citation_covered else "missed"
+    for role in ("G", "X"):
+        required = expected[role]
+        if not required:
+            scores[role] = "not_required"
+            continue
+        if citation_refs is None:
+            scores[role] = "unavailable"
+            continue
+        role_refs = [ref for ref in citation_refs if ref["role"] == role]
+        scores[role] = "matched" if (
+            role_refs
+            and all(any(_ref_matches(ref, anchor) for ref in role_refs) for anchor in required)
+            and all(any(_ref_matches(ref, anchor) for anchor in required) for ref in role_refs)
+        ) else "missed"
+    return scores
+
+
+def _visible_issue_evidence_score(
+    case: dict[str, Any], visible: list[dict[str, Any]], trace: dict[str, Any],
+) -> str:
+    """Score the evidence actually delivered in the visible HTTP issue."""
+    if not visible:
+        return "missed" if case["gold_class"] == "conflict" else "not_required"
+    if len(visible) != 1:
+        return "missed"
+    required = case["evidence"]["B"] + case["evidence"]["C"]
+    # G/X may accompany a visible issue only when separately registered in
+    # the frozen oracle. Their presence is allowed context, not proof that
+    # the reviewer used them as an explanation; citation scoring is separate.
+    registered = required + case["evidence"]["G"] + case["evidence"]["X"]
+    if not case["evidence"]["C"]:
+        # A visible issue without pre-registered current evidence cannot be
+        # endorsed merely because its internal trace has an expected label.
+        return "unavailable"
+    actual = visible[0].get("evidence_refs")
+    if not isinstance(actual, list) or not actual:
+        return "unavailable"
+    if not all(any(_ref_matches(ref, anchor) for ref in actual) for anchor in required):
+        return "missed"
+    if not all(any(_ref_matches(ref, anchor) for anchor in registered) for ref in actual):
+        return "missed"
+    citations = trace.get("citation_refs")
+    if isinstance(citations, list) and any(
+        citation["line_start"] != citation["line_end"] or not any(_ref_matches(ref, {
+            "document_name": citation["document_name"],
+            "line": citation["line_start"],
+        }) for ref in actual)
+        for citation in citations
+        if citation["role"] in {"B", "C", "G", "X"}
+    ):
+        return "missed"
+    return "matched"
+
+
+def _forbidden_hits(
+    case: dict[str, Any], trace: dict[str, Any], draft: dict[str, Any],
+    *, target_dimension: str,
+) -> tuple[int, bool]:
+    hits = 0
+    accepted = draft.get("accepted_draft_observation_refs")
+    actor_attribution_unavailable = (
+        any(row["role"] == "C" for row in case["evidence"]["forbidden"])
+        and not isinstance(accepted, list)
+    )
+    citations = trace.get("citation_refs")
+    citations = citations if isinstance(citations, list) else []
+    for forbidden in case["evidence"]["forbidden"]:
+        if forbidden["role"] == "C":
+            actual = accepted if isinstance(accepted, list) else []
+            actor_matches = lambda ref: (
+                ref.get("actor_sha256") == _actor_digest(forbidden["character_key"])
+                and ref.get("dimension") == target_dimension
+            )
+        else:
+            actual = [ref for ref in citations if ref["role"] == forbidden["role"]]
+            actor_matches = lambda _ref: trace.get("character_key") == forbidden["character_key"]
+        if any(
+            actor_matches(ref) and _ref_matches(ref, forbidden)
+            and (forbidden.get("polarity") is None or ref.get("polarity") == forbidden["polarity"])
+            for ref in actual
+        ):
+            hits += 1
+    return hits, actor_attribution_unavailable
+
+
+def _score_case(case: dict[str, Any], state: dict[str, Any], suite: VerifiedSuite) -> dict[str, Any]:
+    draft = state.get("draft") or {}
+    selected = state.get("selected") or {}
+    candidate = selected.get(case["candidate_key"])
+    digest = _candidate_id_sha256(candidate.get("id")) if isinstance(candidate, dict) else None
+    traces = [
+        row for row in draft.get("case_trace", [])
+        if row.get("confirmed_candidate_id_sha256") == digest
+    ] if digest else []
+    trace = traces[0] if len(traces) == 1 else None
+    visible = [
+        row for row in draft.get("visible_issue_cases", [])
+        if row.get("confirmed_candidate_id_sha256") == digest
+    ] if digest else []
+    selector = next(
+        row for row in suite.plan["candidate_decisions"]
+        if row["candidate_key"] == case["candidate_key"]
+    )
+    forbidden_hits, actor_unavailable = _forbidden_hits(
+        case, trace or {}, draft, target_dimension=selector["trait_type"]
+    )
+    visible_false_positive_count = (
+        sum(row.get("judgement") == "contradicts" for row in visible)
+        if case["gold_class"] != "conflict" else 0
+    )
+    if trace is None or candidate is None:
+        return {
+            "case_id": case["case_id"], "gold_class": case["gold_class"],
+            "candidate_confirmed": candidate is not None,
+            "trace_unique": len(traces) == 1,
+            "actual_outcome": None,
+            "evidence": {role: "unavailable" for role in ("B", "C", "G", "X")},
+            "visible_issue_evidence": "unavailable",
+            "false_positive": visible_false_positive_count > 0,
+            "visible_false_positive_count": visible_false_positive_count,
+            "trace_false_positive": None,
+            "false_positive_unknown": case["gold_class"] != "conflict" and not visible_false_positive_count,
+            "false_negative": case["gold_class"] == "conflict",
+            "target_dimension_suspect_attribution_hits": forbidden_hits,
+            "target_dimension_attribution_unavailable": actor_unavailable,
+            "actor_recall_assessable": bool(case["evidence"]["C"]),
+            "abstained": False, "passed": False,
+        }
+    observation_refs = trace.get("matched_observation_refs")
+    observation_refs = observation_refs if isinstance(observation_refs, list) else []
+    independent = {
+        (ref.get("document_name"), ref.get("line_start"), ref.get("line_end"))
+        for ref in observation_refs
+    }
+    evidence = _evidence_scores(case, candidate, trace)
+    outcome = trace.get("final_outcome")
+    gold = case["gold_class"]
+    axis_key = selector["approved_axis_key"]
+    if axis_key is None:
+        axis_applicability_valid = candidate.get("approved_axis_id") is None
+        baseline_axis_snapshot_matched = None
+    else:
+        axis = next(
+            row for row in suite.plan["approved_axes"] if row["axis_key"] == axis_key
+        )
+        baseline_axis_snapshot_matched = (
+            isinstance(candidate.get("approved_axis_id"), str)
+            and trace.get("comparison_key_sha256")
+            == _sha256(f"approved_axis:{candidate['approved_axis_id']}:1")
+            and trace.get("approved_axis_definition_sha256")
+            == _sha256(" ".join(axis["definition"].split()))
+            and trace.get("observation_axis_binding") == "server_targeted_evidence"
+        )
+        axis_applicability_valid = baseline_axis_snapshot_matched
+    role_check = set(case["required_citation_roles"]) <= set(trace.get("citation_roles") or [])
+    outcome_check = outcome in case["allowed_final_outcomes"]
+    review_check = (
+        trace.get("review_verdict") == "contradicts" if gold == "conflict"
+        else trace.get("review_verdict") == "explained" if gold == "explained"
+        else outcome != "conflict"
+    )
+    if gold == "conflict":
+        visible_check = len(visible) == 1 and visible[0].get("judgement") == "contradicts"
+    elif outcome in {"no_issue", "unverifiable"}:
+        visible_check = not visible
+    else:
+        visible_check = len(visible) <= 1 and not any(
+            row.get("judgement") == "contradicts" for row in visible
+        )
+    evidence_check = all(value in {"matched", "not_required"} for value in evidence.values())
+    visible_issue_evidence = _visible_issue_evidence_score(case, visible, trace)
+    coverage_check = not trace.get("matched_observation_refs_truncated")
+    axis_observation_binding_evidenced = (
+        baseline_axis_snapshot_matched is True
+        and bool(independent)
+        and evidence["C"] == "matched"
+        if axis_key is not None and case["min_independent_observations"] > 0
+        else None
+    )
+    passed = all((
+        outcome_check, review_check, visible_check, role_check, evidence_check,
+        visible_issue_evidence in {"matched", "not_required"},
+        len(independent) >= case["min_independent_observations"],
+        forbidden_hits == 0, not actor_unavailable, coverage_check,
+        axis_applicability_valid,
+    ))
+    return {
+        "case_id": case["case_id"], "gold_class": gold,
+        "candidate_confirmed": True, "trace_unique": True,
+        "actual_outcome": outcome,
+        "review_verdict": trace.get("review_verdict"),
+        "matched_observations": len(independent),
+        "baseline_axis_snapshot_matched": baseline_axis_snapshot_matched,
+        "axis_applicability_valid": axis_applicability_valid,
+        "axis_observation_binding_evidenced": axis_observation_binding_evidenced,
+        "citation_roles_matched": role_check,
+        "evidence": evidence,
+        "visible_issue_evidence": visible_issue_evidence,
+        "target_dimension_suspect_attribution_hits": forbidden_hits,
+        "target_dimension_attribution_unavailable": actor_unavailable,
+        "actor_recall_assessable": bool(case["evidence"]["C"]),
+        "false_positive": gold != "conflict" and (
+            outcome == "conflict" or visible_false_positive_count > 0
+        ),
+        "visible_false_positive_count": visible_false_positive_count,
+        "trace_false_positive": gold != "conflict" and outcome == "conflict",
+        "false_positive_unknown": False,
+        "false_negative": gold == "conflict" and outcome != "conflict",
+        "abstained": outcome in {"needs_confirmation", "unverifiable"},
+        "passed": passed,
+    }
+
+
+def _public_run(summary: dict[str, Any] | None) -> dict[str, Any] | None:
+    if summary is None:
+        return None
+    return {
+        key: summary.get(key)
+        for key in (
+            "status", "runtime_provenance_sha256", "elapsed_seconds", "prompt_tokens", "completion_tokens",
+            "stage_outcome", "stage_reason", "material_coverage", "planned_chunks",
+            "processed_chunks", "draft_observations", "accepted_draft_observation_total",
+            "accepted_draft_observation_refs_complete", "targeted_record_rejection_events",
+            "stage_usage", "reason_counts", "unreported_reason_entries",
+            "token_admission_events",
+        )
+    }
+
+
+def _score_trial(
+    suite: VerifiedSuite, state: dict[str, Any], cases: list[dict[str, Any]],
+) -> dict[str, Any]:
+    baseline = state.get("baseline")
+    draft = state.get("draft")
+    scores = [_score_case(case, state, suite) for case in cases]
+    review = state.get("candidate_review") or {}
+    admission = state.get("baseline_admission") or {}
+    selected = state.get("selected") or {}
+    known_case_digests = {
+        _candidate_id_sha256(selected[case["candidate_key"]]["id"])
+        for case in cases if case["candidate_key"] in selected
+    }
+    unexpected_conflicts = sum(
+        row.get("judgement") == "contradicts"
+        and row.get("confirmed_candidate_id_sha256") not in known_case_digests
+        for row in (draft or {}).get("visible_issue_cases", [])
+    )
+    visible_false_positives = sum(
+        row.get("visible_false_positive_count", 0) for row in scores
+    ) + unexpected_conflicts
+    trace_only_false_positives = sum(
+        row.get("trace_false_positive") is True
+        and row.get("visible_false_positive_count", 0) == 0
+        for row in scores
+    )
+    complete = (
+        draft is not None
+        and draft.get("status") == "completed"
+        and draft.get("stage_outcome") == "completed"
+        and draft.get("material_coverage") == "complete"
+        and type(draft.get("planned_chunks")) is int
+        and draft["planned_chunks"] > 0
+        and draft.get("processed_chunks") == draft["planned_chunks"]
+        and type((draft.get("stage_usage") or {}).get("attempted_calls")) is int
+        and draft["stage_usage"]["attempted_calls"] > 0
+    )
+    passed = (
+        state.get("failure") is None
+        and admission.get("admitted") is True
+        and review.get("unique_matches") == review.get("expected")
+        and len(selected) == len(suite.plan["candidate_decisions"])
+        and complete
+        and all(row["passed"] for row in scores)
+        and unexpected_conflicts == 0
+    )
+    return {
+        "trial": state["trial"],
+        "project_id_sha256": state.get("project_id_sha256"),
+        "failure": state.get("failure"),
+        "baseline": _public_run(baseline),
+        "baseline_admitted": admission.get("admitted") is True,
+        "candidate_review": review,
+        "axis_count": state.get("axis_count", 0),
+        "draft": _public_run(draft),
+        "draft_complete": complete,
+        "case_scores": scores,
+        "counts": {
+            "cases_passed": sum(row["passed"] for row in scores),
+            "cases_total": len(scores),
+            "false_positives": visible_false_positives + trace_only_false_positives,
+            "visible_false_positives": visible_false_positives,
+            "false_positive_unknown_cases": sum(row.get("false_positive_unknown") is True for row in scores),
+            "false_negatives": sum(row["false_negative"] for row in scores),
+            "abstained": sum(row["abstained"] for row in scores),
+            "target_dimension_suspect_attribution_hits": sum(row.get("target_dimension_suspect_attribution_hits", 0) for row in scores),
+            "target_dimension_attribution_unavailable_cases": sum(row.get("target_dimension_attribution_unavailable") is True for row in scores),
+            "actor_recall_unassessed_cases": sum(row.get("actor_recall_assessable") is False for row in scores),
+            "baseline_axis_snapshots_matched": sum(row.get("baseline_axis_snapshot_matched") is True for row in scores),
+            "baseline_axis_snapshot_eligible_cases": sum(row.get("baseline_axis_snapshot_matched") is not None for row in scores),
+            "axis_observation_bindings_evidenced": sum(row.get("axis_observation_binding_evidenced") is True for row in scores),
+            "axis_observation_binding_eligible_cases": sum(row.get("axis_observation_binding_evidenced") is not None for row in scores),
+            "unavailable_evidence_roles": sum(
+                value == "unavailable" for row in scores for value in row["evidence"].values()
+            ),
+            "unexpected_conflicts": unexpected_conflicts,
+        },
+        "passed": passed,
+    }
+
+
+def _failure(exc: BaseException) -> dict[str, Any]:
+    if isinstance(exc, SafeFailure):
+        return exc.payload
+    if isinstance(exc, (OSError, httpx.HTTPError)):
+        code = "environment_error"
+    elif isinstance(exc, (KeyError, TypeError, ValueError)):
+        code = "runner_contract_error"
+    else:
+        code = "runner_error"
+    return {"code": code, "stage": "runner", "details": {"exception_type": type(exc).__name__}}
+
+
+def _bounded_number(value: Any) -> int:
+    return value if type(value) is int and 0 <= value <= 100_000_000 else 0
+
+
+def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
+    provenance = health.get("runtime_provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    build = provenance.get("build")
+    build = build if isinstance(build, dict) else {}
+    provider = provenance.get("chat_provider")
+    provider = provider if isinstance(provider, dict) else {}
+    limits = provenance.get("character_consistency_limits")
+    limits = limits if isinstance(limits, dict) else {}
+    alias = provider.get("model_alias")
+    return {
+        "schema_version": provenance.get("schema_version"),
+        "build_revision": build.get("git_revision") if _safe_key(build.get("git_revision")) else None,
+        "service_artifact_sha256": (
+            build.get("service_artifact_sha256")
+            if isinstance(build.get("service_artifact_sha256"), str)
+            and SHA256.fullmatch(build["service_artifact_sha256"])
+            else None
+        ),
+        "requested_model_alias_sha256": _sha256(alias) if isinstance(alias, str) else None,
+        "endpoint_configuration_sha256": (
+            provider.get("endpoint_configuration_sha256")
+            if isinstance(provider.get("endpoint_configuration_sha256"), str)
+            and SHA256.fullmatch(provider["endpoint_configuration_sha256"])
+            else None
+        ),
+        "character_limits": {
+            key: value for key in (
+                "stage_token_budget", "signal_token_budget", "max_chunks_per_run",
+                "max_candidates_per_run",
+            )
+            if type(value := limits.get(key)) is int and value >= 0
+        },
+    }
+
+
+def _service_preflight_gate(
+    health: dict[str, Any], code_state: dict[str, Any], local_hash: str | None,
+) -> str:
+    """Require the API service bundle and revision to equal the frozen runner."""
+    if not isinstance(local_hash, str) or SHA256.fullmatch(local_hash) is None:
+        raise SafeFailure("local_service_artifact_unavailable", "runtime_preflight")
+    provenance = _safe_character_runtime_provenance(health.get("runtime_provenance"))
+    if provenance is None:
+        raise SafeFailure("runtime_provenance_invalid", "runtime_preflight")
+    build = provenance["build"]
+    if build["git_revision"] != code_state["git_head"]:
+        raise SafeFailure("service_build_revision_mismatch", "runtime_preflight")
+    if build["service_artifact_sha256"] != local_hash:
+        raise SafeFailure("service_artifact_mismatch", "runtime_preflight")
+    if provenance["capabilities"]["character_consistency"] is not True:
+        raise SafeFailure("character_consistency_disabled", "runtime_preflight")
+    digest = _runtime_provenance_digest(provenance)
+    if digest is None:
+        raise SafeFailure("runtime_provenance_invalid", "runtime_preflight")
+    return digest
+
+
+def _code_state() -> dict[str, Any]:
+    """Expose only the revision and cleanliness, never dirty file names."""
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
+            text=True, check=True, timeout=10,
+        ).stdout.strip().lower()
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=ROOT, capture_output=True, text=True, check=True, timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {"git_head": None, "worktree_clean": None}
+    return {
+        "git_head": head if GIT_HASH.fullmatch(head) is not None else None,
+        "worktree_clean": status == "",
+    }
+
+
+def _suite_report(
+    suite: VerifiedSuite, states: list[dict[str, Any]], cases: list[dict[str, Any]],
+) -> dict[str, Any]:
+    trials = [_score_trial(suite, state, cases) for state in states]
+    project_hashes = [trial.get("project_id_sha256") for trial in trials]
+    independent_projects = (
+        len(project_hashes) == 3
+        and all(isinstance(value, str) and SHA256.fullmatch(value) for value in project_hashes)
+        and len(set(project_hashes)) == 3
+    )
+    stability = {
+        case["case_id"]: {
+            "passed_trials": sum(
+                next((row["passed"] for row in trial["case_scores"] if row["case_id"] == case["case_id"]), False)
+                for trial in trials
+            ),
+            "total_trials": 3,
+        }
+        for case in cases
+    }
+    return {
+        "world_id": suite.world_id,
+        "developer_visible": True,
+        "dataset_sha256": suite.hashes,
+        "case_count": suite.case_count,
+        "trials": trials,
+        "independent_projects": independent_projects,
+        "stability": stability,
+        "aggregate": {
+            "complete_trials": sum(trial["draft_complete"] for trial in trials),
+            "passed_trials": sum(trial["passed"] for trial in trials),
+            "candidate_matches": sum((trial["candidate_review"] or {}).get("unique_matches", 0) for trial in trials),
+            "candidate_expected": len(suite.plan["candidate_decisions"]) * 3,
+            "candidate_reviewable": sum((trial["candidate_review"] or {}).get("reviewable", 0) for trial in trials),
+            "axes_bound": sum(trial["axis_count"] for trial in trials),
+            "false_positives": sum(trial["counts"]["false_positives"] for trial in trials),
+            "visible_false_positives": sum(trial["counts"]["visible_false_positives"] for trial in trials),
+            "false_positive_unknown_cases": sum(trial["counts"]["false_positive_unknown_cases"] for trial in trials),
+            "false_negatives": sum(trial["counts"]["false_negatives"] for trial in trials),
+            "abstained": sum(trial["counts"]["abstained"] for trial in trials),
+            "target_dimension_suspect_attribution_hits": sum(trial["counts"]["target_dimension_suspect_attribution_hits"] for trial in trials),
+            "target_dimension_attribution_unavailable_cases": sum(
+                trial["counts"]["target_dimension_attribution_unavailable_cases"] for trial in trials
+            ),
+            "actor_recall_unassessed_cases": sum(
+                trial["counts"]["actor_recall_unassessed_cases"] for trial in trials
+            ),
+            "baseline_axis_snapshots_matched": sum(
+                trial["counts"]["baseline_axis_snapshots_matched"] for trial in trials
+            ),
+            "baseline_axis_snapshot_eligible_cases": sum(
+                trial["counts"]["baseline_axis_snapshot_eligible_cases"] for trial in trials
+            ),
+            "axis_observation_bindings_evidenced": sum(
+                trial["counts"]["axis_observation_bindings_evidenced"] for trial in trials
+            ),
+            "axis_observation_binding_eligible_cases": sum(
+                trial["counts"]["axis_observation_binding_eligible_cases"] for trial in trials
+            ),
+            "unavailable_evidence_roles": sum(trial["counts"]["unavailable_evidence_roles"] for trial in trials),
+            "prompt_tokens": sum(
+                _bounded_number((trial.get(stage) or {}).get("prompt_tokens"))
+                for trial in trials for stage in ("baseline", "draft")
+            ),
+            "completion_tokens": sum(
+                _bounded_number((trial.get(stage) or {}).get("completion_tokens"))
+                for trial in trials for stage in ("baseline", "draft")
+            ),
+            "elapsed_seconds": round(sum(
+                value for trial in trials for stage in ("baseline", "draft")
+                for value in [(trial.get(stage) or {}).get("elapsed_seconds")]
+                if isinstance(value, (int, float)) and 0 <= value <= 1_000_000
+            ), 3),
+        },
+        "passed": independent_projects and all(trial["passed"] for trial in trials),
+    }
+
+
+def _emit_report(report: dict[str, Any], output_json: str | None) -> None:
+    rendered = json.dumps(report, ensure_ascii=False, indent=2)
+    if output_json:
+        path = _resolve_output_json(output_json)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8") as output:
+            output.write(rendered + "\n")
+    print(rendered)
+
+
+def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    official_dataset = Path(args.dataset).resolve() == DATASET.resolve()
+    dataset_kind = "pinned_challenge" if official_dataset else "custom"
+    mode = "developer_diagnostic" if args.diagnostic_dev_one_trial else "strict"
+    try:
+        # Fail on an invalid report path before spending model tokens.
+        if args.output_json:
+            _resolve_output_json(args.output_json)
+        if official_dataset and args.manifest_sha256 != PINNED_MANIFEST_SHA256:
+            raise SafeFailure("official_manifest_digest_override", "fixture_preflight")
+        fixture = verify_fixture(
+            Path(args.dataset), expected_manifest_sha256=args.manifest_sha256
+        )
+    except Exception as exc:
+        return {
+            "schema_version": "character-axis-live-v1",
+            "mode": mode,
+            "dataset_kind": dataset_kind,
+            "claims": {"blind_holdout": False, "production_quality": False,
+                       "independent_full_workflow_trials": False},
+            "failure": _failure(exc), "passed": False,
+        }, 1
+
+    code_state = _code_state()
+    if args.preflight_only:
+        return {
+            "schema_version": "character-axis-live-v1",
+            "dataset_kind": dataset_kind,
+            "mode": "preflight_only", "manifest_sha256": fixture.manifest_sha256,
+            "dataset_sha256": {name: suite.hashes for name, suite in fixture.suites.items()},
+            "code_state": code_state,
+            "claims": {"blind_holdout": False, "production_quality": False,
+                       "independent_full_workflow_trials": False},
+            "preflight_verified": True,
+            "passed": False,
+        }, 0
+
+    if mode == "strict" and not official_dataset:
+        return {
+            "schema_version": "character-axis-live-v1",
+            "mode": mode, "dataset_kind": dataset_kind,
+            "manifest_sha256": fixture.manifest_sha256,
+            "code_state": code_state,
+            "claims": {"blind_holdout": False, "production_quality": False,
+                       "independent_full_workflow_trials": False},
+            "failure": {"code": "strict_requires_pinned_fixture", "stage": "fixture_preflight", "details": {}},
+            "passed": False,
+        }, 1
+
+    if mode == "strict" and (
+        code_state["git_head"] is None or code_state["worktree_clean"] is not True
+    ):
+        return {
+            "schema_version": "character-axis-live-v1",
+            "mode": mode, "dataset_kind": dataset_kind,
+            "manifest_sha256": fixture.manifest_sha256,
+            "code_state": code_state,
+            "claims": {"blind_holdout": False, "production_quality": False,
+                       "independent_full_workflow_trials": False},
+            "failure": {"code": "strict_worktree_not_clean", "stage": "code_preflight", "details": {}},
+            "passed": False,
+        }, 1
+
+    local_service_hash = (
+        _local_service_artifact_sha256(ROOT) if mode == "strict" else None
+    )
+    if mode == "strict" and (
+        not isinstance(local_service_hash, str)
+        or SHA256.fullmatch(local_service_hash) is None
+    ):
+        return {
+            "schema_version": "character-axis-live-v1",
+            "mode": mode, "dataset_kind": dataset_kind,
+            "manifest_sha256": fixture.manifest_sha256,
+            "code_state": code_state,
+            "claims": {"blind_holdout": False, "production_quality": False,
+                       "independent_full_workflow_trials": False},
+            "failure": {"code": "local_service_artifact_unavailable", "stage": "code_preflight", "details": {}},
+            "passed": False,
+        }, 1
+
+    states: dict[str, list[dict[str, Any]]] = {name: [] for name in SUITES}
+    runtime: dict[str, Any] | None = None
+    api_runtime_digest: str | None = None
+    post_api_runtime_digest: str | None = None
+    post_health_failure: str | None = None
+    try:
+        with httpx.Client(
+            base_url=args.base_url.rstrip("/"), timeout=httpx.Timeout(30.0)
+        ) as client:
+            health = _request(client, "GET", "/health", "health")
+            if not isinstance(health, dict):
+                raise SafeFailure("health_contract", "runtime_preflight")
+            if mode == "strict":
+                api_runtime_digest = _service_preflight_gate(
+                    health, code_state, local_service_hash
+                )
+            capabilities = health.get("runtime_provenance", {}).get("capabilities", {}) if isinstance(health.get("runtime_provenance"), dict) else {}
+            if capabilities.get("character_consistency") is not True:
+                raise SafeFailure("character_consistency_disabled", "runtime_preflight")
+            runtime = _runtime_summary(health)
+            model = health.get("model") if isinstance(health, dict) else None
+            configured = isinstance(model, dict) and model.get("configured") is True
+            if not configured:
+                provider = _request(client, "GET", "/api/v1/account/model-provider", "model_provider")
+                configured = isinstance(provider, dict) and (
+                    provider.get("configured") is True
+                    or provider.get("service_default_available") is True
+                )
+            if not configured:
+                raise SafeFailure("model_not_configured", "runtime_preflight")
+            run_suites = ("dev",) if mode == "developer_diagnostic" else SUITES
+            trial_numbers = (1,) if mode == "developer_diagnostic" else range(1, 4)
+            for suite_name in run_suites:
+                suite = fixture.suites[suite_name]
+                for trial in trial_numbers:
+                    state: dict[str, Any] = {"trial": trial}
+                    try:
+                        _execute_trial(
+                            client, suite, trial, state,
+                            timeout_seconds=args.run_timeout_seconds,
+                        )
+                    except Exception as exc:
+                        state["failure"] = _failure(exc)
+                    states[suite_name].append(state)
+            if mode == "strict":
+                try:
+                    after_health = _request(client, "GET", "/health", "health_postrun")
+                    post_api_runtime_digest = _runtime_provenance_digest(
+                        after_health.get("runtime_provenance")
+                        if isinstance(after_health, dict) else None
+                    )
+                except Exception:
+                    post_health_failure = "health_postrun_unavailable"
+    except Exception as exc:
+        return {
+            "schema_version": "character-axis-live-v1",
+            "mode": mode, "dataset_kind": dataset_kind,
+            "manifest_sha256": fixture.manifest_sha256,
+            "code_state": code_state,
+            "claims": {"blind_holdout": False, "production_quality": False,
+                       "independent_full_workflow_trials": False},
+            "failure": _failure(exc), "passed": False,
+        }, 1
+
+    code_state_after = _code_state() if mode == "strict" else None
+    local_service_hash_after = (
+        _local_service_artifact_sha256(ROOT) if mode == "strict" else None
+    )
+    worker_digests = [
+        (state.get(stage) or {}).get("runtime_provenance_sha256")
+        for suite_states in states.values() for state in suite_states
+        for stage in ("baseline", "draft")
+    ]
+    worker_observed = sum(
+        isinstance(value, str) and SHA256.fullmatch(value) is not None
+        for value in worker_digests
+    )
+    worker_matched = sum(
+        api_runtime_digest is not None and value == api_runtime_digest
+        for value in worker_digests
+    )
+    gate_reasons = []
+    if mode == "strict":
+        if len(worker_digests) != 12 or worker_observed != 12:
+            gate_reasons.append("worker_runtime_provenance_incomplete")
+        if worker_matched != 12:
+            gate_reasons.append("api_worker_runtime_provenance_mismatch")
+        if post_health_failure or post_api_runtime_digest != api_runtime_digest:
+            gate_reasons.append("api_runtime_provenance_changed_or_unavailable")
+        if code_state_after != code_state or local_service_hash_after != local_service_hash:
+            gate_reasons.append("runner_code_changed_during_run")
+    provenance_gate = {
+        "applicable": mode == "strict",
+        "passed": mode == "strict" and not gate_reasons,
+        "reason_codes": gate_reasons,
+        "local_service_artifact_sha256": local_service_hash,
+        "api_runtime_provenance_sha256": api_runtime_digest,
+        "worker_runtime_provenance_observed_runs": worker_observed,
+        "worker_runtime_provenance_matches_api_runs": worker_matched,
+        "expected_worker_runs": 12 if mode == "strict" else 2,
+        "postrun_code_state_stable": (
+            code_state_after == code_state and local_service_hash_after == local_service_hash
+            if mode == "strict" else None
+        ),
+        "postrun_api_runtime_stable": (
+            post_health_failure is None and post_api_runtime_digest == api_runtime_digest
+            if mode == "strict" else None
+        ),
+    }
+
+    suites: dict[str, Any] = {}
+    for suite_name in run_suites:
+        suite = fixture.suites[suite_name]
+        try:
+            # The gold file was hashed before HTTP, but is first parsed here.
+            cases = _load_oracle(suite)
+            if mode == "developer_diagnostic":
+                trial = _score_trial(suite, states[suite_name][0], cases)
+                suites[suite_name] = {
+                    "world_id": suite.world_id,
+                    "developer_visible": True,
+                    "dataset_sha256": suite.hashes,
+                    "case_count": suite.case_count,
+                    "trials": [trial],
+                    "diagnostic_completed": trial["draft_complete"],
+                    "passed": False,
+                }
+            else:
+                suites[suite_name] = _suite_report(suite, states[suite_name], cases)
+        except Exception as exc:
+            suites[suite_name] = {
+                "world_id": suite.world_id,
+                "failure": _failure(exc), "passed": False,
+                "attempted_trials": len(states[suite_name]),
+            }
+    project_hashes = [
+        state.get("project_id_sha256") for suite_states in states.values()
+        for state in suite_states
+    ]
+    independent_projects = (
+        len(project_hashes) == 6
+        and all(isinstance(value, str) and SHA256.fullmatch(value) for value in project_hashes)
+        and len(set(project_hashes)) == 6
+    )
+    complete = mode == "strict" and provenance_gate["passed"] and independent_projects and all(
+        suites[name].get("passed") is True for name in SUITES
+    )
+    report = {
+        "schema_version": "character-axis-live-v1",
+        "mode": mode,
+        "dataset_kind": dataset_kind,
+        "manifest_sha256": fixture.manifest_sha256,
+        "code_state": code_state,
+        "runtime": runtime,
+        "provenance_gate": provenance_gate,
+        "claims": {
+            "blind_holdout": False,
+            "production_quality": False,
+            "open_text_generalization": False,
+            "complete_actor_attribution_accuracy": False,
+            "true_actor_recall": False,
+            "independent_full_workflow_trials": complete,
+        },
+        "metric_definitions": {
+            "targeted_record_rejection_events": (
+                "校验拒收与重试事件计数；非独立原文行数、原始模型错误数或召回分母"
+            ),
+            "accepted_draft_observation_total": (
+                "证据校验后接纳的草稿信号数；不包含拒收或模型原始输出"
+            ),
+            "target_dimension_suspect_attribution_hits": (
+                "仅计已接纳草稿信号在预注册目标角色、目标维度、极性与精确行上的可疑归属；"
+                "不能证明行为语义，也不是总体角色归属准确率或 true-actor recall"
+            ),
+            "actor_recall_assessable": (
+                "Oracle 未预注册正向角色召回锚点的 C=[] 案例为 false；不评价真实行动者的 trait 抽取召回"
+            ),
+            "evidence": (
+                "B/C 为预注册来源行的覆盖率；完成审查时另核 reviewer 引用行，"
+                "可见 issue 再核全部实际证据行；不声称覆盖了每条可能相关的原文证据"
+            ),
+            "visible_issue_evidence": (
+                "最终可见 issue 必须覆盖预注册 B/C 精确单行；其余实际引用只允许落在"
+                "预注册 B/C/G/X 行。G/X 在此仅为允许的背景，是否用于解释另看 reviewer citation_refs"
+            ),
+            "false_positives": (
+                "可见 contradicts issue 数加仅在内部 trace 观测到的冲突数；"
+                "trace 缺失且无可见冲突的案例另计为 false_positive_unknown_cases"
+            ),
+            "reason_counts": (
+                "仅展示服务端静态原因码白名单；动态或未知键只计入 unreported_reason_entries，"
+                "不输出其文本"
+            ),
+            "provenance_gate": (
+                "核对本地源码包摘要、Git HEAD、API 与十二次 worker 阶段摘要及运行后稳定性；"
+                "源码包摘要不是 OCI 镜像摘要或运行内存证明"
+            ),
+        },
+        "preflight_verified_suites": list(SUITES),
+        "independent_projects": independent_projects if mode == "strict" else False,
+        "suites": suites,
+        "passed": complete,
+    }
+    return report, 0 if complete else 1
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", default=str(DATASET))
+    parser.add_argument("--manifest-sha256", default=PINNED_MANIFEST_SHA256)
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--run-timeout-seconds", type=float, default=1800.0)
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument(
+        "--diagnostic-dev-one-trial", action="store_true",
+        help="one DEV project only; never passes the strict quality gate",
+    )
+    parser.add_argument("--output-json", help="new JSON path inside artifacts/")
+    args = parser.parse_args()
+    if args.run_timeout_seconds <= 0:
+        parser.error("--run-timeout-seconds must be positive")
+    return args
+
+
+if __name__ == "__main__":
+    parsed = parse_args()
+    result, exit_code = run(parsed)
+    try:
+        _emit_report(result, parsed.output_json)
+    except (OSError, ValueError):
+        # The report has already been redacted; a failed artifact write must
+        # not reveal the filesystem path or suppress the verdict.
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        exit_code = 1
+    raise SystemExit(exit_code)

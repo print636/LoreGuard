@@ -58,6 +58,67 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
         )
         if value is not None
     )
+    # Character extraction/review forks the chat provider with stage-specific
+    # caps. Record both the raw stage limits (which affect admission and JSON
+    # validation) and the effective transport caps after global provider
+    # restrictions. Remaining wall time may tighten a single later call, but
+    # that is run state rather than deployment configuration.
+    signal_deadline = min(
+        value
+        for value in (
+            float(settings.character_signal_total_deadline_seconds),
+            (
+                float(settings.provider_total_deadline_seconds)
+                if settings.provider_total_deadline_seconds is not None
+                else None
+            ),
+        )
+        if value is not None
+    )
+    drift_deadline = min(
+        value
+        for value in (
+            float(settings.character_drift_total_deadline_seconds),
+            (
+                float(settings.provider_total_deadline_seconds)
+                if settings.provider_total_deadline_seconds is not None
+                else None
+            ),
+        )
+        if value is not None
+    )
+    signal_provider_completion = min(
+        value
+        for value in (
+            settings.character_signal_max_completion_tokens,
+            settings.provider_max_completion_tokens,
+        )
+        if value is not None
+    )
+    drift_provider_completion = min(
+        value
+        for value in (
+            settings.character_drift_max_completion_tokens,
+            settings.provider_max_completion_tokens,
+        )
+        if value is not None
+    )
+    signal_provider_response_bytes = min(
+        value
+        for value in (
+            settings.character_signal_max_response_bytes,
+            settings.provider_max_response_bytes,
+        )
+        if value is not None
+    )
+    drift_provider_response_bytes = min(
+        value
+        for value in (
+            settings.character_drift_max_response_bytes,
+            settings.provider_max_response_bytes,
+        )
+        if value is not None
+    )
     model_alias = _safe_label(settings.openai_model, maximum=255)
     revision = settings.loreguard_build_revision.strip() or None
 
@@ -84,6 +145,8 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
         },
         "character_consistency_limits": {
             "sensitivity": settings.character_consistency_sensitivity,
+            "per_run_token_budget": max(0, int(settings.per_run_token_budget)),
+            "daily_token_budget": max(0, int(settings.daily_token_budget)),
             "stage_token_budget": (
                 settings.character_consistency_stage_token_budget
             ),
@@ -94,6 +157,13 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
                 settings.character_consistency_max_candidates_per_run
             ),
             "signal_max_chunk_chars": settings.character_signal_max_chunk_chars,
+            "signal_max_records": settings.character_signal_max_records,
+            "signal_targeted_max_targets_per_chunk": (
+                settings.character_signal_targeted_max_targets_per_chunk
+            ),
+            "signal_timeout_seconds": float(
+                settings.character_signal_timeout_seconds
+            ),
             "signal_provider_max_attempts": (
                 settings.character_signal_max_attempts
             ),
@@ -104,37 +174,31 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "signal_max_completion_tokens": (
                 settings.character_signal_max_completion_tokens
             ),
-            "signal_total_deadline_seconds": min(
-                value
-                for value in (
-                    float(settings.character_signal_total_deadline_seconds),
-                    (
-                        float(settings.provider_total_deadline_seconds)
-                        if settings.provider_total_deadline_seconds is not None
-                        else None
-                    ),
-                )
-                if value is not None
+            "signal_max_response_bytes": settings.character_signal_max_response_bytes,
+            "signal_total_deadline_seconds": signal_deadline,
+            "signal_provider_timeout_seconds": min(
+                float(settings.character_signal_timeout_seconds), signal_deadline
             ),
+            "signal_provider_max_completion_tokens": signal_provider_completion,
+            "signal_provider_max_response_bytes": signal_provider_response_bytes,
             "drift_max_observations": settings.character_drift_max_observations,
             "drift_max_support_evidence": (
                 settings.character_drift_max_support_evidence
             ),
+            "drift_max_evidence_chars": settings.character_drift_max_evidence_chars,
+            "drift_token_budget": settings.character_drift_token_budget,
+            "drift_timeout_seconds": float(settings.character_drift_timeout_seconds),
             "drift_provider_max_attempts": (
                 settings.character_drift_max_attempts
             ),
-            "drift_total_deadline_seconds": min(
-                value
-                for value in (
-                    float(settings.character_drift_total_deadline_seconds),
-                    (
-                        float(settings.provider_total_deadline_seconds)
-                        if settings.provider_total_deadline_seconds is not None
-                        else None
-                    ),
-                )
-                if value is not None
+            "drift_max_completion_tokens": settings.character_drift_max_completion_tokens,
+            "drift_max_response_bytes": settings.character_drift_max_response_bytes,
+            "drift_total_deadline_seconds": drift_deadline,
+            "drift_provider_timeout_seconds": min(
+                float(settings.character_drift_timeout_seconds), drift_deadline
             ),
+            "drift_provider_max_completion_tokens": drift_provider_completion,
+            "drift_provider_max_response_bytes": drift_provider_response_bytes,
         },
         "investigator_limits": {
             "max_seeds": settings.evidence_investigator_max_seeds,

@@ -1,0 +1,34 @@
+{
+  "schema_version": "character-axis-fixture-manifest-v1",
+  "dataset_boundary": {
+    "developer_visible": true,
+    "blind_holdout": false,
+    "production_quality": false
+  },
+  "suites": {
+    "dev": {
+      "world_id": "red-moss-station",
+      "case_count": 5,
+      "files": {
+        "01-world-setting.md": "fe4f393710063c91d34faf70a2f9f91934d0c5ac56893cf3a4abca53f5da1218",
+        "02-character-profiles.md": "c0b47b4f68496011b67e8c0f88392b151da09d54482e426e3a24dcafe8a13e50",
+        "03-published-history-v1.0.md": "fba1e1fdb36c1cacc38a599f78c57936c31b6b743bb5a9c91ec333fd30153866",
+        "04-draft-event-v1.1.md": "97ae638d5fa11e21b9c4863d4b067a35cd948658656c7f0f22d11e20b6bb1d38",
+        "review-plan.json": "17a998964f252309367b621b763d4dc16c107ef64a30880ec2605400a5f1ccad",
+        "oracle.json": "e5c59c17b96092b6c0127fe766b76742775b5abe7be3aa8418ba1d0b6ed68764"
+      }
+    },
+    "transfer": {
+      "world_id": "folded-cloud-post",
+      "case_count": 5,
+      "files": {
+        "01-world-setting.md": "6f19ef9a003f93c935d6231cfcc897d83a1ed8eb3577ebbd0bcee1cf67c3a92d",
+        "02-character-profiles.md": "6ebfd2358af6489f329892d5205f32e105e28f933a4abf4c49fcf9940d506fb4",
+        "03-published-history-v1.0.md": "3ab0f6bd3699e697f71bd302d9577e201e416d9370531465b06c2d7f5dd6e7e9",
+        "04-draft-event-v1.1.md": "f47f2053ee119f6564f74e3c96dd0d9fcdf2eabda74adb1c3bcf1797b11d2c07",
+        "review-plan.json": "b4fb3defe75026377fd4101ba7cc1d86e5b22ba9de424dfb2e9ddb00ad018533",
+        "oracle.json": "79e3b32e87a1d35cd71d8c8361a7d4d012faafc8b38ef218721cc342f2fd3108"
+      }
+    }
+  }
+}
