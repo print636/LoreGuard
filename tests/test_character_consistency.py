@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -3651,7 +3652,41 @@ def test_signal_regeneration_is_not_admitted_without_remaining_token_budget():
         "invalid_json": 1,
         "regeneration_token_budget": 1,
     }
+    admission = result.diagnostics.token_admission
+    assert admission is not None
+    assert admission.phase == "regeneration"
+    assert admission.estimated_tokens > admission.available_tokens
     assert len(provider.calls) == 1
+
+
+def test_signal_initial_budget_skip_reports_only_numeric_admission():
+    provider = SequenceProvider('{"records":[]}')
+    with patch(
+        "app.character_trait_extraction.estimate_issue_evidence_review_tokens",
+        return_value=9_999,
+    ):
+        result = CharacterSignalExtractor(
+            provider,
+            settings=settings(
+                character_signal_token_budget=4_096,
+                character_signal_max_completion_tokens=64,
+            ),
+        ).extract(
+            CharacterSignalChunk(
+                "budget", "profile.md", "林澈一直喜欢蜜瓜。", 10,
+                "formal_character_profile",
+            )
+        )
+
+    assert result.diagnostics.outcome == "skipped"
+    assert result.diagnostics.attempted_calls == 0
+    assert result.diagnostics.reason_counts == {"token_budget": 1}
+    assert result.diagnostics.token_admission.model_dump() == {
+        "phase": "initial",
+        "estimated_tokens": 9_999,
+        "available_tokens": 4_096,
+    }
+    assert provider.calls == []
 
 
 def test_signal_two_invalid_packages_fail_closed_without_first_valid_sibling():
@@ -4196,8 +4231,16 @@ def test_default_flag_is_off_and_limits_are_internally_bounded():
         settings(character_signal_max_attempts=0)
     with pytest.raises(ValueError):
         settings(character_signal_package_max_attempts=3)
+    high_quality_trial = settings(
+        per_run_token_budget=200_000,
+        character_consistency_stage_token_budget=150_000,
+        character_signal_token_budget=40_000,
+    )
+    assert high_quality_trial.character_signal_token_budget == 40_000
     with pytest.raises(ValueError):
-        settings(character_signal_token_budget=22_001)
+        settings(character_consistency_stage_token_budget=150_001)
+    with pytest.raises(ValueError):
+        settings(character_signal_token_budget=40_001)
     with pytest.raises(ValueError):
         settings(character_drift_max_attempts=5)
     with pytest.raises(ValueError):

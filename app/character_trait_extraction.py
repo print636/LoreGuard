@@ -395,6 +395,16 @@ class PendingTraitCandidate(BaseModel):
     evidence: tuple[EvidenceSpan, ...] = Field(min_length=1, max_length=12)
 
 
+class CharacterSignalTokenAdmission(BaseModel):
+    """Content-free, bounded explanation of an unadmitted logical call."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    phase: Literal["initial", "regeneration"]
+    estimated_tokens: int = Field(ge=0, le=1_000_000)
+    available_tokens: int = Field(ge=0, le=1_000_000)
+
+
 class CharacterSignalDiagnostics(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -408,6 +418,7 @@ class CharacterSignalDiagnostics(BaseModel):
     prompt_tokens: int = Field(default=0, ge=0)
     completion_tokens: int = Field(default=0, ge=0)
     charged_tokens: int = Field(default=0, ge=0)
+    token_admission: CharacterSignalTokenAdmission | None = None
 
 
 class CharacterSignalExtractionResult(BaseModel):
@@ -697,9 +708,16 @@ class CharacterSignalExtractor:
                 settings.character_signal_token_budget - total_charged_tokens
             )
             if estimate > remaining_budget:
+                admission = CharacterSignalTokenAdmission(
+                    phase="initial" if package_attempt == 0 else "regeneration",
+                    estimated_tokens=estimate,
+                    available_tokens=max(0, remaining_budget),
+                )
                 if not validation_attempts:
                     return _empty_result(
-                        "skipped", reason_counts={"token_budget": 1}
+                        "skipped",
+                        reason_counts={"token_budget": 1},
+                        token_admission=admission,
                     )
                 return _failed_package_result(
                     validation_attempts,
@@ -708,6 +726,7 @@ class CharacterSignalExtractor:
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
                     extra_reason="regeneration_token_budget",
+                    token_admission=admission,
                 )
 
             remaining_deadline = total_deadline - (self._monotonic() - started)
@@ -1198,6 +1217,7 @@ def _failed_package_result(
     completion_tokens: int,
     charged_tokens: int,
     extra_reason: str | None = None,
+    token_admission: CharacterSignalTokenAdmission | None = None,
 ) -> CharacterSignalExtractionResult:
     reasons: Counter[str] = Counter()
     for attempt in attempts:
@@ -1216,6 +1236,7 @@ def _failed_package_result(
         completion_tokens=completion_tokens,
         charged_tokens=charged_tokens,
         reason_counts=dict(sorted(reasons.items())),
+        token_admission=token_admission,
     )
 
 
@@ -2899,6 +2920,7 @@ def _empty_result(
     completion_tokens: int = 0,
     charged_tokens: int = 0,
     reason_counts: dict[str, int] | None = None,
+    token_admission: CharacterSignalTokenAdmission | None = None,
 ) -> CharacterSignalExtractionResult:
     return CharacterSignalExtractionResult(
         diagnostics=CharacterSignalDiagnostics(
@@ -2912,6 +2934,7 @@ def _empty_result(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             charged_tokens=charged_tokens,
+            token_admission=token_admission,
         )
     )
 

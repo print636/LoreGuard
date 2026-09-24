@@ -256,7 +256,7 @@ class Settings(BaseSettings):
     # call in the optional stage.  The per-call budgets below can only tighten
     # this ceiling; they are not additive entitlements.
     character_consistency_stage_token_budget: int = Field(
-        default=60_000, ge=256, le=100_000
+        default=60_000, ge=256, le=150_000
     )
     character_consistency_max_chunks_per_run: int = Field(
         default=24, ge=1, le=128
@@ -289,7 +289,7 @@ class Settings(BaseSettings):
     # This budget spans that whole regeneration cycle; it is independent from
     # the per-response completion cap and remains subordinate to the stage cap.
     character_signal_token_budget: int = Field(
-        default=22_000, ge=256, le=22_000
+        default=22_000, ge=256, le=40_000
     )
     character_signal_max_completion_tokens: int = Field(
         default=4_096, ge=64, le=8_192

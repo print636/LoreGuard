@@ -60,6 +60,11 @@ _TRACE_OBSERVATION_KINDS = frozenset({
     "state_description",
 })
 _TRACE_POLARITIES = frozenset({"positive", "negative", "neutral", "unclear"})
+_TOKEN_ADMISSION_FIELDS = (
+    "stage_phase", "signal_phase", "chunk_ordinal", "target_ordinal",
+    "estimated_tokens", "available_tokens", "stage_remaining_before",
+    "reviewer_reserve_tokens", "model_calls_before_failure",
+)
 _TRACE_SENSITIVE_LABEL = re.compile(
     r"(?:api[_\s-]?key|base[_\s-]?url|authorization|bearer\s+|password|"
     r"credential|private[_\s-]?key|(?:^|[^a-z0-9])sk-[a-z0-9]{8,}|密钥|密码)",
@@ -930,6 +935,51 @@ def _safe_visible_issue(
     }
 
 
+def _safe_token_admission_events(value: object) -> list[dict[str, int | str | None]]:
+    """Copy only bounded numeric admission facts; never copy model or source text."""
+
+    if not isinstance(value, list):
+        return []
+    safe: list[dict[str, int | str | None]] = []
+    for row in value[:24]:
+        if not isinstance(row, dict) or set(row) != set(_TOKEN_ADMISSION_FIELDS):
+            continue
+        stage_phase = row["stage_phase"]
+        signal_phase = row["signal_phase"]
+        chunk_ordinal = row["chunk_ordinal"]
+        target_ordinal = row["target_ordinal"]
+        numeric_limits = {
+            "estimated_tokens": 1_000_000,
+            "available_tokens": 1_000_000,
+            "stage_remaining_before": 150_000,
+            "reviewer_reserve_tokens": 8_000,
+            "model_calls_before_failure": 2,
+        }
+        if (
+            not isinstance(stage_phase, str)
+            or stage_phase not in {
+                "primary_extraction", "targeted_recall", "targeted_verification"
+            }
+            or not isinstance(signal_phase, str)
+            or signal_phase not in {"initial", "regeneration"}
+            or type(chunk_ordinal) is not int
+            or not 1 <= chunk_ordinal <= 128
+            or (
+                target_ordinal is not None
+                and (type(target_ordinal) is not int or not 1 <= target_ordinal <= 12)
+            )
+            or (stage_phase == "primary_extraction") != (target_ordinal is None)
+            or any(
+                type(row[key]) is not int or not 0 <= row[key] <= limit
+                for key, limit in numeric_limits.items()
+            )
+            or row["estimated_tokens"] <= row["available_tokens"]
+        ):
+            continue
+        safe.append({key: row[key] for key in _TOKEN_ADMISSION_FIELDS})
+    return safe
+
+
 def _run_summary(
     client: httpx.Client,
     project_id: str,
@@ -948,6 +998,9 @@ def _run_summary(
     reason_counts = reason_counts if isinstance(reason_counts, dict) else {}
     usage = stage.get("usage")
     usage = usage if isinstance(usage, dict) else {}
+    token_admission_events = _safe_token_admission_events(
+        stage.get("token_admission_events")
+    )
     case_trace = stage.get("case_trace")
     case_trace = (
         [_safe_case_trace_summary(row) for row in case_trace if isinstance(row, dict)]
@@ -993,6 +1046,7 @@ def _run_summary(
         "drift_considered": counts.get("drift_considered"),
         "reason_counts": reason_counts,
         "stage_usage": usage,
+        "token_admission_events": token_admission_events,
         "case_trace": case_trace,
         "issues": sorted(signatures),
         "visible_issue_cases": sorted(

@@ -86,6 +86,7 @@ _TEMPORARY_CHARACTER_STATE_OR_BEHAVIOR = re.compile(
 )
 _MAX_CONFIRMED_TRAITS_IN_SERVER_CONTEXT = 12
 _MAX_CASE_TRACE_OBSERVATION_REFS = 12
+_MAX_TOKEN_ADMISSION_EVENTS = 24
 _OBJECT_BEARING_TRAIT_DIMENSIONS = frozenset(
     {"preference", "value", "behavior_boundary", "current_state"}
 )
@@ -387,7 +388,42 @@ class CharacterConsistencyStage:
         targeted_reviewer_reserve_tokens = min(
             settings.character_drift_token_budget, stage_budget
         )
-        for source, chunk in selected_chunks:
+        token_admission_events: list[dict[str, int | str | None]] = []
+        token_admission_omitted = 0
+
+        def record_token_admission(
+            phase: str,
+            extraction: object,
+            *,
+            chunk_ordinal: int,
+            target_ordinal: int | None = None,
+            stage_remaining_before: int,
+            reviewer_reserve: int = 0,
+        ) -> None:
+            nonlocal token_admission_omitted
+            diagnostics = getattr(extraction, "diagnostics", None)
+            admission = getattr(diagnostics, "token_admission", None)
+            if admission is None:
+                return
+            if len(token_admission_events) >= _MAX_TOKEN_ADMISSION_EVENTS:
+                token_admission_omitted += 1
+                return
+            token_admission_events.append(
+                {
+                    "stage_phase": phase,
+                    "signal_phase": admission.phase,
+                    "chunk_ordinal": chunk_ordinal,
+                    "target_ordinal": target_ordinal,
+                    "estimated_tokens": admission.estimated_tokens,
+                    "available_tokens": admission.available_tokens,
+                    "stage_remaining_before": stage_remaining_before,
+                    "reviewer_reserve_tokens": reviewer_reserve,
+                    # Logical package generations, not transport retries.
+                    "model_calls_before_failure": diagnostics.attempted_calls,
+                }
+            )
+
+        for chunk_ordinal, (source, chunk) in enumerate(selected_chunks, start=1):
             self.checkpoint()
             remaining = stage_budget - usage.charged_tokens
             if remaining < 256:
@@ -414,6 +450,12 @@ class CharacterConsistencyStage:
                 )
             )
             processed_chunks += 1
+            record_token_admission(
+                "primary_extraction",
+                extraction,
+                chunk_ordinal=chunk_ordinal,
+                stage_remaining_before=remaining,
+            )
             usage.add(extraction.diagnostics)
             signal_ignored_duplicates += (
                 extraction.diagnostics.ignored_duplicate_records
@@ -466,7 +508,7 @@ class CharacterConsistencyStage:
             chunk_targets_complete = True
             initial_round_finished = True
             first_empty_targets: list[CharacterSignalTarget] = []
-            completed_targets: list[CharacterSignalTarget] = []
+            completed_targets: list[tuple[int, CharacterSignalTarget]] = []
             chunk_observations = list(extraction.draft_observations)
             targeted_chunk = CharacterSignalChunk(
                 document_id=source.document.id,
@@ -506,6 +548,14 @@ class CharacterConsistencyStage:
                 targeted = CharacterSignalExtractor(
                     self.provider, settings=targeted_settings
                 ).extract_targeted(targeted_chunk, (target,))
+                record_token_admission(
+                    "targeted_recall",
+                    targeted,
+                    chunk_ordinal=chunk_ordinal,
+                    target_ordinal=target_index + 1,
+                    stage_remaining_before=remaining,
+                    reviewer_reserve=targeted_reviewer_reserve_tokens,
+                )
                 usage.add(targeted.diagnostics)
                 targeted_passes_attempted += targeted.diagnostics.attempted_calls
                 targeted_records_accepted += targeted.diagnostics.accepted_records
@@ -518,7 +568,7 @@ class CharacterConsistencyStage:
                 if targeted.diagnostics.outcome == "completed":
                     targeted_passes_completed += 1
                     successful_model_calls += 1
-                    completed_targets.append(target)
+                    completed_targets.append((target_index, target))
                     if not targeted.signals:
                         targeted_empty_passes += 1
                         first_empty_targets.append(target)
@@ -545,6 +595,7 @@ class CharacterConsistencyStage:
             # target from consuming a later target's first-pass budget.
             verification_queue: list[
                 tuple[
+                    int,
                     CharacterSignalTarget,
                     tuple[tuple[int, int], ...],
                     int,
@@ -552,7 +603,7 @@ class CharacterConsistencyStage:
             ] = []
             targeted_verification_first_empty_targets += len(first_empty_targets)
             if initial_round_finished:
-                for target in completed_targets:
+                for target_index, target in completed_targets:
                     target = _target_with_existing_evidence_ranges(
                         target, tuple(chunk_observations)
                     )
@@ -583,14 +634,17 @@ class CharacterConsistencyStage:
                         chunk_targets_complete = False
                         partial = True
                     verification_queue.append(
-                        (target, candidate_ranges, truncated_lines)
+                        (target_index, target, candidate_ranges, truncated_lines)
                     )
 
             targeted_verification_scheduled += len(verification_queue)
             targeted_passes_scheduled += len(verification_queue)
-            for verification_index, (target, candidate_ranges, _) in enumerate(
-                verification_queue
-            ):
+            for verification_index, (
+                target_index,
+                target,
+                candidate_ranges,
+                _,
+            ) in enumerate(verification_queue):
                 self.checkpoint()
                 remaining = stage_budget - usage.charged_tokens
                 verification_budget = (
@@ -627,6 +681,14 @@ class CharacterConsistencyStage:
                     targeted_chunk,
                     (target,),
                     candidate_evidence_ranges=candidate_ranges,
+                )
+                record_token_admission(
+                    "targeted_verification",
+                    verification,
+                    chunk_ordinal=chunk_ordinal,
+                    target_ordinal=target_index + 1,
+                    stage_remaining_before=remaining,
+                    reviewer_reserve=targeted_reviewer_reserve_tokens,
                 )
                 usage.add(verification.diagnostics)
                 targeted_passes_attempted += verification.diagnostics.attempted_calls
@@ -1027,6 +1089,7 @@ class CharacterConsistencyStage:
                 targeted_verification_budget_exhausted
             ),
             targeted_reviewer_reserve_tokens=targeted_reviewer_reserve_tokens,
+            token_admission_omitted_count=token_admission_omitted,
             ambiguous_alias_count=ambiguous_aliases,
             drift_considered=drift_considered,
             drift_reviewed=drift_reviewed,
@@ -1042,6 +1105,7 @@ class CharacterConsistencyStage:
             sensitivity=settings.character_consistency_sensitivity,
             material_coverage="partial" if partial else "complete",
             case_trace=case_trace,
+            token_admission_events=token_admission_events,
         )
         return CharacterConsistencyStageResult(
             issues=tuple(issues),
@@ -2393,6 +2457,7 @@ def _diagnostics(
     reasons: Counter[str],
     material_coverage: str = "unknown",
     case_trace: list[dict[str, Any]] | None = None,
+    token_admission_events: list[dict[str, int | str | None]] | None = None,
     **counts: Any,
 ) -> dict[str, Any]:
     return {
@@ -2404,6 +2469,7 @@ def _diagnostics(
         "material_coverage": material_coverage,
         "counts": counts,
         "case_trace": list(case_trace or ()),
+        "token_admission_events": list(token_admission_events or ()),
         "reason_counts": dict(sorted(reasons.items())),
         "usage": usage.safe_dict(),
         "boundary": (
@@ -2425,6 +2491,7 @@ def _empty_stage_result(outcome: str, reason_code: str) -> CharacterConsistencyS
             "material_coverage": "unknown",
             "counts": {},
             "case_trace": [],
+            "token_admission_events": [],
             "reason_counts": {},
             "usage": _Usage().safe_dict(),
             "boundary": (

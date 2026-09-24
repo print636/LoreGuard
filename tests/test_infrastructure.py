@@ -94,14 +94,17 @@ class TokenBudgetTests(unittest.TestCase):
                 Settings(_env_file=None).review_agent_max_completion_tokens
             )
 
-    def test_compose_passes_daily_token_budget_to_api_and_worker(self):
+    def test_compose_passes_run_and_daily_token_budgets_to_api_and_worker(self):
         compose = yaml.safe_load(
             (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         )
-        expected = "${DAILY_TOKEN_BUDGET:-100000}"
+        expected = {
+            "PER_RUN_TOKEN_BUDGET": "${PER_RUN_TOKEN_BUDGET:-100000}",
+            "DAILY_TOKEN_BUDGET": "${DAILY_TOKEN_BUDGET:-100000}",
+        }
         for service_name in ("api", "worker"):
             environment = compose["services"][service_name]["environment"]
-            self.assertEqual(expected, environment.get("DAILY_TOKEN_BUDGET"))
+            self.assertEqual(expected, {key: environment.get(key) for key in expected})
 
         example = (ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("DAILY_TOKEN_BUDGET=100000", example)

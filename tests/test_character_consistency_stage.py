@@ -1937,6 +1937,112 @@ def test_empty_verification_budget_exhaustion_is_explicitly_partial():
         assert len(provider.calls) == 3
 
 
+def test_verification_admission_diagnostic_separates_no_call_from_model_rejection():
+    with TestClient(app) as client:
+        project = _confirmed_directness_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content="祁雾走进会议室。",
+            narrative_context=_context(publication="draft"),
+        )
+        provider = QueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence="祁雾说话直来直往，这是他的核心性格。",
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="core_personality",
+                    trait_key="directness",
+                    statement="说话直来直往",
+                )
+            ),
+            _response(),
+            _response(),
+        )
+        with patch(
+            "app.character_trait_extraction.estimate_issue_evidence_review_tokens",
+            side_effect=[100, 100, 100, 1_100],
+        ):
+            result = _run_stage(
+                _new_run(client, project["id"]),
+                provider,
+                character_consistency_stage_token_budget=2_000,
+                character_signal_token_budget=1_000,
+                character_signal_max_completion_tokens=64,
+                character_drift_token_budget=1_000,
+                character_drift_max_completion_tokens=64,
+            )
+
+        assert len(provider.calls) == 3
+        assert result.diagnostics["reason_counts"]["targeted_verification_token_budget"] == 1
+        assert result.diagnostics["counts"]["token_admission_omitted_count"] == 0
+        assert result.diagnostics["token_admission_events"] == [
+            {
+                "stage_phase": "targeted_verification",
+                "signal_phase": "initial",
+                "chunk_ordinal": 2,
+                "target_ordinal": 1,
+                "estimated_tokens": 1_100,
+                "available_tokens": 700,
+                "stage_remaining_before": 1_700,
+                "reviewer_reserve_tokens": 1_000,
+                "model_calls_before_failure": 0,
+            }
+        ]
+        assert result.diagnostics["material_coverage"] == "partial"
+
+
+def test_second_target_admission_location_is_numeric_and_stable():
+    with TestClient(app) as client:
+        project, profile_records = _confirmed_two_target_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content="祁雾走进会议室。",
+            narrative_context=_context(publication="draft"),
+        )
+        provider = QueueProvider(
+            _response(*profile_records),
+            _response(),
+            _response(),
+            _response(),
+        )
+        with patch(
+            "app.character_trait_extraction.estimate_issue_evidence_review_tokens",
+            side_effect=[100, 100, 700, 1_200, 100],
+        ):
+            result = _run_stage(
+                _new_run(client, project["id"]),
+                provider,
+                character_consistency_stage_token_budget=3_000,
+                character_signal_max_completion_tokens=64,
+                character_drift_token_budget=1_000,
+                character_drift_max_completion_tokens=64,
+            )
+
+        events = result.diagnostics["token_admission_events"]
+        assert len(events) == 1
+        assert events[0] == {
+            "stage_phase": "targeted_recall",
+            "signal_phase": "initial",
+            "chunk_ordinal": 2,
+            "target_ordinal": 2,
+            "estimated_tokens": 1_200,
+            "available_tokens": 1_100,
+            "stage_remaining_before": 2_100,
+            "reviewer_reserve_tokens": 1_000,
+            "model_calls_before_failure": 0,
+        }
+        assert len(provider.calls) == 4
+        assert result.diagnostics["material_coverage"] == "partial"
+
+
 def test_cancellation_after_initial_targets_stops_before_empty_verification():
     class TargetedRecallCancelled(RuntimeError):
         pass

@@ -18,6 +18,7 @@ from scripts.run_character_consistency_live import (
     _review_explicit_candidates,
     _safe_unexpected_failure,
     _safe_case_trace_summary,
+    _safe_token_admission_events,
     _safe_trace_observation_refs,
     _safe_visible_issue,
     _validate_oracle_payload,
@@ -49,6 +50,35 @@ def test_qi_disguise_fixture_contains_two_independent_behaviors():
     assert "镜面身份仍在生效" in second_behavior
     assert "立即结束伪装" in resolution
     assert first_behavior != second_behavior
+
+
+def test_token_admission_summary_whitelists_only_bounded_numeric_events():
+    valid = {
+        "stage_phase": "targeted_verification",
+        "signal_phase": "initial",
+        "chunk_ordinal": 2,
+        "target_ordinal": 3,
+        "estimated_tokens": 9_000,
+        "available_tokens": 7_000,
+        "stage_remaining_before": 11_000,
+        "reviewer_reserve_tokens": 4_000,
+        "model_calls_before_failure": 0,
+    }
+    injected = [
+        {**valid, "prompt": "private source text"},
+        {**valid, "api_key": "sk-test-secret-not-for-report"},
+        {**valid, "estimated_tokens": "9000"},
+        {**valid, "target_ordinal": True},
+        {**valid, "stage_phase": ["targeted_verification"]},
+        {**valid, "available_tokens": 10_000},
+    ]
+
+    safe = _safe_token_admission_events([valid, *injected])
+    assert safe == [valid]
+    assert "private source text" not in repr(safe)
+    assert "sk-test-secret-not-for-report" not in repr(safe)
+    assert _safe_token_admission_events(None) == []
+    assert len(_safe_token_admission_events([valid] * 50)) == 24
 
 
 def test_safe_case_trace_summary_keeps_only_bounded_source_provenance():
@@ -578,6 +608,8 @@ def test_run_summary_reports_frozen_issue_axis_without_object_text(monkeypatch):
     assert frozen_key not in repr(report)
     assert candidate_id not in repr(report)
     assert "机密草稿原文" not in repr(report)
+    # Historical API diagnostics did not include admission events.
+    assert report["token_admission_events"] == []
 
 
 def _semantic_visible_issue(*, judgement="contradicts"):

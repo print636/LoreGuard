@@ -94,15 +94,22 @@ promoted. It is a developer-visible failure diagnostic, not a quality gain.
 The follow-up added evidence-bound adjacent-pronoun handling, directional
 trait-key rejection, and a separately labeled diagnostic candidate-review
 path. An earlier build passed three strict runs of the known Demo, but later
-object-identity and actor-binding changes required fresh validation. On the
-current code build, the latest three independent strict Demo workflows passed
-in only 1/3 trials: the other drafts had partial coverage, including exhausted
-targeted-verification budgets and rejected model records. A different frozen
-OOC story stopped at baseline candidate selection on the preceding build.
-The local acceptance environment used a raised 100k character-stage limit
-and 6m daily limit; product defaults are unchanged. These developer-visible
-results do not establish cross-story or production OOC quality. See the
-checkpoint for the complete chronology and failure boundaries.
+object-identity and actor-binding changes required fresh validation. The next
+build passed only 1/3 strict Demo trials at a locally raised 100k character-stage
+and 22k per-signal limit. On the latest diagnostic build, independent strict
+three-trial sets passed 3/3 at a 150k stage, 40k signal and 200k per-run limit;
+3/3 at a 100k stage and 40k signal limit; and 2/3 at a 100k stage and 22k
+signal limit, in that order. These small, developer-visible observations do
+not prove that a larger budget resolves every failure. The partial draft in
+the latest 22k set had rejected model records; its new, content-free
+token-admission events were empty. A different frozen OOC story stopped at
+baseline candidate selection on a preceding build. Product defaults remain
+100k per run, 100k daily, 60k
+for the character stage and 22k per signal; the character stage defaults off.
+The latest runs used a locally raised 10m daily limit. The separate
+[author-approved axis RFC](docs/character-approved-axis-rfc.md) is a proposal,
+not an implemented remedy. None of these results establishes cross-story or
+production OOC quality. See the checkpoint for the full chronology.
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a
