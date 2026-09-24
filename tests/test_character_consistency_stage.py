@@ -730,6 +730,52 @@ def test_same_line_distinct_preference_objects_reach_stage_candidates():
     }
 
 
+def test_v4_same_line_support_ids_survive_stage_without_double_counting_line_evidence():
+    profile_line = "林澈一直喜欢蜜瓜，林澈长期喜欢蜜瓜。"
+    first = {
+        **_record(
+            evidence=profile_line, polarity="positive", kind="explicit_declaration",
+            trait_key="melon_preference", statement="林澈一直喜欢蜜瓜",
+        ),
+        "support_id": "L1:A1",
+    }
+    second = {
+        **_record(
+            evidence=profile_line, polarity="positive", kind="explicit_declaration",
+            trait_key="melon_preference", statement="林澈长期喜欢蜜瓜",
+        ),
+        "support_id": "L1:A2",
+    }
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"子句身份-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="profile.md", role="character_profile",
+            content=profile_line,
+            narrative_context=_context(publication="published"),
+        )
+        run_id = _new_run(client, project["id"])
+        result = _run_stage(
+            run_id,
+            QueueProvider(_response(first, second)),
+            character_signal_full_line_prompt_v2=True,
+            character_signal_support_id_v4=True,
+        )
+        with SessionLocal() as db:
+            candidates = list(db.scalars(
+                select(CharacterTraitCandidateRow).where(
+                    CharacterTraitCandidateRow.source_run_id == run_id
+                )
+            ).all())
+
+    assert result.diagnostics["outcome"] == "completed"
+    assert result.diagnostics["counts"]["signal_count"] == 2
+    assert result.diagnostics["counts"]["pending_candidate_count"] == 1
+    assert len(candidates) == 1
+    assert len(candidates[0].evidence) == 1
+
+
 def test_accepted_signal_diagnostics_are_content_free_and_explain_history_singleton():
     profile_line = "林澈长期喜欢蜜瓜。"
     history_line = "林澈每次回城都喝梨汤。"

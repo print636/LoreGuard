@@ -43,6 +43,9 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_CONSISTENCY_LIMIT_KEYS,
     _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
     _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+    _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+    _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+    _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION,
     _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
     _local_service_artifact_sha256,
 )
@@ -68,6 +71,8 @@ SAFE_REASON_KEYS = frozenset({
     "source_formal", "source_history",
     "regenerated_from_evidence_mismatch", "evidence_mismatch",
     "regenerated_from_core_label_scope", "core_label_scope",
+    "support_index_invalid", "support_id_invalid", "support_label_scope",
+    "regenerated_from_support_id_invalid", "regenerated_from_support_label_scope",
     "key_object_support", "statement_support",
     "lower_authority_baseline_shadowed", "invalid_confirmed_trait_snapshot",
     "chunk_limit", "confirmed_trait_hint_ambiguous",
@@ -742,6 +747,13 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
             | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY},
             _CHARACTER_CONSISTENCY_LIMIT_KEYS
             | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY, _CHARACTER_SIGNAL_CORE_SCOPE_KEY},
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+            },
         }
         or limits.get("sensitivity") not in {"conservative", "balanced", "exploratory"}
     ):
@@ -756,6 +768,18 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or (
             limits[_CHARACTER_SIGNAL_CORE_SCOPE_KEY]
             and limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY] is not True
+        )
+    ):
+        return None
+    if _CHARACTER_SIGNAL_SUPPORT_ID_KEY in limits and (
+        type(limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY]) is not bool
+        or (
+            limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY]
+            and limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY] is not True
+        )
+        or limits[_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY] != (
+            _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
+            if limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] else None
         )
     ):
         return None
@@ -1754,6 +1778,28 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
                 limits[_CHARACTER_SIGNAL_CORE_SCOPE_KEY] is False
                 or limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY] is True
             )
+            else None
+        ),
+        "signal_support_id_v4": (
+            limits.get(_CHARACTER_SIGNAL_SUPPORT_ID_KEY)
+            if type(limits.get(_CHARACTER_SIGNAL_SUPPORT_ID_KEY)) is bool
+            and type(limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY)) is bool
+            and (
+                limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] is False
+                or limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY] is True
+            )
+            and limits.get(_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY) == (
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
+                if limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] else None
+            )
+            else None
+        ),
+        "signal_support_segmenter_version": (
+            _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
+            if limits.get(_CHARACTER_SIGNAL_SUPPORT_ID_KEY) is True
+            and limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY) is True
+            and limits.get(_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY)
+            == _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
             else None
         ),
     }

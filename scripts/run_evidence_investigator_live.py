@@ -356,6 +356,9 @@ _CHARACTER_CONSISTENCY_LIMIT_KEYS = frozenset(
 )
 _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY = "signal_full_line_echo_v2"
 _CHARACTER_SIGNAL_CORE_SCOPE_KEY = "signal_core_scope_v3"
+_CHARACTER_SIGNAL_SUPPORT_ID_KEY = "signal_support_id_v4"
+_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY = "signal_support_segmenter_version"
+_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION = "assertion-index-v1"
 _INVESTIGATOR_INTEGER_LIMIT_KEYS = frozenset(
     {
         "max_seeds",
@@ -2847,6 +2850,13 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY},
             _CHARACTER_CONSISTENCY_LIMIT_KEYS
             | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY, _CHARACTER_SIGNAL_CORE_SCOPE_KEY},
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+            },
         }
         or character_limits.get("sensitivity")
         not in _CHARACTER_CONSISTENCY_SENSITIVITIES
@@ -2867,6 +2877,19 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         ):
             return None
         safe_character_limits[_CHARACTER_SIGNAL_CORE_SCOPE_KEY] = variant
+    if _CHARACTER_SIGNAL_SUPPORT_ID_KEY in character_limits:
+        variant = character_limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY]
+        segmenter = character_limits[_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY]
+        if (
+            type(variant) is not bool
+            or (variant and character_limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY] is not True)
+            or segmenter != (
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION if variant else None
+            )
+        ):
+            return None
+        safe_character_limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] = variant
+        safe_character_limits[_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY] = segmenter
     for key, (minimum, maximum) in (
         _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS.items()
     ):

@@ -45,6 +45,7 @@ from .character_drift import CHARACTER_REVIEW_SYSTEM_PROMPT
 from .character_trait_extraction import (
     CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
     CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
+    CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4,
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
     _validate_signal_prompt_variant_settings,
@@ -453,7 +454,12 @@ class _CharacterConsistencyAccountingProvider:
                 if self.settings.character_signal_core_scope_prompt_v3 else ""
             )
         )
-        if system in {active_primary_system, TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT}:
+        allowed_primary_systems = {active_primary_system}
+        if self.settings.character_signal_support_id_v4:
+            allowed_primary_systems.add(
+                active_primary_system + CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4
+            )
+        if system in allowed_primary_systems | {TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT}:
             provider = self.signal_provider
             completion_reserve = self.settings.character_signal_max_completion_tokens
         elif system == CHARACTER_REVIEW_SYSTEM_PROMPT:

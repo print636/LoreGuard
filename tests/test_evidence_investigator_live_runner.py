@@ -1404,6 +1404,35 @@ def test_runtime_provenance_parser_is_exact_and_fail_closed():
     assert _safe_runtime_provenance(invalid_character_sensitivity) is None
 
 
+def test_runtime_provenance_v4_requires_version_and_full_line_v2():
+    legacy = runtime_provenance()
+    assert _safe_runtime_provenance(legacy)["character_consistency_limits"].get(
+        "signal_support_id_v4"
+    ) is None
+    limits = legacy["character_consistency_limits"]
+    limits["signal_full_line_echo_v2"] = True
+    limits["signal_core_scope_v3"] = False
+    limits["signal_support_id_v4"] = False
+    limits["signal_support_segmenter_version"] = None
+    assert _safe_runtime_provenance(legacy) == legacy
+    limits["signal_support_id_v4"] = True
+    limits["signal_support_segmenter_version"] = "assertion-index-v1"
+    assert _safe_runtime_provenance(legacy) == legacy
+
+    for changed in (
+        {"signal_full_line_echo_v2": False},
+        {"signal_support_id_v4": "true"},
+        {"signal_support_segmenter_version": "untrusted-version"},
+    ):
+        malformed = json.loads(json.dumps(legacy))
+        malformed["character_consistency_limits"].update(changed)
+        assert _safe_runtime_provenance(malformed) is None
+    for missing in ("signal_full_line_echo_v2", "signal_support_segmenter_version"):
+        malformed = json.loads(json.dumps(legacy))
+        del malformed["character_consistency_limits"][missing]
+        assert _safe_runtime_provenance(malformed) is None
+
+
 @pytest.mark.parametrize(
     ("key", "valid_maximum"),
     [

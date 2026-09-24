@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from .config import Settings
+from .character_trait_extraction import ASSERTION_INDEX_V1
 from .embeddings import EmbeddingNotConfiguredError, OpenAICompatibleEmbeddingProvider
 from .evidence_chunks import EvidenceChunker
 from .provider import safe_thinking_configuration
@@ -162,6 +163,10 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
                 settings.character_signal_full_line_prompt_v2
             ),
             "signal_core_scope_v3": settings.character_signal_core_scope_prompt_v3,
+            "signal_support_id_v4": settings.character_signal_support_id_v4,
+            "signal_support_segmenter_version": (
+                ASSERTION_INDEX_V1 if settings.character_signal_support_id_v4 else None
+            ),
             "signal_targeted_max_targets_per_chunk": (
                 settings.character_signal_targeted_max_targets_per_chunk
             ),

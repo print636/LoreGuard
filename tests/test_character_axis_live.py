@@ -1134,6 +1134,43 @@ def test_character_runtime_provenance_requires_new_effective_limits_and_hashes_c
     assert axis_live._runtime_provenance_digest(no_rag) is not None
 
 
+def test_character_runtime_provenance_v4_requires_safe_version_and_v2_dependency():
+    legacy = _runtime_provenance()
+    assert axis_live._runtime_summary({"runtime_provenance": legacy})[
+        "signal_support_id_v4"
+    ] is None
+    limits = legacy["character_consistency_limits"]
+    limits["signal_full_line_echo_v2"] = True
+    limits["signal_core_scope_v3"] = False
+    limits["signal_support_id_v4"] = False
+    limits["signal_support_segmenter_version"] = None
+    off_digest = axis_live._runtime_provenance_digest(legacy)
+    assert off_digest is not None
+    assert axis_live._runtime_summary({"runtime_provenance": legacy})[
+        "signal_support_id_v4"
+    ] is False
+
+    limits["signal_support_id_v4"] = True
+    limits["signal_support_segmenter_version"] = "assertion-index-v1"
+    assert axis_live._runtime_provenance_digest(legacy) not in {None, off_digest}
+    summary = axis_live._runtime_summary({"runtime_provenance": legacy})
+    assert summary["signal_support_id_v4"] is True
+    assert summary["signal_support_segmenter_version"] == "assertion-index-v1"
+
+    for changed in (
+        {"signal_full_line_echo_v2": False},
+        {"signal_support_id_v4": "true"},
+        {"signal_support_segmenter_version": "untrusted-version"},
+    ):
+        malformed = json.loads(json.dumps(legacy))
+        malformed["character_consistency_limits"].update(changed)
+        assert axis_live._runtime_provenance_digest(malformed) is None
+    for missing in ("signal_full_line_echo_v2", "signal_support_segmenter_version"):
+        malformed = json.loads(json.dumps(legacy))
+        del malformed["character_consistency_limits"][missing]
+        assert axis_live._runtime_provenance_digest(malformed) is None
+
+
 def _strict_provenance_trial(tmp_path, monkeypatch, *, worker_change=None,
                              post_revision=None, post_artifact=None):
     root, manifest_digest = _fixture(tmp_path)
