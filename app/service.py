@@ -43,6 +43,7 @@ from .character_consistency_stage import (
 )
 from .character_drift import CHARACTER_REVIEW_SYSTEM_PROMPT
 from .character_trait_extraction import (
+    CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
     _bounded_provider,
@@ -439,7 +440,10 @@ class _CharacterConsistencyAccountingProvider:
         if system in {
             CHARACTER_SIGNAL_SYSTEM_PROMPT,
             TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
-        }:
+        } or (
+            self.settings.character_signal_full_line_prompt_v2
+            and system == CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
+        ):
             provider = self.signal_provider
             completion_reserve = self.settings.character_signal_max_completion_tokens
         elif system == CHARACTER_REVIEW_SYSTEM_PROMPT:

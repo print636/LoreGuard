@@ -4639,7 +4639,10 @@ def test_signal_regeneration_respects_one_total_logical_deadline():
     assert len(provider.calls) == 1
 
 
-def test_production_accounting_wrapper_forwards_remaining_regeneration_deadline():
+@pytest.mark.parametrize("full_line_prompt_v2", (False, True))
+def test_production_accounting_wrapper_forwards_remaining_regeneration_deadline(
+    full_line_prompt_v2: bool,
+):
     from app.service import (
         CharacterConsistencyUsageAccumulator,
         _CharacterConsistencyAccountingProvider,
@@ -4654,7 +4657,10 @@ def test_production_accounting_wrapper_forwards_remaining_regeneration_deadline(
             '{"unexpected":[]}' if calls == 1 else '{"records":[]}'
         )
 
-    configured = settings(character_signal_total_deadline_seconds=30)
+    configured = settings(
+        character_signal_total_deadline_seconds=30,
+        character_signal_full_line_prompt_v2=full_line_prompt_v2,
+    )
     inner = OpenAICompatibleProvider(
         configured,
         transport=httpx.MockTransport(handler),
@@ -4682,13 +4688,86 @@ def test_production_accounting_wrapper_forwards_remaining_regeneration_deadline(
     )
 
     assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.attempted_calls == 2
     assert calls == 2
+    assert accounting.usage.logical_calls == 2
+    assert accounting.usage.prompt_tokens == 34
+    assert accounting.usage.completion_tokens == 18
+    assert accounting.usage.charged_tokens >= 52
     assert extractor.provider is not accounting
     assert (
         extractor.provider.signal_provider.settings.provider_total_deadline_seconds
         == 5.0
     )
     assert extractor.provider.signal_provider.settings.provider_timeout_seconds == 5.0
+
+
+def test_full_line_v2_extraction_routes_through_accounting_and_rejects_unknown_purpose():
+    from app.service import (
+        CharacterConsistencyUsageAccumulator,
+        _CharacterConsistencyAccountingProvider,
+    )
+
+    configured = settings(character_signal_full_line_prompt_v2=True)
+    signal = SequenceProvider('{"records":[]}')
+    usage = CharacterConsistencyUsageAccumulator()
+    accounting = _CharacterConsistencyAccountingProvider(
+        configured,
+        usage,
+        signal_provider=signal,
+        drift_provider=FakeProvider('{"records":[]}'),
+    )
+    result = CharacterSignalExtractor(accounting, settings=configured).extract(
+        CharacterSignalChunk(
+            "v2-routing", "profile.md", "林澈一直喜欢蜜瓜。", 10,
+            "formal_character_profile",
+        )
+    )
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(signal.calls) == 1
+    assert signal.calls[0][0] == (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
+    )
+    safe_usage = usage.safe_dict(terminal_status="completed")
+    assert safe_usage is not None
+    assert safe_usage["logical_calls"] == 1
+    assert safe_usage["prompt_tokens"] == 17
+    assert safe_usage["completion_tokens"] == 9
+    assert safe_usage["charged_tokens"] >= 26
+
+    with pytest.raises(RuntimeError, match="unsupported character consistency provider purpose"):
+        accounting.complete(
+            CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2 + "\n",
+            "unknown purpose",
+        )
+    assert len(signal.calls) == 1
+    assert usage.logical_calls == 1
+
+
+def test_full_line_v2_accounting_rejects_disabled_variant_without_call_or_charge():
+    from app.service import (
+        CharacterConsistencyUsageAccumulator,
+        _CharacterConsistencyAccountingProvider,
+    )
+
+    signal = FakeProvider('{"records":[]}')
+    usage = CharacterConsistencyUsageAccumulator()
+    accounting = _CharacterConsistencyAccountingProvider(
+        settings(character_signal_full_line_prompt_v2=False),
+        usage,
+        signal_provider=signal,
+        drift_provider=FakeProvider('{"records":[]}'),
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported character consistency provider purpose"):
+        accounting.complete(
+            CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
+            "disabled variant",
+        )
+
+    assert signal.calls == []
+    assert usage.safe_dict(terminal_status="failed") is None
 
 
 def test_default_signal_budget_admits_two_maximum_prompt_packages_without_retry_metadata():
