@@ -432,14 +432,31 @@
   to { background-position: -100% 0; }
 }
 
-@media (max-width: 1279px) {
-  .appShell.characterMode { grid-template-columns: 72px minmax(0, 1fr); }
-  .candidateLayout { grid-template-columns: 250px minmax(0, 1fr); }
-}
-
-@media (max-width: 900px) {
+@media (max-width: 1500px) {
   .candidateLayout { grid-template-columns: 1fr; }
   .candidateQueue { padding-right: 0; padding-bottom: 16px; border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
+@media (min-width: 768px) and (max-width: 1500px) {
+  .candidateQueue > ul {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    max-height: 250px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .candidateQueue > ul li { min-width: 0; }
+}
+
+@media (max-width: 1279px) {
+  .appShell.characterMode { grid-template-columns: 72px minmax(0, 1fr); }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .characterLayout { grid-template-columns: 170px minmax(0, 1fr); }
+  .characterRoster { padding-inline: 9px; }
+  .characterSearch > div { grid-template-columns: 1fr; }
+  .characterCoverage { grid-template-columns: 1fr; gap: 5px; }
 }
 
 @media (max-width: 767px) {
