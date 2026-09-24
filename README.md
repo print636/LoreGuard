@@ -123,6 +123,10 @@ The [author-approved axis v1](docs/character-approved-axis-rfc.md) was
 implemented afterward; it does not retroactively change the frozen transfer
 Oracle or those runs. None of these results establishes cross-story or
 production OOC quality. See the checkpoint for the full chronology.
+The later [fixed DEV v2 prompt A/B checkpoint](docs/character-axis-v2-dev-checkpoint-20260924.md)
+records six independent, developer-visible trials. Fewer evidence-excerpt
+rejections did not complete the review workflow: all 30 case evaluations
+remained unavailable.
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a
