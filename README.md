@@ -127,6 +127,10 @@ The later [fixed DEV v2 prompt A/B checkpoint](docs/character-axis-v2-dev-checkp
 records six independent, developer-visible trials. Fewer evidence-excerpt
 rejections did not complete the review workflow: all 30 case evaluations
 remained unavailable.
+The subsequent [fixed DEV v3 core-label prompt A/B checkpoint](docs/character-axis-v3-dev-checkpoint-20260925.md)
+records 2/3 baseline admissions with v3 on versus 0/3 off, but both admitted
+trials stopped at candidate uniqueness; no draft cases were evaluated and the
+frozen transfer suite was not run.
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a
