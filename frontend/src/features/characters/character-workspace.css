@@ -340,7 +340,7 @@
 .candidateDetail { min-width: 0; }
 .candidateMobileBack { display: none; }
 
-.candidateStatement { position: static; height: auto; padding: 0 0 18px; border-bottom: 1px solid var(--line); background: transparent; box-shadow: none; backdrop-filter: none; letter-spacing: normal; }
+.candidateStatement { position: static; display: block; height: auto; padding: 0 0 18px; border-bottom: 1px solid var(--line); background: transparent; box-shadow: none; backdrop-filter: none; letter-spacing: normal; }
 .candidateStatement > div { display: flex; flex-wrap: wrap; gap: 8px; }
 .candidateStatement span,
 .candidateStatement strong { padding: 4px 7px; border-radius: 999px; font-size: 12px; }

@@ -26,7 +26,7 @@ DECLARE
     vector_column_count integer;
 BEGIN
     SELECT version_num INTO current_revision FROM alembic_version;
-    IF current_revision <> '0014_trait_comparison_key' THEN
+    IF current_revision <> '0015_character_trait_axes' THEN
         RAISE EXCEPTION 'unexpected Alembic revision';
     END IF;
     SELECT count(*) INTO vector_extension_count FROM pg_extension WHERE extname = 'vector';
@@ -50,6 +50,25 @@ INSERT INTO projects (id, workspace_id, name, description, created_at)
 VALUES
     ('ci-rag-project', 'ci-rag-workspace', 'CI RAG smoke', '', now()),
     ('ci-rag-other', 'ci-rag-workspace', 'CI RAG other', '', now());
+INSERT INTO character_trait_axes
+    (id, project_id, trait_type, version, display_name, definition,
+     definition_sha256, created_at)
+VALUES
+    ('ci-personality-axis', 'ci-rag-project', 'core_personality', 1,
+     'Risk disclosure', 'Communicates known risks before a joint decision',
+     repeat('a', 64), now());
+DO $$
+BEGIN
+    BEGIN
+        UPDATE character_trait_axes SET definition = 'Changed definition'
+         WHERE id = 'ci-personality-axis';
+        RAISE EXCEPTION 'character axis unexpectedly allowed an in-place edit';
+    EXCEPTION WHEN check_violation THEN
+        IF SQLERRM <> 'character_trait_axis_immutable' THEN
+            RAISE;
+        END IF;
+    END;
+END $$;
 INSERT INTO documents (id, project_id, name, content, version, active, created_at)
 VALUES
     ('ci-rag-document', 'ci-rag-project', 'ci.md', 'test', 2, true, now()),
