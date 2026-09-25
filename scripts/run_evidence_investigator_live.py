@@ -359,6 +359,27 @@ _CHARACTER_SIGNAL_CORE_SCOPE_KEY = "signal_core_scope_v3"
 _CHARACTER_SIGNAL_SUPPORT_ID_KEY = "signal_support_id_v4"
 _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY = "signal_support_segmenter_version"
 _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION = "assertion-index-v1"
+_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY = "signal_semantic_scope_v5"
+_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY = "signal_semantic_scope_version"
+_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION = "semantic-scope-v5"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_KEY = "signal_scope_review_v1"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS = frozenset({
+    _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY,
+    "signal_scope_review_schema_version",
+    "signal_scope_review_prompt_version",
+    "signal_scope_review_token_reserve",
+    "signal_scope_review_completion_tokens",
+    "signal_scope_review_max_response_bytes",
+    "signal_scope_review_timeout_seconds",
+    "signal_scope_review_max_attempts",
+    "signal_scope_review_provider_timeout_seconds",
+    "signal_scope_review_provider_total_deadline_seconds",
+    "signal_scope_review_provider_max_completion_tokens",
+    "signal_scope_review_provider_max_response_bytes",
+    "signal_scope_review_provider_max_attempts",
+})
+_CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION = "character-scope-review-v1"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v1"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY = "signal_support_trace_v1"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY = "signal_support_trace_version"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION = "support-trace-v1"
@@ -2776,6 +2797,83 @@ def _build_summary(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _valid_character_scope_review_limits(limits: dict[str, Any]) -> bool:
+    """Validate the complete content-free Phase B configuration ceiling."""
+
+    enabled = limits.get(_CHARACTER_SIGNAL_SCOPE_REVIEW_KEY)
+    if (
+        type(enabled) is not bool
+        or (enabled and limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY) is not True)
+        or limits.get("signal_scope_review_schema_version") != (
+            _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION if enabled else None
+        )
+        or limits.get("signal_scope_review_prompt_version") != (
+            _CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION if enabled else None
+        )
+    ):
+        return False
+    integers = {
+        "signal_scope_review_token_reserve": (256, 20_000),
+        "signal_scope_review_completion_tokens": (64, 8_192),
+        "signal_scope_review_max_response_bytes": (1_024, 32_768),
+        "signal_scope_review_max_attempts": (1, 4),
+        "signal_scope_review_provider_max_completion_tokens": (1, 8_192),
+        "signal_scope_review_provider_max_response_bytes": (1, 32_768),
+        "signal_scope_review_provider_max_attempts": (1, 4),
+    }
+    for key, (minimum, maximum) in integers.items():
+        value = limits.get(key)
+        if type(value) is not int or not minimum <= value <= maximum:
+            return False
+    if any(
+        type(limits.get(key)) is not int
+        for key in (
+            "signal_provider_max_completion_tokens",
+            "signal_provider_max_response_bytes",
+            "signal_provider_max_attempts",
+        )
+    ):
+        return False
+    numbers = (
+        "signal_scope_review_timeout_seconds",
+        "signal_scope_review_provider_timeout_seconds",
+        "signal_scope_review_provider_total_deadline_seconds",
+        "signal_total_deadline_seconds",
+        "signal_provider_timeout_seconds",
+    )
+    for key in numbers:
+        value = limits.get(key)
+        if (
+            type(value) not in {int, float}
+            or not math.isfinite(float(value))
+            or not 0 < float(value) <= 120
+        ):
+            return False
+    timeout = limits["signal_scope_review_timeout_seconds"]
+    deadline = limits["signal_scope_review_provider_total_deadline_seconds"]
+    if (
+        timeout > 30
+        or deadline != min(timeout, limits["signal_total_deadline_seconds"])
+        or limits["signal_scope_review_provider_timeout_seconds"] > min(
+            timeout, deadline, limits["signal_provider_timeout_seconds"]
+        )
+        or limits["signal_scope_review_provider_max_completion_tokens"] != min(
+            limits["signal_scope_review_completion_tokens"],
+            limits["signal_provider_max_completion_tokens"],
+        )
+        or limits["signal_scope_review_provider_max_response_bytes"] != min(
+            limits["signal_scope_review_max_response_bytes"],
+            limits["signal_provider_max_response_bytes"],
+        )
+        or limits["signal_scope_review_provider_max_attempts"] > min(
+            limits["signal_scope_review_max_attempts"],
+            limits["signal_provider_max_attempts"],
+        )
+    ):
+        return False
+    return True
+
+
 def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
     root = value if type(value) is dict else None
     if root is None or set(root) != {
@@ -2869,6 +2967,48 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
                 _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
                 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
             },
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY,
+            },
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
+            },
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY,
+            }
+            | _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS,
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
+            }
+            | _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS,
         }
         or character_limits.get("sensitivity")
         not in _CHARACTER_CONSISTENCY_SENSITIVITIES
@@ -2902,6 +3042,25 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             return None
         safe_character_limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] = variant
         safe_character_limits[_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY] = segmenter
+    if _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY in character_limits:
+        variant = character_limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY]
+        scope_version = character_limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY]
+        if (
+            type(variant) is not bool
+            or (variant and character_limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] is not True)
+            or scope_version != (
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION if variant else None
+            )
+        ):
+            return None
+        safe_character_limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY] = variant
+        safe_character_limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY] = scope_version
+    if _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY in character_limits:
+        if not _valid_character_scope_review_limits(character_limits):
+            return None
+        safe_character_limits.update({
+            key: character_limits[key] for key in _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS
+        })
     if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in character_limits:
         variant = character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY]
         trace_version = character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY]

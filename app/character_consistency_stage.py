@@ -23,6 +23,7 @@ from .character_drift import (
     prepare_character_drift,
     promote_character_drift,
 )
+from .character_scope_review import ScopeReviewSourceIdentity
 from .character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
@@ -641,12 +642,31 @@ class CharacterConsistencyStage:
                 partial = True
                 reason_counts["stage_token_budget"] += 1
                 break
+            scope_review_v1 = (
+                settings.character_signal_scope_review_v1
+                and source.source_kind == "formal_character_profile"
+            )
+            # The formal review shares this logical signal allowance. Preserve
+            # the stage's drift-review reserve before assigning that allowance.
+            signal_available = (
+                max(0, remaining - targeted_reviewer_reserve_tokens)
+                if scope_review_v1 else remaining
+            )
             call_settings = settings.model_copy(
                 update={
                     "character_signal_token_budget": min(
-                        settings.character_signal_token_budget, remaining
+                        settings.character_signal_token_budget, signal_available
                     )
                 }
+            )
+            scope_source = (
+                ScopeReviewSourceIdentity(
+                    run_input_id=source.input_id,
+                    document_id=source.document.id,
+                    document_version=source.document_version,
+                    content_sha256=source.content_sha256,
+                )
+                if scope_review_v1 else None
             )
             extraction = CharacterSignalExtractor(
                 self.provider, settings=call_settings
@@ -658,7 +678,9 @@ class CharacterConsistencyStage:
                     global_line_start=chunk.global_line_start,
                     source_kind=source.source_kind,  # type: ignore[arg-type]
                     server_context=server_contexts[source.document.id].payload,
-                )
+                ),
+                source_identity=scope_source,
+                frozen_content=source.document.content if scope_review_v1 else None,
             )
             processed_chunks += 1
             record_support_trace(
@@ -669,6 +691,9 @@ class CharacterConsistencyStage:
                 extraction,
                 chunk_ordinal=chunk_ordinal,
                 stage_remaining_before=remaining,
+                reviewer_reserve=(
+                    targeted_reviewer_reserve_tokens if scope_review_v1 else 0
+                ),
             )
             usage.add(extraction.diagnostics)
             record_evidence_mismatch(

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import timedelta
 from hashlib import sha256
-from math import ceil
+from math import ceil, isfinite
 from threading import Event, Lock, Thread
 from time import perf_counter
 from typing import Any, Callable
@@ -41,12 +42,17 @@ from .character_consistency_stage import (
     CharacterConsistencyStage,
     failed_character_consistency_stage,
 )
+from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from .character_drift import CHARACTER_REVIEW_SYSTEM_PROMPT
 from .character_trait_extraction import (
     CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
     CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
+    CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1,
+    CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1,
+    CHARACTER_SIGNAL_SEMANTIC_SCOPE_PROMPT_V5,
     CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4,
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
+    CHARACTER_SIGNAL_SYSTEM_PROMPT_V5,
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
     _validate_signal_prompt_variant_settings,
     _bounded_provider,
@@ -386,6 +392,8 @@ class _CharacterConsistencyAccountingProvider:
         *,
         signal_provider=None,
         drift_provider=None,
+        scope_review_provider=None,
+        scope_review_completion_reserve: int | None = None,
     ) -> None:
         self.settings = settings
         self.usage = usage
@@ -399,6 +407,8 @@ class _CharacterConsistencyAccountingProvider:
             )
         self.signal_provider = signal_provider
         self.drift_provider = drift_provider
+        self.scope_review_provider = scope_review_provider
+        self.scope_review_completion_reserve = scope_review_completion_reserve
 
     def fork_for_character_consistency(
         self,
@@ -439,6 +449,109 @@ class _CharacterConsistencyAccountingProvider:
             drift_provider=drift_provider,
         )
 
+    def fork_for_character_scope_review(
+        self,
+        *,
+        timeout_seconds: float,
+        remaining_deadline_seconds: float,
+        completion_reserve: int,
+        max_response_bytes: int,
+        max_attempts: int,
+    ):
+        """Share the gateway ledger while tightening review transport caps."""
+
+        _validate_signal_prompt_variant_settings(self.settings)
+        if not self.settings.character_signal_scope_review_v1:
+            raise ValueError("character scope review is disabled")
+        if any(
+            type(value) not in {int, float}
+            or not isfinite(float(value))
+            or value <= 0
+            for value in (timeout_seconds, remaining_deadline_seconds)
+        ):
+            raise ValueError("character scope review deadline is invalid")
+        if (
+            type(completion_reserve) is not int or completion_reserve < 64
+            or type(max_response_bytes) is not int or max_response_bytes < 1
+            or type(max_attempts) is not int or max_attempts < 1
+        ):
+            raise ValueError("character scope review limits are invalid")
+
+        review_provider = self.signal_provider
+        reserve = min(
+            completion_reserve,
+            self.settings.character_signal_scope_review_completion_tokens,
+        )
+        if isinstance(review_provider, OpenAICompatibleProvider):
+            provider_settings = review_provider.settings
+            deadline = min(
+                value for value in (
+                    float(timeout_seconds),
+                    float(remaining_deadline_seconds),
+                    float(self.settings.character_signal_total_deadline_seconds),
+                    provider_settings.provider_total_deadline_seconds,
+                    self.settings.provider_total_deadline_seconds,
+                ) if value is not None
+            )
+            timeout = min(
+                float(timeout_seconds),
+                deadline,
+                float(self.settings.character_signal_scope_review_timeout_seconds),
+                float(self.settings.provider_timeout_seconds),
+                float(provider_settings.provider_timeout_seconds),
+            )
+            completion = min(
+                value for value in (
+                    reserve,
+                    provider_settings.provider_max_completion_tokens,
+                    self.settings.provider_max_completion_tokens,
+                ) if value is not None
+            )
+            response_bytes = min(
+                value for value in (
+                    max_response_bytes,
+                    self.settings.character_signal_scope_review_max_response_bytes,
+                    provider_settings.provider_max_response_bytes,
+                    self.settings.provider_max_response_bytes,
+                ) if value is not None
+            )
+            attempts = min(
+                max_attempts,
+                self.settings.character_signal_scope_review_max_attempts,
+                self.settings.provider_max_attempts,
+                provider_settings.provider_max_attempts,
+                review_provider.retry_policy.max_attempts,
+            )
+            bounded_settings = provider_settings.model_copy(update={
+                "enable_model_extraction": False,
+                "enable_review_agent": False,
+                "enable_issue_evidence_review": False,
+                "enable_evidence_investigator": False,
+                "enable_character_consistency": True,
+                "provider_timeout_seconds": timeout,
+                "provider_total_deadline_seconds": deadline,
+                "provider_max_attempts": attempts,
+                "provider_max_completion_tokens": completion,
+                "provider_max_response_bytes": response_bytes,
+            })
+            review_provider = OpenAICompatibleProvider(
+                bounded_settings,
+                transport=review_provider.transport,
+                retry_policy=replace(review_provider.retry_policy, max_attempts=attempts),
+                sleep=review_provider.sleep,
+                monotonic=review_provider.monotonic,
+                wall_time=review_provider.wall_time,
+                random_value=review_provider.random_value,
+            )
+        return _CharacterConsistencyAccountingProvider(
+            self.settings,
+            self.usage,
+            signal_provider=self.signal_provider,
+            drift_provider=self.drift_provider,
+            scope_review_provider=review_provider,
+            scope_review_completion_reserve=reserve,
+        )
+
     def complete(self, system: str, user: str):
         # Settings.model_copy(update=...) can bypass model validators; fail
         # before purpose selection, estimation, provider call or charge.
@@ -455,13 +568,49 @@ class _CharacterConsistencyAccountingProvider:
             )
         )
         allowed_primary_systems = {active_primary_system}
-        if self.settings.character_signal_support_id_v4:
+        if self.settings.character_signal_semantic_scope_v5:
+            allowed_primary_systems.add(
+                CHARACTER_SIGNAL_SYSTEM_PROMPT_V5
+                + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
+                + (
+                    CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1
+                    + CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1
+                    if self.settings.character_signal_scope_review_v1
+                    else CHARACTER_SIGNAL_SEMANTIC_SCOPE_PROMPT_V5
+                )
+            )
+        elif self.settings.character_signal_support_id_v4:
             allowed_primary_systems.add(
                 active_primary_system + CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4
             )
         if system in allowed_primary_systems | {TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT}:
             provider = self.signal_provider
             completion_reserve = self.settings.character_signal_max_completion_tokens
+        elif (
+            system == SCOPE_REVIEW_SYSTEM_PROMPT
+            and self.settings.character_signal_scope_review_v1
+        ):
+            if self.scope_review_provider is None:
+                bounded = self.fork_for_character_scope_review(
+                    timeout_seconds=self.settings.character_signal_scope_review_timeout_seconds,
+                    remaining_deadline_seconds=(
+                        self.settings.character_signal_total_deadline_seconds
+                    ),
+                    completion_reserve=(
+                        self.settings.character_signal_scope_review_completion_tokens
+                    ),
+                    max_response_bytes=(
+                        self.settings.character_signal_scope_review_max_response_bytes
+                    ),
+                    max_attempts=self.settings.character_signal_scope_review_max_attempts,
+                )
+                provider = bounded.scope_review_provider
+            else:
+                provider = self.scope_review_provider
+            completion_reserve = (
+                self.scope_review_completion_reserve
+                or self.settings.character_signal_scope_review_completion_tokens
+            )
         elif system == CHARACTER_REVIEW_SYSTEM_PROMPT:
             provider = self.drift_provider
             completion_reserve = self.settings.character_drift_max_completion_tokens

@@ -8,12 +8,14 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .config import Settings
 from .character_trait_extraction import ASSERTION_INDEX_V1, SUPPORT_TRACE_V1
+from .character_scope_review import SCOPE_REVIEW_PROMPT_V1, SCOPE_REVIEW_SCHEMA_V1
 from .embeddings import EmbeddingNotConfiguredError, OpenAICompatibleEmbeddingProvider
 from .evidence_chunks import EvidenceChunker
 from .provider import safe_thinking_configuration
 
 
 RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v3"
+CHARACTER_SEMANTIC_SCOPE_PROTOCOL_V5 = "semantic-scope-v5"
 _MAX_BUNDLE_FILES = 512
 _MAX_BUNDLE_FILE_BYTES = 4 * 1024 * 1024
 _MAX_BUNDLE_TOTAL_BYTES = 32 * 1024 * 1024
@@ -112,6 +114,31 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
         )
         if value is not None
     )
+    # Deployment ceilings only. Each review call can tighten timeout and total
+    # deadline further as the shared signal stage consumes wall time.
+    scope_review_deadline = min(
+        float(settings.character_signal_scope_review_timeout_seconds),
+        signal_deadline,
+    )
+    scope_review_provider_timeout = min(
+        float(settings.character_signal_scope_review_timeout_seconds),
+        float(settings.character_signal_timeout_seconds),
+        float(settings.provider_timeout_seconds),
+        scope_review_deadline,
+    )
+    scope_review_provider_completion = min(
+        settings.character_signal_scope_review_completion_tokens,
+        signal_provider_completion,
+    )
+    scope_review_provider_response_bytes = min(
+        settings.character_signal_scope_review_max_response_bytes,
+        signal_provider_response_bytes,
+    )
+    scope_review_provider_attempts = min(
+        settings.character_signal_scope_review_max_attempts,
+        settings.character_signal_max_attempts,
+        settings.provider_max_attempts,
+    )
     drift_provider_response_bytes = min(
         value
         for value in (
@@ -164,6 +191,48 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             ),
             "signal_core_scope_v3": settings.character_signal_core_scope_prompt_v3,
             "signal_support_id_v4": settings.character_signal_support_id_v4,
+            "signal_semantic_scope_v5": settings.character_signal_semantic_scope_v5,
+            "signal_semantic_scope_version": (
+                CHARACTER_SEMANTIC_SCOPE_PROTOCOL_V5
+                if settings.character_signal_semantic_scope_v5 else None
+            ),
+            "signal_scope_review_v1": settings.character_signal_scope_review_v1,
+            "signal_scope_review_schema_version": (
+                SCOPE_REVIEW_SCHEMA_V1 if settings.character_signal_scope_review_v1 else None
+            ),
+            "signal_scope_review_prompt_version": (
+                SCOPE_REVIEW_PROMPT_V1 if settings.character_signal_scope_review_v1 else None
+            ),
+            "signal_scope_review_token_reserve": (
+                settings.character_signal_scope_review_token_reserve
+            ),
+            "signal_scope_review_completion_tokens": (
+                settings.character_signal_scope_review_completion_tokens
+            ),
+            "signal_scope_review_max_response_bytes": (
+                settings.character_signal_scope_review_max_response_bytes
+            ),
+            "signal_scope_review_timeout_seconds": float(
+                settings.character_signal_scope_review_timeout_seconds
+            ),
+            "signal_scope_review_max_attempts": (
+                settings.character_signal_scope_review_max_attempts
+            ),
+            "signal_scope_review_provider_timeout_seconds": (
+                scope_review_provider_timeout
+            ),
+            "signal_scope_review_provider_total_deadline_seconds": (
+                scope_review_deadline
+            ),
+            "signal_scope_review_provider_max_completion_tokens": (
+                scope_review_provider_completion
+            ),
+            "signal_scope_review_provider_max_response_bytes": (
+                scope_review_provider_response_bytes
+            ),
+            "signal_scope_review_provider_max_attempts": (
+                scope_review_provider_attempts
+            ),
             "signal_support_trace_v1": settings.character_signal_support_trace_v1,
             "signal_support_trace_version": (
                 SUPPORT_TRACE_V1 if settings.character_signal_support_trace_v1 else None

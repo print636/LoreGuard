@@ -275,6 +275,25 @@ class Settings(BaseSettings):
     character_signal_core_scope_prompt_v3: bool = False
     # Formal-profile support-ID experiment; history/draft keep the old schema.
     character_signal_support_id_v4: bool = False
+    # Formal-profile semantic scope experiment. Requires V4's assertion index;
+    # history, drafts, and targeted recall retain their existing protocols.
+    character_signal_semantic_scope_v5: bool = False
+    # Phase B: a bounded semantic veto for structurally valid formal V5
+    # proposals. It is opt-in until frozen-gold and live gates are satisfied.
+    character_signal_scope_review_v1: bool = False
+    character_signal_scope_review_token_reserve: int = Field(
+        default=6_000, ge=256, le=20_000
+    )
+    character_signal_scope_review_completion_tokens: int = Field(
+        default=2_048, ge=64, le=8_192
+    )
+    character_signal_scope_review_max_response_bytes: int = Field(
+        default=32_768, ge=1_024, le=32_768
+    )
+    character_signal_scope_review_timeout_seconds: float = Field(
+        default=30.0, gt=0, le=30.0
+    )
+    character_signal_scope_review_max_attempts: int = Field(default=1, ge=1, le=4)
     # Content-free observation of V4 support-slot submission/validation only.
     # It neither changes prompts nor accepts otherwise rejected records.
     character_signal_support_trace_v1: bool = False
@@ -293,7 +312,7 @@ class Settings(BaseSettings):
     # rejects the first complete response.
     character_signal_package_max_attempts: int = Field(default=2, ge=1, le=2)
     character_signal_total_deadline_seconds: float = Field(
-        default=60.0, gt=0, le=60.0
+        default=60.0, gt=0, le=120.0
     )
     # One logical signal extraction may generate at most two complete packages.
     # This budget spans that whole regeneration cycle; it is independent from
@@ -545,6 +564,16 @@ class Settings(BaseSettings):
         ):
             raise ValueError("character signal support id v4 requires full line v2")
         if (
+            self.character_signal_semantic_scope_v5
+            and not self.character_signal_support_id_v4
+        ):
+            raise ValueError("character signal semantic scope v5 requires support id v4")
+        if (
+            self.character_signal_scope_review_v1
+            and not self.character_signal_semantic_scope_v5
+        ):
+            raise ValueError("character signal scope review v1 requires semantic scope v5")
+        if (
             self.character_signal_support_trace_v1
             and not self.character_signal_support_id_v4
         ):
@@ -554,6 +583,12 @@ class Settings(BaseSettings):
             < self.character_signal_timeout_seconds
         ):
             raise ValueError("character signal deadline is shorter than timeout")
+        if (
+            self.character_signal_scope_review_v1
+            and self.character_signal_total_deadline_seconds
+            < self.character_signal_scope_review_timeout_seconds
+        ):
+            raise ValueError("character signal deadline is shorter than scope review timeout")
         if (
             self.character_drift_total_deadline_seconds
             < self.character_drift_timeout_seconds

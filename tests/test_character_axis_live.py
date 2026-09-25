@@ -1920,6 +1920,11 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
                     "statement_support": 4,
                     "core_label_scope": 2,
                     "regenerated_from_core_label_scope": 3,
+                    "semantic_scope_unresolved": 4,
+                    "regenerated_from_semantic_scope_unresolved": 2,
+                    "scope_review_reviewer_uncertain": 3,
+                    "scope_review_provider_timeout": 1,
+                    "scope_anchor_invalid": "https://private.invalid/key",
                     "sk-secret": 1,
                 },
             }}
@@ -1987,9 +1992,15 @@ def test_citation_refs_are_projected_only_when_complete_and_content_free(monkeyp
         "statement_support": 4,
         "core_label_scope": 2,
         "regenerated_from_core_label_scope": 3,
+        "semantic_scope_unresolved": 4,
+        "regenerated_from_semantic_scope_unresolved": 2,
+        "scope_review_reviewer_uncertain": 3,
+        "scope_review_provider_timeout": 1,
     }
-    assert summary["unreported_reason_entries"] == 1
+    assert summary["unreported_reason_entries"] == 2
     assert "sk-secret" not in repr(summary)
+    assert "private.invalid" not in repr(summary)
+    assert axis_live._public_run(summary)["reason_counts"] == summary["reason_counts"]
     assert "private.invalid" not in repr(axis_live._public_run(summary))
     assert axis_live._public_run(summary)["core_label_scope_counts"] == (
         summary["core_label_scope_counts"]

@@ -5,6 +5,7 @@ import json
 import re
 
 import scripts.run_evidence_investigator_live as live_runner
+import scripts.run_character_axis_live as axis_live
 
 from app.config import Settings
 from app.runtime_provenance import (
@@ -81,6 +82,15 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     assert result["character_consistency_limits"]["signal_full_line_echo_v2"] is False
     assert result["character_consistency_limits"]["signal_core_scope_v3"] is False
     assert result["character_consistency_limits"]["signal_support_id_v4"] is False
+    assert result["character_consistency_limits"]["signal_semantic_scope_v5"] is False
+    assert result["character_consistency_limits"]["signal_semantic_scope_version"] is None
+    assert result["character_consistency_limits"]["signal_scope_review_v1"] is False
+    assert result["character_consistency_limits"][
+        "signal_scope_review_schema_version"
+    ] is None
+    assert result["character_consistency_limits"][
+        "signal_scope_review_prompt_version"
+    ] is None
     assert result["character_consistency_limits"][
         "signal_support_segmenter_version"
     ] is None
@@ -137,6 +147,11 @@ def test_character_runtime_fingerprint_tracks_stage_and_effective_provider_limit
         {
             "character_signal_full_line_prompt_v2": True,
             "character_signal_support_id_v4": True,
+        },
+        {
+            "character_signal_full_line_prompt_v2": True,
+            "character_signal_support_id_v4": True,
+            "character_signal_semantic_scope_v5": True,
         },
         {"character_signal_max_records": 47},
         {"character_signal_targeted_max_targets_per_chunk": 11},
@@ -249,6 +264,156 @@ def test_runtime_provenance_support_trace_is_versioned_and_requires_v4():
     del legacy["character_consistency_limits"]["signal_support_trace_v1"]
     del legacy["character_consistency_limits"]["signal_support_trace_version"]
     assert live_runner._safe_runtime_provenance(legacy) == legacy
+
+
+def test_v5_runtime_identity_and_both_runner_boundaries_are_versioned_and_strict():
+    disabled = safe_runtime_provenance(configured_settings())
+    assert live_runner._safe_runtime_provenance(disabled) == disabled
+    assert axis_live._safe_character_runtime_provenance(disabled) is not None
+    assert axis_live._runtime_summary({"runtime_provenance": disabled})[
+        "signal_semantic_scope_v5"
+    ] is False
+
+    base = {
+        "character_signal_full_line_prompt_v2": True,
+        "character_signal_core_scope_prompt_v3": True,
+        "character_signal_support_id_v4": True,
+    }
+    v4 = safe_runtime_provenance(configured_settings(**base))
+    v5 = safe_runtime_provenance(configured_settings(
+        **base, character_signal_semantic_scope_v5=True,
+    ))
+    v5_limits = v5["character_consistency_limits"]
+    assert v5_limits["signal_support_id_v4"] is True
+    assert v5_limits["signal_semantic_scope_v5"] is True
+    assert v5_limits["signal_semantic_scope_version"] == "semantic-scope-v5"
+    assert live_runner._safe_runtime_provenance(v5) == v5
+    assert axis_live._safe_character_runtime_provenance(v5) is not None
+    assert axis_live._runtime_provenance_digest(v5) != axis_live._runtime_provenance_digest(v4)
+    assert axis_live._runtime_summary({"runtime_provenance": v4})[
+        "signal_semantic_scope_v5"
+    ] is False
+    summary = axis_live._runtime_summary({"runtime_provenance": v5})
+    assert summary["signal_semantic_scope_v5"] is True
+    assert summary["signal_semantic_scope_version"] == "semantic-scope-v5"
+    assert "character_signal_semantic_scope_v5" not in json.dumps(v5)
+    assert "test-only-secret" not in json.dumps(v5)
+
+    legacy = json.loads(json.dumps(v4))
+    del legacy["character_consistency_limits"]["signal_semantic_scope_v5"]
+    del legacy["character_consistency_limits"]["signal_semantic_scope_version"]
+    for key in live_runner._CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS:
+        del legacy["character_consistency_limits"][key]
+    assert live_runner._safe_runtime_provenance(legacy) == legacy
+    assert axis_live._safe_character_runtime_provenance(legacy) is not None
+    assert axis_live._runtime_summary({"runtime_provenance": legacy})[
+        "signal_semantic_scope_v5"
+    ] is None
+
+    traced = safe_runtime_provenance(configured_settings(
+        **base, character_signal_semantic_scope_v5=True,
+        character_signal_support_trace_v1=True,
+    ))
+    assert live_runner._safe_runtime_provenance(traced) == traced
+    assert axis_live._safe_character_runtime_provenance(traced) is not None
+
+    mutations = (
+        {"signal_semantic_scope_v5": "true"},
+        {"signal_semantic_scope_version": "unknown"},
+        {"signal_semantic_scope_v5": False},
+        {"signal_support_id_v4": False, "signal_support_segmenter_version": None},
+        {"signal_full_line_echo_v2": False},
+        {"unexpected_source_text": "private"},
+    )
+    for changes in mutations:
+        malformed = json.loads(json.dumps(v5))
+        malformed["character_consistency_limits"].update(changes)
+        assert live_runner._safe_runtime_provenance(malformed) is None, changes
+        assert axis_live._safe_character_runtime_provenance(malformed) is None, changes
+    for missing in ("signal_semantic_scope_v5", "signal_semantic_scope_version"):
+        malformed = json.loads(json.dumps(v5))
+        del malformed["character_consistency_limits"][missing]
+        assert live_runner._safe_runtime_provenance(malformed) is None, missing
+        assert axis_live._safe_character_runtime_provenance(malformed) is None, missing
+
+
+def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible():
+    base = {
+        "character_signal_full_line_prompt_v2": True,
+        "character_signal_support_id_v4": True,
+        "character_signal_semantic_scope_v5": True,
+    }
+    off = safe_runtime_provenance(configured_settings(**base))
+    on = safe_runtime_provenance(configured_settings(
+        **base,
+        character_signal_scope_review_v1=True,
+        provider_timeout_seconds=7,
+        provider_total_deadline_seconds=20,
+        provider_max_response_bytes=8_192,
+    ))
+    limits = on["character_consistency_limits"]
+    assert limits["signal_scope_review_v1"] is True
+    assert limits["signal_scope_review_schema_version"] == "character-scope-review-v1"
+    assert limits["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v1"
+    assert limits["signal_scope_review_token_reserve"] == 6_000
+    assert limits["signal_scope_review_completion_tokens"] == 2_048
+    assert limits["signal_scope_review_max_response_bytes"] == 32_768
+    assert limits["signal_scope_review_max_attempts"] == 1
+    assert limits["signal_scope_review_provider_timeout_seconds"] == 7
+    assert limits["signal_scope_review_provider_total_deadline_seconds"] == 20
+    assert limits["signal_scope_review_provider_max_completion_tokens"] == 1_024
+    assert limits["signal_scope_review_provider_max_response_bytes"] == 8_192
+    assert limits["signal_scope_review_provider_max_attempts"] == 1
+    assert live_runner._safe_runtime_provenance(on) == on
+    assert axis_live._safe_character_runtime_provenance(on) is not None
+    assert axis_live._runtime_provenance_digest(on) != axis_live._runtime_provenance_digest(off)
+    summary = axis_live._runtime_summary({"runtime_provenance": on})
+    assert summary["signal_scope_review_v1"] is True
+    assert summary["signal_scope_review_schema_version"] == "character-scope-review-v1"
+    assert summary["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v1"
+    assert summary["signal_scope_review_limits"][
+        "signal_scope_review_provider_max_completion_tokens"
+    ] == 1_024
+    assert "test-only-secret" not in json.dumps(summary)
+    assert "https://" not in json.dumps(summary)
+
+    legacy = json.loads(json.dumps(off))
+    for key in live_runner._CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS:
+        del legacy["character_consistency_limits"][key]
+    assert live_runner._safe_runtime_provenance(legacy) == legacy
+    assert axis_live._safe_character_runtime_provenance(legacy) is not None
+    assert axis_live._runtime_summary({"runtime_provenance": legacy})[
+        "signal_scope_review_v1"
+    ] is None
+
+    traced = safe_runtime_provenance(configured_settings(
+        **base, character_signal_scope_review_v1=True,
+        character_signal_support_trace_v1=True,
+    ))
+    assert live_runner._safe_runtime_provenance(traced) == traced
+    assert axis_live._safe_character_runtime_provenance(traced) is not None
+
+    mutations = (
+        {"signal_scope_review_v1": "true"},
+        {"signal_scope_review_v1": False},
+        {"signal_scope_review_schema_version": "unknown"},
+        {"signal_scope_review_prompt_version": None},
+        {"signal_semantic_scope_v5": False, "signal_semantic_scope_version": None},
+        {"signal_scope_review_completion_tokens": True},
+        {"signal_scope_review_provider_max_completion_tokens": 1_025},
+        {"signal_scope_review_provider_timeout_seconds": 31},
+        {"source_text": "private"},
+    )
+    for changes in mutations:
+        malformed = json.loads(json.dumps(on))
+        malformed["character_consistency_limits"].update(changes)
+        assert live_runner._safe_runtime_provenance(malformed) is None, changes
+        assert axis_live._safe_character_runtime_provenance(malformed) is None, changes
+    for missing in live_runner._CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS:
+        malformed = json.loads(json.dumps(on))
+        del malformed["character_consistency_limits"][missing]
+        assert live_runner._safe_runtime_provenance(malformed) is None, missing
+        assert axis_live._safe_character_runtime_provenance(malformed) is None, missing
 
 
 def test_runtime_provenance_marks_unversioned_build_without_inventing_revision():

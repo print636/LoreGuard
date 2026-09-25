@@ -46,6 +46,12 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
     _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
     _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION,
+    _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY,
+    _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY,
+    _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION,
+    _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY,
+    _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS,
+    _valid_character_scope_review_limits,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION,
@@ -76,6 +82,17 @@ SAFE_REASON_KEYS = frozenset({
     "regenerated_from_core_label_scope", "core_label_scope",
     "support_index_invalid", "support_id_invalid", "support_label_scope",
     "regenerated_from_support_id_invalid", "regenerated_from_support_label_scope",
+    "scope_anchor_invalid", "scope_relation_invalid",
+    "regenerated_from_scope_anchor_invalid", "regenerated_from_scope_relation_invalid",
+    "semantic_scope_unresolved", "regenerated_from_semantic_scope_unresolved",
+    "scope_review_source_mismatch", "scope_review_request_invalid",
+    "scope_review_internal_error", "scope_review_token_budget",
+    "scope_review_deadline", "scope_review_provider_timeout",
+    "scope_review_provider_rate_limit", "scope_review_provider_error",
+    "scope_review_response_too_large", "scope_review_response_invalid",
+    "scope_review_response_mismatch", "scope_review_reviewer_rejected",
+    "scope_review_reviewer_uncertain", "scope_review_basis_invalid",
+    "scope_review_slot_conflict",
     "character_support", "regenerated_from_character_support",
     "key_object_support", "statement_support",
     "lower_authority_baseline_shadowed", "invalid_confirmed_trait_snapshot",
@@ -767,6 +784,48 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
                 _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
                 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
             },
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY,
+            },
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
+            },
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY,
+            }
+            | _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS,
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
+            }
+            | _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS,
         }
         or limits.get("sensitivity") not in {"conservative", "balanced", "exploratory"}
     ):
@@ -794,6 +853,23 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
             _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
             if limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] else None
         )
+    ):
+        return None
+    if _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY in limits and (
+        type(limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY]) is not bool
+        or (
+            limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY]
+            and limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] is not True
+        )
+        or limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY] != (
+            _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION
+            if limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY] else None
+        )
+    ):
+        return None
+    if (
+        _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY in limits
+        and not _valid_character_scope_review_limits(limits)
     ):
         return None
     if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in limits and (
@@ -1875,6 +1951,19 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
     provider = provider if isinstance(provider, dict) else {}
     limits = provenance.get("character_consistency_limits")
     limits = limits if isinstance(limits, dict) else {}
+    scope_review_valid = (
+        _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY in limits
+        and _valid_character_scope_review_limits(limits)
+        and (
+            limits[_CHARACTER_SIGNAL_SCOPE_REVIEW_KEY] is False
+            or (
+                limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY) is True
+                and limits.get(_CHARACTER_SIGNAL_SUPPORT_ID_KEY) is True
+                and limits.get(_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY)
+                == _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
+            )
+        )
+    )
     alias = provider.get("model_alias")
     return {
         "schema_version": (
@@ -1944,6 +2033,55 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
             and limits.get(_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY)
             == _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
             else None
+        ),
+        "signal_semantic_scope_v5": (
+            limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY)
+            if type(limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY)) is bool
+            and (
+                limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY] is False
+                or (
+                    limits.get(_CHARACTER_SIGNAL_SUPPORT_ID_KEY) is True
+                    and limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY) is True
+                    and limits.get(_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY)
+                    == _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
+                )
+            )
+            and limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY) == (
+                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION
+                if limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY] else None
+            )
+            else None
+        ),
+        "signal_semantic_scope_version": (
+            _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION
+            if limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY) is True
+            and limits.get(_CHARACTER_SIGNAL_SUPPORT_ID_KEY) is True
+            and limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY) is True
+            and limits.get(_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY)
+            == _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
+            and limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY)
+            == _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION
+            else None
+        ),
+        "signal_scope_review_v1": (
+            limits[_CHARACTER_SIGNAL_SCOPE_REVIEW_KEY] if scope_review_valid else None
+        ),
+        "signal_scope_review_schema_version": (
+            limits["signal_scope_review_schema_version"] if scope_review_valid else None
+        ),
+        "signal_scope_review_prompt_version": (
+            limits["signal_scope_review_prompt_version"] if scope_review_valid else None
+        ),
+        "signal_scope_review_limits": (
+            {
+                key: limits[key]
+                for key in sorted(_CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS - {
+                    _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY,
+                    "signal_scope_review_schema_version",
+                    "signal_scope_review_prompt_version",
+                })
+            }
+            if scope_review_valid else None
         ),
         "signal_support_trace_v1": (
             limits.get(_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY)

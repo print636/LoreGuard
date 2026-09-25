@@ -1037,7 +1037,13 @@ class ApiFlowTests(unittest.TestCase):
                 row["derivation_type"] == "deterministic_rule"
                 for row in payload["provenance"]["issues"]
             ))
-            self.assertNotIn("prompt", json.dumps(payload, ensure_ascii=False).lower())
+            serialized = json.dumps(payload, ensure_ascii=False).lower()
+            # Version identifiers and token counters are safe diagnostics;
+            # raw prompt bodies and user text are not.
+            self.assertNotRegex(
+                serialized,
+                r'"(?:prompt|system_prompt|user_prompt|raw_prompt)"\s*:',
+            )
 
     def test_end_to_end_analysis_and_feedback(self):
         with TestClient(app) as client:
