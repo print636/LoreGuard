@@ -1171,6 +1171,188 @@ def test_character_runtime_provenance_v4_requires_safe_version_and_v2_dependency
         assert axis_live._runtime_provenance_digest(malformed) is None
 
 
+def test_character_runtime_support_trace_accepts_old_reports_and_rejects_bad_flags():
+    legacy = _runtime_provenance()
+    limits = legacy["character_consistency_limits"]
+    limits.update({
+        "signal_full_line_echo_v2": True,
+        "signal_core_scope_v3": False,
+        "signal_support_id_v4": True,
+        "signal_support_segmenter_version": "assertion-index-v1",
+    })
+    assert axis_live._runtime_provenance_digest(legacy) is not None
+    assert axis_live._runtime_summary({"runtime_provenance": legacy})[
+        "signal_support_trace_v1"
+    ] is None
+    limits["signal_support_trace_v1"] = True
+    limits["signal_support_trace_version"] = "support-trace-v1"
+    assert axis_live._runtime_provenance_digest(legacy) is not None
+    summary = axis_live._runtime_summary({"runtime_provenance": legacy})
+    assert summary["signal_support_trace_v1"] is True
+    assert summary["signal_support_trace_version"] == "support-trace-v1"
+    for update in (
+        {"signal_support_trace_v1": "true"},
+        {"signal_support_trace_v1": True, "signal_support_id_v4": False},
+        {"signal_support_trace_version": "untrusted"},
+    ):
+        bad = json.loads(json.dumps(legacy))
+        bad["character_consistency_limits"].update(update)
+        assert axis_live._runtime_provenance_digest(bad) is None
+
+
+def test_public_support_trace_reprojects_all_fields_and_never_echoes_api_marker(monkeypatch):
+    marker = "SECRET_URL_https://example.invalid/sk-example"
+    valid_trace = {
+        "schema_version": "support-trace-v1",
+        "indexed_support_count": 2,
+        "attempts": [{
+            "attempt": 1,
+            "observability": "parsed",
+            "submitted_slots": [1],
+            "events": [{"slot": 1, "outcome": "accepted", "reason": None}],
+            "unbound_record_events": 0,
+        }],
+        "final_state": "clean",
+        "final_accepted_slots": [1],
+        "candidate_transition": "unavailable",
+    }
+    valid_stage = {
+        "support_trace_chunks": [{
+            "stage_chunk_ordinal": 1,
+            "outcome": "completed",
+            "availability": "available",
+            "trace": valid_trace,
+        }],
+        "support_trace_chunks_omitted_count": 0,
+    }
+    assert axis_live._safe_support_trace_chunks(valid_stage) is not None
+    public = axis_live._public_run(valid_stage)
+    assert public is not None
+    assert public["support_trace_chunks"][0]["trace"] == valid_trace
+
+    provenance = _runtime_provenance()
+    provenance["character_consistency_limits"].update({
+        "signal_full_line_echo_v2": True,
+        "signal_core_scope_v3": False,
+        "signal_support_id_v4": True,
+        "signal_support_segmenter_version": "assertion-index-v1",
+        "signal_support_trace_v1": True,
+        "signal_support_trace_version": "support-trace-v1",
+    })
+    poisoned = json.loads(json.dumps(valid_stage))
+    poisoned["support_trace_chunks"][0]["trace"]["secret"] = marker
+    poisoned["support_trace_chunks"][0]["outcome"] = marker
+    responses = iter([
+        {"runtime_provenance": provenance, "character_consistency": poisoned},
+        [],
+    ])
+    monkeypatch.setattr(axis_live, "_request", lambda *args, **kwargs: next(responses))
+    summary = axis_live._run_summary(
+        None, {"id": "synthetic-run", "status": "completed"}, known_documents=set()
+    )
+    public = axis_live._public_run(summary)
+    assert public is not None
+    assert public["support_trace_chunks"] is None
+    serialized = json.dumps(public, ensure_ascii=False)
+    assert marker not in serialized
+    assert "https://" not in serialized
+    assert "sk-example" not in serialized
+
+    poisoned = json.loads(json.dumps(valid_stage))
+    poisoned["support_trace_chunks"][0]["trace"]["attempts"][0]["events"][0]["reason"] = marker
+    assert axis_live._safe_support_trace_chunks(poisoned) is None
+    poisoned = json.loads(json.dumps(valid_stage))
+    poisoned["support_trace_chunks"][0]["outcome"] = [marker]
+    assert axis_live._safe_support_trace_chunks(poisoned) is None
+    poisoned = json.loads(json.dumps(valid_stage))
+    del poisoned["support_trace_chunks"][0]["trace"]["candidate_transition"]
+    assert axis_live._safe_support_trace_chunks(poisoned) is None
+
+
+def test_public_support_trace_rejects_oversized_nested_lists_before_validation(monkeypatch):
+    marker = "SECRET_URL_https://example.invalid/sk-example"
+    trace = {
+        "schema_version": "support-trace-v1",
+        "indexed_support_count": 1,
+        "attempts": [{
+            "attempt": 1,
+            "observability": "parsed",
+            "submitted_slots": [1],
+            "events": [{"slot": 1, "outcome": "accepted", "reason": None}],
+            "unbound_record_events": 0,
+        }],
+        "final_state": "clean",
+        "final_accepted_slots": [1],
+        "candidate_transition": "unavailable",
+    }
+    stage = {
+        "support_trace_chunks": [{
+            "stage_chunk_ordinal": 1,
+            "outcome": "completed",
+            "availability": "available",
+            "trace": trace,
+        }],
+        "support_trace_chunks_omitted_count": 0,
+        "counts": {"processed_chunks": 1},
+    }
+
+    class MustNotValidate:
+        @staticmethod
+        def model_validate(_value):
+            raise AssertionError("oversized input reached nested model validator")
+
+    monkeypatch.setattr(axis_live, "SupportTraceV1", MustNotValidate)
+    for mutate in (
+        lambda value: value["support_trace_chunks"][0]["trace"]["attempts"].extend(
+            [{"malicious": marker}] * 2
+        ),
+        lambda value: value["support_trace_chunks"][0]["trace"]["attempts"][0]["events"].extend(
+            [{"malicious": marker}] * 64
+        ),
+        lambda value: value["support_trace_chunks"][0]["trace"]["attempts"][0]["submitted_slots"].extend(
+            [marker] * 64
+        ),
+        lambda value: value["support_trace_chunks"][0]["trace"]["final_accepted_slots"].extend(
+            [marker] * 64
+        ),
+    ):
+        poisoned = json.loads(json.dumps(stage))
+        mutate(poisoned)
+        assert axis_live._safe_support_trace_chunks(poisoned) is None
+        public = axis_live._public_run(poisoned)
+        assert public["support_trace_chunks"] is None
+        assert marker not in json.dumps(public, ensure_ascii=False)
+
+
+def test_public_support_trace_rejects_impossible_stage_ordinal_and_omissions():
+    row = {
+        "stage_chunk_ordinal": 1,
+        "outcome": "skipped",
+        "availability": "unavailable",
+        "trace": None,
+    }
+    stage = {
+        "support_trace_chunks": [row],
+        "support_trace_chunks_omitted_count": 0,
+        "counts": {"processed_chunks": 1},
+    }
+    assert axis_live._safe_support_trace_chunks(stage) == ([row], 0)
+    for update in (
+        {"stage_chunk_ordinal": 129},
+        {"stage_chunk_ordinal": 2},
+    ):
+        poisoned = json.loads(json.dumps(stage))
+        poisoned["support_trace_chunks"][0].update(update)
+        assert axis_live._safe_support_trace_chunks(poisoned) is None
+    for omitted in (129, 128):
+        poisoned = json.loads(json.dumps(stage))
+        poisoned["support_trace_chunks_omitted_count"] = omitted
+        assert axis_live._safe_support_trace_chunks(poisoned) is None
+    missing_processed = json.loads(json.dumps(stage))
+    del missing_processed["counts"]
+    assert axis_live._safe_support_trace_chunks(missing_processed) == ([row], 0)
+
+
 def _strict_provenance_trial(tmp_path, monkeypatch, *, worker_change=None,
                              post_revision=None, post_artifact=None):
     root, manifest_digest = _fixture(tmp_path)

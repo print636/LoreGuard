@@ -275,6 +275,9 @@ class Settings(BaseSettings):
     character_signal_core_scope_prompt_v3: bool = False
     # Formal-profile support-ID experiment; history/draft keep the old schema.
     character_signal_support_id_v4: bool = False
+    # Content-free observation of V4 support-slot submission/validation only.
+    # It neither changes prompts nor accepts otherwise rejected records.
+    character_signal_support_trace_v1: bool = False
     # A draft chunk can receive bounded, one-trait-at-a-time recall calls for
     # undercovered confirmed traits. Keep the selected set no larger than the
     # content-free context boundary; the shared stage budget remains final.
@@ -541,6 +544,11 @@ class Settings(BaseSettings):
             and not self.character_signal_full_line_prompt_v2
         ):
             raise ValueError("character signal support id v4 requires full line v2")
+        if (
+            self.character_signal_support_trace_v1
+            and not self.character_signal_support_id_v4
+        ):
+            raise ValueError("character signal support trace v1 requires support id v4")
         if (
             self.character_signal_total_deadline_seconds
             < self.character_signal_timeout_seconds

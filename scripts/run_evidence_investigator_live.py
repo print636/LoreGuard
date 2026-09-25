@@ -359,6 +359,9 @@ _CHARACTER_SIGNAL_CORE_SCOPE_KEY = "signal_core_scope_v3"
 _CHARACTER_SIGNAL_SUPPORT_ID_KEY = "signal_support_id_v4"
 _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY = "signal_support_segmenter_version"
 _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION = "assertion-index-v1"
+_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY = "signal_support_trace_v1"
+_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY = "signal_support_trace_version"
+_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION = "support-trace-v1"
 _INVESTIGATOR_INTEGER_LIMIT_KEYS = frozenset(
     {
         "max_seeds",
@@ -2857,6 +2860,15 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
                 _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
                 _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
             },
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
+            },
         }
         or character_limits.get("sensitivity")
         not in _CHARACTER_CONSISTENCY_SENSITIVITIES
@@ -2890,6 +2902,19 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             return None
         safe_character_limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] = variant
         safe_character_limits[_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY] = segmenter
+    if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in character_limits:
+        variant = character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY]
+        trace_version = character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY]
+        if (
+            type(variant) is not bool
+            or (variant and character_limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] is not True)
+            or trace_version != (
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION if variant else None
+            )
+        ):
+            return None
+        safe_character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY] = variant
+        safe_character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY] = trace_version
     for key, (minimum, maximum) in (
         _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS.items()
     ):

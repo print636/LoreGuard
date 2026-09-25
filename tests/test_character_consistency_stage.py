@@ -52,6 +52,9 @@ from app.character_trait_extraction import (
     CharacterSignalDiagnostics,
     CharacterSignalExtractionResult,
     CharacterSignalTarget,
+    SupportTraceAttemptV1,
+    SupportTraceEventV1,
+    SupportTraceV1,
     _targeted_chunk_prompt,
 )
 from app.config import Settings
@@ -774,6 +777,125 @@ def test_v4_same_line_support_ids_survive_stage_without_double_counting_line_evi
     assert result.diagnostics["counts"]["pending_candidate_count"] == 1
     assert len(candidates) == 1
     assert len(candidates[0].evidence) == 1
+
+
+@pytest.mark.parametrize("trace_enabled", (False, True))
+def test_stage_support_trace_marks_missing_formal_trace_unavailable(
+    monkeypatch, trace_enabled: bool,
+):
+    monkeypatch.setattr(
+        "app.character_consistency_stage._MAX_SUPPORT_TRACE_CHUNKS", 1
+    )
+    private_lines = ("甲始终喜欢热茶。", "乙始终喜欢梨汤。")
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"匿名断言诊断-{uuid4().hex}"}
+        ).json()
+        for index, line in enumerate(private_lines):
+            _create_document(
+                client, project["id"], name=f"private-{index}.md",
+                role="character_profile", content=line,
+                narrative_context=_context(publication="published"),
+            )
+        diagnostic = CharacterSignalDiagnostics(
+            outcome="skipped", attempted_calls=0, raw_records=0,
+            accepted_records=0, rejected_records=0,
+        )
+        mocked_diagnostic = SimpleNamespace(
+            **diagnostic.model_dump(), support_trace=None,
+        )
+        mocked_extraction = SimpleNamespace(
+            signals=(), diagnostics=mocked_diagnostic,
+        )
+        with patch(
+            "app.character_consistency_stage.CharacterSignalExtractor.extract",
+            return_value=mocked_extraction,
+        ) as mock_extract:
+            result = _run_stage(
+                _new_run(client, project["id"]), QueueProvider(),
+                character_signal_full_line_prompt_v2=True,
+                character_signal_support_id_v4=True,
+                character_signal_support_trace_v1=trace_enabled,
+            )
+
+    assert mock_extract.call_count == 2
+    diagnostics = result.diagnostics
+    if not trace_enabled:
+        assert "support_trace_chunks" not in diagnostics
+        assert "support_trace_chunks_omitted_count" not in diagnostics
+        return
+    assert diagnostics["support_trace_chunks"] == [
+        {
+            "stage_chunk_ordinal": 1,
+            "outcome": "skipped",
+            "availability": "unavailable",
+            "trace": None,
+        }
+    ]
+    assert diagnostics["support_trace_chunks_omitted_count"] == 1
+    serialized = json.dumps(diagnostics["support_trace_chunks"], ensure_ascii=False)
+    assert all(value not in serialized for value in (
+        *private_lines, "private-0.md", "private-1.md", "L1:A1",
+    ))
+
+
+def test_stage_support_trace_exports_validated_formal_chunk_only():
+    profile_line = "甲长期喜欢热茶，甲始终喜欢梨汤。"
+    draft_line = "甲走进房间。"
+    trace = SupportTraceV1(
+        indexed_support_count=2,
+        attempts=(SupportTraceAttemptV1(
+            attempt=1, observability="parsed", submitted_slots=(2,),
+            events=(SupportTraceEventV1(slot=2, outcome="accepted"),),
+            unbound_record_events=0,
+        ),),
+        final_state="clean", final_accepted_slots=(2,),
+    )
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"断言诊断关联-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="private-profile.md",
+            role="character_profile", content=profile_line,
+            narrative_context=_context(publication="published"),
+        )
+        _create_document(
+            client, project["id"], name="private-draft.md", role="chapter",
+            content=draft_line,
+            narrative_context=_context(publication="draft"),
+        )
+        diagnostics = CharacterSignalDiagnostics(
+            outcome="completed", attempted_calls=1, raw_records=1,
+            accepted_records=1, rejected_records=0, support_trace=trace,
+        )
+        extraction = CharacterSignalExtractionResult(diagnostics=diagnostics)
+        with patch(
+            "app.character_consistency_stage.CharacterSignalExtractor.extract",
+            return_value=extraction,
+        ) as mock_extract:
+            result = _run_stage(
+                _new_run(client, project["id"]), QueueProvider(),
+                character_signal_full_line_prompt_v2=True,
+                character_signal_support_id_v4=True,
+                character_signal_support_trace_v1=True,
+            )
+
+    assert mock_extract.call_count == 2
+    assert result.diagnostics["support_trace_chunks"] == [
+        {
+            "stage_chunk_ordinal": 1,
+            "outcome": "completed",
+            "availability": "available",
+            "trace": trace.model_dump(mode="json"),
+        }
+    ]
+    assert result.diagnostics["support_trace_chunks_omitted_count"] == 0
+    serialized = json.dumps(result.diagnostics["support_trace_chunks"], ensure_ascii=False)
+    assert all(value not in serialized for value in (
+        profile_line, draft_line, "private-profile.md", "private-draft.md",
+        "L1:A1", "L1:A2",
+    ))
 
 
 def test_accepted_signal_diagnostics_are_content_free_and_explain_history_singleton():

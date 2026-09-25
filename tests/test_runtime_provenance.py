@@ -222,6 +222,35 @@ def test_health_api_provenance_exposes_versioned_support_id_without_prompt_or_so
     assert "https://" not in serialized
 
 
+def test_runtime_provenance_support_trace_is_versioned_and_requires_v4():
+    off = safe_runtime_provenance(configured_settings())
+    limits = off["character_consistency_limits"]
+    assert limits["signal_support_trace_v1"] is False
+    assert limits["signal_support_trace_version"] is None
+    assert live_runner._safe_runtime_provenance(off) == off
+
+    enabled = safe_runtime_provenance(configured_settings(
+        character_signal_full_line_prompt_v2=True,
+        character_signal_support_id_v4=True,
+        character_signal_support_trace_v1=True,
+    ))
+    assert enabled["character_consistency_limits"]["signal_support_trace_v1"] is True
+    assert enabled["character_consistency_limits"]["signal_support_trace_version"] == "support-trace-v1"
+    assert live_runner._safe_runtime_provenance(enabled) == enabled
+    for mutation in (
+        {"signal_support_trace_v1": "false"},
+        {"signal_support_trace_v1": True, "signal_support_id_v4": False},
+        {"signal_support_trace_version": "untrusted"},
+    ):
+        tampered = json.loads(json.dumps(enabled))
+        tampered["character_consistency_limits"].update(mutation)
+        assert live_runner._safe_runtime_provenance(tampered) is None
+    legacy = json.loads(json.dumps(enabled))
+    del legacy["character_consistency_limits"]["signal_support_trace_v1"]
+    del legacy["character_consistency_limits"]["signal_support_trace_version"]
+    assert live_runner._safe_runtime_provenance(legacy) == legacy
+
+
 def test_runtime_provenance_marks_unversioned_build_without_inventing_revision():
     result = safe_runtime_provenance(
         configured_settings(loreguard_build_revision="")

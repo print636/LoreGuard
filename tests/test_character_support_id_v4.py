@@ -621,3 +621,143 @@ def test_v4_budget_denial_is_zero_call_and_zero_charge_with_or_without_v3(
     assert result.diagnostics.reason_counts == {"token_budget": 1}
     assert provider.calls == []
     assert usage.safe_dict(terminal_status="failed") is None
+
+
+def test_v4_support_trace_is_default_off_and_never_changes_public_diagnostics_shape():
+    source = "林澈一直喜欢蜜瓜。"
+    provider = QueueProvider(response(record(source, "L10:A1", "林澈一直喜欢蜜瓜")))
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(chunk(source))
+
+    assert result.diagnostics.support_trace is None
+    assert "support_trace" not in result.diagnostics.model_dump()
+    assert len(result.signals) == 1
+
+
+def test_v4_support_trace_separates_attempt_events_from_final_clean_slots():
+    source = "林澈喜欢蜜瓜，林澈喜欢热茶。"
+    first = record(source, "L10:A1", "林澈喜欢蜜瓜")
+    bad = record(
+        source, "L10:A2", "林澈喜欢热茶", key_object="热茶",
+        trait_key="tea_preference",
+    )
+    bad["evidence"] = "截断证据"
+    recovered = {**bad, "evidence": source}
+    provider = QueueProvider(response(first, bad), response(first, recovered))
+    result = CharacterSignalExtractor(
+        provider, settings=settings(character_signal_support_trace_v1=True)
+    ).extract(chunk(source))
+
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.attempted_calls == 2
+    assert len(result.signals) == 2
+    trace = result.diagnostics.support_trace
+    assert trace is not None
+    assert trace.schema_version == "support-trace-v1"
+    assert trace.indexed_support_count == 2
+    assert trace.final_state == "clean"
+    assert trace.final_accepted_slots == (1, 2)
+    assert trace.candidate_transition == "unavailable"
+    assert [attempt.observability for attempt in trace.attempts] == [
+        "parsed", "parsed",
+    ]
+    assert [(event.slot, event.outcome, event.reason) for event in trace.attempts[0].events] == [
+        (1, "accepted", None), (2, "rejected", "evidence_mismatch"),
+    ]
+    assert [event.outcome for event in trace.attempts[1].events] == [
+        "accepted", "accepted",
+    ]
+    serialized = json.dumps(trace.model_dump(mode="json"), ensure_ascii=False)
+    assert all(fragment not in serialized for fragment in (
+        "林澈", "蜜瓜", "热茶", "L10:A1", "L10:A2", "截断证据",
+    ))
+    assert "support_trace" not in result.diagnostics.model_dump()
+
+
+def test_v4_support_trace_marks_unknown_ids_and_invalid_json_as_unobservable():
+    source = "林澈喜欢蜜瓜。"
+    invalid = record(source, "L10:A1", "林澈喜欢蜜瓜")
+    invalid["support_id"] = "SECRET_URL_https://example.invalid/L10:A1"
+    provider = QueueProvider(response(invalid), response())
+    result = CharacterSignalExtractor(
+        provider, settings=settings(character_signal_support_trace_v1=True)
+    ).extract(chunk(source))
+    trace = result.diagnostics.support_trace
+    assert trace is not None
+    assert trace.attempts[0].observability == "partial"
+    assert trace.attempts[0].submitted_slots == ()
+    assert trace.attempts[0].unbound_record_events == 1
+    assert trace.final_state == "clean"
+    assert "SECRET_URL" not in json.dumps(trace.model_dump(mode="json"))
+
+    malformed = QueueProvider('{broken', response())
+    retried = CharacterSignalExtractor(
+        malformed, settings=settings(character_signal_support_trace_v1=True)
+    ).extract(chunk(source))
+    assert retried.diagnostics.support_trace is not None
+    assert retried.diagnostics.support_trace.attempts[0].observability == "unavailable"
+    assert retried.diagnostics.support_trace.attempts[0].submitted_slots == ()
+
+
+def test_v4_support_trace_model_copy_guard_and_zero_call_budget():
+    with pytest.raises(ValueError, match="support trace v1 requires support id v4"):
+        settings(
+            character_signal_support_id_v4=False,
+            character_signal_support_trace_v1=True,
+        )
+    provider = QueueProvider(response())
+    usage = CharacterConsistencyUsageAccumulator()
+    for invalid in (
+        {"character_signal_support_trace_v1": "false"},
+        {
+            "character_signal_support_id_v4": False,
+            "character_signal_support_trace_v1": True,
+        },
+    ):
+        configured = settings().model_copy(update=invalid)
+        accounting = _CharacterConsistencyAccountingProvider(
+            configured, usage, signal_provider=provider, drift_provider=provider,
+        )
+        with pytest.raises(RuntimeError):
+            CharacterSignalExtractor(accounting, settings=configured).extract(
+                chunk("林澈喜欢蜜瓜。")
+            )
+        with pytest.raises(RuntimeError):
+            accounting.complete(CHARACTER_SIGNAL_SYSTEM_PROMPT, "invalid flag")
+    assert provider.calls == []
+    assert usage.safe_dict(terminal_status="failed") is None
+
+    configured = settings(
+        character_signal_support_trace_v1=True,
+        character_signal_token_budget=4_096,
+        character_signal_max_completion_tokens=64,
+    )
+    accounting = _CharacterConsistencyAccountingProvider(
+        configured, usage, signal_provider=provider, drift_provider=provider,
+    )
+    with patch(
+        "app.character_trait_extraction.estimate_issue_evidence_review_tokens",
+        return_value=9_999,
+    ):
+        skipped = CharacterSignalExtractor(accounting, settings=configured).extract(
+            chunk("林澈喜欢蜜瓜。")
+        )
+    assert skipped.diagnostics.support_trace is not None
+    assert skipped.diagnostics.support_trace.final_state == "no_call"
+    assert skipped.diagnostics.support_trace.attempts == ()
+    assert provider.calls == []
+    assert usage.safe_dict(terminal_status="failed") is None
+
+
+def test_v4_observability_failure_cannot_change_clean_extraction():
+    source = "林澈喜欢蜜瓜。"
+    provider = QueueProvider(response(record(source, "L10:A1", "林澈喜欢蜜瓜")))
+    with patch(
+        "app.character_trait_extraction._support_trace_attempt",
+        side_effect=RuntimeError("synthetic diagnostic failure"),
+    ):
+        result = CharacterSignalExtractor(
+            provider, settings=settings(character_signal_support_trace_v1=True)
+        ).extract(chunk(source))
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.diagnostics.support_trace is None

@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.character_trait_extraction import stable_trait_identity
+from app.character_trait_extraction import SupportTraceV1, stable_trait_identity
 from scripts.run_character_consistency_live import (
     _baseline_admission,
     _candidate_id_sha256,
@@ -46,6 +46,9 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
     _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
     _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION,
+    _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
+    _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
+    _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION,
     _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
     _local_service_artifact_sha256,
 )
@@ -73,6 +76,7 @@ SAFE_REASON_KEYS = frozenset({
     "regenerated_from_core_label_scope", "core_label_scope",
     "support_index_invalid", "support_id_invalid", "support_label_scope",
     "regenerated_from_support_id_invalid", "regenerated_from_support_label_scope",
+    "character_support", "regenerated_from_character_support",
     "key_object_support", "statement_support",
     "lower_authority_baseline_shadowed", "invalid_confirmed_trait_snapshot",
     "chunk_limit", "confirmed_trait_hint_ambiguous",
@@ -754,6 +758,15 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
                 _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
                 _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
             },
+            _CHARACTER_CONSISTENCY_LIMIT_KEYS
+            | {
+                _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+                _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
+            },
         }
         or limits.get("sensitivity") not in {"conservative", "balanced", "exploratory"}
     ):
@@ -780,6 +793,18 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or limits[_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY] != (
             _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
             if limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] else None
+        )
+    ):
+        return None
+    if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in limits and (
+        type(limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY]) is not bool
+        or (
+            limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY]
+            and limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] is not True
+        )
+        or limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY] != (
+            _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION
+            if limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY] else None
         )
     ):
         return None
@@ -825,6 +850,105 @@ def _runtime_provenance_digest(value: object) -> str | None:
         safe, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         allow_nan=False,
     ))
+
+
+def _safe_support_trace_chunks(
+    stage: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int] | None:
+    """Final HTTP boundary for the anonymous V4 trace; never echo API data."""
+
+    raw = stage.get("support_trace_chunks")
+    omitted = stage.get("support_trace_chunks_omitted_count")
+    counts = stage.get("counts")
+    processed = (
+        stage.get("processed_chunks")
+        if "processed_chunks" in stage
+        else counts.get("processed_chunks")
+        if type(counts) is dict
+        else None
+    )
+    if (
+        type(raw) is not list
+        or len(raw) > 128
+        or type(omitted) is not int
+        or not 0 <= omitted <= 128
+        or len(raw) + omitted > 128
+        or (
+            processed is not None
+            and (type(processed) is not int or not 0 <= processed <= 128)
+        )
+    ):
+        return None
+    safe: list[dict[str, Any]] = []
+    previous_ordinal = 0
+    for row in raw:
+        if type(row) is not dict or len(row) != 4 or set(row) != {
+            "stage_chunk_ordinal", "outcome", "availability", "trace"
+        }:
+            return None
+        ordinal = row["stage_chunk_ordinal"]
+        outcome = row["outcome"]
+        availability = row["availability"]
+        if (
+            type(ordinal) is not int
+            or not previous_ordinal < ordinal <= 128
+            or (processed is not None and ordinal > processed)
+            or type(outcome) is not str
+            or outcome not in {"disabled", "completed", "partial", "degraded", "skipped"}
+            or type(availability) is not str
+            or availability not in {"available", "unavailable"}
+        ):
+            return None
+        previous_ordinal = ordinal
+        if availability == "unavailable":
+            if row["trace"] is not None:
+                return None
+            trace = None
+        else:
+            if type(row["trace"]) is not dict:
+                return None
+            raw_trace = row["trace"]
+            if len(raw_trace) != 6 or set(raw_trace) != {
+                "schema_version", "indexed_support_count", "attempts",
+                "final_state", "final_accepted_slots", "candidate_transition",
+            } or type(raw_trace["attempts"]) is not list or len(raw_trace["attempts"]) > 2:
+                return None
+            if (
+                type(raw_trace["final_accepted_slots"]) is not list
+                or len(raw_trace["final_accepted_slots"]) > 64
+            ):
+                return None
+            for attempt in raw_trace["attempts"]:
+                if type(attempt) is not dict or len(attempt) != 5 or set(attempt) != {
+                    "attempt", "observability", "submitted_slots", "events",
+                    "unbound_record_events",
+                } or type(attempt["events"]) is not list or len(attempt["events"]) > 64:
+                    return None
+                if (
+                    type(attempt["submitted_slots"]) is not list
+                    or len(attempt["submitted_slots"]) > 64
+                ):
+                    return None
+                if any(
+                    type(event) is not dict
+                    or len(event) != 3
+                    or set(event) != {"slot", "outcome", "reason"}
+                    for event in attempt["events"]
+                ):
+                    return None
+            try:
+                trace = SupportTraceV1.model_validate(raw_trace).model_dump(
+                    mode="json"
+                )
+            except (ValueError, TypeError):
+                return None
+        safe.append({
+            "stage_chunk_ordinal": ordinal,
+            "outcome": outcome,
+            "availability": availability,
+            "trace": trace,
+        })
+    return safe, omitted
 
 
 def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: set[str]) -> dict[str, Any]:
@@ -888,7 +1012,7 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
         _safe_visible_issue(row, case_trace=safe_trace)
         for row in issues if isinstance(row, dict) and row.get("category") == "character_drift"
     ]
-    return {
+    summary = {
         "run_id": run_id,
         "runtime_provenance_sha256": _runtime_provenance_digest(
             diagnostics.get("runtime_provenance")
@@ -926,6 +1050,21 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
         "accepted_draft_observation_refs": accepted_draft_refs,
         "visible_issue_cases": safe_issues,
     }
+    provenance = _safe_character_runtime_provenance(
+        diagnostics.get("runtime_provenance")
+    )
+    if (
+        provenance is not None
+        and provenance["character_consistency_limits"].get(
+            _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY
+        ) is True
+    ):
+        projected = _safe_support_trace_chunks(stage)
+        summary["support_trace_chunks"] = projected[0] if projected else None
+        summary["support_trace_chunks_omitted_count"] = (
+            projected[1] if projected else None
+        )
+    return summary
 
 
 def _list_pending(client: httpx.Client, project_id: str) -> list[dict[str, Any]]:
@@ -1607,6 +1746,10 @@ def _public_run(summary: dict[str, Any] | None) -> dict[str, Any] | None:
     for key, maximum in PUBLIC_RUN_COUNTER_LIMITS.items():
         public[key] = _safe_public_counter(summary.get(key), maximum=maximum)
     public["stage_usage"] = _safe_public_stage_usage(summary.get("stage_usage"))
+    if "support_trace_chunks" in summary or "support_trace_chunks_omitted_count" in summary:
+        projected = _safe_support_trace_chunks(summary)
+        public["support_trace_chunks"] = projected[0] if projected else None
+        public["support_trace_chunks_omitted_count"] = projected[1] if projected else None
     return public
 
 
@@ -1800,6 +1943,27 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
             and limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY) is True
             and limits.get(_CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY)
             == _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION
+            else None
+        ),
+        "signal_support_trace_v1": (
+            limits.get(_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY)
+            if type(limits.get(_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY)) is bool
+            and (
+                limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY] is False
+                or limits.get(_CHARACTER_SIGNAL_SUPPORT_ID_KEY) is True
+            )
+            and limits.get(_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY) == (
+                _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION
+                if limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY] else None
+            )
+            else None
+        ),
+        "signal_support_trace_version": (
+            _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION
+            if limits.get(_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY) is True
+            and limits.get(_CHARACTER_SIGNAL_SUPPORT_ID_KEY) is True
+            and limits.get(_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY)
+            == _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION
             else None
         ),
     }

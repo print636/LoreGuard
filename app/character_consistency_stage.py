@@ -32,6 +32,7 @@ from .character_trait_extraction import (
     CharacterSignalExtractor,
     CharacterSignalTarget,
     PendingTraitCandidate,
+    SupportTraceV1,
     build_pending_trait_candidates,
     preference_modifier_bridge,
     safe_pronoun_evidence_range,
@@ -141,6 +142,10 @@ _CASE_TRACE_CITATION_HANDLE = re.compile(r"^[BCGX][0-9]{2}$")
 _MAX_ACCEPTED_DRAFT_OBSERVATION_REFS = 64
 _MAX_TOKEN_ADMISSION_EVENTS = 24
 _MAX_EVIDENCE_MISMATCH_CHUNKS = 128
+_MAX_SUPPORT_TRACE_CHUNKS = 128
+_SAFE_SIGNAL_OUTCOMES = frozenset(
+    {"disabled", "completed", "partial", "degraded", "skipped"}
+)
 _EVIDENCE_MISMATCH_KINDS = frozenset(
     {
         "presentation_difference", "unique_other_line", "multiline_omission",
@@ -305,14 +310,20 @@ class CharacterConsistencyStage:
         if not settings.enable_character_consistency:
             return _empty_stage_result("disabled", "feature_disabled")
         if type(remaining_run_tokens) is not int or remaining_run_tokens < 0:
-            return _empty_stage_result("degraded", "invalid_remaining_budget")
+            return _empty_stage_result(
+                "degraded", "invalid_remaining_budget",
+                support_trace_enabled=settings.character_signal_support_trace_v1,
+            )
 
         stage_budget = min(
             settings.character_consistency_stage_token_budget,
             remaining_run_tokens,
         )
         if stage_budget < 256:
-            return _empty_stage_result("skipped", "run_token_budget")
+            return _empty_stage_result(
+                "skipped", "run_token_budget",
+                support_trace_enabled=settings.character_signal_support_trace_v1,
+            )
 
         usage = _Usage()
         reason_counts: Counter[str] = Counter()
@@ -320,6 +331,8 @@ class CharacterConsistencyStage:
         core_label_scope_counts: Counter[str] = Counter()
         evidence_mismatch_chunks: list[dict[str, Any]] = []
         evidence_mismatch_chunks_omitted = 0
+        support_trace_chunks: list[dict[str, Any]] = []
+        support_trace_chunks_omitted = 0
         frozen = self._bind_frozen_documents(
             db,
             run_id=run_id,
@@ -337,6 +350,7 @@ class CharacterConsistencyStage:
                     reasons=reason_counts,
                     source_total=len(frozen),
                     source_eligible=0,
+                    support_trace_enabled=settings.character_signal_support_trace_v1,
                 )
             )
 
@@ -556,6 +570,38 @@ class CharacterConsistencyStage:
                 }
             )
 
+        def record_support_trace(
+            extraction: object, *, source: _FrozenDocument, chunk_ordinal: int
+        ) -> None:
+            nonlocal support_trace_chunks_omitted
+            if (
+                not settings.character_signal_support_trace_v1
+                or source.source_kind != "formal_character_profile"
+            ):
+                return
+            if len(support_trace_chunks) >= _MAX_SUPPORT_TRACE_CHUNKS:
+                support_trace_chunks_omitted += 1
+                return
+            diagnostics = getattr(extraction, "diagnostics", None)
+            raw_outcome = getattr(diagnostics, "outcome", None)
+            outcome = (
+                raw_outcome
+                if type(raw_outcome) is str
+                and raw_outcome in _SAFE_SIGNAL_OUTCOMES
+                else "degraded"
+            )
+            trace = _validated_support_trace_payload(
+                getattr(diagnostics, "support_trace", None)
+            )
+            support_trace_chunks.append(
+                {
+                    "stage_chunk_ordinal": chunk_ordinal,
+                    "outcome": outcome,
+                    "availability": "available" if trace is not None else "unavailable",
+                    "trace": trace,
+                }
+            )
+
         def record_token_admission(
             phase: str,
             extraction: object,
@@ -615,6 +661,9 @@ class CharacterConsistencyStage:
                 )
             )
             processed_chunks += 1
+            record_support_trace(
+                extraction, source=source, chunk_ordinal=chunk_ordinal
+            )
             record_token_admission(
                 "primary_extraction",
                 extraction,
@@ -1391,6 +1440,9 @@ class CharacterConsistencyStage:
             accepted_model_core_without_literal_label_count=(
                 accepted_model_core_without_literal_label_count
             ),
+            support_trace_enabled=settings.character_signal_support_trace_v1,
+            support_trace_chunks=support_trace_chunks,
+            support_trace_chunks_omitted_count=support_trace_chunks_omitted,
         )
         return CharacterConsistencyStageResult(
             issues=tuple(issues),
@@ -3247,6 +3299,19 @@ def _safe_case_trace(
     }
 
 
+def _validated_support_trace_payload(trace: object) -> dict[str, Any] | None:
+    """Expose only the extractor's bounded, validated content-free schema."""
+
+    if not isinstance(trace, SupportTraceV1):
+        return None
+    try:
+        return SupportTraceV1.model_validate(trace.model_dump()).model_dump(
+            mode="json"
+        )
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def _diagnostics(
     *,
     outcome: str,
@@ -3266,9 +3331,12 @@ def _diagnostics(
     evidence_mismatch_chunks_omitted_count: int = 0,
     core_label_scope_counts: Counter[str] | None = None,
     accepted_model_core_without_literal_label_count: int = 0,
+    support_trace_enabled: bool = False,
+    support_trace_chunks: list[dict[str, Any]] | None = None,
+    support_trace_chunks_omitted_count: int = 0,
     **counts: Any,
 ) -> dict[str, Any]:
-    return {
+    diagnostics = {
         "enabled": True,
         "outcome": outcome,
         "reason_code": reason_code,
@@ -3311,42 +3379,54 @@ def _diagnostics(
             "scope, branch compatibility or confirmation state."
         ),
     }
+    if support_trace_enabled:
+        diagnostics["support_trace_chunks"] = list(support_trace_chunks or ())
+        diagnostics["support_trace_chunks_omitted_count"] = (
+            support_trace_chunks_omitted_count
+        )
+    return diagnostics
 
 
-def _empty_stage_result(outcome: str, reason_code: str) -> CharacterConsistencyStageResult:
+def _empty_stage_result(
+    outcome: str, reason_code: str, *, support_trace_enabled: bool = False
+) -> CharacterConsistencyStageResult:
     enabled = outcome != "disabled"
+    diagnostics = {
+        "enabled": enabled,
+        "outcome": outcome,
+        "reason_code": reason_code,
+        "checker_version": CHARACTER_CONSISTENCY_CHECKER_VERSION,
+        "snapshot_bound": True,
+        "material_coverage": "unknown",
+        "counts": {},
+        "case_trace": [],
+        "accepted_signal_histogram": [],
+        "candidate_eligibility": {
+            "stable_or_core_formal_signals": 0,
+            "stable_or_core_history_signals": 0,
+            "prelimit_candidates": 0,
+        },
+        "accepted_draft_observation_refs": [],
+        "accepted_draft_observation_total": 0,
+        "accepted_draft_observation_refs_truncated": False,
+        "token_admission_events": [],
+        "reason_counts": {},
+        "evidence_mismatch_counts": {},
+        "evidence_mismatch_chunks": [],
+        "evidence_mismatch_chunks_omitted_count": 0,
+        "core_label_scope_counts": {},
+        "accepted_model_core_without_literal_label_count": 0,
+        "usage": _Usage().safe_dict(),
+        "boundary": (
+            "Optional frozen-input stage; model output cannot decide authority, "
+            "scope, branch compatibility or confirmation state."
+        ),
+    }
+    if support_trace_enabled:
+        diagnostics["support_trace_chunks"] = []
+        diagnostics["support_trace_chunks_omitted_count"] = 0
     return CharacterConsistencyStageResult(
-        diagnostics={
-            "enabled": enabled,
-            "outcome": outcome,
-            "reason_code": reason_code,
-            "checker_version": CHARACTER_CONSISTENCY_CHECKER_VERSION,
-            "snapshot_bound": True,
-            "material_coverage": "unknown",
-            "counts": {},
-            "case_trace": [],
-            "accepted_signal_histogram": [],
-            "candidate_eligibility": {
-                "stable_or_core_formal_signals": 0,
-                "stable_or_core_history_signals": 0,
-                "prelimit_candidates": 0,
-            },
-            "accepted_draft_observation_refs": [],
-            "accepted_draft_observation_total": 0,
-            "accepted_draft_observation_refs_truncated": False,
-            "token_admission_events": [],
-            "reason_counts": {},
-            "evidence_mismatch_counts": {},
-            "evidence_mismatch_chunks": [],
-            "evidence_mismatch_chunks_omitted_count": 0,
-            "core_label_scope_counts": {},
-            "accepted_model_core_without_literal_label_count": 0,
-            "usage": _Usage().safe_dict(),
-            "boundary": (
-                "Optional frozen-input stage; model output cannot decide authority, "
-                "scope, branch compatibility or confirmation state."
-            ),
-        }
+        diagnostics=diagnostics
     )
 
 

@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictInt,
     TypeAdapter,
     ValidationError,
     model_validator,
@@ -75,6 +76,7 @@ _MAX_SIGNAL_RESPONSE_RECORDS = 64
 # squeeze under the budget: an incomplete list would weaken coverage checks.
 _MAX_SIGNAL_REGENERATION_METADATA_CHARS = 8_192
 ASSERTION_INDEX_V1 = "assertion-index-v1"
+SUPPORT_TRACE_V1 = "support-trace-v1"
 _MAX_SUPPORT_CLAUSES_PER_CHUNK = 256
 _MAX_SUPPORT_CLAUSES_PER_LINE = 64
 _MAX_SUPPORT_PROMPT_CHARS = 20_000
@@ -624,6 +626,98 @@ class CharacterSignalTokenAdmission(BaseModel):
     available_tokens: int = Field(ge=0, le=1_000_000)
 
 
+class SupportTraceEventV1(BaseModel):
+    """One model record outcome, identified only by an index-local anonymous slot."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    slot: int = Field(ge=1, le=_MAX_SUPPORT_CLAUSES_PER_CHUNK, strict=True)
+    outcome: Literal["accepted", "rejected", "ignored_duplicate"]
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _fixed_reason(self) -> SupportTraceEventV1:
+        if self.outcome == "rejected":
+            if self.reason not in _SIGNAL_PACKAGE_VALIDATION_REASONS:
+                raise ValueError("unsafe support trace reason")
+        elif self.reason is not None:
+            raise ValueError("support trace reason belongs to rejection only")
+        return self
+
+
+class SupportTraceAttemptV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt: int = Field(ge=1, le=2, strict=True)
+    observability: Literal["parsed", "partial", "unavailable"]
+    submitted_slots: tuple[StrictInt, ...] = Field(max_length=_MAX_SIGNAL_RESPONSE_RECORDS)
+    events: tuple[SupportTraceEventV1, ...] = Field(max_length=_MAX_SIGNAL_RESPONSE_RECORDS)
+    unbound_record_events: int = Field(ge=0, le=_MAX_SIGNAL_RESPONSE_RECORDS, strict=True)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> SupportTraceAttemptV1:
+        if (
+            self.observability == "unavailable"
+            and (self.submitted_slots or self.events or self.unbound_record_events)
+        ) or (self.observability == "parsed" and self.unbound_record_events):
+            raise ValueError("support trace observability is inconsistent")
+        if tuple(sorted(set(self.submitted_slots))) != self.submitted_slots:
+            raise ValueError("support trace submitted slots are invalid")
+        if any(item.slot not in self.submitted_slots for item in self.events):
+            raise ValueError("support trace event has no submitted slot")
+        if {item.slot for item in self.events} != set(self.submitted_slots):
+            raise ValueError("support trace submitted slots lack events")
+        if self.unbound_record_events + len(self.events) > _MAX_SIGNAL_RESPONSE_RECORDS:
+            raise ValueError("support trace record count exceeds bound")
+        return self
+
+
+class SupportTraceV1(BaseModel):
+    """Bounded content-free extraction trace; candidate linkage is unavailable."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["support-trace-v1"] = SUPPORT_TRACE_V1
+    indexed_support_count: int = Field(ge=0, le=_MAX_SUPPORT_CLAUSES_PER_CHUNK, strict=True)
+    attempts: tuple[SupportTraceAttemptV1, ...] = Field(max_length=2)
+    final_state: Literal["clean", "no_clean_package", "no_call"]
+    final_accepted_slots: tuple[StrictInt, ...] = Field(max_length=_MAX_SIGNAL_RESPONSE_RECORDS)
+    candidate_transition: Literal["unavailable"] = "unavailable"
+
+    @model_validator(mode="after")
+    def _consistent(self) -> SupportTraceV1:
+        if tuple(attempt.attempt for attempt in self.attempts) != tuple(
+            range(1, len(self.attempts) + 1)
+        ):
+            raise ValueError("support trace attempts are not ordered")
+        if self.final_state == "no_call" and (self.attempts or self.final_accepted_slots):
+            raise ValueError("no-call trace cannot have attempts")
+        if self.final_state == "no_clean_package" and not self.attempts:
+            raise ValueError("unclean trace needs an attempted call")
+        if self.final_state != "clean" and self.final_accepted_slots:
+            raise ValueError("unclean trace cannot have accepted slots")
+        if tuple(sorted(set(self.final_accepted_slots))) != self.final_accepted_slots:
+            raise ValueError("final accepted slots are invalid")
+        if any(slot > self.indexed_support_count for slot in self.final_accepted_slots):
+            raise ValueError("final accepted slot exceeds index")
+        if any(
+            slot < 1 or slot > self.indexed_support_count
+            for attempt in self.attempts
+            for slot in attempt.submitted_slots
+        ):
+            raise ValueError("submitted slot exceeds index")
+        if self.final_state == "clean" and (
+            not self.attempts
+            or self.attempts[-1].observability != "parsed"
+            or not set(self.final_accepted_slots).issubset({
+                event.slot for event in self.attempts[-1].events
+                if event.outcome == "accepted"
+            })
+        ):
+            raise ValueError("clean slots do not match final attempt")
+        return self
+
+
 class CharacterSignalDiagnostics(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -647,6 +741,9 @@ class CharacterSignalDiagnostics(BaseModel):
     completion_tokens: int = Field(default=0, ge=0)
     charged_tokens: int = Field(default=0, ge=0)
     token_admission: CharacterSignalTokenAdmission | None = None
+    # Internal-only field: OFF must preserve the legacy serialized response.
+    # The stage exports a separately bounded and validated trace when enabled.
+    support_trace: SupportTraceV1 | None = Field(default=None, exclude=True)
 
 
 class CharacterSignalExtractionResult(BaseModel):
@@ -687,6 +784,7 @@ class _ValidatedSignalPackage:
     evidence_mismatch_counts: dict[EvidenceMismatchKind, int] | None = None
     core_label_scope_counts: dict[CoreLabelScopeKind, int] | None = None
     failures: tuple[_SignalValidationFailure, ...] = ()
+    support_trace_attempt: SupportTraceAttemptV1 | None = None
 
     @property
     def complete(self) -> bool:
@@ -740,12 +838,18 @@ def _validate_signal_prompt_variant_settings(settings: Settings) -> None:
     full_line = settings.character_signal_full_line_prompt_v2
     core_scope = settings.character_signal_core_scope_prompt_v3
     support_id = settings.character_signal_support_id_v4
-    if any(type(flag) is not bool for flag in (full_line, core_scope, support_id)):
+    support_trace = settings.character_signal_support_trace_v1
+    if any(
+        type(flag) is not bool
+        for flag in (full_line, core_scope, support_id, support_trace)
+    ):
         raise RuntimeError("character signal prompt variant flags must be bool")
     if core_scope and not full_line:
         raise RuntimeError("character signal core scope v3 requires full line v2")
     if support_id and not full_line:
         raise RuntimeError("character signal support id v4 requires full line v2")
+    if support_trace and not support_id:
+        raise RuntimeError("character signal support trace v1 requires support id v4")
 
 
 CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4 = """
@@ -978,10 +1082,23 @@ class CharacterSignalExtractor:
         support_index: AssertionIndexV1 | None = None,
     ) -> CharacterSignalExtractionResult:
         settings = self.settings
+        trace_index = (
+            support_index
+            if settings.character_signal_support_trace_v1 and support_index is not None
+            else None
+        )
         if not settings.enable_character_consistency:
-            return _empty_result("disabled", reason_counts={"feature_disabled": 1})
+            return _empty_result(
+                "disabled",
+                reason_counts={"feature_disabled": 1},
+                support_trace=_support_trace_for_result(trace_index, [], 0),
+            )
         if len(chunk.content) > settings.character_signal_max_chunk_chars:
-            return _empty_result("skipped", reason_counts={"chunk_too_large": 1})
+            return _empty_result(
+                "skipped",
+                reason_counts={"chunk_too_large": 1},
+                support_trace=_support_trace_for_result(trace_index, [], 0),
+            )
         started = self._monotonic()
         total_deadline = _effective_signal_deadline(settings)
         total_prompt_tokens = 0
@@ -1015,6 +1132,7 @@ class CharacterSignalExtractor:
                         completion_tokens=total_completion_tokens,
                         charged_tokens=total_charged_tokens,
                         extra_reason="regeneration_metadata_limit",
+                        support_index=trace_index,
                     )
             estimate = estimate_issue_evidence_review_tokens(
                 system_prompt,
@@ -1035,6 +1153,7 @@ class CharacterSignalExtractor:
                         "skipped",
                         reason_counts={"token_budget": 1},
                         token_admission=admission,
+                        support_trace=_support_trace_for_result(trace_index, [], 0),
                     )
                 return _failed_package_result(
                     validation_attempts,
@@ -1044,6 +1163,7 @@ class CharacterSignalExtractor:
                     charged_tokens=total_charged_tokens,
                     extra_reason="regeneration_token_budget",
                     token_admission=admission,
+                    support_index=trace_index,
                 )
 
             remaining_deadline = total_deadline - (self._monotonic() - started)
@@ -1055,6 +1175,7 @@ class CharacterSignalExtractor:
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
                     extra_reason="regeneration_deadline",
+                    support_index=trace_index,
                 )
 
             call_provider = self.provider
@@ -1084,6 +1205,7 @@ class CharacterSignalExtractor:
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
                     extra_reason=reason,
+                    support_index=trace_index,
                 )
             except Exception:
                 total_charged_tokens += estimate
@@ -1094,6 +1216,7 @@ class CharacterSignalExtractor:
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
                     extra_reason="provider_error",
+                    support_index=trace_index,
                 )
 
             prompt_tokens = _safe_tokens(getattr(response, "prompt_tokens", 0))
@@ -1114,6 +1237,7 @@ class CharacterSignalExtractor:
                 ),
                 settings=settings,
                 support_index=support_index,
+                support_trace_enabled=trace_index is not None,
             )
             if validation.complete and verified_before_clean:
                 missing = _regeneration_coverage_regressions(
@@ -1140,6 +1264,7 @@ class CharacterSignalExtractor:
                                 reason="regeneration_coverage_regression",
                             ),
                         ),
+                        support_trace_attempt=validation.support_trace_attempt,
                     )
             validation_attempts.append(validation)
             if validation.complete:
@@ -1195,6 +1320,12 @@ class CharacterSignalExtractor:
                         prompt_tokens=total_prompt_tokens,
                         completion_tokens=total_completion_tokens,
                         charged_tokens=total_charged_tokens,
+                        support_trace=_support_trace_for_result(
+                            trace_index,
+                            validation_attempts,
+                            attempted_calls,
+                            final_signals=clean,
+                        ),
                     ),
                 )
 
@@ -1208,6 +1339,7 @@ class CharacterSignalExtractor:
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             charged_tokens=total_charged_tokens,
+            support_index=trace_index,
         )
 
 
@@ -1219,6 +1351,7 @@ def _validate_signal_package(
     allowed_targeted_evidence_ranges: tuple[tuple[int, int], ...],
     settings: Settings,
     support_index: AssertionIndexV1 | None = None,
+    support_trace_enabled: bool = False,
 ) -> _ValidatedSignalPackage:
     try:
         response_bytes = len(text.encode("utf-8")) if isinstance(text, str) else None
@@ -1255,6 +1388,8 @@ def _validate_signal_package(
     accepted_groups: set[tuple[str | int | None, ...]] = set()
     accepted_signal_ids: set[str] = set()
     ignored_duplicate_records = 0
+    accepted_record_indices: list[int] = []
+    duplicate_record_indices: list[int] = []
     failures: list[_SignalValidationFailure] = []
     targeted_evidence: dict[
         tuple[str, str, str], set[tuple[int, int]]
@@ -1302,6 +1437,7 @@ def _validate_signal_package(
         group_identity = _raw_signal_group_identity(record)
         if group_identity in accepted_groups or signal.id in accepted_signal_ids:
             ignored_duplicate_records += 1
+            duplicate_record_indices.append(record_index)
             continue
 
         if targets:
@@ -1338,6 +1474,7 @@ def _validate_signal_package(
                 # widened range would let a provider smuggle an excluded line
                 # back in by adjoining one new line.
                 ignored_duplicate_records += 1
+                duplicate_record_indices.append(record_index)
                 continue
             if (
                 allowed_targeted_evidence_ranges
@@ -1369,6 +1506,7 @@ def _validate_signal_package(
         accepted_groups.add(group_identity)
         accepted_signal_ids.add(signal.id)
         signals.append(signal)
+        accepted_record_indices.append(record_index)
 
     return _ValidatedSignalPackage(
         signals=tuple(signals),
@@ -1379,6 +1517,170 @@ def _validate_signal_package(
         evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
         core_label_scope_counts=dict(sorted(core_scope_counts.items())),
         failures=tuple(failures),
+        support_trace_attempt=(
+            _try_support_trace_attempt(
+                support_index,
+                envelope.records,
+                accepted_record_indices=accepted_record_indices,
+                duplicate_record_indices=duplicate_record_indices,
+                failures=failures,
+            )
+            if support_trace_enabled and support_index is not None
+            else None
+        ),
+    )
+
+
+def _support_trace_attempt(
+    index: AssertionIndexV1,
+    raw_records: list[Any],
+    *,
+    accepted_record_indices: list[int],
+    duplicate_record_indices: list[int],
+    failures: list[_SignalValidationFailure],
+) -> SupportTraceAttemptV1:
+    """Project a parsed package onto anonymous index slots, never source IDs."""
+
+    slots = {clause.support_id: ordinal for ordinal, clause in enumerate(index.clauses, 1)}
+    accepted = set(accepted_record_indices)
+    duplicates = set(duplicate_record_indices)
+    rejection = {
+        failure.record_index: failure.reason
+        for failure in failures
+        if failure.record_index is not None
+    }
+    events: list[SupportTraceEventV1] = []
+    submitted: set[int] = set()
+    unbound = 0
+    for record_index, raw in enumerate(raw_records):
+        slot = slots.get(raw.get("support_id")) if isinstance(raw, dict) and type(raw.get("support_id")) is str else None
+        if slot is None:
+            unbound += 1
+            continue
+        submitted.add(slot)
+        if record_index in accepted:
+            events.append(SupportTraceEventV1(slot=slot, outcome="accepted"))
+        elif record_index in duplicates:
+            events.append(SupportTraceEventV1(slot=slot, outcome="ignored_duplicate"))
+        elif record_index in rejection:
+            events.append(SupportTraceEventV1(
+                slot=slot, outcome="rejected", reason=rejection[record_index]
+            ))
+        else:
+            # Future validation branches must not fabricate a disposition.
+            return _unavailable_support_trace_attempt(1)
+    return SupportTraceAttemptV1(
+        attempt=1,
+        observability="partial" if unbound else "parsed",
+        submitted_slots=tuple(sorted(submitted)),
+        events=tuple(events),
+        unbound_record_events=unbound,
+    )
+
+
+def _try_support_trace_attempt(
+    index: AssertionIndexV1,
+    raw_records: list[Any],
+    *,
+    accepted_record_indices: list[int],
+    duplicate_record_indices: list[int],
+    failures: list[_SignalValidationFailure],
+) -> SupportTraceAttemptV1 | None:
+    try:
+        return _support_trace_attempt(
+            index,
+            raw_records,
+            accepted_record_indices=accepted_record_indices,
+            duplicate_record_indices=duplicate_record_indices,
+            failures=failures,
+        )
+    except Exception:
+        # Observability must never become a new extraction rejection path.
+        return None
+
+
+def _unavailable_support_trace_attempt(attempt: int) -> SupportTraceAttemptV1:
+    return SupportTraceAttemptV1(
+        attempt=attempt,
+        observability="unavailable",
+        submitted_slots=(),
+        events=(),
+        unbound_record_events=0,
+    )
+
+
+def _support_trace_for_result(
+    index: AssertionIndexV1 | None,
+    validations: list[_ValidatedSignalPackage],
+    attempted_calls: int,
+    *,
+    final_signals: tuple[CharacterSignal, ...] | None = None,
+) -> SupportTraceV1 | None:
+    try:
+        return _build_support_trace_for_result(
+            index, validations, attempted_calls, final_signals=final_signals
+        )
+    except Exception:
+        # A malformed diagnostic cannot change package admission or retries.
+        return None
+
+
+def _build_support_trace_for_result(
+    index: AssertionIndexV1 | None,
+    validations: list[_ValidatedSignalPackage],
+    attempted_calls: int,
+    *,
+    final_signals: tuple[CharacterSignal, ...] | None = None,
+) -> SupportTraceV1 | None:
+    if index is None or not 0 <= attempted_calls <= 2:
+        return None
+    if len(validations) > attempted_calls:
+        return None
+    slots = {clause.support_id: ordinal for ordinal, clause in enumerate(index.clauses, 1)}
+    attempts = tuple(
+        SupportTraceAttemptV1(
+            attempt=ordinal,
+            observability=(
+                validations[ordinal - 1].support_trace_attempt.observability
+                if ordinal <= len(validations)
+                and validations[ordinal - 1].support_trace_attempt is not None
+                else "unavailable"
+            ),
+            submitted_slots=(
+                validations[ordinal - 1].support_trace_attempt.submitted_slots
+                if ordinal <= len(validations)
+                and validations[ordinal - 1].support_trace_attempt is not None
+                else ()
+            ),
+            events=(
+                validations[ordinal - 1].support_trace_attempt.events
+                if ordinal <= len(validations)
+                and validations[ordinal - 1].support_trace_attempt is not None
+                else ()
+            ),
+            unbound_record_events=(
+                validations[ordinal - 1].support_trace_attempt.unbound_record_events
+                if ordinal <= len(validations)
+                and validations[ordinal - 1].support_trace_attempt is not None
+                else 0
+            ),
+        )
+        for ordinal in range(1, attempted_calls + 1)
+    )
+    final_slots: tuple[int, ...] = ()
+    if final_signals is not None:
+        mapped = [slots.get(signal.support_id) for signal in final_signals]
+        if any(slot is None for slot in mapped):
+            return None
+        final_slots = tuple(sorted(set(mapped)))  # type: ignore[arg-type]
+    return SupportTraceV1(
+        indexed_support_count=len(index.clauses),
+        attempts=attempts,
+        final_state=(
+            "clean" if final_signals is not None
+            else "no_clean_package" if attempted_calls else "no_call"
+        ),
+        final_accepted_slots=final_slots,
     )
 
 
@@ -1585,6 +1887,7 @@ def _failed_package_result(
     charged_tokens: int,
     extra_reason: str | None = None,
     token_admission: CharacterSignalTokenAdmission | None = None,
+    support_index: AssertionIndexV1 | None = None,
 ) -> CharacterSignalExtractionResult:
     reasons: Counter[str] = Counter()
     mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
@@ -1610,6 +1913,9 @@ def _failed_package_result(
         evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
         core_label_scope_counts=dict(sorted(core_scope_counts.items())),
         token_admission=token_admission,
+        support_trace=_support_trace_for_result(
+            support_index, attempts, attempted_calls
+        ),
     )
 
 
@@ -3931,6 +4237,7 @@ def _empty_result(
     evidence_mismatch_counts: dict[EvidenceMismatchKind, int] | None = None,
     core_label_scope_counts: dict[CoreLabelScopeKind, int] | None = None,
     token_admission: CharacterSignalTokenAdmission | None = None,
+    support_trace: SupportTraceV1 | None = None,
 ) -> CharacterSignalExtractionResult:
     return CharacterSignalExtractionResult(
         diagnostics=CharacterSignalDiagnostics(
@@ -3947,6 +4254,7 @@ def _empty_result(
             completion_tokens=completion_tokens,
             charged_tokens=charged_tokens,
             token_admission=token_admission,
+            support_trace=support_trace,
         )
     )
 
