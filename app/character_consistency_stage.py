@@ -54,7 +54,12 @@ from .db import (
     AnalysisRunInputRow,
 )
 from .domain import ConsistencyIssue, EvidenceSpan, IssueCategory, Severity
-from .narrative_context import NarrativeScopeV1, payload_sha256, scope_relation
+from .narrative_context import (
+    NarrativeScopeV1,
+    classify_character_source_kind,
+    payload_sha256,
+    scope_relation,
+)
 from .pipeline import DocumentInput
 
 
@@ -1639,8 +1644,10 @@ def _classify_frozen_source(
     role = metadata.get("document_role")
     if resolution not in {"unresolved", "inferred", "confirmed"}:
         return None, "invalid_resolution", None, "unresolved", "unknown", "unresolved"
-    if not isinstance(publication, str):
-        publication = "unknown"
+    if not isinstance(publication, str) or publication not in (
+        "draft", "in_review", "published", "retired", "unknown"
+    ):
+        return None, "invalid_publication", None, resolution, "unknown", "unresolved"
     try:
         scope = NarrativeScopeV1.model_validate(context.get("scope"))
     except Exception:
@@ -1648,28 +1655,33 @@ def _classify_frozen_source(
     if resolution != "confirmed":
         return None, str(resolution), scope, str(resolution), publication, "unresolved"
     authority = context.get("authority_tier")
-    if role == "canon":
+    source_kind = classify_character_source_kind(role, resolution, publication)
+    if source_kind == "formal_character_profile" and role == "canon":
         return (
-            "formal_character_profile",
+            source_kind,
             "formal",
             scope,
             resolution,
             publication,
             "core_canon" if authority in {None, "core_canon"} else str(authority),
         )
-    if role == "character_profile":
+    if source_kind == "formal_character_profile":
         return (
-            "formal_character_profile",
+            source_kind,
             "formal",
             scope,
             resolution,
             publication,
             "formal_record",
         )
-    if role == "chapter" and publication in {"published", "retired"}:
+    if source_kind == "published_history":
         return "published_history", "history", scope, resolution, publication, "formal_record"
-    if role == "chapter" and publication in {"draft", "in_review"}:
+    if source_kind == "draft":
         return "draft", "draft", scope, resolution, publication, "draft"
+    if publication == "retired":
+        return None, "retired", scope, resolution, publication, "reference"
+    if role in ("canon", "character_profile"):
+        return None, "nonformal_publication", scope, resolution, publication, "reference"
     return None, "reference", scope, resolution, publication, "reference"
 
 

@@ -54,6 +54,10 @@ def _project_and_document(
             "name": "character.md",
             "content": content,
             "document_role": "character_profile",
+            "narrative_context": {
+                "resolution_state": "confirmed",
+                "publication_status": "published",
+            },
         },
         headers=headers,
     )
@@ -764,16 +768,31 @@ def test_old_object_only_fingerprint_reuses_same_axis_but_not_different_axis(
 
 def test_legacy_preference_link_cannot_lower_confirmed_authority():
     with TestClient(app) as client:
-        project, _ = _project_and_document(client)
+        project, profile_document = _project_and_document(client)
+        canon_response = client.post(
+            f"/api/v1/projects/{project['id']}/documents/text",
+            json={
+                "name": "world.md",
+                "content": "林澈一直喜欢蜜瓜。",
+                "document_role": "canon",
+                "narrative_context": {
+                    "resolution_state": "confirmed",
+                    "publication_status": "published",
+                },
+            },
+        )
+        assert canon_response.status_code == 201, canon_response.text
         run = _completed_run(client, project["id"])
         canon = _candidate(
             project["id"], run["id"], trait_key="food_preference",
             comparison_key=None, authority_tier="core_canon",
+            document_id=canon_response.json()["id"],
         )
         assert _confirm(client, project["id"], canon).status_code == 201
         formal = _candidate(
             project["id"], run["id"], trait_key="food_preference",
             comparison_key="preference:蜜瓜", authority_tier="formal_record",
+            document_id=profile_document["id"],
         )
 
         link = client.post(

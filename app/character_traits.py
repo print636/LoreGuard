@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from hashlib import sha256
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -15,6 +16,7 @@ from .character_support_bindings import (
     verify_stored_support_bindings,
 )
 from .db import (
+    AnalysisRunInputNarrativeContextRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
     CharacterTraitCandidateRow,
@@ -287,12 +289,237 @@ def _semantic_evidence_digest(evidence: list[dict[str, Any]]) -> str:
     ])
 
 
+def _frozen_context_identities(
+    db, source_run_id: str, evidence: list[dict[str, Any]]
+) -> tuple[tuple[str, str], ...]:
+    """Identify every evidence document by its *frozen* context revision.
+
+    Input ids change between equivalent runs, whereas document ids and the
+    frozen payload hashes do not.  The latter include the revision id, so an
+    intervening retirement cannot silently revive an earlier pending row.
+    """
+
+    try:
+        input_documents = {item["input_id"]: item["document_id"] for item in evidence}
+        if not input_documents:
+            raise ValueError("candidate has no frozen context inputs")
+        if any(
+            not isinstance(input_id, str) or not isinstance(document_id, str)
+            for input_id, document_id in input_documents.items()
+        ):
+            raise ValueError("candidate frozen context identity is invalid")
+        snapshots = {
+            row.id: row for row in db.scalars(
+                select(AnalysisRunInputRow).where(
+                    AnalysisRunInputRow.run_id == source_run_id,
+                    AnalysisRunInputRow.id.in_(input_documents),
+                )
+            ).all()
+        }
+        contexts = {
+            row.input_id: row for row in db.scalars(
+                select(AnalysisRunInputNarrativeContextRow).where(
+                    AnalysisRunInputNarrativeContextRow.input_id.in_(input_documents)
+                )
+            ).all()
+        }
+        if (
+            set(snapshots) != set(input_documents)
+            or set(contexts) != set(input_documents)
+            or len(set(input_documents.values())) != len(input_documents)
+        ):
+            raise ValueError("candidate frozen narrative context is missing")
+        for item in evidence:
+            snapshot = snapshots[item["input_id"]]
+            if (
+                snapshot.document_id != item["document_id"]
+                or snapshot.document_version != item["document_version"]
+                or snapshot.content_sha256 != item["content_sha256"]
+            ):
+                raise ValueError("candidate frozen evidence identity is invalid")
+        identities: dict[str, str] = {}
+        for input_id, document_id in input_documents.items():
+            snapshot = snapshots[input_id]
+            context = contexts[input_id]
+            payload = context.payload
+            if (
+                snapshot.document_id != document_id
+                or sha256(snapshot.content.encode("utf-8")).hexdigest()
+                != snapshot.content_sha256
+                or context.schema_version != 1
+                or not isinstance(payload, dict)
+                or payload.get("schema_version") != 1
+                or payload_sha256(payload) != context.payload_sha256
+                or payload.get("context_revision_id") != context.context_revision_id
+                or type(payload.get("context_revision")) is not int
+                or payload["context_revision"] < 0
+                or (context.context_revision_id is None)
+                != (payload["context_revision"] == 0)
+            ):
+                raise ValueError("candidate frozen narrative context is invalid")
+            if document_id in identities:
+                raise ValueError("candidate frozen narrative context is ambiguous")
+            identities[document_id] = context.payload_sha256
+        return tuple(sorted(identities.items()))
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError("candidate frozen narrative context is invalid") from exc
+
+
+def _reused_candidate_context_identities(
+    db, row: CharacterTraitCandidateRow
+) -> tuple[tuple[str, str], ...]:
+    """A legacy hash is reusable only when its evidence and context survive."""
+
+    if not isinstance(row.evidence, list) or payload_sha256(row.evidence) != row.evidence_sha256:
+        raise ValueError("reused candidate evidence is invalid")
+    try:
+        if (
+            not isinstance(row.scope_payload, dict)
+            or canonical_scope_payload(row.scope_payload) != row.scope_payload
+            or payload_sha256(row.scope_payload) != row.scope_sha256
+        ):
+            raise ValueError("reused candidate scope is invalid")
+    except (TypeError, AttributeError) as exc:
+        raise ValueError("reused candidate scope is invalid") from exc
+    try:
+        parsed = [TraitEvidenceInput.model_validate(item) for item in row.evidence]
+        if _validate_evidence(db, row.source_run_id, parsed) != row.evidence:
+            raise ValueError("reused candidate evidence is not exact")
+    except (TypeError, AttributeError) as exc:
+        raise ValueError("reused candidate evidence is invalid") from exc
+    return _frozen_context_identities(db, row.source_run_id, row.evidence)
+
+
+def _verify_reused_review_chain(db, row: CharacterTraitCandidateRow) -> None:
+    """A mutable state label alone is not evidence of an author decision."""
+
+    reviews = list(db.scalars(
+        select(CharacterTraitReviewRow)
+        .where(CharacterTraitReviewRow.candidate_id == row.id)
+        .order_by(CharacterTraitReviewRow.expected_lock_version, CharacterTraitReviewRow.id)
+        .limit(3)
+    ).all())
+    if row.review_state == "pending":
+        if row.lock_version == 0 and not reviews:
+            return
+        raise ValueError("reused candidate review state is invalid")
+    expected = {
+        "confirmed": ("confirm",),
+        "rejected": ("reject",),
+        "superseded": ("confirm", "supersede"),
+    }.get(row.review_state)
+    if (
+        expected is None
+        or row.lock_version != len(expected)
+        or len(reviews) != len(expected)
+        or row.reviewed_at is None
+        or any(
+            review.project_id != row.project_id
+            or review.decision != decision
+            or review.expected_lock_version != index
+            or review.approved_axis_id != row.approved_axis_id
+            or review.approved_axis_version != row.approved_axis_version
+            for index, (review, decision) in enumerate(zip(reviews, expected, strict=True))
+        )
+    ):
+        raise ValueError("reused candidate review state is invalid")
+    if row.review_state == "superseded":
+        successor_id = reviews[1].comment.removeprefix("由候选 ").removesuffix(" 替代")
+        successor = db.get(CharacterTraitCandidateRow, successor_id)
+        if (
+            reviews[1].comment != f"由候选 {successor_id} 替代"
+            or successor is None
+            or successor.project_id != row.project_id
+            or successor.character_key != row.character_key
+            or successor.trait_type != row.trait_type
+            or successor.supersedes_candidate_id != row.id
+            or successor.review_state not in {"confirmed", "superseded"}
+            or successor.lock_version < 1
+            or successor.reviewed_at is None
+        ):
+            raise ValueError("reused candidate supersession is invalid")
+        successor_confirms = db.scalars(select(CharacterTraitReviewRow).where(
+            CharacterTraitReviewRow.candidate_id == successor.id,
+            CharacterTraitReviewRow.project_id == row.project_id,
+            CharacterTraitReviewRow.decision == "confirm",
+        ).limit(2)).all()
+        if (
+            len(successor_confirms) != 1
+            or successor_confirms[0].expected_lock_version != 0
+            or successor_confirms[0].approved_axis_id != successor.approved_axis_id
+            or successor_confirms[0].approved_axis_version
+            != successor.approved_axis_version
+        ):
+            raise ValueError("reused candidate supersession is invalid")
+
+
+def _verify_reused_nonformal_fingerprint(
+    row: CharacterTraitCandidateRow,
+    contexts: tuple[tuple[str, str], ...],
+    *,
+    comparison_key_override: str | None = None,
+) -> None:
+    if (
+        row.support_binding_mode != "legacy_v1"
+        or row.support_bindings_v1 is not None
+        or row.support_bindings_sha256 is not None
+    ):
+        raise ValueError("reused candidate support mode is invalid")
+    comparison_key = row.comparison_key or comparison_key_override
+    base = {
+        "character_key": row.character_key,
+        "trait_type": row.trait_type,
+        "comparison_key": comparison_key or normalize_trait_key(row.trait_key),
+        "polarity": row.polarity,
+        "stability": row.stability,
+        "contexts": row.contexts,
+        "origin": row.origin,
+        "authority_tier": row.authority_tier,
+        "scope_sha256": row.scope_sha256,
+        "valid_from_release_ordinal": row.valid_from_release_ordinal,
+        "valid_until_release_ordinal": row.valid_until_release_ordinal,
+        "semantic_evidence_sha256": _semantic_evidence_digest(row.evidence),
+        "supersedes_candidate_id": row.supersedes_candidate_id,
+        "generator_version": row.generator_version,
+    }
+    valid = {payload_sha256(base)}
+    if comparison_key is not None and row.trait_type == "preference":
+        base["fingerprint_version"] = "keyed_preference_v2"
+        valid.add(payload_sha256(base))
+    elif comparison_key is not None and row.trait_type in _OBJECT_BEARING_TRAIT_DIMENSIONS:
+        base["relation_axis"] = stable_trait_identity(row.trait_type, row.trait_key)
+        valid.add(payload_sha256(base))
+    base["fingerprint_version"] = "context_bound_v1"
+    base["frozen_contexts"] = [
+        {"document_id": document_id, "payload_sha256": context_sha256}
+        for document_id, context_sha256 in contexts
+    ]
+    valid.add(payload_sha256(base))
+    if row.candidate_fingerprint not in valid:
+        raise ValueError("reused candidate fingerprint is invalid")
+
+
+def _validate_reused_candidate_identity(
+    db, row: CharacterTraitCandidateRow, *, comparison_key_override: str | None = None
+) -> tuple[tuple[str, str], ...]:
+    contexts = _reused_candidate_context_identities(db, row)
+    _verify_reused_review_chain(db, row)
+    if row.support_binding_mode == "required_v1":
+        _verify_reused_formal_target(db, row)
+    else:
+        _verify_reused_nonformal_fingerprint(
+            row, contexts, comparison_key_override=comparison_key_override
+        )
+    return contexts
+
+
 def _formal_target_fingerprint(
     base_payload: dict[str, Any],
     *,
     project_id: str,
     evidence: list[dict[str, Any]],
     support_bindings: dict,
+    frozen_context_sha256: str | None = None,
 ) -> str:
     if (
         support_bindings.get("index_version") != "assertion-index-v1"
@@ -302,26 +529,32 @@ def _formal_target_fingerprint(
         raise ValueError("formal target fingerprint requires one verified target")
     target = support_bindings["bindings"][0]
     source = evidence[target["evidence_index"]]
+    support_identity = {
+        "project_id": project_id,
+        "document_id": source["document_id"],
+        "document_version": source["document_version"],
+        "content_sha256": source["content_sha256"],
+        "line_number": source["line_start"],
+        "support_id": target["support_id"],
+        "actor_anchor_id": target["actor_anchor_id"],
+        "label_anchor_id": target["label_anchor_id"],
+        "scope_relation": target["scope_relation"],
+        "index_version": support_bindings["index_version"],
+    }
+    if frozen_context_sha256 is not None:
+        support_identity["frozen_context_sha256"] = frozen_context_sha256
     return payload_sha256({
         **base_payload,
-        "fingerprint_version": "formal_target_v1",
-        "support_identity": {
-            "project_id": project_id,
-            "document_id": source["document_id"],
-            "document_version": source["document_version"],
-            "content_sha256": source["content_sha256"],
-            "line_number": source["line_start"],
-            "support_id": target["support_id"],
-            "actor_anchor_id": target["actor_anchor_id"],
-            "label_anchor_id": target["label_anchor_id"],
-            "scope_relation": target["scope_relation"],
-            "index_version": support_bindings["index_version"],
-        },
+        "fingerprint_version": (
+            "formal_target_v2" if frozen_context_sha256 is not None
+            else "formal_target_v1"
+        ),
+        "support_identity": support_identity,
     })
 
 
 def formal_target_fingerprint_matches(
-    row: CharacterTraitCandidateRow, support_bindings: dict
+    row: CharacterTraitCandidateRow, support_bindings: dict, *, db=None
 ) -> bool:
     """Bind persisted target metadata to the candidate's stable semantic ID."""
 
@@ -351,11 +584,26 @@ def formal_target_fingerprint_matches(
             "supersedes_candidate_id": row.supersedes_candidate_id,
             "generator_version": row.generator_version,
         }
+        if _formal_target_fingerprint(
+            base_payload,
+            project_id=row.project_id,
+            evidence=row.evidence,
+            support_bindings=support_bindings,
+        ) == row.candidate_fingerprint:
+            return True  # Historical v1 rows retain their original identity.
+        if db is None:
+            return False
+        frozen_contexts = dict(_frozen_context_identities(
+            db, row.source_run_id, row.evidence
+        ))
+        target = support_bindings["bindings"][0]
+        source = row.evidence[target["evidence_index"]]
         return _formal_target_fingerprint(
             base_payload,
             project_id=row.project_id,
             evidence=row.evidence,
             support_bindings=support_bindings,
+            frozen_context_sha256=frozen_contexts[source["document_id"]],
         ) == row.candidate_fingerprint
     except (KeyError, IndexError, TypeError, ValueError):
         return False
@@ -384,7 +632,9 @@ def _verify_reused_formal_target(db, row: CharacterTraitCandidateRow) -> None:
             evidence=row.evidence,
             frozen_by_id=frozen_by_id,
         )
-        if binding is None or not formal_target_fingerprint_matches(row, binding):
+        if binding is None or not formal_target_fingerprint_matches(
+            row, binding, db=db
+        ):
             raise ValueError("reused formal target binding identity is invalid")
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError("reused formal target binding is invalid") from exc
@@ -526,6 +776,7 @@ def upsert_character_trait_candidate(
     if len(canonical_json(parsed.provenance).encode("utf-8")) > 32_000:
         raise ValueError("candidate provenance is too large")
     evidence = _validate_evidence(db, source_run_id, parsed.evidence)
+    frozen_contexts = _frozen_context_identities(db, source_run_id, evidence)
     support_bindings = None
     if parsed.support_refs:
         if parsed.origin != "explicit_setting":
@@ -569,26 +820,41 @@ def upsert_character_trait_candidate(
         and parsed.trait_type in _OBJECT_BEARING_TRAIT_DIMENSIONS
         and parsed.trait_type != "preference"
     )
-    legacy_fingerprint = payload_sha256(fingerprint_payload)
+    legacy_fingerprints = {payload_sha256(fingerprint_payload)}
     if support_bindings is not None:
+        old_formal_fingerprint = _formal_target_fingerprint(
+            fingerprint_payload,
+            project_id=project_id,
+            evidence=evidence,
+            support_bindings=support_bindings,
+        )
+        legacy_fingerprints = {old_formal_fingerprint}
         fingerprint = _formal_target_fingerprint(
             fingerprint_payload,
             project_id=project_id,
             evidence=evidence,
             support_bindings=support_bindings,
+            frozen_context_sha256=dict(frozen_contexts)[evidence[0]["document_id"]],
         )
     elif keyed_preference:
         # Pre-0014 hashes could contain the parsed object key even though the
         # migrated row has no stored key. A versioned hash makes a new,
         # reviewable keyed candidate without changing that historical row.
         fingerprint_payload["fingerprint_version"] = "keyed_preference_v2"
+        legacy_fingerprints.add(payload_sha256(fingerprint_payload))
     elif keyed_relation:
         # Keep historical hashes unchanged. New keyed rows cannot collide when
         # they share an object and evidence but describe distinct relations.
         fingerprint_payload["relation_axis"] = stable_trait_identity(
             parsed.trait_type, trait_key
         )
+        legacy_fingerprints.add(payload_sha256(fingerprint_payload))
     if support_bindings is None:
+        fingerprint_payload["fingerprint_version"] = "context_bound_v1"
+        fingerprint_payload["frozen_contexts"] = [
+            {"document_id": document_id, "payload_sha256": context_sha256}
+            for document_id, context_sha256 in frozen_contexts
+        ]
         fingerprint = payload_sha256(fingerprint_payload)
     possible_existing = db.scalars(
         select(CharacterTraitCandidateRow)
@@ -599,9 +865,7 @@ def upsert_character_trait_candidate(
         .where(
             CharacterTraitCandidateRow.project_id == project_id,
             CharacterTraitCandidateRow.candidate_fingerprint.in_(
-                (fingerprint, legacy_fingerprint)
-                if support_bindings is None and (keyed_preference or keyed_relation)
-                else (fingerprint,)
+                (fingerprint, *sorted(legacy_fingerprints))
             ),
             (
                 (CharacterTraitCandidateRow.source_run_id == source_run_id)
@@ -611,14 +875,18 @@ def upsert_character_trait_candidate(
         .order_by(CharacterTraitCandidateRow.created_at, CharacterTraitCandidateRow.id)
     ).all()
     for existing in possible_existing:
+        prior_contexts = _validate_reused_candidate_identity(
+            db, existing,
+            comparison_key_override=(comparison_key if support_bindings is None else None),
+        )
+        if prior_contexts != frozen_contexts:
+            continue
         if existing.candidate_fingerprint == fingerprint:
-            if support_bindings is not None:
-                _verify_reused_formal_target(db, existing)
             return existing, False
         if (
             support_bindings is None
             and keyed_preference
-            and existing.candidate_fingerprint == legacy_fingerprint
+            and existing.candidate_fingerprint in legacy_fingerprints
             and _stored_comparison_key(
                 existing.comparison_key, trait_type=parsed.trait_type
             ) == comparison_key
@@ -627,7 +895,7 @@ def upsert_character_trait_candidate(
         if (
             support_bindings is None
             and keyed_relation
-            and existing.candidate_fingerprint == legacy_fingerprint
+            and existing.candidate_fingerprint in legacy_fingerprints
             and stable_trait_identity(parsed.trait_type, existing.trait_key)
             == stable_trait_identity(parsed.trait_type, trait_key)
             and (
@@ -642,6 +910,19 @@ def upsert_character_trait_candidate(
             )
         ):
             return existing, False
+        if (
+            support_bindings is not None
+            and existing.candidate_fingerprint in legacy_fingerprints
+        ):
+            return existing, False
+        if (
+            support_bindings is None
+            and not keyed_preference
+            and not keyed_relation
+            and existing.candidate_fingerprint in legacy_fingerprints
+        ):
+            return existing, False
+
     if parsed.supersedes_candidate_id:
         superseded = db.get(
             CharacterTraitCandidateRow, parsed.supersedes_candidate_id

@@ -88,6 +88,7 @@ from .narrative_context import (
     NarrativeContextRevisionInput,
     NarrativeScopeV1,
     canonical_scope_payload,
+    classify_character_source_kind,
     derive_authority_tier,
     add_context_revision,
     context_snapshot_payload,
@@ -1124,6 +1125,25 @@ def _candidate_source_is_current(
     if len(frozen_context_by_input) != len(bindings):
         return False, "来源分析的冻结叙事上下文已缺失", frozen_by_id
 
+    expected_source_kind = {
+        "explicit_setting": "formal_character_profile",
+        "history_inference": "published_history",
+    }.get(row.origin)
+    source_ineligible_reason = "候选来源不符合正式角色特征的收录条件，请重新分析后确认"
+
+    def source_matches_candidate(context_payload: dict) -> bool:
+        role = context_payload.get("legacy_document_role")
+        resolution = context_payload.get("resolution_state")
+        publication = context_payload.get("publication_status")
+        return (
+            expected_source_kind is not None
+            and classify_character_source_kind(role, resolution, publication)
+            == expected_source_kind
+            and derive_authority_tier(role, resolution, publication)
+            == row.authority_tier
+            and context_payload.get("authority_tier") == row.authority_tier
+        )
+
     for frozen in frozen_inputs:
         frozen_context = frozen_context_by_input[frozen.id]
         if (
@@ -1133,6 +1153,9 @@ def _candidate_source_is_current(
             != frozen_context.payload_sha256
         ):
             return False, "来源分析的冻结叙事上下文无法校验", frozen_by_id
+        frozen_payload = frozen_context.payload
+        if not source_matches_candidate(frozen_payload):
+            return False, source_ineligible_reason, frozen_by_id
         legacy = legacy_by_document[frozen.document_id]
         try:
             current_payload = context_snapshot_payload(
@@ -1142,8 +1165,10 @@ def _candidate_source_is_current(
             )
         except (TypeError, ValueError):
             return False, "来源文档的叙事上下文无法校验", frozen_by_id
+        if not source_matches_candidate(current_payload):
+            return False, source_ineligible_reason, frozen_by_id
         if (
-            current_payload != frozen_context.payload
+            current_payload != frozen_payload
             or payload_sha256(current_payload) != frozen_context.payload_sha256
         ):
             return False, "来源文档的叙事上下文已变更，请重新分析后确认", frozen_by_id
@@ -1262,7 +1287,7 @@ def serialize_character_trait_candidate_for_review(
     current, reason, frozen_by_id = _candidate_source_is_current(db, row)
     payload["source_verified"] = frozen_by_id is not None
     support_status, support_payload = _verified_candidate_support_payload(
-        row, frozen_by_id
+        row, frozen_by_id, db=db
     )
     payload["support_bindings_status"] = support_status
     payload["support_bindings_v1"] = support_payload
@@ -1298,6 +1323,8 @@ def serialize_character_trait_candidate_for_review(
 def _verified_candidate_support_payload(
     row: CharacterTraitCandidateRow,
     frozen_by_id: dict[str, AnalysisRunInputRow] | None,
+    *,
+    db=None,
 ) -> tuple[Literal["legacy", "verified", "invalid"], dict | None]:
     if (
         row.support_binding_mode == "legacy_v1"
@@ -1318,7 +1345,7 @@ def _verified_candidate_support_payload(
         )
         if payload is None:
             return "invalid", None
-        if not formal_target_fingerprint_matches(row, payload):
+        if not formal_target_fingerprint_matches(row, payload, db=db):
             return "invalid", None
     except (ValueError, TypeError, AttributeError):
         return "invalid", None
@@ -3496,7 +3523,7 @@ def link_legacy_preference_candidate(
                 },
             )
         support_status, support_payload = _verified_candidate_support_payload(
-            row, frozen_by_id
+            row, frozen_by_id, db=db
         )
         if support_status == "invalid":
             raise HTTPException(
@@ -3643,7 +3670,9 @@ def decide_character_profile_candidate(
         initial_support_status, _ = _verified_candidate_support_payload(row, None)
         if initial_support_status != "legacy":
             frozen_by_id, _ = _verified_candidate_frozen_inputs(db, row)
-            support_status, _ = _verified_candidate_support_payload(row, frozen_by_id)
+            support_status, _ = _verified_candidate_support_payload(
+                row, frozen_by_id, db=db
+            )
             if support_status != "verified":
                 raise HTTPException(
                     409,
@@ -3693,7 +3722,9 @@ def decide_character_profile_candidate(
                     "message": stale_reason,
                 },
             )
-        support_status, _ = _verified_candidate_support_payload(row, frozen_by_id)
+        support_status, _ = _verified_candidate_support_payload(
+            row, frozen_by_id, db=db
+        )
         if support_status == "invalid":
             raise HTTPException(
                 409,

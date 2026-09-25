@@ -18,6 +18,9 @@ PublicationStatus = Literal[
     "draft", "in_review", "published", "retired", "unknown"
 ]
 ScopeRelation = Literal["compatible", "incompatible", "unknown"]
+CharacterSourceKind = Literal[
+    "formal_character_profile", "published_history", "draft"
+]
 
 _KEY_PATTERN = r"^[A-Za-z0-9_.:\-一-鿿]+$"
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -147,6 +150,33 @@ def derive_authority_tier(
             else "draft"
         )
     return "reference"
+
+
+def classify_character_source_kind(
+    document_role: str,
+    resolution_state: str,
+    publication_status: str,
+) -> CharacterSourceKind | None:
+    """Classify a new run's character source without changing document authority.
+
+    Only a confirmed, eligible source may feed new character extraction.  An
+    already confirmed trait is a separate author decision and is not revoked
+    merely because the underlying document is later reclassified or retired.
+    """
+    if resolution_state != "confirmed":
+        return None
+    if document_role in ("canon", "character_profile"):
+        return (
+            "formal_character_profile"
+            if publication_status in ("published", "unknown")
+            else None
+        )
+    if document_role == "chapter":
+        if publication_status == "published":
+            return "published_history"
+        if publication_status in ("draft", "in_review"):
+            return "draft"
+    return None
 
 
 def latest_context_revisions(

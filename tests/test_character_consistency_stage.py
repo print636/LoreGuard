@@ -66,7 +66,11 @@ from app.db import (
 )
 from app.main import app, settings as app_settings, write_limiter
 from app.domain import EvidenceSpan
-from app.narrative_context import NarrativeScopeV1, payload_sha256
+from app.narrative_context import (
+    NarrativeScopeV1,
+    classify_character_source_kind,
+    payload_sha256,
+)
 from app.pipeline import DocumentInput
 from app.service import _load_verified_snapshot, execute_analysis
 
@@ -378,7 +382,7 @@ def _new_run(client: TestClient, project_id: str) -> str:
         ("chapter", "draft", "confirmed", "draft", "draft"),
         ("chapter", "in_review", "confirmed", "draft", "draft"),
         ("chapter", "published", "confirmed", "published_history", "history"),
-        ("chapter", "retired", "confirmed", "published_history", "history"),
+        ("chapter", "retired", "confirmed", None, "retired"),
         ("chapter", "unknown", "confirmed", None, "reference"),
         ("reference", "in_review", "confirmed", None, "reference"),
         ("chapter", "in_review", "inferred", None, "inferred"),
@@ -402,6 +406,118 @@ def test_frozen_source_classification_includes_reviewing_chapters_only_at_confir
     assert scope is not None
     assert scope.branch is not None
     assert scope.branch.path == ["main", "route-a"]
+
+
+@pytest.mark.parametrize(
+    "role", ("canon", "character_profile", "chapter", "reference")
+)
+@pytest.mark.parametrize(
+    "publication", ("draft", "in_review", "published", "retired", "unknown")
+)
+@pytest.mark.parametrize("resolution", ("confirmed", "inferred", "unresolved"))
+def test_new_character_source_eligibility_matrix(
+    role: str, publication: str, resolution: str
+):
+    expected = None
+    if resolution == "confirmed":
+        if role in ("canon", "character_profile") and publication in (
+            "published", "unknown"
+        ):
+            expected = "formal_character_profile"
+        elif role == "chapter" and publication == "published":
+            expected = "published_history"
+        elif role == "chapter" and publication in ("draft", "in_review"):
+            expected = "draft"
+
+    assert classify_character_source_kind(role, resolution, publication) == expected
+    context = _context(publication=publication)
+    context["resolution_state"] = resolution
+    actual, _, _, _, _, _ = _classify_frozen_source(
+        {"document_role": role}, context
+    )
+    assert actual == expected
+
+
+@pytest.mark.parametrize("publication", ("published ", "deleted", None, 3, []))
+def test_corrupted_publication_never_becomes_a_new_character_source(publication):
+    for role in ("canon", "character_profile", "chapter", "reference"):
+        assert classify_character_source_kind(role, "confirmed", publication) is None
+        context = _context(publication="published")
+        context["publication_status"] = publication
+        source_kind, reason, scope, _, _, _ = _classify_frozen_source(
+            {"document_role": role}, context
+        )
+        assert source_kind is None
+        assert reason == "invalid_publication"
+        assert scope is None
+
+
+def test_full_review_freezes_all_active_documents_but_extracts_only_eligible_character_source():
+    legal_line = "林澈长期喜欢蜜瓜。"
+    illegal_line = "林澈始终厌恶蜜瓜。"
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"角色来源资格-{uuid4().hex}"}
+        ).json()
+        documents = [
+            _create_document(
+                client, project["id"], name="legal-profile.md",
+                role="character_profile", content=legal_line,
+                narrative_context=_context(publication="published"),
+            ),
+            _create_document(
+                client, project["id"], name="draft-canon.md",
+                role="canon", content=illegal_line,
+                narrative_context=_context(publication="draft"),
+            ),
+            _create_document(
+                client, project["id"], name="reviewing-profile.md",
+                role="character_profile", content=illegal_line,
+                narrative_context=_context(publication="in_review"),
+            ),
+            _create_document(
+                client, project["id"], name="retired-history.md",
+                role="chapter", content=illegal_line,
+                narrative_context=_context(publication="retired"),
+            ),
+            _create_document(
+                client, project["id"], name="reference.md",
+                role="reference", content=illegal_line,
+                narrative_context=_context(publication="published"),
+            ),
+        ]
+        run_id = _new_run(client, project["id"])
+        with SessionLocal() as db:
+            run = db.get(AnalysisRunRow, run_id)
+            assert run is not None and run.batch_mode == "full_review"
+            frozen_documents, frozen_metadata = _load_verified_snapshot(db, run_id)
+        assert {row.id for row in frozen_documents} == {row["id"] for row in documents}
+        assert len(frozen_metadata) == len(documents)
+        by_document = {row["document_id"]: row for row in frozen_metadata}
+        assert (
+            by_document[documents[1]["id"]]["narrative_context"]["authority_tier"]
+            == "core_canon"
+        )
+        assert (
+            by_document[documents[3]["id"]]["narrative_context"]["authority_tier"]
+            == "formal_record"
+        )
+
+        provider = QueueProvider(
+            _response(_record(
+                evidence=legal_line, polarity="positive",
+                kind="explicit_declaration", statement="林澈长期喜欢蜜瓜",
+            ))
+        )
+        result = _run_stage(run_id, provider)
+
+    assert len(provider.calls) == 1
+    assert result.diagnostics["counts"]["source_eligible"] == 1
+    assert result.diagnostics["counts"]["pending_candidate_count"] == 1
+    assert result.diagnostics["reason_counts"]["source_formal"] == 1
+    assert result.diagnostics["reason_counts"]["source_nonformal_publication"] == 2
+    assert result.diagnostics["reason_counts"]["source_retired"] == 1
+    assert result.diagnostics["reason_counts"]["source_reference"] == 1
 
 
 def test_in_review_target_survives_api_selection_and_frozen_stage_binding_without_model():

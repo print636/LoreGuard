@@ -58,6 +58,7 @@ def _project_and_document(
     *,
     content: str = "林澈一直喜欢蜜瓜。",
     narrative_context: dict | None = None,
+    document_role: str = "character_profile",
 ) -> tuple[dict, dict]:
     project = client.post(
         "/api/v1/projects",
@@ -67,10 +68,13 @@ def _project_and_document(
     body: dict = {
         "name": "chapter.md",
         "content": content,
-        "document_role": "chapter",
+        "document_role": document_role,
     }
-    if narrative_context is not None:
-        body["narrative_context"] = narrative_context
+    body["narrative_context"] = (
+        narrative_context
+        if narrative_context is not None
+        else {"resolution_state": "confirmed", "publication_status": "published"}
+    )
     document = client.post(
         f"/api/v1/projects/{project.json()['id']}/documents/text",
         json=body,
@@ -148,6 +152,21 @@ def _create_candidate(project_id: str, run_id: str, **overrides) -> str:
         assert created
         db.commit()
         return candidate.id
+
+
+def _two_line_evidence(run_id: str) -> list[dict]:
+    with SessionLocal() as db:
+        snapshot = db.scalar(
+            select(AnalysisRunInputRow).where(AnalysisRunInputRow.run_id == run_id)
+        )
+        assert snapshot is not None
+        lines = snapshot.content.splitlines()
+        assert len(lines) == 2
+        first = _candidate_payload(snapshot)["evidence"][0]
+        return [
+            {**first, "line_start": number, "line_end": number, "text": line}
+            for number, line in enumerate(lines, start=1)
+        ]
 
 
 def _confirm_candidate(
@@ -452,6 +471,334 @@ def test_candidate_decision_is_idempotent_and_uses_revision_cas():
             assert snapshot.payload["contexts"] == ["日常 饮食"]
             assert "comparison_key" not in snapshot.payload
             assert snapshot.payload_sha256 == payload_sha256(snapshot.payload)
+
+
+@pytest.mark.parametrize(
+    ("document_role", "resolution_state", "publication_status", "origin"),
+    [
+        ("canon", "confirmed", "draft", "explicit_setting"),
+        ("canon", "confirmed", "in_review", "explicit_setting"),
+        ("canon", "confirmed", "retired", "explicit_setting"),
+        ("character_profile", "confirmed", "draft", "explicit_setting"),
+        ("character_profile", "confirmed", "in_review", "explicit_setting"),
+        ("character_profile", "confirmed", "retired", "explicit_setting"),
+        ("chapter", "confirmed", "draft", "history_inference"),
+        ("chapter", "confirmed", "retired", "history_inference"),
+        ("reference", "confirmed", "published", "explicit_setting"),
+        ("character_profile", "unresolved", "published", "explicit_setting"),
+        ("chapter", "confirmed", "published", "explicit_setting"),
+        ("character_profile", "confirmed", "published", "history_inference"),
+    ],
+)
+def test_legacy_pending_candidate_cannot_confirm_from_ineligible_frozen_source(
+    document_role: str,
+    resolution_state: str,
+    publication_status: str,
+    origin: str,
+):
+    """Already persisted pending rows must not bypass the new run-time filter."""
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client,
+            content=(
+                "林澈一直喜欢蜜瓜。\n林澈经常购买蜜瓜。"
+                if origin == "history_inference" else "林澈一直喜欢蜜瓜。"
+            ),
+            document_role=document_role,
+            narrative_context={
+                "resolution_state": resolution_state,
+                "publication_status": publication_status,
+            },
+        )
+        run = _start_frozen_run(client, project["id"])
+        evidence = (
+            {"evidence": _two_line_evidence(run["id"])}
+            if origin == "history_inference" else {}
+        )
+        candidate_id = _create_candidate(
+            project["id"], run["id"], origin=origin,
+            authority_tier=("core_canon" if document_role == "canon" else "formal_record"),
+            **evidence,
+        )
+        character = quote("林澈", safe="")
+        path = (
+            f"/api/v1/projects/{project['id']}/characters/{character}"
+            f"/profile-candidates/{candidate_id}"
+        )
+        review = client.get(path)
+        assert review.status_code == 200, review.text
+        assert review.json()["reviewable"] is False
+        assert review.json()["status"] == "stale"
+        decision = client.post(
+            f"{path}/decisions",
+            json={"decision": "confirm", "expected_revision": 0},
+        )
+        assert decision.status_code == 409, decision.text
+        assert decision.json()["detail"]["code"] == "character_trait_candidate_stale"
+        with SessionLocal() as db:
+            candidate = db.get(CharacterTraitCandidateRow, candidate_id)
+            assert candidate is not None
+            assert candidate.review_state == "pending"
+            assert candidate.lock_version == 0
+
+
+@pytest.mark.parametrize(
+    ("document_role", "publication_status", "origin", "authority_tier"),
+    [
+        ("canon", "published", "explicit_setting", "core_canon"),
+        ("canon", "unknown", "explicit_setting", "core_canon"),
+        ("character_profile", "published", "explicit_setting", "formal_record"),
+        ("character_profile", "unknown", "explicit_setting", "formal_record"),
+        ("chapter", "published", "history_inference", "formal_record"),
+    ],
+)
+def test_eligible_formal_and_history_sources_remain_confirmable(
+    document_role: str,
+    publication_status: str,
+    origin: str,
+    authority_tier: str,
+):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client,
+            content=(
+                "林澈一直喜欢蜜瓜。\n林澈经常购买蜜瓜。"
+                if origin == "history_inference" else "林澈一直喜欢蜜瓜。"
+            ),
+            document_role=document_role,
+            narrative_context={
+                "resolution_state": "confirmed",
+                "publication_status": publication_status,
+            },
+        )
+        run = _start_frozen_run(client, project["id"])
+        evidence = (
+            {"evidence": _two_line_evidence(run["id"])}
+            if origin == "history_inference" else {}
+        )
+        candidate_id = _create_candidate(
+            project["id"], run["id"], origin=origin,
+            authority_tier=authority_tier,
+            **evidence,
+        )
+        result = _confirm_candidate(client, project["id"], candidate_id)
+        assert result["candidate"]["review_state"] == "confirmed"
+
+
+@pytest.mark.parametrize(
+    ("document_role", "origin", "claimed_authority"),
+    [
+        ("character_profile", "explicit_setting", "core_canon"),
+        ("chapter", "history_inference", "core_canon"),
+        ("canon", "explicit_setting", "formal_record"),
+    ],
+)
+def test_pending_candidate_cannot_claim_wrong_source_authority(
+    document_role: str, origin: str, claimed_authority: str,
+):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client,
+            document_role=document_role,
+            content=(
+                "林澈一直喜欢蜜瓜。\n林澈经常购买蜜瓜。"
+                if origin == "history_inference" else "林澈一直喜欢蜜瓜。"
+            ),
+        )
+        run = _start_frozen_run(client, project["id"])
+        evidence = (
+            {"evidence": _two_line_evidence(run["id"])}
+            if origin == "history_inference" else {}
+        )
+        candidate_id = _create_candidate(
+            project["id"], run["id"], origin=origin,
+            authority_tier=claimed_authority, **evidence,
+        )
+        character = quote("林澈", safe="")
+        path = (
+            f"/api/v1/projects/{project['id']}/characters/{character}"
+            f"/profile-candidates/{candidate_id}"
+        )
+        read = client.get(path)
+        assert read.status_code == 200, read.text
+        assert read.json()["reviewable"] is False
+        assert read.json()["status"] == "stale"
+        decision = client.post(
+            f"{path}/decisions",
+            json={"decision": "confirm", "expected_revision": 0},
+        )
+        assert decision.status_code == 409, decision.text
+        assert decision.json()["detail"]["code"] == "character_trait_candidate_stale"
+        with SessionLocal() as db:
+            candidate = db.get(CharacterTraitCandidateRow, candidate_id)
+            assert candidate is not None
+            assert candidate.review_state == "pending"
+
+
+@pytest.mark.parametrize("claimed_authority", ["core_canon", "formal_record"])
+def test_mixed_canon_and_profile_evidence_cannot_claim_one_authority(
+    claimed_authority: str,
+):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client, document_role="canon")
+        profile = client.post(
+            f"/api/v1/projects/{project['id']}/documents/text",
+            json={
+                "name": "profile.md",
+                "content": "林澈一直喜欢蜜瓜。",
+                "document_role": "character_profile",
+                "narrative_context": {
+                    "resolution_state": "confirmed",
+                    "publication_status": "published",
+                },
+            },
+        )
+        assert profile.status_code == 201, profile.text
+        run = _start_frozen_run(client, project["id"])
+        with SessionLocal() as db:
+            snapshots = list(
+                db.scalars(
+                    select(AnalysisRunInputRow).where(AnalysisRunInputRow.run_id == run["id"])
+                ).all()
+            )
+            assert len(snapshots) == 2
+            evidence = [
+                _candidate_payload(snapshot)["evidence"][0]
+                for snapshot in snapshots
+            ]
+        candidate_id = _create_candidate(
+            project["id"], run["id"], evidence=evidence,
+            authority_tier=claimed_authority,
+        )
+        character = quote("林澈", safe="")
+        path = (
+            f"/api/v1/projects/{project['id']}/characters/{character}"
+            f"/profile-candidates/{candidate_id}"
+        )
+        read = client.get(path)
+        assert read.status_code == 200, read.text
+        assert read.json()["reviewable"] is False
+        response = client.post(
+            f"{path}/decisions",
+            json={"decision": "confirm", "expected_revision": 0},
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "character_trait_candidate_stale"
+
+
+def test_pending_candidate_checks_every_frozen_evidence_source():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        additional = client.post(
+            f"/api/v1/projects/{project['id']}/documents/text",
+            json={
+                "name": "reference.md",
+                "content": "林澈一直喜欢蜜瓜。",
+                "document_role": "reference",
+                "narrative_context": {
+                    "resolution_state": "confirmed",
+                    "publication_status": "published",
+                },
+            },
+        )
+        assert additional.status_code == 201, additional.text
+        run = _start_frozen_run(client, project["id"])
+        with SessionLocal() as db:
+            snapshots = list(
+                db.scalars(
+                    select(AnalysisRunInputRow).where(AnalysisRunInputRow.run_id == run["id"])
+                ).all()
+            )
+            assert len(snapshots) == 2
+            evidence = [
+                _candidate_payload(snapshot)["evidence"][0]
+                for snapshot in snapshots
+            ]
+        candidate_id = _create_candidate(
+            project["id"], run["id"], evidence=evidence,
+        )
+        character = quote("林澈", safe="")
+        path = (
+            f"/api/v1/projects/{project['id']}/characters/{character}"
+            f"/profile-candidates/{candidate_id}"
+        )
+        read = client.get(path)
+        assert read.status_code == 200, read.text
+        assert read.json()["reviewable"] is False
+        response = client.post(
+            f"{path}/decisions",
+            json={"decision": "confirm", "expected_revision": 0},
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "character_trait_candidate_stale"
+
+
+@pytest.mark.parametrize(
+    ("new_role", "new_publication"),
+    [
+        ("character_profile", "retired"),
+        ("reference", "published"),
+        ("canon", "published"),
+    ],
+)
+def test_pending_candidate_rechecks_current_source_eligibility(
+    new_role: str, new_publication: str,
+):
+    with TestClient(app) as client:
+        project, document = _project_and_document(client)
+        run = _start_frozen_run(client, project["id"])
+        candidate_id = _create_candidate(project["id"], run["id"])
+        changed = client.post(
+            (
+                f"/api/v1/projects/{project['id']}/documents/{document['id']}"
+                "/narrative-context/revisions"
+            ),
+            json={
+                "expected_revision": 1,
+                "resolution_state": "confirmed",
+                "publication_status": new_publication,
+                "document_role": new_role,
+            },
+        )
+        assert changed.status_code == 201, changed.text
+        character = quote("林澈", safe="")
+        path = (
+            f"/api/v1/projects/{project['id']}/characters/{character}"
+            f"/profile-candidates/{candidate_id}"
+        )
+        read = client.get(path)
+        assert read.status_code == 200, read.text
+        assert read.json()["reviewable"] is False
+        response = client.post(
+            f"{path}/decisions",
+            json={"decision": "confirm", "expected_revision": 0},
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "character_trait_candidate_stale"
+
+
+def test_confirmed_profile_snapshot_is_not_revoked_by_source_retirement():
+    with TestClient(app) as client:
+        project, document = _project_and_document(client)
+        run = _start_frozen_run(client, project["id"])
+        candidate_id = _create_candidate(project["id"], run["id"])
+        _confirm_candidate(client, project["id"], candidate_id)
+        retired = client.post(
+            (
+                f"/api/v1/projects/{project['id']}/documents/{document['id']}"
+                "/narrative-context/revisions"
+            ),
+            json={
+                "expected_revision": 1,
+                "resolution_state": "confirmed",
+                "publication_status": "retired",
+            },
+        )
+        assert retired.status_code == 201, retired.text
+        next_run = _start_frozen_run(client, project["id"])
+        frozen = client.get(f"/api/v1/analysis-runs/{next_run['id']}")
+        assert frozen.status_code == 200, frozen.text
+        assert frozen.json()["confirmed_trait_count"] == 1
 
 
 def test_run_freezes_stored_object_comparison_keys_and_retry_copies_hashes():
