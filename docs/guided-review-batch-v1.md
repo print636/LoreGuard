@@ -41,10 +41,10 @@ draft_review（新稿作为 target，正式资料作为 background）
 
 调用 `baseline_build` 时，服务端只选择当前项目中处于活动状态且已确认的正式资料：
 
-- `canon` 与 `character_profile`；
-- `publication_status=published` 的历史章节。
+- `canon` 与 `character_profile`，且发布状态为 `published` 或 `unknown`。发布状态未标注的已确认正式资料仍允许进入基线；这一规则不只针对旧资料；
+- `document_role=chapter` 且 `publication_status=published` 的历史章节。
 
-草稿、审阅中、已退役、未确认或不属于正式资料/已发布历史的文件不会进入基线，并会在 `review_batch.excluded_documents` 中给出排除原因。`baseline_build` 没有 target，所有入选文件都被冻结为 `background`。
+`reference` 即使标为 `published` 也只是参考资料，不会冒充历史章节。草稿、审阅中、已退役、未确认或不属于上述正式资料/已发布历史的文件不会进入基线，并会在 `review_batch.excluded_documents` 中给出排除原因。草稿与审阅中资料沿用 `draft_excluded_from_baseline` 原因码。`baseline_build` 没有 target，所有入选文件都被冻结为 `background`。
 
 如果服务端显式启用了角色一致性阶段（`ENABLE_CHARACTER_CONSISTENCY=true`），基线运行可能产生带证据的角色资料候选。候选不会自动变成正式角色基线；用户必须逐条确认或驳回。未启用该阶段时，`baseline_build` 仍可冻结并运行背景资料，但不会因此自动生成角色候选。
 
@@ -57,7 +57,7 @@ draft_review（新稿作为 target，正式资料作为 background）
 - 资料上下文已人工确认；
 - `publication_status` 为 `draft` 或 `in_review`。
 
-服务端根据自身保存的资料上下文自动加入背景，客户端不能把任意文件伪装成权威资料。背景包括已确认且未退役的 `canon`、`character_profile` 和与 target 范围兼容的已发布历史章节。未确认、已退役或范围不兼容的资料会被排除，并在状态响应中可见。
+服务端根据自身保存的资料上下文自动加入背景，客户端不能把任意文件伪装成权威资料。背景与建立基线使用同一资格：已确认、未退役、发布状态为 `published` 或 `unknown` 的 `canon` / `character_profile`，以及已确认且 `published` 的历史 `chapter`；还须与 target 范围兼容。草稿/审阅中的非目标资料以 `draft_excluded_from_background` 排除，已发布的 `reference` 也不会变成背景。未确认、已退役或范围不兼容的资料同样会被排除，原因在状态响应中可见。
 
 每个运行冻结以下信息：
 

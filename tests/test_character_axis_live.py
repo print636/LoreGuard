@@ -826,7 +826,22 @@ def test_partial_baseline_inventory_is_read_only_and_cannot_admit(
     state = {"trial": 1}
     with pytest.raises(axis_live.SafeFailure, match="baseline_admission_failed") as error:
         axis_live._execute_trial(object(), suite, 1, state, timeout_seconds=1)
-    assert state["partial_baseline_inventory"] == expected_inventory
+    actual_inventory = dict(state["partial_baseline_inventory"])
+    funnel = actual_inventory.pop("support_funnel_diagnostic_v2", None)
+    assert actual_inventory == expected_inventory
+    if candidate_items == "valid":
+        assert funnel["schema_version"] == "support-funnel-diagnostic-v2"
+        assert funnel["available"] is True
+        assert funnel["semantic_axis"] == "not_evaluable"
+        assert funnel["binding_status_counts"] == {
+            "verified": 0, "legacy": 0, "invalid": 0, "missing": 2,
+        }
+        assert all(
+            stage["candidate_count"] == 0
+            for stage in funnel["selectors"]["selector_1"]["stages"].values()
+        )
+    else:
+        assert funnel is None
     assert calls == [
         ("POST", "project_create"), ("GET", "characters"),
         ("GET", "candidate_list"),
@@ -836,7 +851,7 @@ def test_partial_baseline_inventory_is_read_only_and_cannot_admit(
     scored = axis_live._score_trial(suite, state, [])
     assert scored["passed"] is False
     assert scored["draft"] is None
-    assert scored["partial_baseline_inventory"] == expected_inventory
+    assert scored["partial_baseline_inventory"] == state["partial_baseline_inventory"]
     assert "private model statement" not in json.dumps(scored)
 
 
@@ -874,15 +889,17 @@ def test_partial_inventory_anonymizes_selector_keys_and_rejects_reused_candidate
 
 
 @pytest.mark.parametrize(
-    ("statement", "diagnostic_failure", "expected_pass"),
+    ("statement", "diagnostic_failure", "funnel_failure", "expected_pass"),
     [
-        ("source anchor", False, True),
-        ("paraphrased statement", False, False),
-        ("source anchor", True, True),
+        ("source anchor", False, False, True),
+        ("paraphrased statement", False, False, False),
+        ("source anchor", True, False, True),
+        ("source anchor", False, True, True),
     ],
 )
 def test_complete_dev_baseline_location_diagnostic_is_non_gating_and_redacted(
-    tmp_path, monkeypatch, statement, diagnostic_failure, expected_pass,
+    tmp_path, monkeypatch, statement, diagnostic_failure, funnel_failure,
+    expected_pass,
 ):
     root, digest = _fixture(tmp_path)
     suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
@@ -944,6 +961,11 @@ def test_complete_dev_baseline_location_diagnostic_is_non_gating_and_redacted(
             raise RuntimeError("fixture-secret-should-not-leak source anchor")
 
         monkeypatch.setattr(axis_live, "_support_location_diagnostic", fail_diagnostic)
+    if funnel_failure:
+        def fail_funnel(*_args, **_kwargs):
+            raise RuntimeError("fixture-secret-should-not-leak source anchor")
+
+        monkeypatch.setattr(axis_live, "_support_funnel_diagnostic", fail_funnel)
 
     state = {"trial": 1}
     if expected_pass:
@@ -979,6 +1001,21 @@ def test_complete_dev_baseline_location_diagnostic_is_non_gating_and_redacted(
             "statement_zero_target_one_count": int(not expected_pass),
             "selectors": {"selector_1": {"match_count": 1, "unique": True}},
         }
+    funnel = scored["support_funnel_diagnostic_v2"]
+    if funnel_failure:
+        assert funnel == {
+            "schema_version": "support-funnel-diagnostic-v2",
+            "available": False, "reason_code": "diagnostic_unavailable",
+        }
+    else:
+        assert funnel["semantic_axis"] == "not_evaluable"
+        assert funnel["polarity_interpretation"] == "frozen_field_equality_only"
+        stages = funnel["selectors"]["selector_1"]["stages"]
+        assert stages["target_quote_in_verified_span"] == {
+            "candidate_count": 1, "distinct_target_location_count": 1,
+        }
+        assert stages["profile_statement_contains_quote"]["candidate_count"] == int(expected_pass)
+        assert funnel["selectors"]["selector_1"]["frozen_selector_unique"] is expected_pass
     rendered = json.dumps(scored)
     assert all(secret not in rendered for secret in (
         "candidate-1", "project-id", "source anchor", "paraphrased statement",
@@ -1075,6 +1112,219 @@ def _location_candidate(suite, *, value="paraphrased statement"):
             }],
         },
     }
+
+
+def _funnel_from_rows(suite, rows):
+    matches = [
+        [row["id"] for row in rows if axis_live._candidate_matches(row, selector)]
+        for selector in suite.plan["candidate_decisions"]
+    ]
+    return axis_live._safe_support_funnel_diagnostic(
+        rows, "project-id", suite, source_run_id="baseline-run",
+        document_ids={"02-character-profiles.md": "profile-document"},
+        statement_matches=matches,
+    )
+
+
+def test_funnel_v2_is_cumulative_but_reports_target_field_marginals(tmp_path):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    valid = _location_candidate(suite, value="source anchor")
+    rows = [
+        {**valid, "id": "wrong-actor", "character_key": "Someone else"},
+        {**valid, "id": "wrong-type", "trait_type": "speech_pattern"},
+        {**valid, "id": "wrong-identity", "comparison_key": "core_personality:other"},
+        {**valid, "id": "wrong-polarity", "polarity": "negative"},
+        {**valid, "id": "paraphrase", "value": "same meaning, different words"},
+        {**valid, "id": "wrong-stability", "stability": "stable"},
+        {**valid, "id": "wrong-origin", "origin": "history_inference"},
+        {**valid, "id": "valid", "api_key": "fixture-secret-token",
+         "base_url": "https://synthetic.invalid/private"},
+    ]
+    funnel = _funnel_from_rows(suite, rows)
+    assert funnel["available"] is True
+    assert funnel["semantic_axis"] == "not_evaluable"
+    assert funnel["polarity_interpretation"] == "frozen_field_equality_only"
+    selector = funnel["selectors"]["selector_1"]
+    stages = selector["stages"]
+    assert [stage["candidate_count"] for stage in stages.values()] == [8, 7, 6, 5, 4, 3, 2, 1, 1]
+    assert all(stage["distinct_target_location_count"] == 1 for stage in stages.values())
+    assert selector["target_field_counts"] == {
+        "character_key_equal": 7,
+        "trait_type_equal": 7,
+        "trait_type_and_comparison_identity_fence_equal": 6,
+        "polarity_equal_frozen": 7,
+        "stability_equal_frozen": 7,
+        "origin_equal_frozen": 7,
+        "profile_statement_contains_quote": 7,
+    }
+    assert selector["frozen_selector_candidate_count"] == 1
+    assert selector["frozen_selector_unique"] is True
+    rendered = json.dumps(funnel)
+    assert all(secret not in rendered for secret in (
+        "wrong-actor", "wrong-type", "wrong-identity", "wrong-polarity",
+        "paraphrase", "wrong-stability", "wrong-origin", "source anchor", "same meaning",
+        "fixture-secret-token",
+        "https://synthetic.invalid/private", "profile-document", "baseline-run",
+    ))
+
+
+def test_funnel_v2_keeps_same_line_targets_separate_and_counts_duplicate_location(tmp_path):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    name = "02-character-profiles.md"
+    line = "😀source anchor。unrelated target"
+    suite.files[name] = (line + "\n").encode()
+    suite.hashes[name] = _hash(suite.files[name])
+    first = _location_candidate(suite, value="source anchor")
+    first_target = first["support_bindings_v1"]["bindings"][0]["target"]
+    first_target["start_offset"] = 1
+    first_target["end_offset"] = 1 + len("source anchor")
+    duplicate = {**first, "id": "duplicate-target"}
+    wrong = _location_candidate(suite, value="source anchor")
+    wrong["id"] = "other-clause"
+    other_binding = wrong["support_bindings_v1"]["bindings"][0]
+    other_binding["support_id"] = other_binding["target"]["support_id"] = "L1:A2"
+    other_binding["target"]["start_offset"] = line.index("unrelated")
+    other_binding["target"]["end_offset"] = len(line)
+    other_binding["context"] = [{
+        "support_id": "L1:A1", "start_offset": 1,
+        "end_offset": 1 + len("source anchor"), "role": "actor_anchor",
+    }]
+    funnel = _funnel_from_rows(suite, [first, duplicate, wrong])
+    selector = funnel["selectors"]["selector_1"]
+    assert selector["stages"]["target_quote_in_verified_span"] == {
+        "candidate_count": 2, "distinct_target_location_count": 1,
+    }
+    assert selector["stages"]["frozen_selector_plus_verified_target"] == {
+        "candidate_count": 2, "distinct_target_location_count": 1,
+    }
+    assert selector["frozen_selector_candidate_count"] == 3
+    assert selector["frozen_selector_unique"] is False
+    assert "unrelated target" not in json.dumps(funnel, ensure_ascii=False)
+
+
+def test_funnel_v2_global_uniqueness_and_core_identity_not_semantic_axis(tmp_path):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    selector = suite.plan["candidate_decisions"][0]
+    suite.plan["candidate_decisions"].append({**selector, "candidate_key": "second"})
+    row = _location_candidate(suite, value="source anchor")
+    row["trait_key"] = "self_authored_other_axis"
+    row["comparison_key"] = axis_live.stable_trait_identity(
+        "core_personality", row["trait_key"]
+    )
+    funnel = _funnel_from_rows(suite, [row])
+    assert funnel["semantic_axis"] == "not_evaluable"
+    for result in funnel["selectors"].values():
+        assert result["stages"]["comparison_identity_fence_equal"]["candidate_count"] == 1
+        assert result["frozen_selector_candidate_count"] == 1
+        assert result["frozen_selector_unique"] is False
+
+
+@pytest.mark.parametrize("origin,expected_count", (
+    ("history_inference", 1), ("explicit_setting", 0),
+))
+def test_funnel_v2_history_origin_is_a_separate_frozen_stage(
+    tmp_path, origin, expected_count,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    selector = suite.plan["candidate_decisions"][0]
+    selector["source_document"] = "03-published-history-v1.0.md"
+    row = _location_candidate(suite, value="source anchor")
+    row["origin"] = origin
+    ref = row["evidence"][0]
+    ref["document_name"] = selector["source_document"]
+    ref["document_id"] = "history-document"
+    ref["content_sha256"] = suite.hashes[selector["source_document"]]
+    matches = [[row["id"]] if axis_live._candidate_matches(row, selector) else []]
+    funnel = axis_live._safe_support_funnel_diagnostic(
+        [row], "project-id", suite, source_run_id="baseline-run",
+        document_ids={selector["source_document"]: "history-document"},
+        statement_matches=matches,
+    )
+    stages = funnel["selectors"]["selector_1"]["stages"]
+    assert stages["stability_equal_frozen"]["candidate_count"] == 1
+    assert stages["origin_equal_frozen"]["candidate_count"] == expected_count
+    assert stages["frozen_selector_plus_verified_target"]["candidate_count"] == expected_count
+
+
+@pytest.mark.parametrize("change", (
+    "legacy", "missing", "verified_without_payload", "wrong_project", "wrong_run",
+    "wrong_document", "wrong_version", "wrong_hash", "wrong_line", "wrong_text",
+    "wrong_target", "boolean_line",
+))
+def test_funnel_v2_requires_verified_exact_source_without_affecting_gate(
+    tmp_path, change,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    row = _location_candidate(suite, value="source anchor")
+    evidence = row["evidence"][0]
+    target = row["support_bindings_v1"]["bindings"][0]["target"]
+    if change == "legacy":
+        row["support_bindings_status"] = "legacy"
+        row["support_bindings_v1"] = None
+    elif change == "missing":
+        del row["support_bindings_status"]
+        del row["support_bindings_v1"]
+    elif change == "verified_without_payload":
+        row["support_bindings_v1"] = None
+    elif change == "wrong_project":
+        row["project_id"] = "other-project"
+    elif change == "wrong_run":
+        row["source_run_id"] = "other-run"
+    elif change == "wrong_document":
+        evidence["document_id"] = "other-document"
+    elif change == "wrong_version":
+        evidence["document_version"] = 2
+    elif change == "wrong_hash":
+        evidence["content_sha256"] = "0" * 64
+    elif change == "wrong_line":
+        evidence["line_start"] = evidence["line_end"] = 2
+    elif change == "wrong_text":
+        evidence["text"] = "different source anchor"
+    elif change == "wrong_target":
+        target["end_offset"] = len(evidence["text"]) + 1
+    else:
+        evidence["line_start"] = True
+    frozen_match_count = int(axis_live._candidate_matches(row, suite.plan["candidate_decisions"][0]))
+    funnel = _funnel_from_rows(suite, [row])
+    assert funnel["available"] is True
+    result = funnel["selectors"]["selector_1"]
+    assert result["stages"]["target_quote_in_verified_span"]["candidate_count"] == 0
+    assert result["frozen_selector_candidate_count"] == frozen_match_count
+
+
+def test_funnel_v2_duplicate_ids_and_runtime_failure_are_allowlisted(tmp_path, monkeypatch):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    row = _location_candidate(suite, value="source anchor")
+    assert _funnel_from_rows(suite, [row, row]) == {
+        "schema_version": "support-funnel-diagnostic-v2", "available": False,
+        "reason_code": "diagnostic_unavailable",
+    }
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("secret source anchor should not leak")
+
+    monkeypatch.setattr(axis_live, "_support_funnel_diagnostic", fail)
+    assert _funnel_from_rows(suite, [row]) == {
+        "schema_version": "support-funnel-diagnostic-v2", "available": False,
+        "reason_code": "diagnostic_unavailable",
+    }
+
+
+def test_funnel_v2_is_not_emitted_for_transfer_suite(tmp_path, monkeypatch):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["transfer"]
+    monkeypatch.setattr(axis_live, "_list_pending", lambda *_args: [_location_candidate(suite)])
+    inventory = axis_live._partial_baseline_inventory(
+        object(), "project-id", suite, source_run_id="baseline-run",
+        document_ids={"02-character-profiles.md": "profile-document"},
+    )
+    assert "support_funnel_diagnostic_v2" not in inventory
+    assert "support_location_diagnostic_v1" not in inventory
 
 
 def test_partial_inventory_reports_verified_target_location_without_changing_gate(
@@ -1272,6 +1522,10 @@ def test_nonpartial_baseline_rejection_does_not_fetch_candidate_inventory(
     assert "partial_baseline_inventory" not in state
     assert state["support_location_diagnostic_v1"] == {
         "schema_version": "support-location-diagnostic-v1",
+        "available": False, "reason_code": "snapshot_unavailable",
+    }
+    assert state["support_funnel_diagnostic_v2"] == {
+        "schema_version": "support-funnel-diagnostic-v2",
         "available": False, "reason_code": "snapshot_unavailable",
     }
     assert calls == [("POST", "project_create")]

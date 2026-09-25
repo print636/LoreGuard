@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
 from unittest.mock import patch
 from uuid import uuid4
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import select
 
+from app.character_consistency_stage import CharacterConsistencyStage
 from app.db import (
     AnalysisRunInputContextRow,
     AnalysisRunInputRow,
@@ -21,6 +23,7 @@ from app.pipeline import DocumentInput, PipelineResult
 from app.service import (
     _character_stage_settings_for_run,
     _enforce_draft_issue_boundary,
+    _load_verified_snapshot,
 )
 
 
@@ -234,6 +237,8 @@ def test_auto_selection_excludes_unconfirmed_and_non_chapter_drafts():
         for row in batch["excluded_documents"]
     }
     assert reasons[unresolved["id"]] == "narrative_context_unconfirmed"
+    assert reasons[false_target["id"]] == "draft_excluded_from_background"
+    assert batch["background_document_ids"] == []
     target_reasons = {
         row["document_id"]: row["reason"]
         for row in batch["target_selection_exclusions"]
@@ -306,6 +311,113 @@ def test_baseline_build_has_only_background_and_excludes_draft():
         and row["reason"] == "draft_excluded_from_baseline"
         for row in batch["excluded_documents"]
     )
+
+
+@pytest.mark.parametrize("mode", ["baseline_build", "draft_review"])
+def test_guided_batch_background_authority_is_role_and_status_bound(mode: str):
+    with TestClient(app) as client, patch("app.main.dispatch_analysis"):
+        project_id = _project(client)["id"]
+        documents = {
+            name: _document(
+                client,
+                project_id,
+                name=f"{name}.md",
+                role=role,
+                publication=publication,
+                confirmed=confirmed,
+            )
+            for name, role, publication, confirmed in (
+                ("canon_unknown", "canon", "unknown", True),
+                ("profile_published", "character_profile", "published", True),
+                ("history_published", "chapter", "published", True),
+                ("reference_published", "reference", "published", True),
+                ("canon_draft", "canon", "draft", True),
+                ("profile_in_review", "character_profile", "in_review", True),
+                ("chapter_unknown", "chapter", "unknown", True),
+                ("chapter_in_review", "chapter", "in_review", True),
+                ("retired", "canon", "retired", True),
+                ("unconfirmed", "canon", "published", False),
+                ("target", "chapter", "draft", True),
+            )
+        }
+        request: dict = {"mode": mode}
+        if mode == "draft_review":
+            request["target_document_ids"] = [documents["target"]["id"]]
+        response = client.post(
+            f"/api/v1/projects/{project_id}/analysis-runs", json=request
+        )
+        assert response.status_code == 202, response.text
+        run_id = response.json()["id"]
+        status = client.get(f"/api/v1/analysis-runs/{run_id}").json()
+
+    batch = status["review_batch"]
+    eligible_background_ids = {
+        documents[name]["id"]
+        for name in ("canon_unknown", "profile_published", "history_published")
+    }
+    target_id = documents["target"]["id"]
+    assert set(batch["background_document_ids"]) == eligible_background_ids
+    assert batch["target_document_ids"] == (
+        [target_id] if mode == "draft_review" else []
+    )
+    excluded = {
+        row["document_id"]: row["reason"]
+        for row in batch["excluded_documents"]
+    }
+    draft_reason = (
+        "draft_excluded_from_baseline"
+        if mode == "baseline_build"
+        else "draft_excluded_from_background"
+    )
+    expected_reasons = {
+        "reference_published": "not_authority_or_published_history",
+        "canon_draft": draft_reason,
+        "profile_in_review": draft_reason,
+        "chapter_unknown": "not_authority_or_published_history",
+        "chapter_in_review": draft_reason,
+        "retired": "retired_document",
+        "unconfirmed": "narrative_context_unconfirmed",
+    }
+    if mode == "baseline_build":
+        expected_reasons["target"] = draft_reason
+    for name, reason in expected_reasons.items():
+        assert excluded[documents[name]["id"]] == reason
+
+    # The public frozen-input projection is also the worker's input allowlist:
+    # excluded documents cannot seed formal character candidates in this run.
+    input_documents = {
+        row["document_id"]: row for row in status["input_documents"]
+    }
+    expected_frozen_ids = eligible_background_ids | (
+        {target_id} if mode == "draft_review" else set()
+    )
+    assert set(input_documents) == expected_frozen_ids
+    assert status["input_snapshot_available"] is True
+    for document_id in eligible_background_ids:
+        frozen = input_documents[document_id]
+        assert frozen["batch_role"] == "background"
+        assert frozen["narrative_context"]["resolution_state"] == "confirmed"
+        assert frozen["content_sha256"]
+        assert frozen["narrative_context_sha256"]
+    if mode == "draft_review":
+        assert input_documents[target_id]["batch_role"] == "target"
+
+    with SessionLocal() as db:
+        frozen_documents, metadata = _load_verified_snapshot(db, run_id)
+        bound = CharacterConsistencyStage(settings=settings)._bind_frozen_documents(
+            db,
+            run_id=run_id,
+            documents=frozen_documents,
+            metadata=metadata,
+            reasons=Counter(),
+        )
+    source_kinds = {row.document.id: row.source_kind for row in bound}
+    assert set(source_kinds) == expected_frozen_ids
+    for name in ("canon_unknown", "profile_published"):
+        assert source_kinds[documents[name]["id"]] == "formal_character_profile"
+    assert source_kinds[documents["history_published"]["id"]] == "published_history"
+    if mode == "draft_review":
+        assert source_kinds[target_id] == "draft"
 
 
 def test_idempotency_binds_normalized_batch_intent():

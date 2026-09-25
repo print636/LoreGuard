@@ -266,6 +266,55 @@ test("only confirmed canon, character profiles and published chapters can ready 
   assert.deepEqual(state.confirmedDrafts.map((item) => item.id), ["draft"]);
 });
 
+test("missing and unrecognized publication statuses fail closed without hiding unresolved unknown canon", () => {
+  const originalContext = document().narrative_context;
+  const state = guidedDocumentState([
+    document({ id: "unknown-canon", document_role: "canon" }),
+    document({
+      id: "published-chapter",
+      document_role: "chapter",
+      narrative_context: {
+        ...originalContext,
+        resolution_state: "confirmed",
+        publication_status: "published",
+      },
+    }),
+    document({ id: "absent-context-canon", document_role: "canon", narrative_context: undefined }),
+    document({
+      id: "missing-status-profile",
+      document_role: "character_profile",
+      narrative_context: { resolution_state: "confirmed", scope: originalContext.scope },
+    }),
+    document({
+      id: "future-status-canon",
+      document_role: "canon",
+      narrative_context: {
+        ...originalContext,
+        resolution_state: "confirmed",
+        publication_status: "superseded",
+      },
+    }),
+    document({
+      id: "malformed-status-profile",
+      document_role: "character_profile",
+      narrative_context: {
+        ...originalContext,
+        resolution_state: "confirmed",
+        publication_status: 17,
+      },
+    }),
+    document({
+      id: "unknown-chapter",
+      document_role: "chapter",
+      narrative_context: { ...originalContext, resolution_state: "confirmed" },
+    }),
+  ]);
+
+  assert.deepEqual(state.baseline.map((item) => item.id), ["unknown-canon", "published-chapter"]);
+  assert.deepEqual(state.unresolvedBaseline.map((item) => item.id), ["unknown-canon"]);
+  assert.deepEqual(state.unresolved.map((item) => item.id), ["unknown-canon", "absent-context-canon"]);
+});
+
 test("analysis requests keep baseline targets server-derived and draft targets explicit", () => {
   assert.deepEqual(analysisRunRequest("baseline_build", "balanced", ["ignored"]), {
     mode: "baseline_build",
@@ -345,4 +394,81 @@ test("only a frozen baseline matching current versions and context revisions sta
     narrative_context: { ...canon.narrative_context, context_revision: 5 },
   }], [run]), null);
   assert.equal(findCurrentBaselineRun([canon, document({ id: "new-canon", document_role: "canon" })], [run]), null);
+});
+
+test("current baseline matches only the eligible documents in the API frozen input", () => {
+  const source = (id, role, status) => document({
+    id,
+    name: `${id}.md`,
+    version: 2,
+    document_role: role,
+    narrative_context: {
+      context_revision: 3,
+      resolution_state: "confirmed",
+      origin: "explicit",
+      publication_status: status,
+      scope: { schema_version: 1, timeline_key: "main" },
+      scope_sha256: `scope-${id}`,
+    },
+  });
+  const eligible = [
+    source("canon-unknown", "canon", "unknown"),
+    source("profile-published", "character_profile", "published"),
+    source("chapter-published", "chapter", "published"),
+  ];
+  const excluded = [
+    source("reference-published", "reference", "published"),
+    ...["canon", "character_profile"].flatMap((role) =>
+      ["draft", "in_review", "retired"].map((status) => source(`${role}-${status}`, role, status)),
+    ),
+  ];
+  const documents = [...eligible, ...excluded];
+  const frozen = eligible.map((item) => ({
+    document_id: item.id,
+    document_version: item.version,
+    document_role: item.document_role,
+    batch_role: "background",
+    narrative_context: {
+      context_revision: item.narrative_context.context_revision,
+      resolution_state: "confirmed",
+      publication_status: item.narrative_context.publication_status,
+      scope_sha256: item.narrative_context.scope_sha256,
+    },
+  }));
+  const run = {
+    id: "baseline-api-frozen",
+    status: "completed",
+    input_snapshot_available: true,
+    review_batch: {
+      mode: "baseline_build",
+      background_document_ids: eligible.map((item) => item.id),
+    },
+    input_documents: frozen,
+  };
+
+  assert.deepEqual(guidedDocumentState(documents).baseline.map((item) => item.id), eligible.map((item) => item.id));
+  assert.equal(findCurrentBaselineRun(documents, [run])?.id, run.id);
+  assert.equal(findCurrentBaselineRun([
+    ...eligible,
+    { ...excluded[0], version: 99 },
+    ...excluded.slice(1),
+  ], [run])?.id, run.id);
+
+  for (const changed of [
+    { ...eligible[0], version: 3 },
+    { ...eligible[1], narrative_context: { ...eligible[1].narrative_context, context_revision: 4 } },
+    { ...eligible[2], narrative_context: { ...eligible[2].narrative_context, scope_sha256: "new-scope" } },
+  ]) {
+    const updated = documents.map((item) => item.id === changed.id ? changed : item);
+    assert.equal(findCurrentBaselineRun(updated, [run]), null, `${changed.id} changed`);
+  }
+  const promoted = {
+    ...excluded[1],
+    narrative_context: { ...excluded[1].narrative_context, publication_status: "published" },
+  };
+  assert.equal(
+    findCurrentBaselineRun(documents.map((item) => item.id === promoted.id ? promoted : item), [run]),
+    null,
+  );
+  assert.equal(findCurrentBaselineRun([...documents, source("new-canon", "canon", "published")], [run]), null);
 });

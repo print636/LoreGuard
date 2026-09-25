@@ -543,19 +543,26 @@ def _review_batch_selection(
         if narrative.get("resolution_state") != "confirmed":
             exclude(document, "narrative_context_unconfirmed")
             continue
-        if narrative.get("publication_status") == "retired":
+        publication = narrative.get("publication_status")
+        if publication == "retired":
             exclude(document, "retired_document")
             continue
-        if (
-            payload.mode == "baseline_build"
-            and narrative.get("publication_status") in {"draft", "in_review"}
-        ):
-            exclude(document, "draft_excluded_from_baseline")
+        if publication in {"draft", "in_review"}:
+            exclude(
+                document,
+                "draft_excluded_from_baseline"
+                if payload.mode == "baseline_build"
+                else "draft_excluded_from_background",
+            )
             continue
-        is_authority = role in {"canon", "character_profile"}
-        is_published_history = (
-            narrative.get("publication_status") == "published"
+        # A publication label alone cannot promote reference material into
+        # history. Confirmed canon/profile with unknown publication status
+        # remain eligible for legacy compatibility.
+        is_authority = (
+            role in {"canon", "character_profile"}
+            and publication in {"published", "unknown"}
         )
+        is_published_history = role == "chapter" and publication == "published"
         if not (is_authority or is_published_history):
             exclude(document, "not_authority_or_published_history")
             continue

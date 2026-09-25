@@ -153,6 +153,11 @@ open-text semantic accuracy or production readiness. A [single real-model DEV
 checkpoint](docs/character-support-binding-dev-checkpoint-20260926.md) completed
 the character baseline but stopped at candidate selection (3/5 frozen
 selectors uniquely matched); no draft or OOC case was evaluated.
+Two further [same-build DEV repetitions and diagnostic boundaries](docs/character-support-funnel-dev-checkpoint-20260926.md)
+also stopped before draft review despite complete baselines (4/5 and 3/5
+unique frozen selector matches). The implemented V2 funnel was replayed
+offline against three isolated snapshots produced by real-model runs; it was
+not emitted in the original online reports or counted in their scores.
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a

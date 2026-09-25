@@ -78,6 +78,7 @@ GIT_HASH = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 SAFE_KEY = re.compile(r"[A-Za-z0-9_.:-]{1,100}\Z")
 SUPPORT_ID = re.compile(r"L[1-9][0-9]{0,7}:A[1-9][0-9]{0,2}\Z")
 SUPPORT_LOCATION_DIAGNOSTIC_V1 = "support-location-diagnostic-v1"
+SUPPORT_FUNNEL_DIAGNOSTIC_V2 = "support-funnel-diagnostic-v2"
 SAFE_REASON_KEYS = frozenset({
     "source_formal", "source_history",
     "regenerated_from_evidence_mismatch", "evidence_mismatch",
@@ -1427,6 +1428,199 @@ def _safe_support_location_diagnostic(
         return _support_location_unavailable("diagnostic_unavailable")
 
 
+def _support_funnel_unavailable(reason_code: str) -> dict[str, Any]:
+    """Fixed failure vocabulary; never serialize an exception or source text."""
+    if reason_code not in {"snapshot_unavailable", "diagnostic_unavailable"}:
+        reason_code = "diagnostic_unavailable"
+    return {
+        "schema_version": SUPPORT_FUNNEL_DIAGNOSTIC_V2,
+        "available": False,
+        "reason_code": reason_code,
+    }
+
+
+def _support_funnel_diagnostic(
+    pending: list[dict[str, Any]], project_id: str, suite: VerifiedSuite,
+    *, source_run_id: str, document_ids: dict[str, str],
+    statement_matches: list[list[str]],
+) -> dict[str, Any]:
+    """Describe persisted DEV candidates; never select, score, or confirm one."""
+    selectors = suite.plan["candidate_decisions"]
+    if len(statement_matches) != len(selectors):
+        raise ValueError("diagnostic contract")
+    status_counts = {key: 0 for key in ("verified", "legacy", "invalid", "missing")}
+    targets: dict[str, tuple[str, int, int]] = {}
+    known_ids: set[str] = set()
+    for row in pending:
+        candidate_id = row.get("id")
+        if not isinstance(candidate_id, str) or not candidate_id or candidate_id in known_ids:
+            raise ValueError("diagnostic contract")
+        known_ids.add(candidate_id)
+        status, target = _verified_target_span(row)
+        status_counts[status] += 1
+        if target is not None:
+            targets[candidate_id] = target
+
+    def stage_counts(
+        rows: list[tuple[dict[str, Any], tuple[str, int, str, int, int]]],
+    ) -> dict[str, int]:
+        return {
+            "candidate_count": len(rows),
+            "distinct_target_location_count": len({location for _, location in rows}),
+        }
+
+    counts: dict[str, Any] = {}
+    frozen_ids: list[list[str]] = []
+    for ordinal, (selector, old_matches) in enumerate(
+        zip(selectors, statement_matches), start=1
+    ):
+        name = selector["source_document"]
+        line = selector["source_line"]
+        expected_lines = _source_lines(suite.files[name])
+        expected_line = expected_lines[line - 1]
+        expected_document_id = document_ids.get(name)
+        normalized_quote = _normalized_clause(selector["source_quote"])
+        located: list[tuple[dict[str, Any], tuple[str, int, str, int, int]]] = []
+        if isinstance(expected_document_id, str) and expected_document_id and normalized_quote:
+            for row in pending:
+                target = targets.get(row["id"])
+                if (
+                    target is None
+                    or row.get("reviewable") is not True
+                    or row.get("project_id") != project_id
+                    or row.get("source_run_id") != source_run_id
+                ):
+                    continue
+                evidence = row.get("evidence")
+                if type(evidence) is not list or len(evidence) != 1 or type(evidence[0]) is not dict:
+                    continue
+                ref = evidence[0]
+                support_id, start, end = target
+                if (
+                    ref.get("document_id") != expected_document_id
+                    or ref.get("document_name") != name
+                    or type(ref.get("document_version")) is not int
+                    or ref["document_version"] != 1
+                    or ref.get("content_sha256") != suite.hashes[name]
+                    or type(ref.get("line_start")) is not int
+                    or ref["line_start"] != line
+                    or type(ref.get("line_end")) is not int
+                    or ref["line_end"] != line
+                    or ref.get("text") != expected_line
+                    or not isinstance(ref.get("input_id"), str)
+                    or not ref["input_id"]
+                    or not support_id.startswith(f"L{line}:A")
+                    or end > len(expected_line)
+                ):
+                    continue
+                if normalized_quote in _normalized_clause(expected_line[start:end]):
+                    located.append((row, (expected_document_id, line, support_id, start, end)))
+
+        character = [item for item in located if item[0].get("character_key") == selector["character_key"]]
+        trait_type = [item for item in character if item[0].get("trait_type") == selector["trait_type"]]
+
+        def identity_consistent(row: dict[str, Any]) -> bool:
+            trait_key = row.get("trait_key")
+            return (
+                isinstance(trait_key, str) and bool(trait_key.strip())
+                and row.get("comparison_key") == stable_trait_identity(
+                    selector["trait_type"], trait_key, selector["key_object"] or ""
+                )
+            )
+
+        identity = [item for item in trait_type if identity_consistent(item[0])]
+        polarity = [item for item in identity if item[0].get("polarity") == selector["polarity"]]
+        stability = [item for item in polarity if item[0].get("stability") == selector["stability"]]
+        expected_origin = (
+            "history_inference" if name == "03-published-history-v1.0.md"
+            else "explicit_setting"
+        )
+        origin = [item for item in stability if item[0].get("origin") == expected_origin]
+        statement = [
+            item for item in origin
+            if normalized_quote in _normalized_clause(item[0].get("value"))
+        ]
+        full = [item for item in statement if _candidate_matches(item[0], selector)]
+        stages = {
+            "target_quote_in_verified_span": stage_counts(located),
+            "character_key_equal": stage_counts(character),
+            "trait_type_equal": stage_counts(trait_type),
+            "comparison_identity_fence_equal": stage_counts(identity),
+            "polarity_equal_frozen": stage_counts(polarity),
+            "stability_equal_frozen": stage_counts(stability),
+            "origin_equal_frozen": stage_counts(origin),
+            "profile_statement_contains_quote": stage_counts(statement),
+            "frozen_selector_plus_verified_target": stage_counts(full),
+        }
+        # Marginals are evaluated on the same target location but are not a
+        # second scoring path. They expose parallel mismatches hidden by a
+        # cumulative funnel without claiming semantic correctness.
+        target_field_counts = {
+            "character_key_equal": sum(
+                item[0].get("character_key") == selector["character_key"] for item in located
+            ),
+            "trait_type_equal": sum(
+                item[0].get("trait_type") == selector["trait_type"] for item in located
+            ),
+            "trait_type_and_comparison_identity_fence_equal": sum(
+                item[0].get("trait_type") == selector["trait_type"]
+                and identity_consistent(item[0]) for item in located
+            ),
+            "polarity_equal_frozen": sum(
+                item[0].get("polarity") == selector["polarity"] for item in located
+            ),
+            "stability_equal_frozen": sum(
+                item[0].get("stability") == selector["stability"] for item in located
+            ),
+            "origin_equal_frozen": sum(
+                item[0].get("origin") == expected_origin for item in located
+            ),
+            "profile_statement_contains_quote": sum(
+                normalized_quote in _normalized_clause(item[0].get("value"))
+                for item in located
+            ),
+        }
+        if any(not isinstance(candidate_id, str) or candidate_id not in known_ids for candidate_id in old_matches):
+            raise ValueError("diagnostic contract")
+        frozen_ids.append(old_matches)
+        counts[f"selector_{ordinal}"] = {
+            "stages": stages,
+            "target_field_counts": target_field_counts,
+            "frozen_selector_candidate_count": len(old_matches),
+        }
+
+    frequency: dict[str, int] = {}
+    for matched in frozen_ids:
+        for candidate_id in matched:
+            frequency[candidate_id] = frequency.get(candidate_id, 0) + 1
+    for ordinal, matched in enumerate(frozen_ids, start=1):
+        counts[f"selector_{ordinal}"]["frozen_selector_unique"] = (
+            len(matched) == 1 and frequency[matched[0]] == 1
+        )
+    return {
+        "schema_version": SUPPORT_FUNNEL_DIAGNOSTIC_V2,
+        "available": True,
+        "semantic_axis": "not_evaluable",
+        "polarity_interpretation": "frozen_field_equality_only",
+        "binding_status_counts": status_counts,
+        "selectors": counts,
+    }
+
+
+def _safe_support_funnel_diagnostic(
+    pending: list[dict[str, Any]], project_id: str, suite: VerifiedSuite,
+    *, source_run_id: str, document_ids: dict[str, str],
+    statement_matches: list[list[str]],
+) -> dict[str, Any]:
+    try:
+        return _support_funnel_diagnostic(
+            pending, project_id, suite, source_run_id=source_run_id,
+            document_ids=document_ids, statement_matches=statement_matches,
+        )
+    except Exception:
+        return _support_funnel_unavailable("diagnostic_unavailable")
+
+
 def _partial_baseline_inventory(
     client: httpx.Client, project_id: str, suite: VerifiedSuite,
     *, source_run_id: str | None = None, document_ids: dict[str, str] | None = None,
@@ -1492,6 +1686,10 @@ def _partial_baseline_inventory(
             pending, project_id, suite, source_run_id=source_run_id,
             document_ids=document_ids, statement_matches=matches_by_selector,
         )
+        inventory["support_funnel_diagnostic_v2"] = _safe_support_funnel_diagnostic(
+            pending, project_id, suite, source_run_id=source_run_id,
+            document_ids=document_ids, statement_matches=matches_by_selector,
+        )
     return inventory
 
 
@@ -1531,6 +1729,10 @@ def _review_candidates(
     }
     if suite.name == "dev" and source_run_id is not None and document_ids is not None:
         state["support_location_diagnostic_v1"] = _safe_support_location_diagnostic(
+            all_pending, project_id, suite, source_run_id=source_run_id,
+            document_ids=document_ids, statement_matches=statement_matches,
+        )
+        state["support_funnel_diagnostic_v2"] = _safe_support_funnel_diagnostic(
             all_pending, project_id, suite, source_run_id=source_run_id,
             document_ids=document_ids, statement_matches=statement_matches,
         )
@@ -1614,6 +1816,9 @@ def _execute_trial(client: httpx.Client, suite: VerifiedSuite, trial: int, state
         state["support_location_diagnostic_v1"] = _support_location_unavailable(
             "snapshot_unavailable"
         )
+        state["support_funnel_diagnostic_v2"] = _support_funnel_unavailable(
+            "snapshot_unavailable"
+        )
     if state["baseline_admission"]["admitted"] is not True:
         if baseline.get("status") == "completed" and baseline.get("stage_outcome") == "partial":
             try:
@@ -1627,6 +1832,12 @@ def _execute_trial(client: httpx.Client, suite: VerifiedSuite, trial: int, state
                     ].get(
                         "support_location_diagnostic_v1",
                         _support_location_unavailable("diagnostic_unavailable"),
+                    )
+                    state["support_funnel_diagnostic_v2"] = state[
+                        "partial_baseline_inventory"
+                    ].get(
+                        "support_funnel_diagnostic_v2",
+                        _support_funnel_unavailable("diagnostic_unavailable"),
                     )
             except Exception as exc:
                 state["partial_baseline_inventory"] = {
@@ -2104,6 +2315,10 @@ def _score_trial(
         **({"support_location_diagnostic_v1": state.get(
             "support_location_diagnostic_v1",
             _support_location_unavailable("snapshot_unavailable"),
+        )} if suite.name == "dev" and baseline is not None else {}),
+        **({"support_funnel_diagnostic_v2": state.get(
+            "support_funnel_diagnostic_v2",
+            _support_funnel_unavailable("snapshot_unavailable"),
         )} if suite.name == "dev" and baseline is not None else {}),
         "candidate_review": review,
         "axis_count": state.get("axis_count", 0),
@@ -2791,11 +3006,21 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 "不上传草稿，也不改变基线失败或试验通过状态"
             ),
             "support_location_diagnostic_v1": (
-                "DEV 基线候选快照可用时，独立统计后端已验证的 target 分句与冻结短句的"
-                "归一化逐字定位；要求本轮项目、来源运行、文档 ID/哈希和精确行一致。"
-                "不使用 statement、整行其他分句或承接桥段；仅输出匿名计数，不选候选、"
-                "不改变冻结 selector 或准入 gate，也不代表语义正确率；诊断不可用时"
-                "只输出固定原因码，不将诊断失败扩展为试验失败"
+                "DEV 基线候选快照可用时，在可审核且角色、类型、方向、稳定性、来源和"
+                "比较身份已符合冻结 selector 的候选中，统计后端已验证 target 分句与"
+                "冻结短句的归一化逐字定位；还要求本轮项目、来源运行、文档 ID/哈希"
+                "及精确行一致。它不是独立的目标定位召回率；statement_zero_target_one_count"
+                "仅是在这些字段前提下 statement 未含短句而 target 含短句的槽数。"
+                "不选候选、不改变 gate，也不代表语义正确率；诊断异常仅给固定原因码"
+            ),
+            "support_funnel_diagnostic_v2": (
+                "仅 DEV 的同一待审候选快照，先核对已验证 target 与精确来源，再按角色、"
+                "类型、机械比较身份、冻结方向、稳定性、正式/历史来源字段与 statement"
+                "包含短句逐层计数；"
+                "distinct_target_location_count 是同一已验证目标位置去重，不是独立"
+                "标注召回。无对象 core 的比较身份由候选 trait_key 推导，无法判语义轴；"
+                "方向相等不等于语义正确。额外显示既有冻结 selector 数及全局唯一性，"
+                "所有槽匿名且不输出正文、候选 ID、偏移、URL 或密钥；不改变 gate"
             ),
             "unselected_reviewable_candidates": (
                 "基线运行产生、但不在预注册作者审核计划内的可审核候选数；字段缺失或无效"

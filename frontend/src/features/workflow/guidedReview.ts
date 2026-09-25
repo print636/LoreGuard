@@ -395,11 +395,15 @@ export function isDraftDocument(document: GuidedDocument): boolean {
 }
 
 export function isBaselineDocument(document: GuidedDocument): boolean {
-  if (!document.active || isDraftDocument(document)) return false;
+  if (!document.active) return false;
+  const status = document.narrative_context?.publication_status;
   if (document.document_role === "chapter") {
-    return document.narrative_context?.publication_status === "published";
+    return status === "published";
   }
-  return ["canon", "character_profile"].includes(document.document_role);
+  if (document.document_role === "canon" || document.document_role === "character_profile") {
+    return status === "published" || status === "unknown";
+  }
+  return false;
 }
 
 export function guidedDocumentState(documents: GuidedDocument[]) {
