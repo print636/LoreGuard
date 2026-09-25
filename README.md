@@ -149,8 +149,10 @@ author decisions and distinguishes the target clause from carryover context in
 the UI. Invalid new bindings block review; legacy candidates retain the older
 whole-line display. Both changes are default-off and do not alter the frozen
 evaluation gate. They establish evidence identity and failure handling, **not**
-open-text semantic accuracy or production readiness; a fresh real-model
-diagnostic is still required.
+open-text semantic accuracy or production readiness. A [single real-model DEV
+checkpoint](docs/character-support-binding-dev-checkpoint-20260926.md) completed
+the character baseline but stopped at candidate selection (3/5 frozen
+selectors uniquely matched); no draft or OOC case was evaluated.
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a

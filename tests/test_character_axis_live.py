@@ -731,7 +731,7 @@ def test_execute_trial_uploads_only_story_documents_and_explicit_draft_target(
     monkeypatch.setattr(axis_live, "_wait_run", lambda _c, run_id, **_k: {"id": run_id})
     monkeypatch.setattr(axis_live, "_run_summary", lambda _c, run, **_k: {"run_id": run["id"]})
     monkeypatch.setattr(axis_live, "_baseline_admission", lambda _summary: {"admitted": True})
-    monkeypatch.setattr(axis_live, "_review_candidates", lambda *_: None)
+    monkeypatch.setattr(axis_live, "_review_candidates", lambda *_a, **_k: None)
 
     state = {}
     axis_live._execute_trial(object(), suite, 1, state, timeout_seconds=1)
@@ -873,6 +873,119 @@ def test_partial_inventory_anonymizes_selector_keys_and_rejects_reused_candidate
     assert "candidate-1" not in json.dumps(inventory)
 
 
+@pytest.mark.parametrize(
+    ("statement", "diagnostic_failure", "expected_pass"),
+    [
+        ("source anchor", False, True),
+        ("paraphrased statement", False, False),
+        ("source anchor", True, True),
+    ],
+)
+def test_complete_dev_baseline_location_diagnostic_is_non_gating_and_redacted(
+    tmp_path, monkeypatch, statement, diagnostic_failure, expected_pass,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    candidate = _location_candidate(suite, value=statement)
+    candidate["api_key"] = "fixture-secret-should-not-leak"
+    candidate["base_url"] = "https://synthetic.invalid/private"
+    calls = []
+
+    def fake_request(_client, method, _path, route, **_kwargs):
+        calls.append((method, route))
+        if route == "project_create":
+            return {"id": "project-id"}
+        if route == "characters":
+            return {"items": [{"character_key": "Actor"}], "has_more": False}
+        if route == "candidate_list":
+            return {"items": [candidate], "has_more": False}
+        if route == "axis_create":
+            spec = suite.plan["approved_axes"][0]
+            return {
+                "id": "axis-id", "version": 1,
+                "definition_sha256": axis_live._sha256(" ".join(spec["definition"].split())),
+            }
+        if route == "candidate_decision":
+            return {"candidate": {
+                **candidate, "review_state": "confirmed", "approved_axis_id": "axis-id",
+            }}
+        raise AssertionError(f"unexpected API route {route}")
+
+    def fake_start(_client, _project, *, mode, target_id=None):
+        if mode == "baseline_build":
+            assert target_id is None
+            return "baseline-run"
+        assert mode == "draft_review" and target_id == "draft-document"
+        return "draft-run"
+
+    def fake_summary(_client, run, **_kwargs):
+        if run["id"] == "baseline-run":
+            return {"status": "completed", "stage_outcome": "completed"}
+        return {
+            "status": "completed", "stage_outcome": "completed",
+            "material_coverage": "complete", "planned_chunks": 1,
+            "processed_chunks": 1, "stage_usage": {"attempted_calls": 1},
+            "visible_issue_cases": [],
+        }
+
+    monkeypatch.setattr(axis_live, "_request", fake_request)
+    monkeypatch.setattr(
+        axis_live, "_upload",
+        lambda _c, _p, _s, name, *_a, **_k:
+        "profile-document" if name == "02-character-profiles.md"
+        else "draft-document" if name == axis_live.DRAFT_FILE else f"document-{name}",
+    )
+    monkeypatch.setattr(axis_live, "_start_run", fake_start)
+    monkeypatch.setattr(axis_live, "_wait_run", lambda _c, run_id, **_k: {"id": run_id})
+    monkeypatch.setattr(axis_live, "_run_summary", fake_summary)
+    monkeypatch.setattr(axis_live, "_baseline_admission", lambda _summary: {"admitted": True})
+    if diagnostic_failure:
+        def fail_diagnostic(*_args, **_kwargs):
+            raise RuntimeError("fixture-secret-should-not-leak source anchor")
+
+        monkeypatch.setattr(axis_live, "_support_location_diagnostic", fail_diagnostic)
+
+    state = {"trial": 1}
+    if expected_pass:
+        axis_live._execute_trial(object(), suite, 1, state, timeout_seconds=1)
+    else:
+        with pytest.raises(axis_live.SafeFailure, match="candidate_not_unique") as error:
+            axis_live._execute_trial(object(), suite, 1, state, timeout_seconds=1)
+        state["failure"] = error.value.payload
+    scored = axis_live._score_trial(suite, state, [])
+    assert scored["passed"] is expected_pass
+    assert calls.count(("GET", "candidate_list")) == 1
+    assert calls.count(("GET", "characters")) == 1
+    assert scored["candidate_review"]["selectors"]["wanted"] == {
+        "match_count": int(expected_pass), "unique": expected_pass,
+    }
+    if expected_pass:
+        assert state["selected"]["wanted"]["id"] == "candidate-1"
+    else:
+        assert not any(route in {"axis_create", "candidate_decision"} for _, route in calls)
+        assert scored["draft"] is None
+    diagnostic = scored["support_location_diagnostic_v1"]
+    if diagnostic_failure:
+        assert diagnostic == {
+            "schema_version": "support-location-diagnostic-v1",
+            "available": False, "reason_code": "diagnostic_unavailable",
+        }
+    else:
+        assert diagnostic == {
+            "schema_version": "support-location-diagnostic-v1",
+            "binding_status_counts": {
+                "verified": 1, "legacy": 0, "invalid": 0, "missing": 0,
+            },
+            "statement_zero_target_one_count": int(not expected_pass),
+            "selectors": {"selector_1": {"match_count": 1, "unique": True}},
+        }
+    rendered = json.dumps(scored)
+    assert all(secret not in rendered for secret in (
+        "candidate-1", "project-id", "source anchor", "paraphrased statement",
+        "fixture-secret-should-not-leak", "https://synthetic.invalid/private",
+    ))
+
+
 def test_partial_inventory_global_uniqueness_rejects_shared_multimatch(
     tmp_path, monkeypatch,
 ):
@@ -902,6 +1015,30 @@ def test_partial_inventory_global_uniqueness_rejects_shared_multimatch(
     }
     assert inventory["matched_reviewable_total"] == 2
     assert inventory["extra_reviewable_total"] == 0
+
+
+def test_partial_inventory_survives_location_diagnostic_failure(tmp_path, monkeypatch):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    monkeypatch.setattr(axis_live, "_list_pending", lambda *_a: [_location_candidate(suite)])
+
+    def fail_diagnostic(*_args, **_kwargs):
+        raise ValueError("fixture-secret-should-not-leak source anchor")
+
+    monkeypatch.setattr(axis_live, "_support_location_diagnostic", fail_diagnostic)
+    inventory = axis_live._partial_baseline_inventory(
+        object(), "project-id", suite, source_run_id="baseline-run",
+        document_ids={"02-character-profiles.md": "profile-document"},
+    )
+    assert inventory["available"] is True
+    assert inventory["selectors"] == {
+        "selector_1": {"match_count": 0, "unique": False},
+    }
+    assert inventory["support_location_diagnostic_v1"] == {
+        "schema_version": "support-location-diagnostic-v1",
+        "available": False, "reason_code": "diagnostic_unavailable",
+    }
+    assert "fixture-secret-should-not-leak" not in json.dumps(inventory)
 
 
 def _location_candidate(suite, *, value="paraphrased statement"):
@@ -1133,6 +1270,10 @@ def test_nonpartial_baseline_rejection_does_not_fetch_candidate_inventory(
     with pytest.raises(axis_live.SafeFailure, match="baseline_admission_failed"):
         axis_live._execute_trial(object(), suite, 1, state, timeout_seconds=1)
     assert "partial_baseline_inventory" not in state
+    assert state["support_location_diagnostic_v1"] == {
+        "schema_version": "support-location-diagnostic-v1",
+        "available": False, "reason_code": "snapshot_unavailable",
+    }
     assert calls == [("POST", "project_create")]
 
 

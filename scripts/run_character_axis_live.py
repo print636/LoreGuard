@@ -1402,6 +1402,31 @@ def _support_location_diagnostic(
     }
 
 
+def _support_location_unavailable(reason_code: str) -> dict[str, Any]:
+    """Report only a fixed diagnostic status, never an exception or source text."""
+    if reason_code not in {"snapshot_unavailable", "diagnostic_unavailable"}:
+        reason_code = "diagnostic_unavailable"
+    return {
+        "schema_version": SUPPORT_LOCATION_DIAGNOSTIC_V1,
+        "available": False,
+        "reason_code": reason_code,
+    }
+
+
+def _safe_support_location_diagnostic(
+    pending: list[dict[str, Any]], project_id: str, suite: VerifiedSuite,
+    *, source_run_id: str, document_ids: dict[str, str],
+    statement_matches: list[list[str]],
+) -> dict[str, Any]:
+    try:
+        return _support_location_diagnostic(
+            pending, project_id, suite, source_run_id=source_run_id,
+            document_ids=document_ids, statement_matches=statement_matches,
+        )
+    except Exception:
+        return _support_location_unavailable("diagnostic_unavailable")
+
+
 def _partial_baseline_inventory(
     client: httpx.Client, project_id: str, suite: VerifiedSuite,
     *, source_run_id: str | None = None, document_ids: dict[str, str] | None = None,
@@ -1463,7 +1488,7 @@ def _partial_baseline_inventory(
         "selectors": selector_counts,
     }
     if suite.name == "dev" and source_run_id is not None and document_ids is not None:
-        inventory["support_location_diagnostic_v1"] = _support_location_diagnostic(
+        inventory["support_location_diagnostic_v1"] = _safe_support_location_diagnostic(
             pending, project_id, suite, source_run_id=source_run_id,
             document_ids=document_ids, statement_matches=matches_by_selector,
         )
@@ -1472,7 +1497,8 @@ def _partial_baseline_inventory(
 
 def _review_candidates(
     client: httpx.Client, project_id: str, suite: VerifiedSuite,
-    state: dict[str, Any],
+    state: dict[str, Any], *, source_run_id: str | None = None,
+    document_ids: dict[str, str] | None = None,
 ) -> None:
     plan = suite.plan
     all_pending = _list_pending(client, project_id)
@@ -1481,8 +1507,12 @@ def _review_candidates(
     chosen: dict[str, dict[str, Any]] = {}
     reused: set[str] = set()
     selection_checks: dict[str, dict[str, Any]] = {}
+    statement_matches: list[list[str]] = []
     for selector in selectors:
         matches = [row for row in reviewable if _candidate_matches(row, selector)]
+        statement_matches.append([
+            row["id"] for row in matches if isinstance(row.get("id"), str)
+        ])
         key = selector["candidate_key"]
         selection_checks[key] = {"match_count": len(matches), "unique": len(matches) == 1}
         if len(matches) == 1:
@@ -1499,6 +1529,11 @@ def _review_candidates(
         "unselected_reviewable": len(reviewable) - len(reused),
         "selectors": selection_checks,
     }
+    if suite.name == "dev" and source_run_id is not None and document_ids is not None:
+        state["support_location_diagnostic_v1"] = _safe_support_location_diagnostic(
+            all_pending, project_id, suite, source_run_id=source_run_id,
+            document_ids=document_ids, statement_matches=statement_matches,
+        )
     if len(chosen) != len(selectors) or any(not row["unique"] for row in selection_checks.values()):
         raise SafeFailure("candidate_not_unique", "candidate_review")
 
@@ -1575,6 +1610,10 @@ def _execute_trial(client: httpx.Client, suite: VerifiedSuite, trial: int, state
     baseline = _run_summary(client, baseline_run, known_documents=known_docs)
     state["baseline"] = baseline
     state["baseline_admission"] = _baseline_admission(baseline)
+    if suite.name == "dev":
+        state["support_location_diagnostic_v1"] = _support_location_unavailable(
+            "snapshot_unavailable"
+        )
     if state["baseline_admission"]["admitted"] is not True:
         if baseline.get("status") == "completed" and baseline.get("stage_outcome") == "partial":
             try:
@@ -1582,12 +1621,22 @@ def _execute_trial(client: httpx.Client, suite: VerifiedSuite, trial: int, state
                     client, project_id, suite, source_run_id=baseline_id,
                     document_ids=baseline_document_ids,
                 )
+                if suite.name == "dev":
+                    state["support_location_diagnostic_v1"] = state[
+                        "partial_baseline_inventory"
+                    ].get(
+                        "support_location_diagnostic_v1",
+                        _support_location_unavailable("diagnostic_unavailable"),
+                    )
             except Exception as exc:
                 state["partial_baseline_inventory"] = {
                     "available": False, "reason_code": _failure(exc)["code"],
                 }
         raise SafeFailure("baseline_admission_failed", "baseline")
-    _review_candidates(client, project_id, suite, state)
+    _review_candidates(
+        client, project_id, suite, state, source_run_id=baseline_id,
+        document_ids=baseline_document_ids,
+    )
     draft_document_id = _upload(
         client, project_id, suite, DRAFT_FILE, "chapter", published=False
     )
@@ -2052,6 +2101,10 @@ def _score_trial(
         "baseline_admitted": admission.get("admitted") is True,
         **({"partial_baseline_inventory": state["partial_baseline_inventory"]}
            if "partial_baseline_inventory" in state else {}),
+        **({"support_location_diagnostic_v1": state.get(
+            "support_location_diagnostic_v1",
+            _support_location_unavailable("snapshot_unavailable"),
+        )} if suite.name == "dev" and baseline is not None else {}),
         "candidate_review": review,
         "axis_count": state.get("axis_count", 0),
         "draft": _public_run(draft),
@@ -2738,10 +2791,11 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 "不上传草稿，也不改变基线失败或试验通过状态"
             ),
             "support_location_diagnostic_v1": (
-                "仅在 DEV 基线部分完成时，独立统计后端已验证的 target 分句与冻结短句的"
+                "DEV 基线候选快照可用时，独立统计后端已验证的 target 分句与冻结短句的"
                 "归一化逐字定位；要求本轮项目、来源运行、文档 ID/哈希和精确行一致。"
                 "不使用 statement、整行其他分句或承接桥段；仅输出匿名计数，不选候选、"
-                "不改变冻结 selector 或准入 gate，也不代表语义正确率"
+                "不改变冻结 selector 或准入 gate，也不代表语义正确率；诊断不可用时"
+                "只输出固定原因码，不将诊断失败扩展为试验失败"
             ),
             "unselected_reviewable_candidates": (
                 "基线运行产生、但不在预注册作者审核计划内的可审核候选数；字段缺失或无效"
