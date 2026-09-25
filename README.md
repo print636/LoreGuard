@@ -131,6 +131,15 @@ The subsequent [fixed DEV v3 core-label prompt A/B checkpoint](docs/character-ax
 records 2/3 baseline admissions with v3 on versus 0/3 off, but both admitted
 trials stopped at candidate uniqueness; no draft cases were evaluated and the
 frozen transfer suite was not run.
+The [V4 DEV comparison](docs/character-axis-v4-dev-checkpoint-20260925.md)
+keeps the support-ID protocol disabled by default after it reduced frozen
+candidate coverage. A later [anonymous support-trace diagnostic](docs/character-support-trace-dev-checkpoint-20260925.md)
+used three real-model DEV trials: three target clauses were not submitted and
+two were submitted but failed the actor-support guard in every trial. All three
+baselines remained partial, so these are pipeline observations, not OOC
+accuracy results. The guard's current direct-actor contract would reject all
+five target clauses if submitted; their cross-clause subject and label scope
+still need independent author confirmation, not automatic inheritance.
 
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a
