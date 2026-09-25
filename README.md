@@ -30,6 +30,12 @@ See the [approved-axis v1 contract](docs/character-approved-axis-rfc.md) for
 the exact API and limits. This has not passed a separate cross-story real-model
 quality gate.
 
+An author-confirmed character trait remains active even if its source document
+is later retired or reclassified as reference material. The character workbench
+offers an explicit, audited per-trait withdrawal with confirmation; it excludes
+the trait from future runs without changing historical run snapshots. Withdrawn
+traits remain visible in the profile archive and cannot be silently restored.
+
 Context inference is single-document and limited to 30,000 characters and 2,000 lines; larger inputs require manual context assignment. It is not a story rewrite, bulk classifier, authority decision, or production-accuracy claim. See the [V1 workflow and API contract](docs/guided-review-batch-v1.md) and the [full Chinese guide](README.zh-CN.md).
 
 Relevant API entry points are:

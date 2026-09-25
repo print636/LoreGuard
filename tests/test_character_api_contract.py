@@ -17,6 +17,7 @@ from app.character_traits import upsert_character_trait_candidate
 from app.character_support_bindings import support_bindings_sha256
 from app.db import (
     AnalysisDiagnosticRow,
+    AnalysisRunCharacterTraitInputRow,
     AnalysisRunInputRow,
     AnalysisRunInputNarrativeContextRow,
     AnalysisRunRow,
@@ -230,6 +231,26 @@ def _confirm(
     )
 
 
+def _withdraw(
+    client: TestClient,
+    project_id: str,
+    candidate_id: str,
+    *,
+    expected_revision: int = 1,
+    comment: str = "撤销过时设定",
+    headers: dict[str, str] | None = None,
+):
+    return client.post(
+        _decision_path(project_id, candidate_id),
+        json={
+            "decision": "withdraw",
+            "expected_revision": expected_revision,
+            "comment": comment,
+        },
+        headers=headers,
+    )
+
+
 def _candidate_input_from_row(
     row: CharacterTraitCandidateRow,
     *,
@@ -316,7 +337,7 @@ def test_character_roster_envelope_distinguishes_readiness_states():
         assert not_generated.json()["model_coverage"] == "unknown"
 
 
-def test_character_roster_legacy_fallback_then_baseline_cutover_is_run_scoped():
+def test_character_roster_baseline_cutover_keeps_historical_confirmed_trait():
     with TestClient(app) as client:
         project, _ = _project_and_document(client)
         legacy = _completed_run(
@@ -392,6 +413,14 @@ def test_character_roster_legacy_fallback_then_baseline_cutover_is_run_scoped():
             client, project["id"], batch_mode="draft_review"
         )
         roster = client.get(f"/api/v1/projects/{project['id']}/characters")
+        withdrawn = _withdraw(client, project["id"], candidate_id)
+        assert withdrawn.status_code == 201, withdrawn.text
+        withdrawn_roster = client.get(
+            f"/api/v1/projects/{project['id']}/characters"
+        )
+        withdrawn_profile = client.get(
+            f"/api/v1/projects/{project['id']}/characters/{quote('林澈', safe='')}"
+        )
 
     assert roster.status_code == 200, roster.text
     body = roster.json()
@@ -399,9 +428,18 @@ def test_character_roster_legacy_fallback_then_baseline_cutover_is_run_scoped():
     assert body["source_run_id"] != legacy["id"]
     assert body["source_run_id"] != later_draft["id"]
     assert body["model_coverage"] == "partial"
-    assert body["readiness"] == "not_generated"
-    assert body["items"] == []
-    assert body["total"] == 0
+    assert body["readiness"] == "ready"
+    assert body["items"][0]["confirmed_trait_count"] == 1
+    assert body["total"] == 1
+    assert withdrawn_roster.status_code == 200
+    assert withdrawn_roster.json()["total"] == 1
+    assert withdrawn_roster.json()["items"][0]["confirmed_trait_count"] == 0
+    assert withdrawn_roster.json()["items"][0]["withdrawn_trait_count"] == 1
+    assert withdrawn_profile.status_code == 200
+    assert withdrawn_profile.json()["confirmed_traits"] == []
+    assert [item["id"] for item in withdrawn_profile.json()["withdrawn_traits"]] == [
+        candidate_id
+    ]
 
 
 def test_replaced_source_marks_pending_candidate_stale_and_blocks_confirmation():
@@ -2347,3 +2385,228 @@ def test_author_axis_supersession_requires_same_explicit_axis_and_preserves_old_
             assert original.approved_axis_id == first_axis["id"]
             assert replacement.review_state == "confirmed"
             assert replacement.approved_axis_id == first_axis["id"]
+
+
+@pytest.mark.parametrize("source_change", ["retired", "reference"])
+def test_confirmed_trait_survives_source_change_until_explicit_withdrawal(source_change):
+    with TestClient(app) as client:
+        project, document = _project_and_document(client)
+        first_run = _completed_run(client, project["id"])
+        candidate_id = _candidate(project["id"], first_run["id"])
+        assert _confirm(client, project["id"], candidate_id).status_code == 201
+
+        if source_change == "retired":
+            changed = client.post(
+                f"/api/v1/projects/{project['id']}/documents/{document['id']}"
+                "/narrative-context/revisions",
+                json={
+                    "expected_revision": 1,
+                    "resolution_state": "confirmed",
+                    "publication_status": "retired",
+                },
+            )
+        else:
+            changed = client.post(
+                f"/api/v1/projects/{project['id']}/documents/text",
+                json={
+                    "name": document["name"],
+                    "content": "林澈一直喜欢蜜瓜。",
+                    "replace_document_id": document["id"],
+                    "document_role": "reference",
+                    "narrative_context": {
+                        "resolution_state": "confirmed",
+                        "publication_status": "published",
+                    },
+                },
+            )
+        assert changed.status_code == 201, changed.text
+        profile_url = f"/api/v1/projects/{project['id']}/characters/{quote('林澈', safe='')}"
+        profile_before = client.get(profile_url)
+        assert {item["id"] for item in profile_before.json()["confirmed_traits"]} == {
+            candidate_id
+        }
+        before_withdraw = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            old_snapshot = db.scalar(select(AnalysisRunCharacterTraitInputRow).where(
+                AnalysisRunCharacterTraitInputRow.run_id == before_withdraw["id"],
+                AnalysisRunCharacterTraitInputRow.candidate_id == candidate_id,
+            ))
+            assert old_snapshot is not None
+            snapshot_id = old_snapshot.id
+            snapshot_digest = old_snapshot.payload_sha256
+
+        withdrawn = _withdraw(client, project["id"], candidate_id)
+        assert withdrawn.status_code == 201, withdrawn.text
+        assert withdrawn.json()["candidate"]["review_state"] == "withdrawn"
+        assert withdrawn.json()["candidate"]["revision"] == 2
+        profile_after = client.get(profile_url)
+        assert profile_after.json()["confirmed_traits"] == []
+        assert {item["id"] for item in profile_after.json()["withdrawn_traits"]} == {
+            candidate_id
+        }
+        withdrawn_list = client.get(
+            f"{profile_url}/profile-candidates?state=withdrawn"
+        )
+        assert withdrawn_list.status_code == 200, withdrawn_list.text
+        assert [item["id"] for item in withdrawn_list.json()["items"]] == [candidate_id]
+        after_withdraw = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            assert db.scalar(select(AnalysisRunCharacterTraitInputRow).where(
+                AnalysisRunCharacterTraitInputRow.run_id == after_withdraw["id"],
+                AnalysisRunCharacterTraitInputRow.candidate_id == candidate_id,
+            )) is None
+            old_snapshot = db.get(AnalysisRunCharacterTraitInputRow, snapshot_id)
+            assert old_snapshot is not None
+            assert old_snapshot.payload_sha256 == snapshot_digest
+            assert old_snapshot.payload["candidate_lock_version"] == 1
+            reviews = list(db.scalars(select(CharacterTraitReviewRow).where(
+                CharacterTraitReviewRow.candidate_id == candidate_id,
+            ).order_by(CharacterTraitReviewRow.expected_lock_version)).all())
+            assert [item.decision for item in reviews] == ["confirm", "withdraw"]
+
+
+def test_withdrawal_idempotency_cas_and_review_state_guards():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        confirmed_id = _candidate(project["id"], run["id"])
+        rejected_id = _candidate(
+            project["id"], run["id"], trait_key="讨厌苹果", value="讨厌苹果"
+        )
+        assert _confirm(client, project["id"], confirmed_id).status_code == 201
+        assert client.post(
+            _decision_path(project["id"], rejected_id),
+            json={"decision": "reject", "expected_revision": 0},
+        ).status_code == 201
+        key = {"Idempotency-Key": f"withdraw-{uuid4().hex}"}
+        first = _withdraw(client, project["id"], confirmed_id, headers=key)
+        assert first.status_code == 201, first.text
+        assert first.json()["deduplicated"] is False
+        replay = _withdraw(client, project["id"], confirmed_id, headers=key)
+        assert replay.status_code == 201, replay.text
+        assert replay.json()["deduplicated"] is True
+        assert replay.json()["decision_id"] == first.json()["decision_id"]
+        changed_body = _withdraw(
+            client, project["id"], confirmed_id, comment="另一项请求", headers=key
+        )
+        assert changed_body.status_code == 409
+        assert changed_body.json()["detail"]["code"] == "idempotency_key_conflict"
+        for candidate_id, expected in ((confirmed_id, 1), (rejected_id, 1)):
+            denied = _withdraw(
+                client, project["id"], candidate_id, expected_revision=expected
+            )
+            assert denied.status_code == 409, denied.text
+            assert denied.json()["detail"]["code"] == "character_trait_revision_conflict"
+        with SessionLocal() as db:
+            reviews = list(db.scalars(select(CharacterTraitReviewRow).where(
+                CharacterTraitReviewRow.candidate_id == confirmed_id,
+                CharacterTraitReviewRow.decision == "withdraw",
+            )).all())
+            assert len(reviews) == 1
+
+
+def test_withdrawn_candidate_same_context_reuses_terminal_row_without_reactivation():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        first_run = _completed_run(client, project["id"])
+        candidate_id = _candidate(project["id"], first_run["id"])
+        assert _confirm(client, project["id"], candidate_id).status_code == 201
+        assert _withdraw(client, project["id"], candidate_id).status_code == 201
+        later_run = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            original = db.get(CharacterTraitCandidateRow, candidate_id)
+            source = db.scalar(select(AnalysisRunInputRow).where(
+                AnalysisRunInputRow.run_id == later_run["id"]
+            ))
+            assert source is not None
+            proposal = _candidate_input_from_row(
+                original, comparison_key=original.comparison_key
+            )
+            proposal["evidence"] = [{
+                **original.evidence[0],
+                "input_id": source.id,
+                "document_id": source.document_id,
+                "document_name": source.document_name,
+                "document_version": source.document_version,
+                "content_sha256": source.content_sha256,
+            }]
+            reused, created = upsert_character_trait_candidate(
+                db,
+                project_id=project["id"],
+                source_run_id=later_run["id"],
+                candidate=proposal,
+            )
+            assert not created
+            assert reused.id == candidate_id
+            assert reused.review_state == "withdrawn"
+            assert db.scalar(select(AnalysisRunCharacterTraitInputRow).where(
+                AnalysisRunCharacterTraitInputRow.run_id == later_run["id"],
+                AnalysisRunCharacterTraitInputRow.candidate_id == candidate_id,
+            )) is None
+
+
+def test_superseded_trait_cannot_be_withdrawn_but_successor_can():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        original_id = _candidate(project["id"], run["id"])
+        assert _confirm(client, project["id"], original_id).status_code == 201
+        successor_id = _candidate(
+            project["id"], run["id"], value="不喜欢蜜瓜",
+            polarity="negative", supersedes_candidate_id=original_id,
+        )
+        assert _confirm(client, project["id"], successor_id).status_code == 201
+        denied = _withdraw(client, project["id"], original_id, expected_revision=2)
+        assert denied.status_code == 409
+        assert denied.json()["detail"]["code"] == "character_trait_revision_conflict"
+        assert _withdraw(client, project["id"], successor_id).status_code == 201
+        with SessionLocal() as db:
+            original = db.get(CharacterTraitCandidateRow, original_id)
+            assert original.review_state == "superseded"
+            proposal = _candidate_input_from_row(
+                original, comparison_key=original.comparison_key
+            )
+            reused, created = upsert_character_trait_candidate(
+                db, project_id=project["id"], source_run_id=run["id"],
+                candidate=proposal,
+            )
+            assert not created
+            assert reused.id == original_id
+
+
+def test_withdrawal_requires_owner_workspace_and_csrf():
+    with patch.multiple(
+        settings,
+        auth_mode="required",
+        auth_secret_key="api-contract-test-secret-key-32-bytes",
+        auth_cookie_secure=False,
+        auth_cookie_samesite="lax",
+    ), TestClient(app) as owner, TestClient(app) as other:
+        def register(client: TestClient, label: str) -> dict[str, str]:
+            response = client.post(
+                "/api/v1/auth/register",
+                json={
+                    "email": f"{label}-{uuid4().hex}@example.com",
+                    "password": "correct horse battery staple",
+                    "display_name": label,
+                },
+            )
+            assert response.status_code == 201, response.text
+            return {"X-CSRF-Token": response.headers["X-CSRF-Token"]}
+
+        owner_headers = register(owner, "owner")
+        other_headers = register(other, "other")
+        project, _ = _project_and_document(owner, headers=owner_headers)
+        run = _completed_run(owner, project["id"], headers=owner_headers)
+        candidate_id = _candidate(project["id"], run["id"])
+        assert _confirm(
+            owner, project["id"], candidate_id, headers=owner_headers
+        ).status_code == 201
+        assert _withdraw(
+            other, project["id"], candidate_id, headers=other_headers
+        ).status_code == 404
+        assert _withdraw(owner, project["id"], candidate_id).status_code == 403
+        approved = _withdraw(
+            owner, project["id"], candidate_id, headers=owner_headers
+        )
+        assert approved.status_code == 201, approved.text

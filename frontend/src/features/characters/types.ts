@@ -30,6 +30,7 @@ export type CharacterSummary = {
   aliases: string[];
   applicable_scopes: NarrativeScopeRef[];
   confirmed_item_count: number;
+  withdrawn_item_count: number;
   pending_candidate_count: number;
   drift_issue_count: number | null;
   profile_revision: number | null;
@@ -48,6 +49,7 @@ export type CharacterDimension =
 
 export type CharacterProfileItem = {
   id: string;
+  revision: number | null;
   dimension: CharacterDimension;
   statement: string;
   origin: "explicit_profile" | "confirmed_inference";
@@ -102,6 +104,7 @@ export type ProfileSupportBindingsV1 = {
 export type ProfileCandidateStatus =
   | "pending"
   | "confirmed"
+  | "withdrawn"
   | "rejected"
   | "stale";
 
@@ -204,7 +207,7 @@ export type CandidatePage = Page<ProfileCandidate> & {
 export type CandidateDecision = "confirm" | "reject";
 
 export type CandidateDecisionIn = {
-  decision: CandidateDecision;
+  decision: CandidateDecision | "withdraw";
   comment: string;
   expected_revision: number;
   approved_axis_id?: string;

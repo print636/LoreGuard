@@ -43,6 +43,7 @@ const modelCoverages = new Set<ModelCoverage>([
 const candidateStatuses = new Set<ProfileCandidateStatus>([
   "pending",
   "confirmed",
+  "withdrawn",
   "rejected",
   "stale",
 ]);
@@ -258,6 +259,9 @@ function normalizeCharacterSummary(value: unknown): CharacterSummary | null {
     confirmed_item_count: integer(
       source.confirmed_item_count ?? source.confirmed_trait_count,
     ),
+    withdrawn_item_count: integer(
+      source.withdrawn_item_count ?? source.withdrawn_trait_count,
+    ),
     pending_candidate_count: integer(source.pending_candidate_count),
     drift_issue_count: nullableInteger(source.drift_issue_count),
     profile_revision: nullableInteger(source.profile_revision),
@@ -450,6 +454,7 @@ function normalizeProfileItem(value: unknown): CharacterProfileItem | null {
   const evidence = normalizeEvidenceList(source.evidence, source.scope);
   return {
     id,
+    revision: nullableInteger(source.revision),
     dimension: normalizeCharacterDimension(
       source.dimension ?? source.trait_type,
     ),
@@ -972,10 +977,29 @@ export async function fetchProfileCandidates(
   input: { page: number; pageSize?: number },
   signal?: AbortSignal,
 ): Promise<CandidatePage> {
+  return fetchCandidatesByState(projectId, characterId, "pending", input, signal);
+}
+
+export async function fetchWithdrawnProfileCandidates(
+  projectId: string,
+  characterId: string,
+  input: { page: number; pageSize?: number },
+  signal?: AbortSignal,
+): Promise<CandidatePage> {
+  return fetchCandidatesByState(projectId, characterId, "withdrawn", input, signal);
+}
+
+async function fetchCandidatesByState(
+  projectId: string,
+  characterId: string,
+  state: "pending" | "withdrawn",
+  input: { page: number; pageSize?: number },
+  signal?: AbortSignal,
+): Promise<CandidatePage> {
   const pageSize = input.pageSize || 20;
   const params = new URLSearchParams({
-    state: "pending",
-    status: "pending",
+    state,
+    status: state,
     page: String(input.page),
     page_size: String(pageSize),
     limit: String(pageSize),
@@ -985,7 +1009,14 @@ export async function fetchProfileCandidates(
     `${characterApiPaths(projectId, characterId).candidates}?${params.toString()}`,
     { signal },
   );
-  return normalizeCandidatePage(payload, characterId);
+  const page = normalizeCandidatePage(payload, characterId);
+  if (state === "withdrawn" && (
+    (record(payload)?.state !== undefined && record(payload)?.state !== state) ||
+    page.items.some((item) => item.status !== "withdrawn" || item.character_id !== characterId)
+  )) {
+    throw new TypeError("已撤销记录包含不属于当前角色或仍在生效的特征");
+  }
+  return page;
 }
 
 export async function fetchProfileCandidate(

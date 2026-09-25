@@ -665,7 +665,8 @@ class CharacterTraitCandidateRow(Base):
             name="ck_character_trait_candidate_authority",
         ),
         CheckConstraint(
-            "review_state IN ('pending', 'confirmed', 'rejected', 'superseded')",
+            "review_state IN ('pending', 'confirmed', 'rejected', 'superseded', "
+            "'withdrawn')",
             name="ck_character_trait_candidate_review_state",
         ),
         CheckConstraint(
@@ -787,7 +788,7 @@ class CharacterTraitReviewRow(Base):
             name="uq_character_trait_review_idempotency",
         ),
         CheckConstraint(
-            "decision IN ('confirm', 'reject', 'supersede')",
+            "decision IN ('confirm', 'reject', 'supersede', 'withdraw')",
             name="ck_character_trait_review_decision",
         ),
         CheckConstraint(

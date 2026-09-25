@@ -16,6 +16,7 @@ import {
   fetchDriftIssues,
   fetchProfileCandidate,
   fetchProfileCandidates,
+  fetchWithdrawnProfileCandidates,
   fetchSourceNeighbors,
   submitCandidateDecision,
 } from "./api";
@@ -48,6 +49,7 @@ import type {
   CharacterTraitAxis,
   DriftIssuePage,
   ProfileCandidate,
+  CharacterProfileItem,
   SourceNeighborPage,
 } from "./types";
 
@@ -81,6 +83,7 @@ function requestError(error: unknown): string {
     if (code === "character_trait_support_binding_invalid") return "精确证据定位无法与冻结原文核对；请重新分析后审核。";
     if (code === "character_trait_confirmation_conflict") return "同一作用域已有冲突的已确认特征；请核对角色档案与轴定义。";
     if (code === "character_trait_supersession_conflict") return "待替代的角色特征已变化；请刷新后重新核对。";
+    if (code === "character_trait_revision_conflict") return "这条特征已在其他页面更新；档案正在刷新，请重新核对后再操作。";
     if (error.status === 409) return "档案或作者轴已在其他页面更新；请刷新后重新核对。";
     if (error.status === 429) return "请求过于频繁，请稍后重试。";
     if (error.status === 404) return "这项角色资料不存在，或不属于当前项目。";
@@ -129,6 +132,13 @@ export default function CharacterWorkspace({
   const [characterPage, setCharacterPage] = useState<CharacterPage | null>(null);
   const [characterDetail, setCharacterDetail] = useState<CharacterDetail | null>(null);
   const [candidatePage, setCandidatePage] = useState<CandidatePage | null>(null);
+  const [withdrawnPage, setWithdrawnPage] = useState<CandidatePage | null>(null);
+  const [withdrawnPageNumber, setWithdrawnPageNumber] = useState(1);
+  const [withdrawnLoading, setWithdrawnLoading] = useState(false);
+  const [withdrawnError, setWithdrawnError] = useState("");
+  const [withdrawnReload, setWithdrawnReload] = useState(0);
+  const [withdrawBusyId, setWithdrawBusyId] = useState<string | null>(null);
+  const [withdrawError, setWithdrawError] = useState<{ id: string; message: string } | null>(null);
   const [candidate, setCandidate] = useState<ProfileCandidate | null>(null);
   const [neighborPage, setNeighborPage] = useState<SourceNeighborPage | null>(null);
   const [neighborLoading, setNeighborLoading] = useState(false);
@@ -173,6 +183,11 @@ export default function CharacterWorkspace({
   const decisionRequestRef = useRef(0);
   const axisCreatePendingRef = useRef(false);
   const decisionPendingRef = useRef(false);
+  const withdrawPendingRef = useRef(false);
+  const withdrawRequestRef = useRef(0);
+  const profileScopeKey = reviewScopeKey(projectId, route.characterId, null);
+  const profileScopeRef = useRef({ key: profileScopeKey, generation: 0 });
+  profileScopeRef.current = advanceReviewScope(profileScopeRef.current, profileScopeKey);
 
   useEffect(() => {
     // A previous candidate's mutation can still finish on the server. Its
@@ -186,6 +201,14 @@ export default function CharacterWorkspace({
     setAnnouncement("");
   }, [scopeKey]);
 
+  useEffect(() => {
+    if (profileScopeRef.current.key !== profileScopeKey) return;
+    withdrawPendingRef.current = false;
+    setWithdrawBusyId(null);
+    setWithdrawError(null);
+    setWithdrawnPageNumber(1);
+  }, [profileScopeKey]);
+
   const prerequisiteReadiness: CharacterReadiness | null = projectId
     ? documentCount === 0
       ? "no_documents"
@@ -194,7 +217,10 @@ export default function CharacterWorkspace({
         : null
     : null;
   const readiness = prerequisiteReadiness || characterPage?.readiness || "ready";
-  const readinessView = describeReadiness(readiness);
+  // A confirmed trait survives document retirement. A selected character is
+  // also a direct detail target, independent of the roster search filter.
+  const canBrowseCharacters = Boolean(characterPage?.total || route.characterId);
+  const readinessView = canBrowseCharacters ? null : describeReadiness(readiness);
 
   function pathFor(next: CharacterRouteState): string {
     return `/app/projects/${encodeURIComponent(projectId)}/characters${characterSearch(next)}`;
@@ -232,9 +258,7 @@ export default function CharacterWorkspace({
   useEffect(() => {
     if (
       !projectId ||
-      projectLoading ||
-      documentCount === 0 ||
-      completedRunCount === 0
+      projectLoading
     ) {
       setCharacterPage(null);
       setListError("");
@@ -261,8 +285,6 @@ export default function CharacterWorkspace({
   }, [
     projectId,
     projectLoading,
-    documentCount,
-    completedRunCount,
     route.page,
     route.query,
     listReload,
@@ -271,7 +293,7 @@ export default function CharacterWorkspace({
   useEffect(() => {
     setCharacterDetail(null);
     setDetailError("");
-    if (!projectId || !route.characterId || readiness !== "ready") {
+    if (!projectId || !route.characterId || !canBrowseCharacters) {
       setDetailLoading(false);
       return;
     }
@@ -287,13 +309,42 @@ export default function CharacterWorkspace({
         if (!controller.signal.aborted) setDetailLoading(false);
       });
     return () => controller.abort();
-  }, [projectId, route.characterId, readiness, detailReload]);
+  }, [projectId, route.characterId, canBrowseCharacters, detailReload]);
+
+  useEffect(() => {
+    setWithdrawnPage(null);
+    setWithdrawnError("");
+    if (!projectId || !route.characterId || route.section !== "profile" || !canBrowseCharacters) {
+      setWithdrawnLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setWithdrawnLoading(true);
+    void fetchWithdrawnProfileCandidates(
+      projectId,
+      route.characterId,
+      { page: withdrawnPageNumber },
+      controller.signal,
+    )
+      .then((page) => {
+        if (!controller.signal.aborted) setWithdrawnPage(page);
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        const message = requestError(error);
+        if (message) setWithdrawnError(message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setWithdrawnLoading(false);
+      });
+    return () => controller.abort();
+  }, [projectId, route.characterId, route.section, canBrowseCharacters, withdrawnPageNumber, withdrawnReload]);
 
   useEffect(() => {
     setCandidatePage(null);
     setDriftPage(null);
     setSectionError("");
-    if (!projectId || !route.characterId || readiness !== "ready") {
+    if (!projectId || !route.characterId || !canBrowseCharacters) {
       setSectionLoading(false);
       return;
     }
@@ -331,7 +382,7 @@ export default function CharacterWorkspace({
     route.characterId,
     route.section,
     route.page,
-    readiness,
+    canBrowseCharacters,
     sectionReload,
   ]);
 
@@ -343,7 +394,7 @@ export default function CharacterWorkspace({
       !route.characterId ||
       route.section !== "candidates" ||
       !route.candidateId ||
-      readiness !== "ready"
+      !canBrowseCharacters
     ) {
       setCandidateLoading(false);
       return;
@@ -378,7 +429,7 @@ export default function CharacterWorkspace({
     route.characterId,
     route.section,
     route.candidateId,
-    readiness,
+    canBrowseCharacters,
     candidateReload,
   ]);
 
@@ -396,7 +447,7 @@ export default function CharacterWorkspace({
       !projectId || !route.candidateId ||
       candidate?.id !== route.candidateId ||
       candidate.dimension !== "core_personality" ||
-      readiness !== "ready"
+      !canBrowseCharacters
     ) {
       setAxisLoading(false);
       return;
@@ -423,7 +474,7 @@ export default function CharacterWorkspace({
         }
       });
     return () => controller.abort();
-  }, [projectId, route.candidateId, candidate?.id, candidate?.dimension, readiness, axisReload]);
+  }, [projectId, route.candidateId, candidate?.id, candidate?.dimension, canBrowseCharacters, axisReload]);
 
   useEffect(() => {
     setNeighborPage(null);
@@ -434,7 +485,7 @@ export default function CharacterWorkspace({
     setNeighborMoreBusy(false);
     if (
       !projectId || !route.characterId || !route.candidateId ||
-      route.section !== "candidates" || readiness !== "ready" ||
+      route.section !== "candidates" || !canBrowseCharacters ||
       candidate?.id !== route.candidateId || !candidate.source_verified
     ) {
       setNeighborLoading(false);
@@ -462,7 +513,7 @@ export default function CharacterWorkspace({
         }
       });
     return () => controller.abort();
-  }, [projectId, route.characterId, route.candidateId, route.section, readiness, candidate?.id, candidate?.source_verified, neighborReload]);
+  }, [projectId, route.characterId, route.candidateId, route.section, canBrowseCharacters, candidate?.id, candidate?.source_verified, neighborReload]);
 
   async function loadMoreNeighbors() {
     if (
@@ -659,6 +710,62 @@ export default function CharacterWorkspace({
     }
   }
 
+  async function withdrawConfirmedTrait(item: CharacterProfileItem) {
+    if (
+      !route.characterId || item.revision === null ||
+      withdrawPendingRef.current ||
+      !characterDetail?.profile_items.some(
+        (current) => current.id === item.id && current.revision === item.revision,
+      )
+    ) return;
+    const characterId = route.characterId;
+    const startedScope = profileScopeRef.current;
+    const requestId = ++withdrawRequestRef.current;
+    const isCurrentRequest = () =>
+      isCurrentReviewRequest(profileScopeRef.current, startedScope, withdrawRequestRef.current, requestId);
+    withdrawPendingRef.current = true;
+    setWithdrawBusyId(item.id);
+    setWithdrawError(null);
+    setActionError("");
+    setAnnouncement("");
+    try {
+      const result = await submitCandidateDecision(projectId, characterId, item.id, {
+        decision: "withdraw",
+        comment: "",
+        expected_revision: item.revision,
+      });
+      if (!isCurrentRequest()) return;
+      if (result.candidate.id !== item.id || result.candidate.status !== "withdrawn") {
+        throw new TypeError("撤销响应与所选特征不一致");
+      }
+      setAnnouncement("特征已撤销，将不再参与之后新建的审查；既有运行报告不变。撤销记录可在档案下方查看。");
+      setWithdrawnPageNumber(1);
+      setWithdrawnReload((value) => value + 1);
+      setListReload((value) => value + 1);
+      setDetailReload((value) => value + 1);
+    } catch (error) {
+      if (!isCurrentRequest()) return;
+      const message = requestError(error);
+      setActionError(`撤销结果需要核对：${message}`);
+      setWithdrawError({
+        id: item.id,
+        message: error instanceof ApiError
+          ? message
+          : `${message} 请刷新档案核对撤销是否已生效，再决定是否重试。`,
+      });
+      // A lost response does not prove the mutation failed. Re-read state
+      // before offering the same action again, including on 409 conflicts.
+      setListReload((value) => value + 1);
+      setDetailReload((value) => value + 1);
+      setWithdrawnReload((value) => value + 1);
+    } finally {
+      if (isCurrentRequest()) {
+        withdrawPendingRef.current = false;
+        setWithdrawBusyId(null);
+      }
+    }
+  }
+
   const coverage = describeCoverage(
     characterDetail?.model_coverage || characterPage?.model_coverage || "unknown",
     characterDetail?.coverage_detail || characterPage?.coverage_detail,
@@ -694,9 +801,15 @@ export default function CharacterWorkspace({
       </div>
       {actionError && <div className="characterActionError" role="alert">{actionError}</div>}
 
-      {projectLoading ? (
+      {projectLoading || (listLoading && !characterPage) ? (
         <div className="characterWorkspaceLoading" aria-busy="true">正在读取项目资料…</div>
-      ) : documentCount > 0 && !baselineContextReady ? (
+      ) : listError && !characterPage ? (
+        <div className="characterPrerequisite characterPanelError" role="alert">
+          <h2>角色档案列表没有加载</h2>
+          <p>{listError}</p>
+          <button type="button" onClick={() => setListReload((value) => value + 1)}>重试</button>
+        </div>
+      ) : documentCount > 0 && !baselineContextReady && !canBrowseCharacters ? (
         <div className="characterPrerequisite">
           <h2>先确认正式资料的上下文</h2>
           <p>{baselineContextDetail}</p>
@@ -818,7 +931,18 @@ export default function CharacterWorkspace({
 
                   <div className="characterSectionBody">
                     {route.section === "profile" && (
-                      <CharacterProfile items={characterDetail.profile_items} />
+                      <CharacterProfile
+                        items={characterDetail.profile_items}
+                        withdrawnPage={withdrawnPage}
+                        withdrawnPageNumber={withdrawnPageNumber}
+                        withdrawnLoading={withdrawnLoading}
+                        withdrawnError={withdrawnError}
+                        withdrawBusyId={withdrawBusyId}
+                        withdrawError={withdrawError}
+                        onWithdraw={(item) => void withdrawConfirmedTrait(item)}
+                        onWithdrawnPage={setWithdrawnPageNumber}
+                        onRetryWithdrawn={() => setWithdrawnReload((value) => value + 1)}
+                      />
                     )}
                     {route.section === "candidates" && (
                       <CandidateReview

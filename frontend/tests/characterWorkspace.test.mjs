@@ -10,6 +10,7 @@ import {
   fetchCharacters,
   fetchDriftIssues,
   fetchProfileCandidates,
+  fetchWithdrawnProfileCandidates,
   fetchProfileCandidate,
   fetchSourceNeighbors,
   normalizeCharacterDimension,
@@ -30,6 +31,7 @@ import {
 import {
   candidateDecisionLabel,
   candidateReviewState,
+  candidateStatusNames,
   characterDriftReportPath,
   describeCoverage,
   describeReadiness,
@@ -552,6 +554,86 @@ test("candidate decisions send the expected revision with an idempotency key", a
     { decision: "confirm", comment: "证据充分", expected_revision: 3 },
   );
   assert.equal(result.candidate.status, "confirmed");
+});
+
+test("withdrawal submits only the selected confirmed revision with CSRF and a stable retry key", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  context.after(() => { globalThis.fetch = originalFetch; globalThis.document = originalDocument; });
+  globalThis.document = { cookie: "loreguard_csrf=withdraw-token" };
+  let calls = 0;
+  let firstKey = "";
+  globalThis.fetch = async (url, init) => {
+    calls += 1;
+    assert.equal(url, "/api/v1/projects/project-1/characters/%E6%9E%97%E6%BE%88/profile-candidates/trait-1/decisions");
+    const headers = new Headers(init.headers);
+    assert.equal(headers.get("X-CSRF-Token"), "withdraw-token");
+    assert.ok(headers.get("Idempotency-Key"));
+    if (firstKey) assert.equal(headers.get("Idempotency-Key"), firstKey);
+    firstKey = headers.get("Idempotency-Key");
+    assert.deepEqual(JSON.parse(init.body), {
+      decision: "withdraw", comment: "", expected_revision: 3,
+    });
+    if (calls === 1) throw new TypeError("transport lost");
+    return new Response(JSON.stringify({
+      candidate: {
+        id: "trait-1", character_key: "林澈", trait_type: "preference",
+        trait_key: "食物偏好", value: "喜欢蜜瓜", review_state: "withdrawn",
+        revision: 4, evidence: [],
+      },
+      deduplicated: true,
+    }), { status: 201 });
+  };
+  const result = await submitCandidateDecision("project-1", "林澈", "trait-1", {
+    decision: "withdraw", comment: "", expected_revision: 3,
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.candidate.status, "withdrawn");
+  assert.equal(result.candidate.reviewable, false);
+  assert.equal(result.deduplicated, true);
+  assert.equal(candidateStatusNames[result.candidate.status], "已撤销");
+});
+
+test("retired source does not erase a confirmed trait, and withdrawn records are separately queryable", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const confirmed = {
+    id: "trait-1", character_key: "林澈", trait_type: "preference",
+    trait_key: "食物偏好", value: "喜欢蜜瓜", review_state: "confirmed",
+    revision: 3, origin: "explicit_setting", source_run_id: "run-older",
+    evidence: [{ document_id: "doc-1", document_name: "旧设定.md", document_version: 1,
+      document_role: "reference", publication_status: "retired", line_start: 1,
+      line_end: 1, text: "林澈喜欢蜜瓜。" }],
+  };
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("state=withdrawn")) {
+      const parsed = new URL(String(url), "http://local.invalid");
+      assert.equal(parsed.searchParams.get("status"), "withdrawn");
+      assert.equal(parsed.searchParams.get("page"), "1");
+      return new Response(JSON.stringify({
+        items: [{ ...confirmed, id: "trait-0", review_state: "withdrawn", revision: 4 }],
+        total: 1, page: 1, page_size: 20, has_more: false,
+      }), { status: 200 });
+    }
+    return new Response(JSON.stringify({
+      character_key: "林澈", confirmed_traits: [confirmed],
+    }), { status: 200 });
+  };
+  const profile = await fetchCharacter("project-1", "林澈");
+  assert.equal(profile.profile_items[0].id, "trait-1");
+  assert.equal(profile.profile_items[0].revision, 3);
+  assert.equal(profile.profile_items[0].statement, "食物偏好：喜欢蜜瓜");
+  const withdrawn = await fetchWithdrawnProfileCandidates("project-1", "林澈", { page: 1 });
+  assert.equal(withdrawn.items[0].status, "withdrawn");
+  assert.equal(withdrawn.items[0].reviewable, false);
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    state: "withdrawn", items: [confirmed], total: 1, page: 1,
+    page_size: 20, has_more: false,
+  }), { status: 200 });
+  await assert.rejects(
+    fetchWithdrawnProfileCandidates("project-1", "林澈", { page: 1 }),
+    /仍在生效的特征/,
+  );
 });
 
 test("author axis list is project scoped and rejects malformed or cross-project records", async (context) => {

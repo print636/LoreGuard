@@ -397,7 +397,7 @@ def _verify_reused_review_chain(db, row: CharacterTraitCandidateRow) -> None:
         select(CharacterTraitReviewRow)
         .where(CharacterTraitReviewRow.candidate_id == row.id)
         .order_by(CharacterTraitReviewRow.expected_lock_version, CharacterTraitReviewRow.id)
-        .limit(3)
+        .limit(4)
     ).all())
     if row.review_state == "pending":
         if row.lock_version == 0 and not reviews:
@@ -407,6 +407,7 @@ def _verify_reused_review_chain(db, row: CharacterTraitCandidateRow) -> None:
         "confirmed": ("confirm",),
         "rejected": ("reject",),
         "superseded": ("confirm", "supersede"),
+        "withdrawn": ("confirm", "withdraw"),
     }.get(row.review_state)
     if (
         expected is None
@@ -433,7 +434,7 @@ def _verify_reused_review_chain(db, row: CharacterTraitCandidateRow) -> None:
             or successor.character_key != row.character_key
             or successor.trait_type != row.trait_type
             or successor.supersedes_candidate_id != row.id
-            or successor.review_state not in {"confirmed", "superseded"}
+            or successor.review_state not in {"confirmed", "superseded", "withdrawn"}
             or successor.lock_version < 1
             or successor.reviewed_at is None
         ):

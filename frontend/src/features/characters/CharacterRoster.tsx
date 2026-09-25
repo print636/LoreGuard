@@ -139,6 +139,9 @@ export default function CharacterRoster({
                 </span>
                 <span className="characterRosterSignals">
                   <small>{character.confirmed_item_count} 已确认</small>
+                  {character.withdrawn_item_count > 0 && (
+                    <small>{character.withdrawn_item_count} 已撤销</small>
+                  )}
                   {character.pending_candidate_count > 0 && (
                     <strong>{character.pending_candidate_count} 待确认</strong>
                   )}

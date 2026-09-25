@@ -24,10 +24,30 @@ DECLARE
     current_revision text;
     vector_extension_count integer;
     vector_column_count integer;
+    candidate_withdraw_check_count integer;
+    review_withdraw_check_count integer;
 BEGIN
     SELECT version_num INTO current_revision FROM alembic_version;
-    IF current_revision <> '0016_character_support_bindings' THEN
+    IF current_revision <> '0017_character_trait_withdraw' THEN
         RAISE EXCEPTION 'unexpected Alembic revision';
+    END IF;
+    SELECT count(*) INTO candidate_withdraw_check_count
+      FROM pg_constraint constraint_row
+      JOIN pg_class table_row ON table_row.oid = constraint_row.conrelid
+     WHERE table_row.relname = 'character_trait_candidates'
+       AND constraint_row.conname = 'ck_character_trait_candidate_review_state'
+       AND pg_get_constraintdef(constraint_row.oid) LIKE '%withdrawn%';
+    IF candidate_withdraw_check_count <> 1 THEN
+        RAISE EXCEPTION 'character withdrawal state constraint is unavailable';
+    END IF;
+    SELECT count(*) INTO review_withdraw_check_count
+      FROM pg_constraint constraint_row
+      JOIN pg_class table_row ON table_row.oid = constraint_row.conrelid
+     WHERE table_row.relname = 'character_trait_reviews'
+       AND constraint_row.conname = 'ck_character_trait_review_decision'
+       AND pg_get_constraintdef(constraint_row.oid) LIKE '%withdraw%';
+    IF review_withdraw_check_count <> 1 THEN
+        RAISE EXCEPTION 'character withdrawal review constraint is unavailable';
     END IF;
     SELECT count(*) INTO vector_extension_count FROM pg_extension WHERE extname = 'vector';
     IF vector_extension_count <> 1 THEN

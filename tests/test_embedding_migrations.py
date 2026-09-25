@@ -21,10 +21,130 @@ from app.narrative_context import payload_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0016_character_support_bindings"
+HEAD_REVISION = "0017_character_trait_withdraw"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
+    def test_character_withdrawal_migration_preserves_schema_and_is_reversible_only_without_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            url = f"sqlite:///{(Path(directory) / 'withdrawal.db').as_posix()}"
+            self.upgrade_to(url, "0016_character_support_bindings")
+            engine = create_engine(url)
+
+            def protections(table: str) -> dict[str, set[tuple]]:
+                inspector = inspect(engine)
+                return {
+                    "checks": {(item["name"],) for item in inspector.get_check_constraints(table)},
+                    "uniques": {(item["name"], tuple(item["column_names"]))
+                                for item in inspector.get_unique_constraints(table)},
+                    "indexes": {(item["name"], tuple(item["column_names"]))
+                                for item in inspector.get_indexes(table)},
+                    "foreign_keys": {
+                        (tuple(item["constrained_columns"]), item["referred_table"],
+                         tuple(item["referred_columns"]))
+                        for item in inspector.get_foreign_keys(table)
+                    },
+                }
+
+            tables = ("character_trait_candidates", "character_trait_reviews")
+            before = {table: protections(table) for table in tables}
+            with engine.connect() as connection:
+                before_triggers = {
+                    table: {
+                        name for (name,) in connection.exec_driver_sql(
+                            "SELECT name FROM sqlite_master WHERE type='trigger' "
+                            "AND tbl_name = ?", (table,)
+                        ).all()
+                    }
+                    for table in tables
+                }
+            candidate_table = Table(tables[0], MetaData(), autoload_with=engine)
+            review_table = Table(tables[1], MetaData(), autoload_with=engine)
+            scope = {"schema_version": 1, "timeline_key": "main"}
+            evidence = [{"document_id": "doc-legacy", "text": "林澈喜欢蜜瓜。"}]
+            with engine.begin() as connection:
+                connection.execute(candidate_table.insert().values(
+                    id="withdraw-candidate", project_id="project-old",
+                    source_run_id="run-old", character_key="林澈",
+                    character_display_name="林澈", trait_type="preference",
+                    trait_key="食物偏好:蜜瓜", value="喜欢蜜瓜", polarity="positive",
+                    stability="stable", contexts=[], origin="explicit_setting",
+                    authority_tier="formal_record", confidence=0.9,
+                    scope_payload=scope, scope_sha256=payload_sha256(scope),
+                    evidence=evidence, evidence_sha256=payload_sha256(evidence),
+                    support_binding_mode="legacy_v1", candidate_fingerprint="f" * 64,
+                    generator_version="test-v1", provenance={},
+                    review_state="confirmed", lock_version=1,
+                    reviewed_at=datetime(2026, 9, 1), created_at=datetime(2026, 9, 1),
+                ))
+                connection.execute(review_table.insert().values(
+                    id="confirm-review", project_id="project-old",
+                    candidate_id="withdraw-candidate", decision="confirm",
+                    expected_lock_version=0, comment="", created_at=datetime(2026, 9, 1),
+                ))
+            engine.dispose()
+
+            self.upgrade(url)
+            engine = create_engine(url)
+            self.assertEqual({table: protections(table) for table in tables}, before)
+            with engine.connect() as connection:
+                after_triggers = {
+                    table: {
+                        name for (name,) in connection.exec_driver_sql(
+                            "SELECT name FROM sqlite_master WHERE type='trigger' "
+                            "AND tbl_name = ?", (table,)
+                        ).all()
+                    }
+                    for table in tables
+                }
+                self.assertEqual(after_triggers, before_triggers)
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT review_state, lock_version FROM character_trait_candidates "
+                    "WHERE id='withdraw-candidate'"
+                ).one(), ("confirmed", 1))
+            engine.dispose()
+
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            config.attributes["database_url"] = url
+            command.downgrade(config, "0016_character_support_bindings")
+            engine = create_engine(url)
+            with engine.begin() as connection:
+                with self.assertRaises(IntegrityError):
+                    connection.exec_driver_sql(
+                        "UPDATE character_trait_candidates SET review_state='withdrawn' "
+                        "WHERE id='withdraw-candidate'"
+                    )
+            engine.dispose()
+
+            self.upgrade(url)
+            engine = create_engine(url)
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "UPDATE character_trait_candidates SET review_state='withdrawn', "
+                    "lock_version=2 WHERE id='withdraw-candidate'"
+                )
+                connection.exec_driver_sql(
+                    "INSERT INTO character_trait_reviews "
+                    "(id, project_id, candidate_id, decision, expected_lock_version, "
+                    "comment, created_at) VALUES "
+                    "('withdraw-review', 'project-old', 'withdraw-candidate', "
+                    "'withdraw', 1, '单独撤销', '2026-09-26 00:00:00')"
+                )
+            engine.dispose()
+            with self.assertRaisesRegex(RuntimeError, "withdrawn traits"):
+                command.downgrade(config, "0016_character_support_bindings")
+            engine = create_engine(url)
+            with engine.connect() as connection:
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT version_num FROM alembic_version"
+                ).scalar_one(), HEAD_REVISION)
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT review_state FROM character_trait_candidates "
+                    "WHERE id='withdraw-candidate'"
+                ).scalar_one(), "withdrawn")
+            engine.dispose()
+
     def test_support_binding_migration_marks_existing_candidate_legacy_without_rehashing(self):
         with tempfile.TemporaryDirectory() as directory:
             url = f"sqlite:///{(Path(directory) / 'support-binding.db').as_posix()}"
@@ -173,7 +293,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
                     "SELECT version_num FROM alembic_version"
                 ).scalar_one()
             self.assertEqual(row, ("required_v1", "f" * 64))
-            self.assertEqual(revision, HEAD_REVISION)
+            self.assertEqual(revision, "0016_character_support_bindings")
             engine.dispose()
 
     def test_author_axis_migration_round_trips_on_sqlite(self):

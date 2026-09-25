@@ -261,9 +261,22 @@ def downgrade() -> None:
                 for item in sa.inspect(bind).get_foreign_keys(table_name)
             ):
                 op.drop_constraint(project_fk_name, table_name, type_="foreignkey")
-        if "approved_axis_version" in columns:
-            op.drop_column(table_name, "approved_axis_version")
-        if "approved_axis_id" in columns:
-            op.drop_column(table_name, "approved_axis_id")
+        if bind.dialect.name == "sqlite" and (
+            "approved_axis_version" in columns or "approved_axis_id" in columns
+        ):
+            # A later table rebuild can reify SQLite's original inline axis
+            # reference as a table-level foreign key. DROP COLUMN then fails
+            # because that key still names approved_axis_id. Recreate the
+            # table while dropping both axis columns and their dependent key.
+            with op.batch_alter_table(table_name, recreate="always") as batch:
+                if "approved_axis_version" in columns:
+                    batch.drop_column("approved_axis_version")
+                if "approved_axis_id" in columns:
+                    batch.drop_column("approved_axis_id")
+        else:
+            if "approved_axis_version" in columns:
+                op.drop_column(table_name, "approved_axis_version")
+            if "approved_axis_id" in columns:
+                op.drop_column(table_name, "approved_axis_id")
     if sa.inspect(bind).has_table("character_trait_axes"):
         op.drop_table("character_trait_axes")

@@ -31,6 +31,7 @@ export const candidateOriginNames = {
 export const candidateStatusNames = {
   pending: "待确认",
   confirmed: "已确认",
+  withdrawn: "已撤销",
   rejected: "已驳回",
   stale: "来源已变化",
 } as const;

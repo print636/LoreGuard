@@ -315,6 +315,65 @@
   font-size: 12px;
 }
 
+.characterProfileArchive { display: grid; gap: 24px; min-width: 0; }
+.characterProfilePolicy {
+  padding: 12px 15px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--lavender);
+  border-radius: 9px;
+  background: rgba(183, 162, 255, .07);
+}
+.characterProfilePolicy p { margin: 0; color: var(--text-2); line-height: 1.65; }
+.characterProfilePolicy p + p { margin-top: 5px; }
+.characterProfileGroups li > .characterWithdrawConfirm {
+  display: grid;
+  gap: 8px;
+  margin-top: 13px;
+  padding: 14px;
+  border: 1px solid rgba(255, 127, 173, .45);
+  border-radius: 9px;
+  background: rgba(255, 127, 173, .06);
+}
+.characterProfileGroups li .characterWithdrawConfirm strong { color: var(--text); }
+.characterProfileGroups li .characterWithdrawConfirm p {
+  margin: 0;
+  color: var(--text-2);
+  line-height: 1.65;
+}
+.characterProfileGroups li .characterWithdrawConfirm .characterWithdrawError,
+.characterWithdrawUnavailable { color: var(--danger); }
+.characterProfileGroups li > .characterWithdrawOpen {
+  min-height: 44px;
+  margin-top: 11px;
+  padding: 7px 11px;
+  color: var(--text-2);
+  border-color: var(--line);
+  background: transparent;
+}
+.characterProfileGroups li > .characterWithdrawOpen:hover { color: var(--danger); border-color: var(--danger); }
+.characterProfileGroups li .characterWithdrawUnavailable { margin-top: 7px; font-size: 12px; }
+.characterWithdrawActions { display: flex; flex-wrap: wrap; gap: 9px; }
+.characterWithdrawActions button { min-height: 44px; padding: 8px 13px; }
+.characterWithdrawActions .characterWithdrawDanger {
+  color: #211128;
+  border-color: var(--danger);
+  background: var(--danger);
+  font-weight: 700;
+}
+.characterWithdrawnArchive { border-top: 1px solid var(--line); padding-top: 17px; }
+.characterWithdrawnArchive > p { margin: 7px 0 14px; color: var(--text-2); line-height: 1.65; }
+.characterWithdrawnArchive > ul { margin: 0; padding: 0; list-style: none; }
+.characterWithdrawnArchive li { padding: 12px 4px; border-bottom: 1px solid var(--line); }
+.characterWithdrawnArchive li p { margin: 0 0 8px; color: var(--text); line-height: 1.65; }
+.characterWithdrawnArchive .characterProfileMetadata { display: flex; flex-wrap: wrap; gap: 7px; }
+.characterWithdrawnArchive .characterProfileMetadata span {
+  padding: 4px 7px;
+  color: var(--text-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+}
+
 .candidateWorkspace,
 .characterDriftWorkspace { display: grid; gap: 16px; }
 .candidateLayout { display: grid; grid-template-columns: minmax(230px, 300px) minmax(0, 1fr); gap: 18px; }

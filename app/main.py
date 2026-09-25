@@ -68,6 +68,7 @@ from .provider_credentials import (
 from .character_traits import (
     MAX_CANDIDATES_PER_SOURCE_RUN,
     _OBJECT_BEARING_TRAIT_DIMENSIONS,
+    _verify_reused_review_chain,
     _validated_comparison_key,
     formal_target_fingerprint_matches,
     normalize_character_key,
@@ -269,7 +270,7 @@ class TextDocumentIn(BaseModel):
 class CharacterTraitDecisionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    decision: Literal["confirm", "reject"]
+    decision: Literal["confirm", "reject", "withdraw"]
     expected_revision: int = Field(ge=0)
     comment: str = Field(default="", max_length=2_000)
     approved_axis_id: str | None = Field(default=None, min_length=1, max_length=36)
@@ -3026,7 +3027,7 @@ def list_characters(
                 )
                 .limit(1)
             )
-        rows = (
+        latest_rows = (
             list(
                 db.scalars(
                     select(CharacterTraitCandidateRow)
@@ -3044,6 +3045,26 @@ def list_characters(
             if latest_completed_run is not None
             else []
         )
+        # A later baseline run may emit no candidate for a character whose
+        # author-confirmed trait remains active (or was later withdrawn).
+        # Keep both the profile and its withdrawal audit discoverable without
+        # pretending either was extracted by the latest model run.
+        historical_reviewed = list(
+            db.scalars(
+                select(CharacterTraitCandidateRow).where(
+                    CharacterTraitCandidateRow.project_id == project_id,
+                    CharacterTraitCandidateRow.review_state.in_(
+                        ("confirmed", "withdrawn")
+                    ),
+                )
+            ).all()
+        )
+        rows_by_id = {row.id: row for row in latest_rows}
+        rows_by_id.update({row.id: row for row in historical_reviewed})
+        rows = sorted(
+            rows_by_id.values(),
+            key=lambda row: (row.character_key, row.created_at, row.id),
+        )
         grouped: dict[str, dict] = {}
         for row in rows:
             item = grouped.setdefault(
@@ -3052,6 +3073,7 @@ def list_characters(
                     "character_key": row.character_key,
                     "character_display_name": row.character_display_name,
                     "confirmed_trait_count": 0,
+                    "withdrawn_trait_count": 0,
                     "pending_candidate_count": 0,
                     "profile_revision": 0,
                     "updated_at": row.created_at,
@@ -3059,6 +3081,8 @@ def list_characters(
             )
             if row.review_state == "confirmed":
                 item["confirmed_trait_count"] += 1
+            elif row.review_state == "withdrawn":
+                item["withdrawn_trait_count"] += 1
             elif row.review_state == "pending":
                 item["pending_candidate_count"] += 1
             item["profile_revision"] = max(
@@ -3142,6 +3166,11 @@ def get_character_profile(
                 for row in rows
                 if row.review_state == "confirmed"
             ],
+            "withdrawn_traits": [
+                serialize_character_trait_candidate(row)
+                for row in rows
+                if row.review_state == "withdrawn"
+            ],
             "pending_candidate_count": sum(
                 row.review_state == "pending" for row in rows
             ),
@@ -3154,7 +3183,7 @@ def get_character_profile(
 def list_character_profile_candidates(
     project_id: str,
     character_key: str,
-    state: Literal["pending", "confirmed", "rejected", "superseded"] | None = None,
+    state: Literal["pending", "confirmed", "rejected", "superseded", "withdrawn"] | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
     context: AuthContext = Depends(get_auth_context),
@@ -3667,6 +3696,119 @@ def decide_character_profile_candidate(
         )
         if row is None:
             raise HTTPException(404, "角色候选不存在")
+        if payload.decision == "withdraw":
+            # A confirmed profile entry is an author decision, independent of
+            # whether its original source is still a formal/current document.
+            # Requiring the pending-candidate source gate here would make a
+            # retired source impossible to withdraw explicitly.
+            try:
+                _verify_reused_review_chain(db, row)
+            except ValueError:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_review_integrity_invalid",
+                        "message": "角色特征审核记录不完整，无法撤销",
+                    },
+                ) from None
+            existing_withdrawal = (
+                db.scalar(
+                    select(CharacterTraitReviewRow).where(
+                        CharacterTraitReviewRow.candidate_id == candidate_id,
+                        CharacterTraitReviewRow.idempotency_key == idempotency_key,
+                    )
+                )
+                if idempotency_key is not None
+                else None
+            )
+            if existing_withdrawal is not None:
+                if (
+                    existing_withdrawal.decision != "withdraw"
+                    or existing_withdrawal.expected_lock_version
+                    != payload.expected_revision
+                    or existing_withdrawal.comment != payload.comment
+                    or existing_withdrawal.approved_axis_id != row.approved_axis_id
+                    or existing_withdrawal.approved_axis_version
+                    != row.approved_axis_version
+                ):
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": "idempotency_key_conflict",
+                            "message": "同一幂等键不能用于不同的候选审核请求",
+                        },
+                    )
+                return {
+                    "candidate": serialize_character_trait_candidate(row),
+                    "decision_id": existing_withdrawal.id,
+                    "deduplicated": True,
+                }
+            if (
+                row.review_state != "confirmed"
+                or row.lock_version != payload.expected_revision
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_revision_conflict",
+                        "message": "仅可撤销当前已确认的角色特征，请刷新后重试",
+                        "actual_revision": row.lock_version,
+                        "review_state": row.review_state,
+                    },
+                )
+            changed = db.execute(
+                update(CharacterTraitCandidateRow)
+                .where(
+                    CharacterTraitCandidateRow.id == row.id,
+                    CharacterTraitCandidateRow.project_id == project_id,
+                    CharacterTraitCandidateRow.review_state == "confirmed",
+                    CharacterTraitCandidateRow.lock_version == payload.expected_revision,
+                )
+                .values(
+                    review_state="withdrawn",
+                    lock_version=payload.expected_revision + 1,
+                    reviewed_at=utc_now_naive(),
+                    reviewed_by_user_id=context.user_id,
+                )
+            ).rowcount
+            if changed != 1:
+                db.rollback()
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_revision_conflict",
+                        "message": "角色特征已发生变化，请刷新后重试",
+                    },
+                )
+            withdrawal = CharacterTraitReviewRow(
+                project_id=project_id,
+                candidate_id=row.id,
+                decision="withdraw",
+                approved_axis_id=row.approved_axis_id,
+                approved_axis_version=row.approved_axis_version,
+                expected_lock_version=payload.expected_revision,
+                idempotency_key=idempotency_key,
+                comment=payload.comment,
+                created_by_user_id=context.user_id,
+            )
+            db.add(withdrawal)
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_revision_conflict",
+                        "message": "角色特征已发生变化，请刷新后重试",
+                    },
+                ) from None
+            db.refresh(row)
+            return {
+                "candidate": serialize_character_trait_candidate(row),
+                "decision_id": withdrawal.id,
+                "deduplicated": False,
+            }
         initial_support_status, _ = _verified_candidate_support_payload(row, None)
         if initial_support_status != "legacy":
             frozen_by_id, _ = _verified_candidate_frozen_inputs(db, row)
