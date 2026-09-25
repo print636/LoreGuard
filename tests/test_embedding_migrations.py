@@ -21,10 +21,161 @@ from app.narrative_context import payload_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0015_character_trait_axes"
+HEAD_REVISION = "0016_character_support_bindings"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
+    def test_support_binding_migration_marks_existing_candidate_legacy_without_rehashing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            url = f"sqlite:///{(Path(directory) / 'support-binding.db').as_posix()}"
+            self.upgrade_to(url, "0015_character_trait_axes")
+            engine = create_engine(url)
+            before = {item["name"] for item in inspect(engine).get_columns(
+                "character_trait_candidates"
+            )}
+            def protections(inspector):
+                table = "character_trait_candidates"
+                return {
+                    kind: {item["name"] for item in getattr(inspector, method)(table)}
+                    for kind, method in (
+                        ("foreign_keys", "get_foreign_keys"),
+                        ("uniques", "get_unique_constraints"),
+                        ("checks", "get_check_constraints"),
+                        ("indexes", "get_indexes"),
+                    )
+                }
+
+            before_protections = protections(inspect(engine))
+            self.assertNotIn("support_bindings_v1", before)
+            old_candidate_table = Table(
+                "character_trait_candidates", MetaData(), autoload_with=engine
+            )
+            scope = {"schema_version": 1, "timeline_key": "main"}
+            evidence = [{"document_id": "document-old", "text": "old line"}]
+            with engine.begin() as connection:
+                connection.execute(old_candidate_table.insert().values(
+                    id="candidate-old",
+                    project_id="project-old",
+                    source_run_id="run-old",
+                    character_key="old-character",
+                    character_display_name="old-character",
+                    trait_type="preference",
+                    trait_key="old-preference",
+                    value="old-value",
+                    polarity="positive",
+                    stability="stable",
+                    contexts=[],
+                    origin="explicit_setting",
+                    authority_tier="formal_record",
+                    confidence=0.9,
+                    scope_payload=scope,
+                    scope_sha256=payload_sha256(scope),
+                    evidence=evidence,
+                    evidence_sha256=payload_sha256(evidence),
+                    # Deliberately not recomputable: a pre-0014 row may have
+                    # hashed a comparison key that was never persisted.
+                    candidate_fingerprint="f" * 64,
+                    generator_version="test-v1",
+                    provenance={},
+                    review_state="pending",
+                    lock_version=0,
+                    created_at=datetime(2026, 9, 1),
+                ))
+            engine.dispose()
+            self.upgrade(url)
+            engine = create_engine(url)
+            after = {item["name"] for item in inspect(engine).get_columns(
+                "character_trait_candidates"
+            )}
+            self.assertIn("support_bindings_v1", after)
+            self.assertIn("support_bindings_sha256", after)
+            self.assertIn("support_binding_mode", after)
+            self.assertEqual(protections(inspect(engine)), before_protections)
+            with engine.connect() as connection:
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT support_binding_mode, support_bindings_v1, "
+                    "support_bindings_sha256, candidate_fingerprint "
+                    "FROM character_trait_candidates WHERE id = 'candidate-old'"
+                ).one(), ("legacy_v1", None, None, "f" * 64))
+            engine.dispose()
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            config.attributes["database_url"] = url
+            command.downgrade(config, "0015_character_trait_axes")
+            engine = create_engine(url)
+            after_downgrade = {item["name"] for item in inspect(engine).get_columns(
+                "character_trait_candidates"
+            )}
+            self.assertNotIn("support_bindings_v1", after_downgrade)
+            self.assertNotIn("support_bindings_sha256", after_downgrade)
+            self.assertNotIn("support_binding_mode", after_downgrade)
+            self.assertEqual(protections(inspect(engine)), before_protections)
+            with engine.connect() as connection:
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT candidate_fingerprint FROM character_trait_candidates "
+                    "WHERE id = 'candidate-old'"
+                ).scalar_one(), "f" * 64)
+            engine.dispose()
+
+    def test_support_binding_downgrade_rejects_bound_candidate_without_data_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            url = f"sqlite:///{(Path(directory) / 'bound-candidate.db').as_posix()}"
+            self.upgrade(url)
+            engine = create_engine(url)
+            candidate_table = Table(
+                "character_trait_candidates", MetaData(), autoload_with=engine
+            )
+            scope = {"schema_version": 1, "timeline_key": "main"}
+            evidence = [{"document_id": "document-1", "text": "test line"}]
+            with engine.begin() as connection:
+                connection.execute(candidate_table.insert().values(
+                    id="candidate-bound",
+                    project_id="project-1",
+                    source_run_id="run-1",
+                    character_key="test-character",
+                    character_display_name="test-character",
+                    trait_type="preference",
+                    trait_key="test-preference",
+                    value="test-value",
+                    polarity="positive",
+                    stability="stable",
+                    contexts=[],
+                    origin="explicit_setting",
+                    authority_tier="formal_record",
+                    confidence=0.9,
+                    scope_payload=scope,
+                    scope_sha256=payload_sha256(scope),
+                    evidence=evidence,
+                    evidence_sha256=payload_sha256(evidence),
+                    support_binding_mode="required_v1",
+                    support_bindings_v1={"schema_version": "test"},
+                    support_bindings_sha256="f" * 64,
+                    candidate_fingerprint="e" * 64,
+                    generator_version="test-v1",
+                    provenance={},
+                    review_state="pending",
+                    lock_version=0,
+                    created_at=datetime(2026, 9, 1),
+                ))
+            engine.dispose()
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            config.attributes["database_url"] = url
+            with self.assertRaisesRegex(RuntimeError, "support bindings exist"):
+                command.downgrade(config, "0015_character_trait_axes")
+            engine = create_engine(url)
+            with engine.connect() as connection:
+                row = connection.exec_driver_sql(
+                    "SELECT support_binding_mode, support_bindings_sha256 "
+                    "FROM character_trait_candidates WHERE id = 'candidate-bound'"
+                ).one()
+                revision = connection.exec_driver_sql(
+                    "SELECT version_num FROM alembic_version"
+                ).scalar_one()
+            self.assertEqual(row, ("required_v1", "f" * 64))
+            self.assertEqual(revision, HEAD_REVISION)
+            engine.dispose()
+
     def test_author_axis_migration_round_trips_on_sqlite(self):
         with tempfile.TemporaryDirectory() as directory:
             url = f"sqlite:///{(Path(directory) / 'approved-axis.db').as_posix()}"

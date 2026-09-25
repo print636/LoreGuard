@@ -21,6 +21,7 @@ import type {
   SourceNeighbor,
   SourceNeighborPage,
 } from "./types.ts";
+import { readSupportBindings } from "./supportBindings.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -185,7 +186,10 @@ function normalizeEvidence(
   const source = record(value);
   if (!source) return null;
   const documentName = text(source.document_name);
-  const excerpt = text(source.text);
+  // Frozen codepoint offsets refer to the untrimmed source line. A generic
+  // text normalizer would silently shift targets on indented manuscript lines.
+  const excerpt = typeof source.text === "string" && source.text.trim()
+    ? source.text : "";
   const lineStart = integer(source.line_start);
   const lineEnd = integer(source.line_end);
   if (!documentName || !excerpt || lineStart < 1 || lineEnd < lineStart) return null;
@@ -270,7 +274,11 @@ function candidateStatus(value: unknown): ProfileCandidateStatus {
 
 export function normalizeProfileCandidate(
   value: unknown,
-  options: { characterId?: string; inheritedCoverage?: ModelCoverage } = {},
+  options: {
+    characterId?: string;
+    inheritedCoverage?: ModelCoverage;
+    requireExactEvidence?: boolean;
+  } = {},
 ): ProfileCandidate {
   const source = requiredRecord(value, "角色归纳候选");
   const id = text(source.id);
@@ -308,6 +316,13 @@ export function normalizeProfileCandidate(
     rawScope,
     "反向证据",
   );
+  const supportBindings = readSupportBindings(
+    source.support_bindings_status,
+    source.support_bindings_v1,
+    supportingEvidence,
+    source.source_verified === true,
+    options.requireExactEvidence === true,
+  );
   const status = candidateStatus(source.status ?? source.review_state);
   const origin =
     source.origin === "explicit_setting" || source.origin === "history_inference"
@@ -336,6 +351,7 @@ export function normalizeProfileCandidate(
   const reviewable = Boolean(
     explicitlyReviewable &&
       source.source_verified === true &&
+      supportBindings.status !== "invalid" &&
       status === "pending" &&
       dimension !== "unknown" &&
       origin !== "unknown" &&
@@ -345,6 +361,9 @@ export function normalizeProfileCandidate(
       revision !== null,
   );
   let unreviewableReason = optionalText(source.unreviewable_reason);
+  if (supportBindings.status === "invalid") {
+    unreviewableReason = "精确证据定位未通过冻结原文核对，请重新分析后审核。";
+  }
   if (!reviewable && !unreviewableReason) {
     if (source.source_verified !== true) {
       unreviewableReason = "候选原文行未与冻结输入核对，不能确认。";
@@ -405,6 +424,8 @@ export function normalizeProfileCandidate(
       source.model_coverage ?? options.inheritedCoverage ?? "unknown",
     ),
     source_verified: source.source_verified === true,
+    support_bindings_status: supportBindings.status,
+    support_bindings_v1: supportBindings.payload,
     revision: revision ?? 0,
   };
 }
@@ -977,7 +998,7 @@ export async function fetchProfileCandidate(
     characterApiPaths(projectId, characterId, candidateId).candidate,
     { signal },
   );
-  return normalizeProfileCandidate(payload, { characterId });
+  return normalizeProfileCandidate(payload, { characterId, requireExactEvidence: true });
 }
 
 export async function submitCandidateDecision(

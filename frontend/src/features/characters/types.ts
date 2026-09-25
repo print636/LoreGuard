@@ -74,6 +74,31 @@ export type ProfileEvidence = {
   context_verified: boolean;
 };
 
+export type SupportBindingStatus = "legacy" | "verified" | "invalid";
+
+export type ProfileSupportSpan = {
+  support_id: string;
+  start_offset: number;
+  end_offset: number;
+  role: "target" | "actor_anchor" | "label_anchor" | "bridge";
+};
+
+export type ProfileSupportBinding = {
+  evidence_index: number;
+  support_id: string;
+  target: ProfileSupportSpan & { role: "target" };
+  actor_anchor_id: string | null;
+  label_anchor_id: string | null;
+  scope_relation: "local" | "same_actor_continuation" | "labelled_elaboration";
+  context: ProfileSupportSpan[];
+};
+
+export type ProfileSupportBindingsV1 = {
+  schema_version: "character-support-bindings-v1";
+  index_version: "assertion-index-v1";
+  bindings: ProfileSupportBinding[];
+};
+
 export type ProfileCandidateStatus =
   | "pending"
   | "confirmed"
@@ -108,6 +133,8 @@ export type ProfileCandidate = {
   source_snapshot_revision: string;
   model_coverage: ModelCoverage;
   source_verified: boolean;
+  support_bindings_status: SupportBindingStatus;
+  support_bindings_v1: ProfileSupportBindingsV1 | null;
   revision: number;
 };
 

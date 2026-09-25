@@ -141,6 +141,17 @@ accuracy results. The guard's current direct-actor contract would reject all
 five target clauses if submitted; their cross-clause subject and label scope
 still need independent author confirmation, not automatic inheritance.
 
+An opt-in [V5 semantic scope review](docs/semantic-scope-review-rfc-20260925.md)
+now lets a bounded model reviewer assess same-line subject and label carryover
+against frozen source clauses. Its [precise support binding](docs/character-support-binding-v1.md)
+keeps separately supported clauses on one line as independently reviewable
+author decisions and distinguishes the target clause from carryover context in
+the UI. Invalid new bindings block review; legacy candidates retain the older
+whole-line display. Both changes are default-off and do not alter the frozen
+evaluation gate. They establish evidence identity and failure handling, **not**
+open-text semantic accuracy or production readiness; a fresh real-model
+diagnostic is still required.
+
 The overlay serves `BAAI/bge-small-zh-v1.5` privately inside the Compose
 network with float32 CLS pooling, a fixed revision, no silent truncation and a
 persistent named model cache. It exposes no host port and requires no external

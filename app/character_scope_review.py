@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 SCOPE_REVIEW_SCHEMA_V1 = "character-scope-review-v1"
 SCOPE_REVIEW_PROMPT_V1 = "character-scope-review-prompt-v1"
+SCOPE_REVIEW_PROMPT_V2 = "character-scope-review-prompt-v2"
 ASSERTION_INDEX_V1 = "assertion-index-v1"
 MAX_SCOPE_REVIEW_REQUEST_BYTES = 131_072
 MAX_SCOPE_REVIEW_RESPONSE_BYTES = 32_768
@@ -28,6 +29,15 @@ _SHA256_PATTERN = r"^[a-f0-9]{64}$"
 _SUPPORT_ID_PARTS = re.compile(r"^L([1-9][0-9]{0,7}):A([1-9][0-9]{0,2})$")
 
 ReviewVerdict = Literal["supported", "rejected", "uncertain"]
+BasisInvalidSubtype = Literal[
+    "duplicate",
+    "unknown_id",
+    "cross_line",
+    "missing_target",
+    "missing_anchor",
+    "missing_intermediate",
+    "extra_unrelated",
+]
 ReviewReason = Literal[
     "supported",
     "reviewer_rejected",
@@ -118,7 +128,7 @@ class ScopeReviewProposal(BaseModel):
 
 class ScopeReviewRequest(ScopeReviewSourceIdentity):
     schema_version: Literal["character-scope-review-v1"] = SCOPE_REVIEW_SCHEMA_V1
-    prompt_version: Literal["character-scope-review-prompt-v1"] = SCOPE_REVIEW_PROMPT_V1
+    prompt_version: Literal["character-scope-review-prompt-v2"] = SCOPE_REVIEW_PROMPT_V2
     assertion_index_version: Literal["assertion-index-v1"] = ASSERTION_INDEX_V1
     block_line_start: int = Field(ge=1, le=10_000_000)
     lines: tuple[ScopeReviewLine, ...] = Field(min_length=1, max_length=64)
@@ -287,6 +297,25 @@ def _uncertain_all(request: ScopeReviewRequest, reason: ReviewReason) -> ScopeRe
     )
 
 
+def _required_basis_ids(
+    request: ScopeReviewRequest,
+    proposal: ScopeReviewProposal,
+    clauses: dict[str, ScopeReviewClause],
+) -> frozenset[str]:
+    target = clauses[proposal.support_id]
+    target_line = next(line for line in request.lines if line.line_number == target.line_number)
+    required = {proposal.support_id}
+    for anchor_id in (proposal.actor_anchor_id, proposal.label_anchor_id):
+        if anchor_id is None:
+            continue
+        anchor = clauses[anchor_id]
+        required.update(
+            clause.support_id for clause in target_line.clauses
+            if anchor.start_offset <= clause.start_offset <= target.start_offset
+        )
+    return frozenset(required)
+
+
 def _basis_valid(
     request: ScopeReviewRequest,
     proposal: ScopeReviewProposal,
@@ -307,17 +336,48 @@ def _basis_valid(
         return False
     if item.verdict != "supported":
         return True
-    target_line = next(line for line in request.lines if line.line_number == target.line_number)
-    required = {proposal.support_id}
-    for anchor_id in (proposal.actor_anchor_id, proposal.label_anchor_id):
-        if anchor_id is None:
-            continue
-        anchor = clauses[anchor_id]
-        required.update(
-            clause.support_id for clause in target_line.clauses
-            if anchor.start_offset <= clause.start_offset <= target.start_offset
-        )
-    return required <= set(item.basis_ids)
+    return _required_basis_ids(request, proposal, clauses) == set(item.basis_ids)
+
+
+def classify_basis_invalid(
+    request: ScopeReviewRequest,
+    proposal: ScopeReviewProposal,
+    item: ScopeReviewItem,
+) -> BasisInvalidSubtype | None:
+    """Classify an invalid basis without returning source text or model-authored IDs.
+
+    This diagnostic helper does not participate in the acceptance decision.
+    Its precedence is fixed so a single item contributes at most one category.
+    """
+    clauses = {
+        clause.support_id: clause
+        for line in request.lines
+        for clause in line.clauses
+    }
+    target = clauses[proposal.support_id]
+    basis = set(item.basis_ids)
+    if len(basis) != len(item.basis_ids):
+        return "duplicate"
+    if any(basis_id not in clauses for basis_id in basis):
+        return "unknown_id"
+    if any(clauses[basis_id].line_number != target.line_number for basis_id in basis):
+        return "cross_line"
+    if item.verdict != "supported":
+        return None
+    if proposal.support_id not in basis:
+        return "missing_target"
+    anchors = tuple(
+        anchor_id for anchor_id in (proposal.actor_anchor_id, proposal.label_anchor_id)
+        if anchor_id is not None
+    )
+    if any(anchor_id not in basis for anchor_id in anchors):
+        return "missing_anchor"
+    required = _required_basis_ids(request, proposal, clauses)
+    if required - basis:
+        return "missing_intermediate"
+    if basis - required:
+        return "extra_unrelated"
+    return None
 
 
 def _slots_support(proposal: ScopeReviewProposal, item: ScopeReviewItem) -> bool:

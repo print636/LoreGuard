@@ -1,15 +1,20 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+from copy import deepcopy
 from unittest.mock import patch
 from urllib.parse import quote
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select, update
+from sqlalchemy import (
+    CheckConstraint, Column, JSON, MetaData, String, Table, create_engine,
+    select, text, update,
+)
 from sqlalchemy.exc import IntegrityError
 
 from app.character_traits import upsert_character_trait_candidate
+from app.character_support_bindings import support_bindings_sha256
 from app.db import (
     AnalysisDiagnosticRow,
     AnalysisRunInputRow,
@@ -18,6 +23,7 @@ from app.db import (
     CharacterTraitAxisRow,
     CharacterTraitCandidateRow,
     CharacterTraitReviewRow,
+    Base,
     SessionLocal,
 )
 from app.main import app, settings, write_limiter
@@ -93,6 +99,10 @@ def _candidate(
     line_start: int = 1,
     line_end: int = 1,
     document_id: str | None = None,
+    support_id: str | None = None,
+    actor_anchor_id: str | None = None,
+    label_anchor_id: str | None = None,
+    scope_relation: str = "local",
 ) -> str:
     with SessionLocal() as db:
         snapshot = db.scalar(
@@ -147,6 +157,13 @@ def _candidate(
                         "text": evidence_text,
                     }
                 ],
+                **({"support_refs": [{
+                    "evidence_index": 0,
+                    "support_id": support_id,
+                    "actor_anchor_id": actor_anchor_id,
+                    "label_anchor_id": label_anchor_id,
+                    "scope_relation": scope_relation,
+                }]} if support_id is not None else {}),
                 "generator_version": "api-contract-test-v1",
                 "provenance": {"extractor": "test", "record_index": 0},
                 "supersedes_candidate_id": supersedes_candidate_id,
@@ -825,8 +842,13 @@ def test_pre0014_preference_upgrade_needs_explicit_supersession():
             # contains the parsed object, while the new column remains NULL.
             legacy.candidate_fingerprint = old_fingerprint
             legacy.comparison_key = None
+            assert legacy.support_binding_mode == "legacy_v1"
             db.commit()
 
+        pre0014_detail = client.get(_candidate_path(project["id"], legacy_id))
+        assert pre0014_detail.status_code == 200
+        assert pre0014_detail.json()["support_bindings_status"] == "legacy"
+        assert pre0014_detail.json()["reviewable"] is True
         assert _confirm(client, project["id"], legacy_id).status_code == 201
         with SessionLocal() as db:
             legacy = db.get(CharacterTraitCandidateRow, legacy_id)
@@ -1749,6 +1771,442 @@ def test_new_and_legacy_trimmed_evidence_are_distinguished_without_mutating_hist
         assert after.status_code == 200
         assert after.json()["status"] == "confirmed"
         assert after.json()["evidence"][0]["source_text_exact"] is False
+
+
+def test_reviewed_same_line_targets_are_separate_reviewable_candidates():
+    line = "林澈喜欢蜜瓜。林澈喜欢葡萄。"
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client, content=line)
+        run = _completed_run(client, project["id"])
+        first = _candidate(
+            project["id"], run["id"], value="偏爱水果",
+            support_id="L1:A1",
+        )
+        second = _candidate(
+            project["id"], run["id"], value="偏爱水果",
+            support_id="L1:A2",
+        )
+        assert first != second
+        with SessionLocal() as db:
+            left = db.get(CharacterTraitCandidateRow, first)
+            right = db.get(CharacterTraitCandidateRow, second)
+            assert left.candidate_fingerprint != right.candidate_fingerprint
+            assert left.evidence == right.evidence
+            assert left.evidence_sha256 == right.evidence_sha256
+            assert left.support_binding_mode == right.support_binding_mode == "required_v1"
+            assert left.support_bindings_v1["bindings"][0]["support_id"] == "L1:A1"
+            assert right.support_bindings_v1["bindings"][0]["support_id"] == "L1:A2"
+        for candidate_id, target_id in ((first, "L1:A1"), (second, "L1:A2")):
+            detail = client.get(_candidate_path(project["id"], candidate_id))
+            assert detail.status_code == 200, detail.text
+            body = detail.json()
+            assert body["reviewable"] is True
+            assert body["support_bindings_status"] == "verified"
+            assert body["support_bindings_v1"]["bindings"][0]["support_id"] == target_id
+            assert body["evidence"][0]["text"] == line
+        confirmed = _confirm(client, project["id"], first)
+        assert confirmed.status_code == 201, confirmed.text
+        pending = client.get(_candidate_path(project["id"], second)).json()
+        assert pending["review_state"] == "pending"
+        assert pending["reviewable"] is True
+
+
+def test_new_support_binding_corruption_blocks_review_but_legacy_null_does_not():
+    line = "林澈喜欢蜜瓜。林澈喜欢葡萄。"
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client, content=line)
+        run = _completed_run(client, project["id"])
+        reviewed = _candidate(
+            project["id"], run["id"], value="偏爱水果",
+            support_id="L1:A2",
+        )
+        legacy = _candidate(
+            project["id"], run["id"], value="旧版整行候选",
+        )
+        with SessionLocal() as db:
+            assert db.get(CharacterTraitCandidateRow, legacy).support_binding_mode == "legacy_v1"
+            row = db.get(CharacterTraitCandidateRow, reviewed)
+            damaged = deepcopy(row.support_bindings_v1)
+            damaged["bindings"][0]["target"]["start_offset"] = 0
+            row.support_bindings_v1 = damaged
+            row.support_bindings_sha256 = support_bindings_sha256(damaged)
+            db.commit()
+        detail = client.get(_candidate_path(project["id"], reviewed))
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["support_bindings_status"] == "invalid"
+        assert body["support_bindings_v1"] is None
+        assert body["reviewable"] is False
+        denied = _confirm(client, project["id"], reviewed)
+        assert denied.status_code == 409
+        assert denied.json()["detail"]["code"] == "character_trait_support_binding_invalid"
+        old = client.get(_candidate_path(project["id"], legacy)).json()
+        assert old["support_bindings_status"] == "legacy"
+        assert old["reviewable"] is True
+        assert _confirm(client, project["id"], legacy).status_code == 201
+
+
+@pytest.mark.parametrize("erase_marker", (False, True))
+def test_required_binding_cannot_fall_back_to_legacy_when_values_disappear(
+    erase_marker: bool,
+):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈喜欢蜜瓜。林澈喜欢葡萄。"
+        )
+        run = _completed_run(client, project["id"])
+        candidate_id = _candidate(
+            project["id"], run["id"], support_id="L1:A2"
+        )
+        # Simulate a corrupted store despite the fresh-schema CHECK. The API
+        # must also fail closed for older SQLite migrations lacking that CHECK.
+        with SessionLocal() as db:
+            connection = db.connection()
+            connection.exec_driver_sql("PRAGMA ignore_check_constraints=ON")
+            try:
+                db.execute(
+                    update(CharacterTraitCandidateRow)
+                    .where(CharacterTraitCandidateRow.id == candidate_id)
+                    .values(
+                        support_bindings_v1=None,
+                        support_bindings_sha256=None,
+                        **({"support_binding_mode": None} if erase_marker else {}),
+                    )
+                )
+                db.commit()
+            finally:
+                db.execute(text("PRAGMA ignore_check_constraints=OFF"))
+                db.commit()
+        detail = client.get(_candidate_path(project["id"], candidate_id))
+        assert detail.status_code == 200
+        assert detail.json()["support_bindings_status"] == "invalid"
+        assert detail.json()["reviewable"] is False
+        denied = _confirm(client, project["id"], candidate_id)
+        assert denied.status_code == 409
+        assert denied.json()["detail"]["code"] == "character_trait_support_binding_invalid"
+
+
+@pytest.mark.parametrize("erase_all_columns", (False, True))
+def test_damaged_reviewed_binding_blocks_idempotent_confirmation_replay(
+    erase_all_columns: bool,
+):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈喜欢蜜瓜。林澈喜欢葡萄。"
+        )
+        run = _completed_run(client, project["id"])
+        candidate_id = _candidate(project["id"], run["id"], support_id="L1:A2")
+        headers = {"Idempotency-Key": "reviewed-support-replay"}
+        first = _confirm(client, project["id"], candidate_id, headers=headers)
+        assert first.status_code == 201, first.text
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            if erase_all_columns:
+                connection = db.connection()
+                connection.exec_driver_sql("PRAGMA ignore_check_constraints=ON")
+                try:
+                    db.execute(
+                        update(CharacterTraitCandidateRow)
+                        .where(CharacterTraitCandidateRow.id == candidate_id)
+                        .values(
+                            support_binding_mode=None,
+                            support_bindings_v1=None,
+                            support_bindings_sha256=None,
+                        )
+                    )
+                    db.commit()
+                finally:
+                    db.execute(text("PRAGMA ignore_check_constraints=OFF"))
+                    db.commit()
+            else:
+                damaged = deepcopy(row.support_bindings_v1)
+                damaged["bindings"][0]["target"]["start_offset"] = 0
+                row.support_bindings_v1 = damaged
+                row.support_bindings_sha256 = support_bindings_sha256(damaged)
+                db.commit()
+        replay = _confirm(client, project["id"], candidate_id, headers=headers)
+        assert replay.status_code == 409
+        assert replay.json()["detail"]["code"] == "character_trait_support_binding_invalid"
+        with SessionLocal() as db:
+            reviews = list(db.scalars(select(CharacterTraitReviewRow).where(
+                CharacterTraitReviewRow.candidate_id == candidate_id
+            )).all())
+            assert len(reviews) == 1
+
+
+def test_legacy_candidate_idempotent_replay_keeps_old_source_semantics():
+    with TestClient(app) as client:
+        project, document = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        legacy_id = _candidate(project["id"], run["id"])
+        headers = {"Idempotency-Key": "legacy-support-replay"}
+        first = _confirm(client, project["id"], legacy_id, headers=headers)
+        assert first.status_code == 201, first.text
+        replaced = client.post(
+            f"/api/v1/projects/{project['id']}/documents/text",
+            json={
+                "name": "character.md",
+                "content": "林澈现在喜欢葡萄。",
+                "replace_document_id": document["id"],
+            },
+        )
+        assert replaced.status_code == 201, replaced.text
+        replay = _confirm(client, project["id"], legacy_id, headers=headers)
+        assert replay.status_code == 201, replay.text
+        assert replay.json()["deduplicated"] is True
+
+
+def test_valid_neighbor_target_payload_cannot_replace_candidate_identity():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈喜欢蜜瓜。林澈喜欢葡萄。"
+        )
+        run = _completed_run(client, project["id"])
+        first = _candidate(project["id"], run["id"], support_id="L1:A1")
+        neighbor = _candidate(project["id"], run["id"], support_id="L1:A2")
+        with SessionLocal() as db:
+            left = db.get(CharacterTraitCandidateRow, first)
+            right = db.get(CharacterTraitCandidateRow, neighbor)
+            left.support_bindings_v1 = deepcopy(right.support_bindings_v1)
+            left.support_bindings_sha256 = support_bindings_sha256(left.support_bindings_v1)
+            db.commit()
+        detail = client.get(_candidate_path(project["id"], first))
+        assert detail.status_code == 200
+        assert detail.json()["support_bindings_status"] == "invalid"
+        assert detail.json()["reviewable"] is False
+        denied = _confirm(client, project["id"], first)
+        assert denied.status_code == 409
+        assert denied.json()["detail"]["code"] == "character_trait_support_binding_invalid"
+        sound = client.get(_candidate_path(project["id"], neighbor))
+        assert sound.status_code == 200
+        assert sound.json()["support_bindings_status"] == "verified"
+
+
+def test_valid_alternate_anchor_for_same_target_cannot_replace_review_chain():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈很谨慎。他先观察。然后才行动。"
+        )
+        run = _completed_run(client, project["id"])
+        first = _candidate(
+            project["id"], run["id"], support_id="L1:A3",
+            actor_anchor_id="L1:A1", scope_relation="same_actor_continuation",
+        )
+        alternate = _candidate(
+            project["id"], run["id"], support_id="L1:A3",
+            actor_anchor_id="L1:A2", scope_relation="same_actor_continuation",
+        )
+        assert first != alternate
+        with SessionLocal() as db:
+            left = db.get(CharacterTraitCandidateRow, first)
+            right = db.get(CharacterTraitCandidateRow, alternate)
+            assert left.candidate_fingerprint != right.candidate_fingerprint
+            left.support_bindings_v1 = deepcopy(right.support_bindings_v1)
+            left.support_bindings_sha256 = support_bindings_sha256(left.support_bindings_v1)
+            db.commit()
+        body = client.get(_candidate_path(project["id"], first)).json()
+        assert body["support_bindings_status"] == "invalid"
+        assert body["reviewable"] is False
+        denied = _confirm(client, project["id"], first)
+        assert denied.status_code == 409
+        assert denied.json()["detail"]["code"] == "character_trait_support_binding_invalid"
+
+
+def test_required_binding_database_check_rejects_missing_digest():
+    # Fresh schema (and PostgreSQL migration) install this CHECK. SQLite
+    # upgraded in place retains older checks instead; API validation covers it.
+    check = next(
+        item for item in Base.metadata.tables["character_trait_candidates"].constraints
+        if getattr(item, "name", None)
+        == "ck_character_trait_candidate_support_bindings_pair"
+    )
+    engine = create_engine("sqlite:///:memory:")
+    table = Table(
+        "support_check", MetaData(),
+        Column("support_binding_mode", String(24)),
+        Column("support_bindings_v1", JSON(none_as_null=True)),
+        Column("support_bindings_sha256", String(64)),
+        CheckConstraint(str(check.sqltext), name=check.name),
+    )
+    table.create(engine)
+    try:
+        with engine.begin() as connection:
+            connection.execute(table.insert().values(
+                support_binding_mode="required_v1",
+                support_bindings_v1={"schema_version": "test"},
+                support_bindings_sha256="f" * 64,
+            ))
+            connection.execute(table.insert().values(
+                support_binding_mode="legacy_v1",
+                support_bindings_v1=None,
+                support_bindings_sha256=None,
+            ))
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(table.insert().values(
+                    support_binding_mode="required_v1",
+                    support_bindings_v1={"schema_version": "test"},
+                    support_bindings_sha256=None,
+                ))
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(table.insert().values(
+                    support_binding_mode=None,
+                    support_bindings_v1=None,
+                    support_bindings_sha256=None,
+                ))
+    finally:
+        engine.dispose()
+
+
+def test_target_fingerprint_reuses_same_frozen_content_not_new_document_version():
+    line = "林澈喜欢蜜瓜。林澈喜欢葡萄。"
+    with TestClient(app) as client:
+        project, document = _project_and_document(client, content=line)
+        first_run = _completed_run(client, project["id"])
+        candidate_id = _candidate(
+            project["id"], first_run["id"], value="偏爱水果",
+            support_id="L1:A2",
+        )
+        second_run = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            original = db.get(CharacterTraitCandidateRow, candidate_id)
+            original_binding = deepcopy(original.support_bindings_v1)
+            second_input = db.scalar(select(AnalysisRunInputRow).where(
+                AnalysisRunInputRow.run_id == second_run["id"]
+            ))
+            assert second_input is not None
+            same_input = {
+                **_candidate_input_from_row(original, comparison_key=None),
+                "value": "他对这种水果有稳定偏好",
+                "evidence": [{**original.evidence[0], "input_id": second_input.id}],
+                "support_refs": [{
+                    "evidence_index": 0, "support_id": "L1:A2",
+                    "scope_relation": "local",
+                }],
+            }
+            reused, created = upsert_character_trait_candidate(
+                db, project_id=project["id"], source_run_id=second_run["id"],
+                candidate=same_input,
+            )
+            assert not created and reused.id == candidate_id
+            assert reused.source_run_id == first_run["id"]
+            assert reused.value == original.value
+            assert reused.support_bindings_v1 == original_binding
+            db.rollback()
+        replaced = client.post(
+            f"/api/v1/projects/{project['id']}/documents/text",
+            json={
+                "name": "character.md",
+                "content": line + "新的版本。",
+                "replace_document_id": document["id"],
+            },
+        )
+        assert replaced.status_code == 201, replaced.text
+        third_run = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            original = db.get(CharacterTraitCandidateRow, candidate_id)
+            third_input = db.scalar(select(AnalysisRunInputRow).where(
+                AnalysisRunInputRow.run_id == third_run["id"]
+            ))
+            assert third_input is not None
+            new_input = {
+                **_candidate_input_from_row(original, comparison_key=None),
+                "evidence": [{
+                    "input_id": third_input.id,
+                    "document_id": third_input.document_id,
+                    "document_name": third_input.document_name,
+                    "document_version": third_input.document_version,
+                    "content_sha256": third_input.content_sha256,
+                    "line_start": 1, "line_end": 1,
+                    "text": third_input.content.splitlines()[0],
+                }],
+                "support_refs": [{
+                    "evidence_index": 0, "support_id": "L1:A2",
+                    "scope_relation": "local",
+                }],
+            }
+            refreshed, created = upsert_character_trait_candidate(
+                db, project_id=project["id"], source_run_id=third_run["id"],
+                candidate=new_input,
+            )
+            assert created and refreshed.id != candidate_id
+            assert refreshed.candidate_fingerprint != original.candidate_fingerprint
+            assert refreshed.support_bindings_v1["bindings"][0]["support_id"] == "L1:A2"
+            db.rollback()
+
+
+def test_cross_run_formal_target_reuse_rejects_damaged_prior_binding():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈喜欢蜜瓜。林澈喜欢葡萄。"
+        )
+        first_run = _completed_run(client, project["id"])
+        candidate_id = _candidate(
+            project["id"], first_run["id"], support_id="L1:A2"
+        )
+        second_run = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            prior = db.get(CharacterTraitCandidateRow, candidate_id)
+            assert prior is not None
+            second_input = db.scalar(select(AnalysisRunInputRow).where(
+                AnalysisRunInputRow.run_id == second_run["id"]
+            ))
+            assert second_input is not None
+            next_input = {
+                **_candidate_input_from_row(prior, comparison_key=None),
+                "evidence": [{**prior.evidence[0], "input_id": second_input.id}],
+                "support_refs": [{
+                    "evidence_index": 0,
+                    "support_id": "L1:A2",
+                    "scope_relation": "local",
+                }],
+            }
+            prior.support_bindings_sha256 = "f" * 64
+            db.commit()
+            with pytest.raises(ValueError, match="support bindings failed validation"):
+                upsert_character_trait_candidate(
+                    db,
+                    project_id=project["id"],
+                    source_run_id=second_run["id"],
+                    candidate=next_input,
+                )
+            assert db.scalars(select(CharacterTraitCandidateRow).where(
+                CharacterTraitCandidateRow.project_id == project["id"]
+            )).all() == [prior]
+
+
+def test_supersession_link_preserves_verified_target_binding():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈喜欢蜜瓜。林澈喜欢葡萄。"
+        )
+        run = _completed_run(client, project["id"])
+        legacy_confirmed = _candidate(
+            project["id"], run["id"], trait_key="food_preference",
+            value="喜欢蜜瓜", comparison_key=None,
+        )
+        assert _confirm(client, project["id"], legacy_confirmed).status_code == 201
+        reviewed = _candidate(
+            project["id"], run["id"], trait_key="food_preference",
+            value="喜欢蜜瓜", comparison_key="preference:蜜瓜",
+            support_id="L1:A1",
+        )
+        linked = client.post(
+            f"/api/v1/projects/{project['id']}/characters/{quote('林澈', safe='')}"
+            f"/profile-candidates/{reviewed}/supersession-links",
+            json={
+                "supersedes_candidate_id": legacy_confirmed,
+                "expected_revision": 0,
+            },
+        )
+        assert linked.status_code == 201, linked.text
+        child_id = linked.json()["candidate"]["id"]
+        assert child_id != reviewed
+        child = client.get(_candidate_path(project["id"], child_id))
+        assert child.status_code == 200, child.text
+        assert child.json()["support_bindings_status"] == "verified"
+        assert child.json()["support_bindings_v1"]["bindings"][0]["support_id"] == "L1:A1"
 
 
 def test_source_neighbors_do_not_merge_partially_overlapping_line_ranges():

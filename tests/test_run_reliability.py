@@ -286,6 +286,7 @@ class RunReliabilityTests(unittest.TestCase):
                     valid_until_release_ordinal=upper,
                     evidence=[],
                     evidence_sha256=empty_evidence_hash,
+                    support_binding_mode="legacy_v1",
                     candidate_fingerprint=payload_sha256({"trait": suffix}),
                     generator_version="test-v1",
                     provenance={},

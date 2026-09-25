@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .config import Settings
 from .character_trait_extraction import ASSERTION_INDEX_V1, SUPPORT_TRACE_V1
-from .character_scope_review import SCOPE_REVIEW_PROMPT_V1, SCOPE_REVIEW_SCHEMA_V1
+from .character_scope_review import SCOPE_REVIEW_PROMPT_V2, SCOPE_REVIEW_SCHEMA_V1
 from .embeddings import EmbeddingNotConfiguredError, OpenAICompatibleEmbeddingProvider
 from .evidence_chunks import EvidenceChunker
 from .provider import safe_thinking_configuration
@@ -201,7 +201,7 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
                 SCOPE_REVIEW_SCHEMA_V1 if settings.character_signal_scope_review_v1 else None
             ),
             "signal_scope_review_prompt_version": (
-                SCOPE_REVIEW_PROMPT_V1 if settings.character_signal_scope_review_v1 else None
+                SCOPE_REVIEW_PROMPT_V2 if settings.character_signal_scope_review_v1 else None
             ),
             "signal_scope_review_token_reserve": (
                 settings.character_signal_scope_review_token_reserve

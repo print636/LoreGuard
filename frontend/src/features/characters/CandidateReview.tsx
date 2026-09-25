@@ -432,6 +432,8 @@ export default function CandidateReview({
                 items={selected.supporting_evidence}
                 emptyText="没有可展示的支持证据，因此不能仅凭候选表述作出确认。"
                 candidateEvidence
+                supportBindingsStatus={selected.support_bindings_status}
+                supportBindings={selected.support_bindings_v1?.bindings || []}
               />
               <EvidenceList
                 title="反向或例外证据"

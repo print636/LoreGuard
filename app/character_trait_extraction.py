@@ -532,6 +532,24 @@ class CharacterSignal(BaseModel):
     actor_anchor_id: str | None = Field(default=None, exclude=True)
     label_anchor_id: str | None = Field(default=None, exclude=True)
     scope_relation: str | None = Field(default=None, exclude=True)
+    # Set only after the semantic reviewer accepts a server-bound formal claim.
+    source_run_input_id: str | None = Field(default=None, exclude=True)
+
+
+class CandidateSupportRef(BaseModel):
+    """Internal target/anchor IDs; offsets are resolved again from frozen input."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_input_id: str
+    document_id: str
+    line_number: int
+    support_id: str = Field(pattern=_SUPPORT_ID_PATTERN)
+    actor_anchor_id: str | None = Field(default=None, pattern=_SUPPORT_ID_PATTERN)
+    label_anchor_id: str | None = Field(default=None, pattern=_SUPPORT_ID_PATTERN)
+    scope_relation: Literal[
+        "local", "same_actor_continuation", "labelled_elaboration"
+    ]
 
 
 class CharacterSignalTarget(BaseModel):
@@ -642,6 +660,7 @@ class PendingTraitCandidate(BaseModel):
     origin: Literal["explicit_setting", "history_inference"]
     status: Literal["pending"] = "pending"
     evidence: tuple[EvidenceSpan, ...] = Field(min_length=1, max_length=12)
+    support_refs: tuple[CandidateSupportRef, ...] = Field(default=(), exclude=True)
 
 
 class CharacterSignalTokenAdmission(BaseModel):
@@ -2358,7 +2377,8 @@ def _review_clean_signals(
             charged_tokens=run.charged_tokens,
         )
     supported = tuple(
-        signal for signal, decision in zip(signals, run.evaluation.decisions)
+        signal.model_copy(update={"source_run_input_id": source_identity.run_input_id})
+        for signal, decision in zip(signals, run.evaluation.decisions)
         if decision.verdict == "supported"
     )
     reasons: Counter[str] = Counter()
@@ -2381,9 +2401,7 @@ def build_pending_trait_candidates(
 ) -> tuple[PendingTraitCandidate, ...]:
     """Apply eligibility only; no inference is ever auto-confirmed."""
 
-    groups: dict[
-        tuple[str, str, str, str, str, str, str, str], list[CharacterSignal]
-    ] = defaultdict(list)
+    groups: dict[tuple[str, ...], list[CharacterSignal]] = defaultdict(list)
     for signal in _merge_compatible_same_evidence_signals(signals):
         if signal.source_kind == "draft" or signal.stability not in {"core", "stable"}:
             continue
@@ -2408,6 +2426,15 @@ def build_pending_trait_candidates(
             signal.polarity,
             signal.stability,
             _compact(signal.key_object),
+            # Reviewed formal claims are independently author-reviewable.
+            # Legacy and history grouping remain line/semantic based.
+            (
+                f"{signal.evidence.document_id}:{signal.support_id}"
+                if signal.source_kind == "formal_character_profile"
+                and signal.source_run_input_id is not None
+                and signal.support_id is not None
+                else ""
+            ),
         )
         groups[key].append(signal)
     candidates: list[PendingTraitCandidate] = []
@@ -2421,6 +2448,7 @@ def build_pending_trait_candidates(
             polarity,
             stability,
             key_object_identity,
+            target_scope,
         ) = key
         independent: dict[tuple[str, int, int], CharacterSignal] = {}
         for row in rows:
@@ -2430,8 +2458,48 @@ def build_pending_trait_candidates(
         if source_kind == "published_history" and len(selected) < 2:
             continue
         evidence = tuple(row.evidence for row in selected[:12])
+        selected_lines = {
+            (row.evidence.document_id, row.evidence.line_start,
+             row.evidence.line_end): row.source_run_input_id
+            for row in selected[:12]
+        }
+        support_refs_by_key: dict[tuple[object, ...], CandidateSupportRef] = {}
+        for row in rows:
+            ev = row.evidence
+            if (
+                (ev.document_id, ev.line_start, ev.line_end) not in selected_lines
+                or row.source_run_input_id != selected_lines[
+                    (ev.document_id, ev.line_start, ev.line_end)
+                ]
+                or row.source_run_input_id is None
+                or row.support_id is None
+                or row.scope_relation not in {
+                    "local", "same_actor_continuation", "labelled_elaboration"
+                }
+                or ev.line_start != ev.line_end
+            ):
+                continue
+            ref = CandidateSupportRef(
+                run_input_id=row.source_run_input_id,
+                document_id=ev.document_id,
+                line_number=ev.line_start,
+                support_id=row.support_id,
+                actor_anchor_id=row.actor_anchor_id,
+                label_anchor_id=row.label_anchor_id,
+                scope_relation=row.scope_relation,
+            )
+            support_refs_by_key.setdefault(
+                (ref.run_input_id, ref.line_number, ref.support_id,
+                 ref.actor_anchor_id, ref.label_anchor_id, ref.scope_relation), ref
+            )
+        if target_scope and (
+            len({ref.support_id for ref in support_refs_by_key.values()}) != 1
+            or len(support_refs_by_key) != 1
+        ):
+            # An ambiguous reviewed target cannot be one author decision.
+            continue
         representative = selected[0]
-        identity = "|".join(
+        identity_parts = (
             [
                 source_kind,
                 character,
@@ -2444,6 +2512,9 @@ def build_pending_trait_candidates(
             ]
             + [f"{row.document_id}:{row.line_start}:{row.line_end}" for row in evidence]
         )
+        if target_scope:
+            identity_parts.append(f"target:{target_scope}")
+        identity = "|".join(identity_parts)
         candidates.append(
             PendingTraitCandidate(
                 id=f"ct_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:32]}",
@@ -2462,6 +2533,7 @@ def build_pending_trait_candidates(
                     else "history_inference"
                 ),
                 evidence=evidence,
+                support_refs=tuple(support_refs_by_key.values()),
             )
         )
     return tuple(candidates)
@@ -2488,6 +2560,7 @@ def _merge_compatible_same_evidence_signals(
             signal.actor_anchor_id,
             signal.label_anchor_id,
             signal.scope_relation,
+            signal.source_run_input_id,
             signal.character,
             signal.dimension,
             signal.polarity,

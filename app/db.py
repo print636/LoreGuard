@@ -693,6 +693,17 @@ class CharacterTraitCandidateRow(Base):
             "AND length(candidate_fingerprint) = 64",
             name="ck_character_trait_candidate_hashes",
         ),
+        CheckConstraint(
+            "support_binding_mode IS NOT NULL AND ("
+            "(support_binding_mode = 'legacy_v1' "
+            "AND support_bindings_v1 IS NULL "
+            "AND support_bindings_sha256 IS NULL) OR "
+            "(support_binding_mode = 'required_v1' "
+            "AND support_bindings_v1 IS NOT NULL "
+            "AND support_bindings_sha256 IS NOT NULL "
+            "AND length(support_bindings_sha256) = 64))",
+            name="ck_character_trait_candidate_support_bindings_pair",
+        ),
         Index(
             "ix_character_trait_candidates_project_state_character",
             "project_id",
@@ -737,6 +748,12 @@ class CharacterTraitCandidateRow(Base):
     )
     evidence: Mapped[list] = mapped_column(JSON)
     evidence_sha256: Mapped[str] = mapped_column(String(64))
+    # Optional verified sub-line metadata; legacy evidence and hashes stay intact.
+    support_binding_mode: Mapped[str] = mapped_column(String(24), nullable=False)
+    support_bindings_v1: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    support_bindings_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     candidate_fingerprint: Mapped[str] = mapped_column(String(64))
     generator_version: Mapped[str] = mapped_column(String(80))
     provenance: Mapped[dict] = mapped_column(JSON, default=dict)

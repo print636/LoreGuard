@@ -104,6 +104,12 @@ export function describeReadiness(readiness: CharacterReadiness) {
 }
 
 export function candidateReviewState(candidate: ProfileCandidate) {
+  if (candidate.support_bindings_status === "invalid") {
+    return {
+      allowed: false,
+      label: candidate.unreviewable_reason || "精确证据定位未通过核对，请重新分析后审核。",
+    };
+  }
   if (candidate.dimension === "unknown") {
     return {
       allowed: false,

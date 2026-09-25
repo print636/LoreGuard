@@ -76,6 +76,8 @@ FROZEN_FILES = frozenset(
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 GIT_HASH = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 SAFE_KEY = re.compile(r"[A-Za-z0-9_.:-]{1,100}\Z")
+SUPPORT_ID = re.compile(r"L[1-9][0-9]{0,7}:A[1-9][0-9]{0,2}\Z")
+SUPPORT_LOCATION_DIAGNOSTIC_V1 = "support-location-diagnostic-v1"
 SAFE_REASON_KEYS = frozenset({
     "source_formal", "source_history",
     "regenerated_from_evidence_mismatch", "evidence_mismatch",
@@ -869,7 +871,9 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         return None
     if (
         _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY in limits
-        and not _valid_character_scope_review_limits(limits)
+        and not _valid_character_scope_review_limits(
+            limits, allow_legacy_prompt_version=True,
+        )
     ):
         return None
     if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in limits and (
@@ -1253,8 +1257,154 @@ def _candidate_matches(row: dict[str, Any], selector: dict[str, Any]) -> bool:
     return row.get("comparison_key") == expected_key
 
 
+def _verified_target_span(
+    row: dict[str, Any],
+) -> tuple[str, tuple[str, int, int] | None]:
+    """Read only the API-verified target, never a statement or context span."""
+    if "support_bindings_status" not in row or "support_bindings_v1" not in row:
+        return "missing", None
+    status = row["support_bindings_status"]
+    payload = row["support_bindings_v1"]
+    if status == "legacy" and payload is None:
+        return "legacy", None
+    if status == "invalid":
+        return "invalid", None
+    if status != "verified":
+        return "invalid", None
+    if payload is None:
+        return "invalid", None
+    if (
+        type(payload) is not dict
+        or set(payload) != {"schema_version", "index_version", "bindings"}
+        or payload.get("schema_version") != "character-support-bindings-v1"
+        or payload.get("index_version") != "assertion-index-v1"
+        or type(payload.get("bindings")) is not list
+        or len(payload["bindings"]) != 1
+    ):
+        return "invalid", None
+    binding = payload["bindings"][0]
+    if type(binding) is not dict or set(binding) != {
+        "evidence_index", "support_id", "target", "actor_anchor_id",
+        "label_anchor_id", "scope_relation", "context",
+    }:
+        return "invalid", None
+    target = binding.get("target")
+    if (
+        type(binding.get("evidence_index")) is not int
+        or binding["evidence_index"] != 0
+        or type(binding.get("support_id")) is not str
+        or SUPPORT_ID.fullmatch(binding["support_id"]) is None
+        or type(target) is not dict
+        or set(target) != {"support_id", "start_offset", "end_offset", "role"}
+        or target.get("support_id") != binding["support_id"]
+        or target.get("role") != "target"
+        or type(target.get("start_offset")) is not int
+        or type(target.get("end_offset")) is not int
+        or target["start_offset"] < 0
+        or target["end_offset"] <= target["start_offset"]
+    ):
+        return "invalid", None
+    return "verified", (
+        binding["support_id"], target["start_offset"], target["end_offset"]
+    )
+
+
+def _support_location_diagnostic(
+    pending: list[dict[str, Any]], project_id: str, suite: VerifiedSuite,
+    *, source_run_id: str, document_ids: dict[str, str],
+    statement_matches: list[list[str]],
+) -> dict[str, Any]:
+    """Count source-bound target locations; this never selects a candidate."""
+    status_counts = {key: 0 for key in ("verified", "legacy", "invalid", "missing")}
+    targets: dict[str, tuple[str, int, int]] = {}
+    for row in pending:
+        status, target = _verified_target_span(row)
+        status_counts[status] += 1
+        if target is not None:
+            targets[row["id"]] = target
+
+    matches_by_selector: list[list[str]] = []
+    for selector in suite.plan["candidate_decisions"]:
+        name = selector["source_document"]
+        line = selector["source_line"]
+        expected_lines = _source_lines(suite.files[name])
+        expected_line = expected_lines[line - 1]
+        normalized_quote = _normalized_clause(selector["source_quote"])
+        expected_document_id = document_ids.get(name)
+        matched: list[str] = []
+        for row in pending:
+            target = targets.get(row["id"])
+            trait_key = row.get("trait_key")
+            if (
+                target is None
+                or row.get("reviewable") is not True
+                or row.get("project_id") != project_id
+                or row.get("source_run_id") != source_run_id
+                or row.get("character_key") != selector["character_key"]
+                or row.get("trait_type") != selector["trait_type"]
+                or row.get("polarity") != selector["polarity"]
+                or row.get("stability") != selector["stability"]
+                or row.get("origin") != "explicit_setting"
+                or name == "03-published-history-v1.0.md"
+                or not isinstance(trait_key, str)
+                or not trait_key.strip()
+                or row.get("comparison_key") != stable_trait_identity(
+                    selector["trait_type"], trait_key, selector["key_object"] or ""
+                )
+                or not isinstance(expected_document_id, str)
+                or not expected_document_id
+                or not normalized_quote
+            ):
+                continue
+            evidence = row.get("evidence")
+            if type(evidence) is not list or len(evidence) != 1 or type(evidence[0]) is not dict:
+                continue
+            ref = evidence[0]
+            support_id, start, end = target
+            if (
+                ref.get("document_id") != expected_document_id
+                or ref.get("document_name") != name
+                or type(ref.get("document_version")) is not int
+                or ref["document_version"] != 1
+                or ref.get("content_sha256") != suite.hashes[name]
+                or ref.get("line_start") != line
+                or ref.get("line_end") != line
+                or ref.get("text") != expected_line
+                or not isinstance(ref.get("input_id"), str)
+                or not ref["input_id"]
+                or not support_id.startswith(f"L{line}:A")
+                or end > len(expected_line)
+            ):
+                continue
+            if normalized_quote in _normalized_clause(expected_line[start:end]):
+                matched.append(row["id"])
+        matches_by_selector.append(matched)
+
+    frequency: dict[str, int] = {}
+    for matches in matches_by_selector:
+        for candidate_id in matches:
+            frequency[candidate_id] = frequency.get(candidate_id, 0) + 1
+    selector_counts = {
+        f"selector_{ordinal}": {
+            "match_count": len(matches),
+            "unique": len(matches) == 1 and frequency[matches[0]] == 1,
+        }
+        for ordinal, matches in enumerate(matches_by_selector, start=1)
+    }
+    return {
+        "schema_version": SUPPORT_LOCATION_DIAGNOSTIC_V1,
+        "binding_status_counts": status_counts,
+        "statement_zero_target_one_count": sum(
+            len(old_matches) == 0 and len(target_matches) == 1
+            for old_matches, target_matches in zip(statement_matches, matches_by_selector)
+        ),
+        "selectors": selector_counts,
+    }
+
+
 def _partial_baseline_inventory(
     client: httpx.Client, project_id: str, suite: VerifiedSuite,
+    *, source_run_id: str | None = None, document_ids: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Read-only, redacted inventory after a partial baseline fails admission."""
     pending = _list_pending(client, project_id)
@@ -1305,13 +1455,19 @@ def _partial_baseline_inventory(
         selector_counts[f"selector_{ordinal}"] = {
             "match_count": len(match_ids), "unique": unique,
         }
-    return {
+    inventory = {
         "available": True,
         "reviewable_total": len(reviewable),
         "matched_reviewable_total": len(matched_ids),
         "extra_reviewable_total": len(reviewable) - len(matched_ids),
         "selectors": selector_counts,
     }
+    if suite.name == "dev" and source_run_id is not None and document_ids is not None:
+        inventory["support_location_diagnostic_v1"] = _support_location_diagnostic(
+            pending, project_id, suite, source_run_id=source_run_id,
+            document_ids=document_ids, statement_matches=matches_by_selector,
+        )
+    return inventory
 
 
 def _review_candidates(
@@ -1409,8 +1565,10 @@ def _execute_trial(client: httpx.Client, suite: VerifiedSuite, trial: int, state
         raise SafeFailure("project_create_contract", "project_create")
     project_id = project["id"]
     state["project_id_sha256"] = _sha256(project_id)
-    for name, role in BASELINE_FILES:
-        _upload(client, project_id, suite, name, role, published=True)
+    baseline_document_ids = {
+        name: _upload(client, project_id, suite, name, role, published=True)
+        for name, role in BASELINE_FILES
+    }
     baseline_id = _start_run(client, project_id, mode="baseline_build")
     baseline_run = _wait_run(client, baseline_id, timeout_seconds=timeout_seconds)
     known_docs = {name for name, _ in BASELINE_FILES} | {DRAFT_FILE}
@@ -1421,7 +1579,8 @@ def _execute_trial(client: httpx.Client, suite: VerifiedSuite, trial: int, state
         if baseline.get("status") == "completed" and baseline.get("stage_outcome") == "partial":
             try:
                 state["partial_baseline_inventory"] = _partial_baseline_inventory(
-                    client, project_id, suite
+                    client, project_id, suite, source_run_id=baseline_id,
+                    document_ids=baseline_document_ids,
                 )
             except Exception as exc:
                 state["partial_baseline_inventory"] = {
@@ -1953,7 +2112,9 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
     limits = limits if isinstance(limits, dict) else {}
     scope_review_valid = (
         _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY in limits
-        and _valid_character_scope_review_limits(limits)
+        and _valid_character_scope_review_limits(
+            limits, allow_legacy_prompt_version=True,
+        )
         and (
             limits[_CHARACTER_SIGNAL_SCOPE_REVIEW_KEY] is False
             or (
@@ -2121,6 +2282,12 @@ def _service_preflight_gate(
         raise SafeFailure("service_build_revision_mismatch", "runtime_preflight")
     if build["service_artifact_sha256"] != local_hash:
         raise SafeFailure("service_artifact_mismatch", "runtime_preflight")
+    limits = provenance["character_consistency_limits"]
+    if (
+        _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY in limits
+        and not _valid_character_scope_review_limits(limits)
+    ):
+        raise SafeFailure("runtime_provenance_invalid", "runtime_preflight")
     if provenance["capabilities"]["character_consistency"] is not True:
         raise SafeFailure("character_consistency_disabled", "runtime_preflight")
     digest = _runtime_provenance_digest(provenance)
@@ -2569,6 +2736,12 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 "仅在基线部分完成且准入失败时，对待审核候选执行只读查询；"
                 "以匿名序号槽报告预注册锚点的脱敏匹配计数和额外可审核候选数，不确认候选、"
                 "不上传草稿，也不改变基线失败或试验通过状态"
+            ),
+            "support_location_diagnostic_v1": (
+                "仅在 DEV 基线部分完成时，独立统计后端已验证的 target 分句与冻结短句的"
+                "归一化逐字定位；要求本轮项目、来源运行、文档 ID/哈希和精确行一致。"
+                "不使用 statement、整行其他分句或承接桥段；仅输出匿名计数，不选候选、"
+                "不改变冻结 selector 或准入 gate，也不代表语义正确率"
             ),
             "unselected_reviewable_candidates": (
                 "基线运行产生、但不在预注册作者审核计划内的可审核候选数；字段缺失或无效"

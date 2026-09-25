@@ -2,16 +2,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.character_scope_review import ScopeReviewSourceIdentity
 from app.character_scope_review_provider import SCOPE_REVIEW_USER_PREFIX
 from app.character_consistency_stage import CharacterConsistencyStage, _FrozenDocument
-from app.character_trait_extraction import CharacterSignalChunk, CharacterSignalExtractor
+from app.character_trait_extraction import (
+    CharacterSignalChunk,
+    CharacterSignalExtractor,
+    build_pending_trait_candidates,
+)
 from app.config import Settings
+from app.db import AnalysisRunRow, CharacterTraitCandidateRow, SessionLocal
+from app.main import app
 from app.pipeline import DocumentInput
+from app.service import _load_verified_snapshot
 
 
 def _settings(**updates) -> Settings:
@@ -95,6 +107,19 @@ class ReviewingProvider:
                         clause["support_id"] for clause in row["clauses"]
                     }
                 )
+                clauses = {clause["support_id"]: clause for clause in line["clauses"]}
+                target = clauses[proposal["support_id"]]
+                anchor_ids = (
+                    proposal.get("actor_anchor_id"), proposal.get("label_anchor_id")
+                )
+                first_offset = min(
+                    [target["start_offset"]]
+                    + [clauses[anchor_id]["start_offset"] for anchor_id in anchor_ids if anchor_id]
+                )
+                exact_basis = [
+                    clause["support_id"] for clause in line["clauses"]
+                    if first_offset <= clause["start_offset"] <= target["start_offset"]
+                ]
                 item = {
                     "proposal_id": proposal["proposal_id"],
                     "support_id": proposal["support_id"],
@@ -106,7 +131,7 @@ class ReviewingProvider:
                     "polarity_relation": "same",
                     "statement_relation": "supported",
                     "level_supported": "yes",
-                    "basis_ids": [clause["support_id"] for clause in line["clauses"]],
+                    "basis_ids": exact_basis,
                 }
                 if ordinal < len(self.verdicts):
                     item.update(self.verdicts[ordinal])
@@ -377,3 +402,84 @@ def test_stage_passes_frozen_run_identity_and_keeps_rejected_local_out_of_candid
     assert result.diagnostics["usage"]["attempted_calls"] == 2
     assert provider.review_payload["request"]["run_input_id"] == "server-frozen-row-9"
     assert provider.review_payload["request"]["document_version"] == 7
+
+
+@pytest.mark.parametrize("strip_refs", (False, True))
+def test_stage_persists_same_line_reviewed_targets_as_separate_formal_candidates(
+    strip_refs: bool,
+):
+    line = "桑衍喜欢蜜瓜，桑衍也喜欢蜜瓜。"
+    first = _record(line, support_id="L2:A1", statement="桑衍喜欢蜜瓜")
+    second = _record(line, support_id="L2:A2", statement="桑衍也喜欢蜜瓜")
+    provider = ReviewingProvider([first, second])
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/projects", json={"name": f"分句审阅-{uuid4().hex}"}
+        )
+        assert created.status_code == 201, created.text
+        project_id = created.json()["id"]
+        document = client.post(
+            f"/api/v1/projects/{project_id}/documents/text",
+            json={
+                "name": "profile.md",
+                "content": "## 桑衍\n" + line + "\n",
+                "document_role": "character_profile",
+                "narrative_context": {
+                    "resolution_state": "confirmed",
+                    "publication_status": "published",
+                    "scope": {"timeline_key": "main"},
+                },
+            },
+        )
+        assert document.status_code == 201, document.text
+        with patch("app.main.dispatch_analysis"):
+            created_run = client.post(f"/api/v1/projects/{project_id}/analysis-runs")
+        assert created_run.status_code == 202, created_run.text
+        run_id = created_run.json()["id"]
+        with SessionLocal() as db:
+            run = db.get(AnalysisRunRow, run_id)
+            assert run is not None
+            run.status = "running"
+            db.commit()
+            documents, metadata = _load_verified_snapshot(db, run_id)
+            builder_override = (
+                patch(
+                    "app.character_consistency_stage.build_pending_trait_candidates",
+                    side_effect=lambda signals: tuple(
+                        row.model_copy(update={"support_refs": ()})
+                        for row in build_pending_trait_candidates(signals)
+                    ),
+                ) if strip_refs else nullcontext()
+            )
+            with builder_override:
+                result = CharacterConsistencyStage(
+                    settings=_settings(), provider=provider
+                ).run(
+                    db,
+                    run_id=run_id,
+                    project_id=project_id,
+                    documents=documents,
+                    metadata=metadata,
+                    remaining_run_tokens=30_000,
+                )
+            db.commit()
+            rows = list(db.scalars(select(CharacterTraitCandidateRow).where(
+                CharacterTraitCandidateRow.source_run_id == run_id
+            )).all())
+
+    assert result.diagnostics["counts"]["signal_count"] == 2
+    assert result.diagnostics["counts"]["pending_candidate_count"] == 2
+    if strip_refs:
+        assert result.diagnostics["outcome"] == "partial"
+        assert result.diagnostics["counts"]["persisted_created"] == 0
+        assert result.diagnostics["counts"]["persisted_failed"] == 2
+        assert result.diagnostics["reason_counts"]["candidate_persistence"] == 2
+        assert rows == []
+        return
+    assert result.diagnostics["counts"]["persisted_created"] == 2
+    assert len(rows) == 2
+    assert len({row.candidate_fingerprint for row in rows}) == 2
+    assert {row.support_bindings_v1["bindings"][0]["support_id"] for row in rows} == {
+        "L2:A1", "L2:A2",
+    }
+    assert all(row.support_binding_mode == "required_v1" for row in rows)

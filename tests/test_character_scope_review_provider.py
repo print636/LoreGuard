@@ -145,6 +145,10 @@ def test_cross_clause_same_axis_different_words_can_be_supported():
     assert "同一语义轴" in provider.calls[0][0]
     assert "statement_relation 为 supported/contradicted/ambiguous" in provider.calls[0][0]
     assert "不得借同一行其他分句的事实补足 statement" in provider.calls[0][0]
+    assert "对每个非空的 actor_anchor_id 和 label_anchor_id" in provider.calls[0][0]
+    assert "包括纯情境分句" in provider.calls[0][0]
+    assert "每个分句 ID 只列一次" in provider.calls[0][0]
+    assert "不得为了凑齐路径而把不支持或拿不准的候选改判 supported" in provider.calls[0][0]
     prompt_data = json.loads(provider.calls[0][1].removeprefix(SCOPE_REVIEW_USER_PREFIX))
     assert prompt_data["request_digest"] == request_digest(request)
     assert prompt_data["request"]["lines"][0]["text"] == request.lines[0].text

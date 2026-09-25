@@ -369,6 +369,8 @@
 .characterEvidenceMeta b { min-width: 0; overflow-wrap: anywhere; color: var(--cyan); font-size: 12px; }
 .characterEvidenceMeta span { color: var(--muted); font-size: 12px; }
 .characterEvidenceList blockquote { margin: 0; padding: 11px 13px; color: var(--text-2); border-left: 3px solid var(--lavender); background: var(--field); line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+.characterEvidenceTarget { color: var(--color-text); border-bottom: 2px solid var(--color-lavender); background: var(--color-surface-raised); }
+.characterEvidenceContext { text-decoration: underline dotted var(--color-cyan) 2px; text-underline-offset: 3px; }
 .characterEvidenceGroup.contrary blockquote { border-left-color: var(--warning); }
 .characterEvidenceLineStatus { margin: 0 0 8px; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .characterInlineEmpty { color: var(--muted); font-size: 12px; line-height: 1.6; }

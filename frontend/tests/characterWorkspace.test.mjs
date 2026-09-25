@@ -34,6 +34,7 @@ import {
   describeCoverage,
   describeReadiness,
 } from "../src/features/characters/presentation.ts";
+import { splitEvidenceBySupport } from "../src/features/characters/supportBindings.ts";
 import {
   characterRouteStateFromSearch,
   characterSearch,
@@ -58,10 +59,133 @@ function candidate(overrides = {}) {
     source_run_id: "run-1",
     source_snapshot_revision: "snapshot-1",
     model_coverage: "full",
+    support_bindings_status: "legacy",
+    support_bindings_v1: null,
     revision: 3,
     ...overrides,
   };
 }
+
+function verifiedSupportCandidate(overrides = {}) {
+  const line = "  🌙林澈按住剑。随后她退到门边。  ";
+  const contextText = "🌙林澈按住剑。";
+  const targetText = "随后她退到门边。";
+  const contextStart = 2;
+  const contextEnd = contextStart + Array.from(contextText).length;
+  const targetEnd = contextEnd + Array.from(targetText).length;
+  const evidence = {
+    input_id: "input-1", document_id: "doc-1", document_name: "角色.md",
+    document_version: 2, line_start: 1, line_end: 1, text: line,
+    source_verified: true, source_text_exact: true,
+  };
+  const binding = {
+    evidence_index: 0, support_id: "L1:A2",
+    target: { support_id: "L1:A2", start_offset: contextEnd, end_offset: targetEnd, role: "target" },
+    actor_anchor_id: "L1:A1", label_anchor_id: null,
+    scope_relation: "same_actor_continuation",
+    context: [{ support_id: "L1:A1", start_offset: contextStart, end_offset: contextEnd, role: "actor_anchor" }],
+  };
+  return {
+    id: "candidate-bound", character_key: "林澈", trait_type: "core_personality",
+    trait_key: "谨慎", value: "遇险时先保护同伴", origin: "explicit_setting",
+    source_run_id: "run-1", scope_sha256: "snapshot", revision: 1,
+    review_state: "pending", reviewable: true, model_coverage: "full",
+    source_verified: true, evidence: [evidence],
+    support_bindings_status: "verified",
+    support_bindings_v1: {
+      schema_version: "character-support-bindings-v1",
+      index_version: "assertion-index-v1",
+      bindings: [binding],
+    },
+    ...overrides,
+  };
+}
+
+test("verified support renders the exact indented Unicode line with distinct context and target", () => {
+  const raw = verifiedSupportCandidate();
+  const parsed = normalizeProfileCandidate(raw, { requireExactEvidence: true });
+  assert.equal(parsed.reviewable, true);
+  assert.equal(parsed.support_bindings_status, "verified");
+  assert.equal(parsed.supporting_evidence[0].text, raw.evidence[0].text);
+  assert.deepEqual(
+    splitEvidenceBySupport(parsed.supporting_evidence[0].text, parsed.support_bindings_v1.bindings),
+    [
+      { text: "  ", kind: "plain" },
+      { text: "🌙林澈按住剑。", kind: "context" },
+      { text: "随后她退到门边。", kind: "target" },
+      { text: "  ", kind: "plain" },
+    ],
+  );
+});
+
+test("Unicode combining characters use codepoint offsets rather than UTF-16 indices", () => {
+  const raw = verifiedSupportCandidate();
+  const line = "e\u0301🌙林澈按住剑。随后她退到门边。";
+  const contextEnd = Array.from("e\u0301🌙林澈按住剑。").length;
+  const binding = {
+    ...raw.support_bindings_v1.bindings[0],
+    context: [{ ...raw.support_bindings_v1.bindings[0].context[0], start_offset: 0, end_offset: contextEnd }],
+    target: {
+      ...raw.support_bindings_v1.bindings[0].target,
+      start_offset: contextEnd,
+      end_offset: Array.from(line).length,
+    },
+  };
+  const parsed = normalizeProfileCandidate({
+    ...raw,
+    evidence: [{ ...raw.evidence[0], text: line }],
+    support_bindings_v1: { ...raw.support_bindings_v1, bindings: [binding] },
+  }, { requireExactEvidence: true });
+  assert.deepEqual(splitEvidenceBySupport(line, parsed.support_bindings_v1.bindings), [
+    { text: "e\u0301🌙林澈按住剑。", kind: "context" },
+    { text: "随后她退到门边。", kind: "target" },
+  ]);
+});
+
+test("legacy candidates retain whole-line review while missing or damaged new bindings fail closed", () => {
+  const base = verifiedSupportCandidate();
+  const legacy = normalizeProfileCandidate({
+    ...base, support_bindings_status: "legacy", support_bindings_v1: null,
+  }, { requireExactEvidence: true });
+  assert.equal(legacy.reviewable, true);
+  assert.equal(legacy.support_bindings_v1, null);
+  for (const malformed of [
+    { support_bindings_status: undefined, support_bindings_v1: null },
+    { support_bindings_status: "verified", support_bindings_v1: null },
+    { support_bindings_status: "invalid", support_bindings_v1: null },
+    { support_bindings_status: "legacy", support_bindings_v1: base.support_bindings_v1 },
+    { support_bindings_v1: { ...base.support_bindings_v1, bindings: [{
+      ...base.support_bindings_v1.bindings[0], evidence_index: 9,
+    }] } },
+    { support_bindings_v1: { ...base.support_bindings_v1, bindings: [{
+      ...base.support_bindings_v1.bindings[0], target: {
+        ...base.support_bindings_v1.bindings[0].target, end_offset: 999,
+      },
+    }] } },
+    { support_bindings_v1: { ...base.support_bindings_v1, bindings: [{
+      ...base.support_bindings_v1.bindings[0], context: [{
+        ...base.support_bindings_v1.bindings[0].context[0], end_offset: 999,
+      }],
+    }] } },
+    { support_bindings_v1: { ...base.support_bindings_v1, bindings: [{
+      ...base.support_bindings_v1.bindings[0], context: [{
+        ...base.support_bindings_v1.bindings[0].context[0], role: "bridge",
+      }],
+    }] } },
+    { support_bindings_v1: { ...base.support_bindings_v1, bindings: [{
+      ...base.support_bindings_v1.bindings[0], actor_anchor_id: null,
+      scope_relation: "local",
+    }] } },
+    { evidence: [{ ...base.evidence[0], source_text_exact: false }] },
+    { evidence: [{ ...base.evidence[0], input_id: null }] },
+  ]) {
+    const parsed = normalizeProfileCandidate({ ...base, ...malformed }, { requireExactEvidence: true });
+    assert.equal(parsed.support_bindings_status, "invalid");
+    assert.equal(parsed.support_bindings_v1, null);
+    assert.equal(candidateReviewState(parsed).allowed, false);
+    assert.match(candidateReviewState(parsed).label, /精确证据定位/);
+  }
+});
 
 test("character route state round-trips linkable selection and filters", () => {
   const state = {
@@ -352,6 +476,8 @@ test("frozen character dimensions include current state and fail unknown values 
     scope_sha256: "snapshot-raw",
     source_run_id: "run-raw",
     source_verified: true,
+    support_bindings_status: "legacy",
+    support_bindings_v1: null,
     review_state: "pending",
     revision: 0,
     evidence: [

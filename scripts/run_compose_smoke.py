@@ -26,7 +26,7 @@ DECLARE
     vector_column_count integer;
 BEGIN
     SELECT version_num INTO current_revision FROM alembic_version;
-    IF current_revision <> '0015_character_trait_axes' THEN
+    IF current_revision <> '0016_character_support_bindings' THEN
         RAISE EXCEPTION 'unexpected Alembic revision';
     END IF;
     SELECT count(*) INTO vector_extension_count FROM pg_extension WHERE extname = 'vector';

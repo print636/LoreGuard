@@ -954,6 +954,8 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
                 expected_columns -= {
                     "authority_tier", "comparison_key",
                     "approved_axis_id", "approved_axis_version",
+                    "support_binding_mode", "support_bindings_v1",
+                    "support_bindings_sha256",
                 }
             if table_name == "character_trait_reviews":
                 expected_columns -= {"approved_axis_id", "approved_axis_version"}
@@ -977,7 +979,11 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
         } == {
             column.name
             for column in Base.metadata.tables["character_trait_candidates"].columns
-        } - {"comparison_key", "approved_axis_id", "approved_axis_version"}
+        } - {
+            "comparison_key", "approved_axis_id", "approved_axis_version",
+            "support_binding_mode", "support_bindings_v1",
+            "support_bindings_sha256",
+        }
         engine.dispose()
 
         command.downgrade(config, "0008_document_concurrency")

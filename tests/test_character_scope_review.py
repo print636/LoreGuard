@@ -9,11 +9,14 @@ from pydantic import ValidationError
 from app.character_scope_review import (
     MAX_SCOPE_REVIEW_RESPONSE_BYTES,
     SCOPE_REVIEW_SCHEMA_V1,
+    SCOPE_REVIEW_PROMPT_V2,
     ScopeReviewClause,
+    ScopeReviewItem,
     ScopeReviewLine,
     ScopeReviewProposal,
     ScopeReviewRequest,
     ScopeReviewSourceIdentity,
+    classify_basis_invalid,
     evaluate_scope_review,
     request_digest,
     verify_frozen_source,
@@ -139,6 +142,7 @@ def _evaluate(request: ScopeReviewRequest, identity: ScopeReviewSourceIdentity,
 
 def test_nonliteral_same_axis_and_situational_middle_clause_are_supported():
     request, identity, frozen_content = _request()
+    assert request.prompt_version == SCOPE_REVIEW_PROMPT_V2
     result = _evaluate(request, identity, frozen_content, _item(request))
     assert result.decisions[0].verdict == "supported"
     assert result.decisions[0].reason == "supported"
@@ -333,6 +337,88 @@ def test_basis_must_be_allowlisted_unique_and_cover_target_anchor_path(basis_ids
     )
     assert result.decisions[0].verdict == "uncertain"
     assert result.decisions[0].reason == "basis_invalid"
+
+
+@pytest.mark.parametrize("basis_ids,verdict,subtype", (
+    (["L2:A1", "L2:A2", "L2:A3"], "supported", None),
+    (["L2:A1", "L2:A1", "L2:A2", "L2:A3"], "supported", "duplicate"),
+    (["L2:A1", "L2:A2", "L2:A9"], "supported", "unknown_id"),
+    (["L2:A1", "L2:A2"], "supported", "missing_target"),
+    (["L2:A2", "L2:A3"], "supported", "missing_anchor"),
+    (["L2:A1", "L2:A3"], "supported", "missing_intermediate"),
+    ([], "rejected", None),
+    ([], "uncertain", None),
+    (["L2:A1", "L2:A1"], "rejected", "duplicate"),
+))
+def test_basis_invalid_subtype_is_fixed_and_agrees_with_acceptance_gate(
+    basis_ids: list[str], verdict: str, subtype: str | None,
+):
+    request, identity, frozen_content = _request()
+    row = _item(request, basis_ids=basis_ids, verdict=verdict)
+    item = ScopeReviewItem.model_validate_json(json.dumps(row))
+    assert classify_basis_invalid(request, request.proposals[0], item) == subtype
+    result = _evaluate(request, identity, frozen_content, row)
+    assert (result.decisions[0].reason == "basis_invalid") == (subtype is not None)
+
+
+def test_basis_invalid_subtype_distinguishes_cross_line_without_returning_ids():
+    request, _, _ = _request()
+    other_line = _line(("独立旁注",), line_number=3)
+    extended = ScopeReviewRequest(
+        run_input_id=request.run_input_id,
+        document_id=request.document_id,
+        document_version=request.document_version,
+        content_sha256=request.content_sha256,
+        block_line_start=request.block_line_start,
+        lines=(*request.lines, other_line),
+        proposals=request.proposals,
+    )
+    item = ScopeReviewItem.model_validate_json(json.dumps(_item(extended, basis_ids=[
+        "L2:A1", "L2:A2", "L2:A3", "L3:A1",
+    ])))
+    assert classify_basis_invalid(extended, extended.proposals[0], item) == "cross_line"
+
+
+def test_basis_invalid_subtype_covers_both_distinct_anchor_paths():
+    line = _line(("actor", "context", "label", "target"))
+    proposal = ScopeReviewProposal(**{
+        **_proposal().model_dump(),
+        "support_id": "L2:A4",
+        "actor_anchor_id": "L2:A1",
+        "label_anchor_id": "L2:A3",
+    })
+    request, identity, frozen_content = _request(line, (proposal,))
+    for ids, expected in (
+        (["L2:A1", "L2:A2", "L2:A3", "L2:A4"], None),
+        (["L2:A1", "L2:A3", "L2:A4"], "missing_intermediate"),
+        (["L2:A1", "L2:A2", "L2:A4"], "missing_anchor"),
+    ):
+        row = _item(request, basis_ids=ids)
+        item = ScopeReviewItem.model_validate_json(json.dumps(row))
+        assert classify_basis_invalid(request, proposal, item) == expected
+        result = _evaluate(request, identity, frozen_content, row)
+        assert (result.decisions[0].reason == "basis_invalid") == (expected is not None)
+
+
+def test_supported_basis_rejects_unrelated_same_line_clause_without_order_requirement():
+    line = _line(("actor", "situation", "target", "unrelated"))
+    request, identity, frozen_content = _request(line)
+    proposal = request.proposals[0]
+    valid = _item(request, basis_ids=["L2:A3", "L2:A1", "L2:A2"])
+    accepted = _evaluate(request, identity, frozen_content, valid)
+    assert accepted.decisions[0].verdict == "supported"
+    assert classify_basis_invalid(
+        request, proposal, ScopeReviewItem.model_validate_json(json.dumps(valid))
+    ) is None
+
+    extra = _item(request, basis_ids=["L2:A1", "L2:A2", "L2:A3", "L2:A4"])
+    assert classify_basis_invalid(
+        request, proposal, ScopeReviewItem.model_validate_json(json.dumps(extra))
+    ) == "extra_unrelated"
+    rejected = _evaluate(request, identity, frozen_content, extra)
+    assert rejected.decisions[0].verdict == "uncertain"
+    assert rejected.decisions[0].reason == "basis_invalid"
+    assert rejected.decisions[0].basis_ids == ()
 
 
 @pytest.mark.parametrize("wrong_slot", (

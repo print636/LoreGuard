@@ -13,7 +13,7 @@ export default defineConfig({
     ["html", { outputFolder: "../artifacts/playwright/report", open: "never" }],
   ],
   use: {
-    baseURL: "http://127.0.0.1:8080",
+    baseURL: process.env.LOREGUARD_E2E_BASE_URL || "http://127.0.0.1:8080",
     headless: true,
     screenshot: "only-on-failure",
     trace: "retain-on-failure",

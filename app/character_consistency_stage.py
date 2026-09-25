@@ -46,6 +46,7 @@ from .character_traits import (
     normalize_character_key,
     upsert_character_trait_candidate,
 )
+from .character_support_bindings import TraitSupportRef
 from .chunking import chunk_character_profile_document, chunk_document
 from .config import Settings, get_settings
 from .db import (
@@ -1064,6 +1065,7 @@ class CharacterConsistencyStage:
                 mapped = _trait_candidate_input(
                     candidate,
                     frozen_by_document=frozen_by_document,
+                    require_support_bindings=settings.character_signal_scope_review_v1,
                 )
                 if mapped is None:
                     persisted_scope_skipped += 1
@@ -2157,6 +2159,7 @@ def _trait_candidate_input(
     candidate: PendingTraitCandidate,
     *,
     frozen_by_document: dict[str, _FrozenDocument],
+    require_support_bindings: bool = False,
 ) -> TraitCandidateInput | None:
     sources: list[_FrozenDocument] = []
     evidence_rows: list[TraitEvidenceInput] = []
@@ -2185,6 +2188,31 @@ def _trait_candidate_input(
                 text=evidence.text,
             )
         )
+    support_refs: list[TraitSupportRef] = []
+    if candidate.origin == "explicit_setting":
+        for evidence_index, (evidence, source) in enumerate(
+            zip(candidate.evidence, sources)
+        ):
+            matched = [
+                ref for ref in candidate.support_refs
+                if ref.run_input_id == source.input_id
+                and ref.document_id == source.document.id
+                and ref.line_number == evidence.line_start == evidence.line_end
+            ]
+            for ref in matched:
+                support_refs.append(TraitSupportRef(
+                    evidence_index=evidence_index,
+                    support_id=ref.support_id,
+                    actor_anchor_id=ref.actor_anchor_id,
+                    label_anchor_id=ref.label_anchor_id,
+                    scope_relation=ref.scope_relation,
+                ))
+            if require_support_bindings and not matched:
+                raise ValueError("reviewed formal candidate lacks sub-line support")
+        if require_support_bindings and (
+            len(candidate.evidence) != 1 or len(support_refs) != 1
+        ):
+            raise ValueError("reviewed formal candidate must bind one target")
     scope = _merge_compatible_scopes(sources)
     if scope is None:
         return None
@@ -2215,6 +2243,7 @@ def _trait_candidate_input(
         valid_from_release_ordinal=max(release_ordinals) if release_ordinals else None,
         valid_until_release_ordinal=None,
         evidence=evidence_rows,
+        support_refs=support_refs,
         generator_version=CHARACTER_CONSISTENCY_CHECKER_VERSION,
         provenance={
             "schema_version": 1,

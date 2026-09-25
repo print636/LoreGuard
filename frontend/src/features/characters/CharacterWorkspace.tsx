@@ -78,6 +78,7 @@ function requestError(error: unknown): string {
     if (code === "character_trait_axis_not_found") return "所选作者轴不存在或不属于当前项目，请刷新轴列表。";
     if (code === "character_trait_axis_dimension_mismatch") return "所选作者轴不适用于这条核心性格候选，请重新选择。";
     if (code === "character_trait_candidate_stale") return "来源文档或叙事上下文已变化；请重新分析后审核。";
+    if (code === "character_trait_support_binding_invalid") return "精确证据定位无法与冻结原文核对；请重新分析后审核。";
     if (code === "character_trait_confirmation_conflict") return "同一作用域已有冲突的已确认特征；请核对角色档案与轴定义。";
     if (code === "character_trait_supersession_conflict") return "待替代的角色特征已变化；请刷新后重新核对。";
     if (error.status === 409) return "档案或作者轴已在其他页面更新；请刷新后重新核对。";

@@ -8,6 +8,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 
 from .character_trait_extraction import stable_trait_identity
+from .character_support_bindings import (
+    TraitSupportRef,
+    bind_support_refs,
+    support_bindings_sha256,
+    verify_stored_support_bindings,
+)
 from .db import (
     AnalysisRunInputRow,
     AnalysisRunRow,
@@ -91,6 +97,7 @@ class TraitCandidateInput(BaseModel):
     valid_from_release_ordinal: int | None = Field(default=None, ge=0)
     valid_until_release_ordinal: int | None = Field(default=None, ge=0)
     evidence: list[TraitEvidenceInput] = Field(min_length=1, max_length=12)
+    support_refs: list[TraitSupportRef] = Field(default_factory=list, max_length=48)
     generator_version: str = Field(min_length=1, max_length=80)
     provenance: dict[str, Any] = Field(default_factory=dict)
     supersedes_candidate_id: str | None = Field(default=None, max_length=36)
@@ -266,6 +273,123 @@ def _validate_evidence(
     return result
 
 
+def _semantic_evidence_digest(evidence: list[dict[str, Any]]) -> str:
+    return payload_sha256([
+        {
+            "document_id": item["document_id"],
+            "document_version": item["document_version"],
+            "content_sha256": item["content_sha256"],
+            "line_start": item["line_start"],
+            "line_end": item["line_end"],
+            "text": item["text"],
+        }
+        for item in evidence
+    ])
+
+
+def _formal_target_fingerprint(
+    base_payload: dict[str, Any],
+    *,
+    project_id: str,
+    evidence: list[dict[str, Any]],
+    support_bindings: dict,
+) -> str:
+    if (
+        support_bindings.get("index_version") != "assertion-index-v1"
+        or not isinstance(support_bindings.get("bindings"), list)
+        or len(support_bindings["bindings"]) != 1
+    ):
+        raise ValueError("formal target fingerprint requires one verified target")
+    target = support_bindings["bindings"][0]
+    source = evidence[target["evidence_index"]]
+    return payload_sha256({
+        **base_payload,
+        "fingerprint_version": "formal_target_v1",
+        "support_identity": {
+            "project_id": project_id,
+            "document_id": source["document_id"],
+            "document_version": source["document_version"],
+            "content_sha256": source["content_sha256"],
+            "line_number": source["line_start"],
+            "support_id": target["support_id"],
+            "actor_anchor_id": target["actor_anchor_id"],
+            "label_anchor_id": target["label_anchor_id"],
+            "scope_relation": target["scope_relation"],
+            "index_version": support_bindings["index_version"],
+        },
+    })
+
+
+def formal_target_fingerprint_matches(
+    row: CharacterTraitCandidateRow, support_bindings: dict
+) -> bool:
+    """Bind persisted target metadata to the candidate's stable semantic ID."""
+
+    if row.support_binding_mode != "required_v1":
+        return False
+    try:
+        if (
+            not isinstance(row.evidence, list)
+            or payload_sha256(row.evidence) != row.evidence_sha256
+            or payload_sha256(row.scope_payload) != row.scope_sha256
+            or normalize_character_key(row.character_key) != row.character_key
+        ):
+            return False
+        base_payload = {
+            "character_key": row.character_key,
+            "trait_type": row.trait_type,
+            "comparison_key": row.comparison_key or normalize_trait_key(row.trait_key),
+            "polarity": row.polarity,
+            "stability": row.stability,
+            "contexts": row.contexts,
+            "origin": row.origin,
+            "authority_tier": row.authority_tier,
+            "scope_sha256": row.scope_sha256,
+            "valid_from_release_ordinal": row.valid_from_release_ordinal,
+            "valid_until_release_ordinal": row.valid_until_release_ordinal,
+            "semantic_evidence_sha256": _semantic_evidence_digest(row.evidence),
+            "supersedes_candidate_id": row.supersedes_candidate_id,
+            "generator_version": row.generator_version,
+        }
+        return _formal_target_fingerprint(
+            base_payload,
+            project_id=row.project_id,
+            evidence=row.evidence,
+            support_bindings=support_bindings,
+        ) == row.candidate_fingerprint
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+
+
+def _verify_reused_formal_target(db, row: CharacterTraitCandidateRow) -> None:
+    """Never count a damaged prior formal target as a successful reuse."""
+
+    if row.support_binding_mode != "required_v1" or not isinstance(row.evidence, list):
+        raise ValueError("reused formal target lacks required support binding")
+    try:
+        input_ids = {item["input_id"] for item in row.evidence}
+        frozen_by_id = {
+            item.id: item for item in db.scalars(
+                select(AnalysisRunInputRow).where(
+                    AnalysisRunInputRow.run_id == row.source_run_id,
+                    AnalysisRunInputRow.id.in_(input_ids),
+                )
+            ).all()
+        }
+        if input_ids != set(frozen_by_id):
+            raise ValueError("reused formal target frozen source is missing")
+        binding = verify_stored_support_bindings(
+            row.support_bindings_v1,
+            row.support_bindings_sha256,
+            evidence=row.evidence,
+            frozen_by_id=frozen_by_id,
+        )
+        if binding is None or not formal_target_fingerprint_matches(row, binding):
+            raise ValueError("reused formal target binding identity is invalid")
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError("reused formal target binding is invalid") from exc
+
+
 def validate_character_trait_supersession(
     *,
     project_id: str,
@@ -402,20 +526,25 @@ def upsert_character_trait_candidate(
     if len(canonical_json(parsed.provenance).encode("utf-8")) > 32_000:
         raise ValueError("candidate provenance is too large")
     evidence = _validate_evidence(db, source_run_id, parsed.evidence)
+    support_bindings = None
+    if parsed.support_refs:
+        if parsed.origin != "explicit_setting":
+            raise ValueError("candidate support binding requires a formal setting")
+        if len(parsed.support_refs) != 1 or len(evidence) != 1:
+            raise ValueError("reviewed formal candidate must bind one target")
+        frozen_by_id = {
+            row.id: row for row in db.scalars(
+                select(AnalysisRunInputRow).where(
+                    AnalysisRunInputRow.run_id == source_run_id,
+                    AnalysisRunInputRow.id.in_({item["input_id"] for item in evidence}),
+                )
+            ).all()
+        }
+        support_bindings = bind_support_refs(
+            parsed.support_refs, evidence=evidence, frozen_by_id=frozen_by_id
+        )
     evidence_hash = payload_sha256(evidence)
-    semantic_evidence_hash = payload_sha256(
-        [
-            {
-                "document_id": item["document_id"],
-                "document_version": item["document_version"],
-                "content_sha256": item["content_sha256"],
-                "line_start": item["line_start"],
-                "line_end": item["line_end"],
-                "text": item["text"],
-            }
-            for item in evidence
-        ]
-    )
+    semantic_evidence_hash = _semantic_evidence_digest(evidence)
     scope = canonical_scope_payload(parsed.scope)
     scope_hash = payload_sha256(scope)
     fingerprint_payload = {
@@ -441,7 +570,14 @@ def upsert_character_trait_candidate(
         and parsed.trait_type != "preference"
     )
     legacy_fingerprint = payload_sha256(fingerprint_payload)
-    if keyed_preference:
+    if support_bindings is not None:
+        fingerprint = _formal_target_fingerprint(
+            fingerprint_payload,
+            project_id=project_id,
+            evidence=evidence,
+            support_bindings=support_bindings,
+        )
+    elif keyed_preference:
         # Pre-0014 hashes could contain the parsed object key even though the
         # migrated row has no stored key. A versioned hash makes a new,
         # reviewable keyed candidate without changing that historical row.
@@ -452,7 +588,8 @@ def upsert_character_trait_candidate(
         fingerprint_payload["relation_axis"] = stable_trait_identity(
             parsed.trait_type, trait_key
         )
-    fingerprint = payload_sha256(fingerprint_payload)
+    if support_bindings is None:
+        fingerprint = payload_sha256(fingerprint_payload)
     possible_existing = db.scalars(
         select(CharacterTraitCandidateRow)
         .join(
@@ -463,7 +600,7 @@ def upsert_character_trait_candidate(
             CharacterTraitCandidateRow.project_id == project_id,
             CharacterTraitCandidateRow.candidate_fingerprint.in_(
                 (fingerprint, legacy_fingerprint)
-                if keyed_preference or keyed_relation
+                if support_bindings is None and (keyed_preference or keyed_relation)
                 else (fingerprint,)
             ),
             (
@@ -475,9 +612,12 @@ def upsert_character_trait_candidate(
     ).all()
     for existing in possible_existing:
         if existing.candidate_fingerprint == fingerprint:
+            if support_bindings is not None:
+                _verify_reused_formal_target(db, existing)
             return existing, False
         if (
-            keyed_preference
+            support_bindings is None
+            and keyed_preference
             and existing.candidate_fingerprint == legacy_fingerprint
             and _stored_comparison_key(
                 existing.comparison_key, trait_type=parsed.trait_type
@@ -485,7 +625,8 @@ def upsert_character_trait_candidate(
         ):
             return existing, False
         if (
-            keyed_relation
+            support_bindings is None
+            and keyed_relation
             and existing.candidate_fingerprint == legacy_fingerprint
             and stable_trait_identity(parsed.trait_type, existing.trait_key)
             == stable_trait_identity(parsed.trait_type, trait_key)
@@ -550,6 +691,12 @@ def upsert_character_trait_candidate(
         valid_until_release_ordinal=parsed.valid_until_release_ordinal,
         evidence=evidence,
         evidence_sha256=evidence_hash,
+        support_binding_mode=("required_v1" if support_bindings is not None else "legacy_v1"),
+        support_bindings_v1=support_bindings,
+        support_bindings_sha256=(
+            support_bindings_sha256(support_bindings)
+            if support_bindings is not None else None
+        ),
         candidate_fingerprint=fingerprint,
         generator_version=parsed.generator_version,
         provenance=parsed.provenance,

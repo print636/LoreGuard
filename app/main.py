@@ -69,11 +69,13 @@ from .character_traits import (
     MAX_CANDIDATES_PER_SOURCE_RUN,
     _OBJECT_BEARING_TRAIT_DIMENSIONS,
     _validated_comparison_key,
+    formal_target_fingerprint_matches,
     normalize_character_key,
     upsert_character_trait_candidate,
     validate_character_trait_supersession,
 )
 from .character_trait_extraction import stable_trait_identity, trait_keys_compatible
+from .character_support_bindings import verify_stored_support_bindings
 from .character_consistency_stage import _safe_context_label as _safe_axis_author_text
 from .document_diff import build_document_diff
 from .docx_import import DocxImportError, extract_docx_text
@@ -1252,9 +1254,22 @@ def serialize_character_trait_candidate_for_review(
     payload = serialize_character_trait_candidate(row)
     current, reason, frozen_by_id = _candidate_source_is_current(db, row)
     payload["source_verified"] = frozen_by_id is not None
+    support_status, support_payload = _verified_candidate_support_payload(
+        row, frozen_by_id
+    )
+    payload["support_bindings_status"] = support_status
+    payload["support_bindings_v1"] = support_payload
     if include_evidence_context:
         payload["evidence"] = _candidate_evidence_for_review(db, row, frozen_by_id)
-    if row.review_state == "pending" and not current:
+    if row.review_state == "pending" and support_status == "invalid":
+        payload.update(
+            {
+                "status": "stale",
+                "reviewable": False,
+                "unreviewable_reason": "候选精确证据定位无法与冻结原文核对，请重新分析",
+            }
+        )
+    elif row.review_state == "pending" and not current:
         payload.update(
             {
                 "status": "stale",
@@ -1271,6 +1286,36 @@ def serialize_character_trait_candidate_for_review(
             }
         )
     return payload
+
+
+def _verified_candidate_support_payload(
+    row: CharacterTraitCandidateRow,
+    frozen_by_id: dict[str, AnalysisRunInputRow] | None,
+) -> tuple[Literal["legacy", "verified", "invalid"], dict | None]:
+    if (
+        row.support_binding_mode == "legacy_v1"
+        and row.support_bindings_v1 is None
+        and row.support_bindings_sha256 is None
+    ):
+        return "legacy", None
+    if row.support_binding_mode != "required_v1":
+        return "invalid", None
+    if frozen_by_id is None:
+        return "invalid", None
+    try:
+        payload = verify_stored_support_bindings(
+            row.support_bindings_v1,
+            row.support_bindings_sha256,
+            evidence=row.evidence,
+            frozen_by_id=frozen_by_id,
+        )
+        if payload is None:
+            return "invalid", None
+        if not formal_target_fingerprint_matches(row, payload):
+            return "invalid", None
+    except (ValueError, TypeError, AttributeError):
+        return "invalid", None
+    return "verified", payload
 
 
 def resolve_document_context(
@@ -3434,13 +3479,24 @@ def link_legacy_preference_candidate(
                     "message": "只能为待审核的有对象偏好候选选择旧特征",
                 },
             )
-        source_is_current, stale_reason, _ = _candidate_source_is_current(db, row)
+        source_is_current, stale_reason, frozen_by_id = _candidate_source_is_current(db, row)
         if not source_is_current:
             raise HTTPException(
                 409,
                 detail={
                     "code": "character_trait_candidate_stale",
                     "message": stale_reason,
+                },
+            )
+        support_status, support_payload = _verified_candidate_support_payload(
+            row, frozen_by_id
+        )
+        if support_status == "invalid":
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_support_binding_invalid",
+                    "message": "候选精确证据定位无法与冻结原文核对，请重新分析",
                 },
             )
         superseded = db.scalar(
@@ -3481,6 +3537,19 @@ def link_legacy_preference_candidate(
                     "valid_from_release_ordinal": row.valid_from_release_ordinal,
                     "valid_until_release_ordinal": row.valid_until_release_ordinal,
                     "evidence": row.evidence,
+                    **({
+                        "support_refs": [
+                            {
+                                name: binding[name]
+                                for name in (
+                                    "evidence_index", "support_id",
+                                    "actor_anchor_id", "label_anchor_id",
+                                    "scope_relation",
+                                )
+                            }
+                            for binding in support_payload["bindings"]
+                        ]
+                    } if support_payload is not None else {}),
                     "generator_version": row.generator_version,
                     "provenance": row.provenance,
                     "supersedes_candidate_id": payload.supersedes_candidate_id,
@@ -3564,6 +3633,18 @@ def decide_character_profile_candidate(
         )
         if row is None:
             raise HTTPException(404, "角色候选不存在")
+        initial_support_status, _ = _verified_candidate_support_payload(row, None)
+        if initial_support_status != "legacy":
+            frozen_by_id, _ = _verified_candidate_frozen_inputs(db, row)
+            support_status, _ = _verified_candidate_support_payload(row, frozen_by_id)
+            if support_status != "verified":
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_support_binding_invalid",
+                        "message": "候选精确证据定位无法与冻结原文核对，请重新分析",
+                    },
+                )
         existing_review = (
             db.scalar(
                 select(CharacterTraitReviewRow).where(
@@ -3596,13 +3677,22 @@ def decide_character_profile_candidate(
                 "decision_id": existing_review.id,
                 "deduplicated": True,
             }
-        source_is_current, stale_reason, _ = _candidate_source_is_current(db, row)
+        source_is_current, stale_reason, frozen_by_id = _candidate_source_is_current(db, row)
         if not source_is_current:
             raise HTTPException(
                 409,
                 detail={
                     "code": "character_trait_candidate_stale",
                     "message": stale_reason,
+                },
+            )
+        support_status, _ = _verified_candidate_support_payload(row, frozen_by_id)
+        if support_status == "invalid":
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_support_binding_invalid",
+                    "message": "候选精确证据定位无法与冻结原文核对，请重新分析",
                 },
             )
         if row.review_state != "pending" or row.lock_version != payload.expected_revision:

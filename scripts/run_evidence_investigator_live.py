@@ -379,7 +379,8 @@ _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS = frozenset({
     "signal_scope_review_provider_max_attempts",
 })
 _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION = "character-scope-review-v1"
-_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v1"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v2"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSION = "character-scope-review-prompt-v1"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY = "signal_support_trace_v1"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY = "signal_support_trace_version"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION = "support-trace-v1"
@@ -2797,18 +2798,25 @@ def _build_summary(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _valid_character_scope_review_limits(limits: dict[str, Any]) -> bool:
-    """Validate the complete content-free Phase B configuration ceiling."""
+def _valid_character_scope_review_limits(
+    limits: dict[str, Any], *, allow_legacy_prompt_version: bool = False,
+) -> bool:
+    """Validate Phase B limits; legacy V1 is for reading old reports only."""
 
     enabled = limits.get(_CHARACTER_SIGNAL_SCOPE_REVIEW_KEY)
+    prompt_version = limits.get("signal_scope_review_prompt_version")
+    allowed_prompt_versions = {_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION}
+    if allow_legacy_prompt_version:
+        allowed_prompt_versions.add(_CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSION)
     if (
         type(enabled) is not bool
         or (enabled and limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY) is not True)
         or limits.get("signal_scope_review_schema_version") != (
             _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION if enabled else None
         )
-        or limits.get("signal_scope_review_prompt_version") != (
-            _CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION if enabled else None
+        or (
+            (type(prompt_version) is not str or prompt_version not in allowed_prompt_versions)
+            if enabled else prompt_version is not None
         )
     ):
         return False
@@ -3056,7 +3064,9 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         safe_character_limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY] = variant
         safe_character_limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY] = scope_version
     if _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY in character_limits:
-        if not _valid_character_scope_review_limits(character_limits):
+        if not _valid_character_scope_review_limits(
+            character_limits, allow_legacy_prompt_version=True,
+        ):
             return None
         safe_character_limits.update({
             key: character_limits[key] for key in _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS
@@ -4463,6 +4473,12 @@ def run_live_evaluation(
             "service_artifact_sha256"
         )
         != runner_service_artifact_sha256
+        or (
+            _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY in health["runtime_provenance"]["character_consistency_limits"]
+            and not _valid_character_scope_review_limits(
+                health["runtime_provenance"]["character_consistency_limits"]
+            )
+        )
     ):
         raise LiveEvaluationError("service_not_ready")
 

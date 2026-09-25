@@ -749,7 +749,15 @@ def test_execute_trial_uploads_only_story_documents_and_explicit_draft_target(
     [
         ("valid", {"available": True, "reviewable_total": 2,
                    "matched_reviewable_total": 1, "extra_reviewable_total": 1,
-                   "selectors": {"selector_1": {"match_count": 1, "unique": True}}}),
+                   "selectors": {"selector_1": {"match_count": 1, "unique": True}},
+                   "support_location_diagnostic_v1": {
+                       "schema_version": "support-location-diagnostic-v1",
+                       "binding_status_counts": {
+                           "verified": 0, "legacy": 0, "invalid": 0, "missing": 2,
+                       },
+                       "statement_zero_target_one_count": 0,
+                       "selectors": {"selector_1": {"match_count": 0, "unique": False}},
+                   }}),
         ("malformed", {"available": False,
                        "reason_code": "candidate_inventory_contract"}),
         ("non_dict", {"available": False,
@@ -894,6 +902,211 @@ def test_partial_inventory_global_uniqueness_rejects_shared_multimatch(
     }
     assert inventory["matched_reviewable_total"] == 2
     assert inventory["extra_reviewable_total"] == 0
+
+
+def _location_candidate(suite, *, value="paraphrased statement"):
+    name = "02-character-profiles.md"
+    line = suite.files[name].decode("utf-8").splitlines()[0]
+    return {
+        "id": "candidate-1", "project_id": "project-id",
+        "source_run_id": "baseline-run", "reviewable": True,
+        "character_key": "Actor", "trait_type": "core_personality",
+        "trait_key": "decision_axis",
+        "comparison_key": axis_live.stable_trait_identity(
+            "core_personality", "decision_axis"
+        ),
+        "value": value, "polarity": "positive", "stability": "core",
+        "origin": "explicit_setting",
+        "evidence": [{
+            "input_id": "frozen-input", "document_id": "profile-document",
+            "document_name": name, "document_version": 1,
+            "content_sha256": suite.hashes[name],
+            "line_start": 1, "line_end": 1, "text": line,
+        }],
+        "support_bindings_status": "verified",
+        "support_bindings_v1": {
+            "schema_version": "character-support-bindings-v1",
+            "index_version": "assertion-index-v1",
+            "bindings": [{
+                "evidence_index": 0, "support_id": "L1:A1",
+                "target": {
+                    "support_id": "L1:A1", "start_offset": 0,
+                    "end_offset": len(line), "role": "target",
+                },
+                "actor_anchor_id": None, "label_anchor_id": None,
+                "scope_relation": "local", "context": [],
+            }],
+        },
+    }
+
+
+def test_partial_inventory_reports_verified_target_location_without_changing_gate(
+    tmp_path, monkeypatch,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    candidate = _location_candidate(suite)
+    candidate["api_key"] = "synthetic-secret-token"
+    candidate["base_url"] = "https://synthetic.invalid/private"
+    calls = []
+
+    def fake_request(_client, method, _path, route, **_kwargs):
+        calls.append((method, route))
+        if route == "characters":
+            return {"items": [{"character_key": "Actor"}], "has_more": False}
+        assert route == "candidate_list"
+        return {"items": [candidate], "has_more": False}
+
+    monkeypatch.setattr(axis_live, "_request", fake_request)
+    inventory = axis_live._partial_baseline_inventory(
+        object(), "project-id", suite, source_run_id="baseline-run",
+        document_ids={"02-character-profiles.md": "profile-document"},
+    )
+    assert calls == [("GET", "characters"), ("GET", "candidate_list")]
+    assert inventory["selectors"] == {"selector_1": {"match_count": 0, "unique": False}}
+    diagnostic = inventory["support_location_diagnostic_v1"]
+    assert diagnostic == {
+        "schema_version": "support-location-diagnostic-v1",
+        "binding_status_counts": {
+            "verified": 1, "legacy": 0, "invalid": 0, "missing": 0,
+        },
+        "statement_zero_target_one_count": 1,
+        "selectors": {"selector_1": {"match_count": 1, "unique": True}},
+    }
+    rendered = json.dumps(inventory)
+    assert all(secret not in rendered for secret in (
+        "source anchor", "paraphrased statement", "candidate-1", "project-id",
+        "synthetic-secret-token", "https://synthetic.invalid/private",
+    ))
+
+
+def test_target_location_offsets_use_unicode_codepoints(tmp_path, monkeypatch):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    name = "02-character-profiles.md"
+    line = "😀source anchor"
+    suite.files[name] = (line + "\n").encode("utf-8")
+    suite.hashes[name] = _hash(suite.files[name])
+    candidate = _location_candidate(suite)
+    target = candidate["support_bindings_v1"]["bindings"][0]["target"]
+    target["start_offset"] = 1
+    target["end_offset"] = len(line)
+    monkeypatch.setattr(axis_live, "_list_pending", lambda *_: [candidate])
+    inventory = axis_live._partial_baseline_inventory(
+        object(), "project-id", suite, source_run_id="baseline-run",
+        document_ids={name: "profile-document"},
+    )
+    diagnostic = inventory["support_location_diagnostic_v1"]
+    assert diagnostic["selectors"]["selector_1"] == {
+        "match_count": 1, "unique": True,
+    }
+    assert "😀" not in json.dumps(inventory, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("change", (
+    "wrong_project", "wrong_run", "wrong_document", "wrong_version", "wrong_hash",
+    "wrong_line", "wrong_text", "wrong_target", "context_only",
+))
+def test_target_location_requires_exact_frozen_source_and_target_only(
+    tmp_path, monkeypatch, change,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    candidate = _location_candidate(suite, value="source anchor")
+    evidence = candidate["evidence"][0]
+    target = candidate["support_bindings_v1"]["bindings"][0]["target"]
+    if change == "wrong_project":
+        candidate["project_id"] = "other-project"
+    elif change == "wrong_run":
+        candidate["source_run_id"] = "other-run"
+    elif change == "wrong_document":
+        evidence["document_id"] = "other-document"
+    elif change == "wrong_version":
+        evidence["document_version"] = 2
+    elif change == "wrong_hash":
+        evidence["content_sha256"] = "0" * 64
+    elif change == "wrong_line":
+        evidence["line_start"] = evidence["line_end"] = 2
+    elif change == "wrong_text":
+        evidence["text"] = "different source anchor"
+    elif change == "wrong_target":
+        target["end_offset"] = len(evidence["text"]) + 1
+    else:
+        line = "source anchor. unrelated target."
+        suite.files["02-character-profiles.md"] = (line + "\n").encode()
+        suite.hashes["02-character-profiles.md"] = _hash(suite.files["02-character-profiles.md"])
+        evidence["content_sha256"] = suite.hashes["02-character-profiles.md"]
+        evidence["text"] = line
+        binding = candidate["support_bindings_v1"]["bindings"][0]
+        binding["support_id"] = target["support_id"] = "L1:A2"
+        target["start_offset"] = line.index("unrelated")
+        target["end_offset"] = len(line) - 1
+        binding["context"] = [{
+            "support_id": "L1:A1", "start_offset": 0,
+            "end_offset": len("source anchor"), "role": "actor_anchor",
+        }]
+    monkeypatch.setattr(axis_live, "_list_pending", lambda *_: [candidate])
+    inventory = axis_live._partial_baseline_inventory(
+        object(), "project-id", suite, source_run_id="baseline-run",
+        document_ids={"02-character-profiles.md": "profile-document"},
+    )
+    diagnostic = inventory["support_location_diagnostic_v1"]
+    assert diagnostic["selectors"] == {"selector_1": {"match_count": 0, "unique": False}}
+    assert diagnostic["statement_zero_target_one_count"] == 0
+
+
+def test_target_location_counts_fixed_binding_states_and_global_uniqueness(
+    tmp_path, monkeypatch,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    selector = suite.plan["candidate_decisions"][0]
+    suite.plan["candidate_decisions"].append({**selector, "candidate_key": "second"})
+    verified = _location_candidate(suite)
+    legacy = {**verified, "id": "legacy", "support_bindings_status": "legacy",
+              "support_bindings_v1": None}
+    invalid = {**verified, "id": "invalid", "reviewable": False,
+               "support_bindings_status": "invalid", "support_bindings_v1": None}
+    missing = {key: value for key, value in verified.items()
+               if key not in {"support_bindings_status", "support_bindings_v1"}}
+    missing["id"] = "missing"
+    monkeypatch.setattr(axis_live, "_list_pending", lambda *_: [
+        verified, legacy, invalid, missing,
+    ])
+    inventory = axis_live._partial_baseline_inventory(
+        object(), "project-id", suite, source_run_id="baseline-run",
+        document_ids={"02-character-profiles.md": "profile-document"},
+    )
+    diagnostic = inventory["support_location_diagnostic_v1"]
+    assert diagnostic["binding_status_counts"] == {
+        "verified": 1, "legacy": 1, "invalid": 1, "missing": 1,
+    }
+    assert diagnostic["selectors"] == {
+        "selector_1": {"match_count": 1, "unique": False},
+        "selector_2": {"match_count": 1, "unique": False},
+    }
+    assert diagnostic["statement_zero_target_one_count"] == 2
+
+
+def test_target_location_rejects_claimed_verified_binding_without_payload(
+    tmp_path, monkeypatch,
+):
+    root, digest = _fixture(tmp_path)
+    suite = axis_live.verify_fixture(root, expected_manifest_sha256=digest).suites["dev"]
+    candidate = _location_candidate(suite)
+    candidate["support_bindings_v1"] = None
+    monkeypatch.setattr(axis_live, "_list_pending", lambda *_: [candidate])
+    inventory = axis_live._partial_baseline_inventory(
+        object(), "project-id", suite, source_run_id="baseline-run",
+        document_ids={"02-character-profiles.md": "profile-document"},
+    )
+    diagnostic = inventory["support_location_diagnostic_v1"]
+    assert diagnostic["binding_status_counts"] == {
+        "verified": 0, "legacy": 0, "invalid": 1, "missing": 0,
+    }
+    assert diagnostic["selectors"]["selector_1"] == {
+        "match_count": 0, "unique": False,
+    }
 
 
 def test_nonpartial_baseline_rejection_does_not_fetch_candidate_inventory(
