@@ -80,10 +80,30 @@ class ComposeSmokeTests(unittest.TestCase):
         self.assertEqual(command[:4], ["docker", "compose", "exec", "-T"])
         self.assertIn("BEGIN;", PGVECTOR_SMOKE_SQL)
         self.assertIn("ROLLBACK;", PGVECTOR_SMOKE_SQL)
-        self.assertIn("0017_character_trait_withdraw", PGVECTOR_SMOKE_SQL)
+        self.assertIn("0018_character_axis_direction", PGVECTOR_SMOKE_SQL)
         self.assertIn("ck_character_trait_candidate_review_state", PGVECTOR_SMOKE_SQL)
         self.assertIn("ck_character_trait_review_decision", PGVECTOR_SMOKE_SQL)
         self.assertIn("character_trait_axis_immutable", PGVECTOR_SMOKE_SQL)
+        self.assertIn("axis_direction_column_count <> 10", PGVECTOR_SMOKE_SQL)
+        self.assertIn("axis_direction_check_count <> 4", PGVECTOR_SMOKE_SQL)
+        for column in (
+            "positive_proposition",
+            "positive_proposition_sha256",
+            "positive_proposition_authored_by_user_id",
+            "positive_proposition_authored_at",
+            "axis_alignment",
+            "axis_polarity",
+            "axis_positive_proposition_sha256",
+        ):
+            self.assertIn(column, PGVECTOR_SMOKE_SQL)
+        for constraint in (
+            "ck_character_trait_axis_proposition_pair",
+            "ck_character_trait_candidate_alignment_pair",
+            "ck_character_trait_candidate_alignment_direction",
+            "ck_character_trait_review_alignment_pair",
+        ):
+            self.assertIn(constraint, PGVECTOR_SMOKE_SQL)
+        self.assertIn("character_trait_axis_proposition_immutable", PGVECTOR_SMOKE_SQL)
         self.assertIn("INSERT INTO workspaces", PGVECTOR_SMOKE_SQL)
         self.assertIn("workspace_id, name", PGVECTOR_SMOKE_SQL)
         self.assertIn("<=>", PGVECTOR_SMOKE_SQL)

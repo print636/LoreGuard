@@ -26,10 +26,43 @@ DECLARE
     vector_column_count integer;
     candidate_withdraw_check_count integer;
     review_withdraw_check_count integer;
+    axis_direction_column_count integer;
+    axis_direction_check_count integer;
 BEGIN
     SELECT version_num INTO current_revision FROM alembic_version;
-    IF current_revision <> '0017_character_trait_withdraw' THEN
+    IF current_revision <> '0018_character_axis_direction' THEN
         RAISE EXCEPTION 'unexpected Alembic revision';
+    END IF;
+    SELECT count(*) INTO axis_direction_column_count
+      FROM information_schema.columns
+     WHERE table_schema = current_schema()
+       AND (
+           (table_name = 'character_trait_axes' AND column_name IN (
+               'positive_proposition', 'positive_proposition_sha256',
+               'positive_proposition_authored_by_user_id',
+               'positive_proposition_authored_at'))
+           OR (table_name IN ('character_trait_candidates', 'character_trait_reviews')
+               AND column_name IN (
+                   'axis_alignment', 'axis_polarity',
+                   'axis_positive_proposition_sha256'))
+       );
+    IF axis_direction_column_count <> 10 THEN
+        RAISE EXCEPTION 'character axis direction columns are unavailable';
+    END IF;
+    SELECT count(*) INTO axis_direction_check_count
+      FROM pg_constraint constraint_row
+      JOIN pg_class table_row ON table_row.oid = constraint_row.conrelid
+      JOIN pg_namespace schema_row ON schema_row.oid = table_row.relnamespace
+     WHERE schema_row.nspname = current_schema()
+       AND constraint_row.contype = 'c'
+       AND (table_row.relname, constraint_row.conname) IN (
+           ('character_trait_axes', 'ck_character_trait_axis_proposition_pair'),
+           ('character_trait_candidates', 'ck_character_trait_candidate_alignment_pair'),
+           ('character_trait_candidates', 'ck_character_trait_candidate_alignment_direction'),
+           ('character_trait_reviews', 'ck_character_trait_review_alignment_pair')
+       );
+    IF axis_direction_check_count <> 4 THEN
+        RAISE EXCEPTION 'character axis direction constraints are unavailable';
     END IF;
     SELECT count(*) INTO candidate_withdraw_check_count
       FROM pg_constraint constraint_row
@@ -72,11 +105,12 @@ VALUES
     ('ci-rag-other', 'ci-rag-workspace', 'CI RAG other', '', now());
 INSERT INTO character_trait_axes
     (id, project_id, trait_type, version, display_name, definition,
-     definition_sha256, created_at)
+     definition_sha256, positive_proposition, positive_proposition_sha256,
+     positive_proposition_authored_at, created_at)
 VALUES
     ('ci-personality-axis', 'ci-rag-project', 'core_personality', 1,
      'Risk disclosure', 'Communicates known risks before a joint decision',
-     repeat('a', 64), now());
+     repeat('a', 64), 'Discloses known risks', repeat('b', 64), now(), now());
 DO $$
 BEGIN
     BEGIN
@@ -85,6 +119,15 @@ BEGIN
         RAISE EXCEPTION 'character axis unexpectedly allowed an in-place edit';
     EXCEPTION WHEN check_violation THEN
         IF SQLERRM <> 'character_trait_axis_immutable' THEN
+            RAISE;
+        END IF;
+    END;
+    BEGIN
+        UPDATE character_trait_axes SET positive_proposition = 'Changed proposition'
+         WHERE id = 'ci-personality-axis';
+        RAISE EXCEPTION 'character axis unexpectedly allowed a proposition edit';
+    EXCEPTION WHEN check_violation THEN
+        IF SQLERRM <> 'character_trait_axis_proposition_immutable' THEN
             RAISE;
         END IF;
     END;
