@@ -11,6 +11,7 @@ from app.model_extractor import (
     ModelEnhancedExtractor,
     RECORD_ADAPTER,
     _schema_rejection_reason,
+    _schema_wrong_type_detail,
 )
 from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
 from app.provider import (
@@ -187,11 +188,21 @@ class ModelExtractorTests(unittest.TestCase):
     def test_record_rejection_diagnostics_reject_unlisted_values(self):
         diagnostics = ModelExecutionDiagnostics()
         diagnostics.note_record_rejection("lexical_support")
+        diagnostics.note_schema_wrong_type_detail("event.core_list")
         with self.assertRaises(ValueError):
             diagnostics.note_record_rejection("attacker controlled text")
+        with self.assertRaises(ValueError):
+            diagnostics.note_schema_wrong_type_detail("event.participants=secret")
+        with self.assertRaises(ValueError):
+            diagnostics.note_schema_wrong_type_detail("event.core_text")
         diagnostics.record_rejections["unexpected_raw_response"] = 1
+        diagnostics.schema_wrong_type_details["fact.subject=secret"] = 1
         self.assertEqual(
             {"lexical_support": 1}, diagnostics.safe_dict()["record_rejections"]
+        )
+        self.assertEqual(
+            {"event.core_list": 1},
+            diagnostics.safe_dict()["schema_wrong_type_details"],
         )
 
     def test_record_schema_reasons_are_fixed_categories_without_input_values(self):
@@ -215,6 +226,60 @@ class ModelExtractorTests(unittest.TestCase):
                 reason = _schema_rejection_reason(error.exception)
                 self.assertEqual(expected, reason)
                 self.assertNotIn("private_notes", reason)
+
+    def test_schema_wrong_type_details_are_fixed_kind_and_type_families(self):
+        base = {
+            "kind": "fact", "subject": "林澈", "predicate": "身份",
+            "value": "领航员", "source_line_start": 1,
+            "source_line_end": 1, "modality": "asserted",
+            "source_scope": "narrator", "certainty": "certain",
+        }
+        event = {
+            **base, "kind": "event", "time": "2040-01-01 10:00",
+            "location": "西塔", "participants": ["林澈"],
+        }
+        for field in ("subject", "predicate", "value"):
+            event.pop(field)
+        cases = (
+            ({**base, "subject": []}, "fact.core_text"),
+            ({**base, "time": []}, "fact.optional_text"),
+            ({**base, "current": []}, "fact.optional_bool"),
+            ({**event, "participants": "林澈"}, "event.core_list"),
+            ({**event, "participants": [5]}, "event.core_list"),
+            ({**event, "time": []}, "event.time"),
+            ({**event, "location": []}, "event.location"),
+            ({**event, "time": [], "location": []}, "other"),
+            ({**base, "subject": [], "current": []}, "other"),
+            ({**base, "source_line_start": []}, "other"),
+        )
+        for raw, expected in cases:
+            with self.subTest(expected=expected, kind=raw["kind"]):
+                with self.assertRaises(ValidationError) as error:
+                    RECORD_ADAPTER.validate_python(raw)
+                self.assertEqual("schema_wrong_type", _schema_rejection_reason(error.exception))
+                self.assertEqual(expected, _schema_wrong_type_detail(raw, error.exception))
+        with self.assertRaises(ValidationError) as error:
+            RECORD_ADAPTER.validate_python({**base, "subject": []})
+        self.assertEqual(
+            "other",
+            _schema_wrong_type_detail({**base, "kind": "untrusted"}, error.exception),
+        )
+
+    def test_single_document_wrong_type_detail_does_not_accept_record(self):
+        parsed = ModelEnhancedExtractor(self.provider_for({"records": [
+            {
+                "kind": "fact", "subject": [], "predicate": "身份",
+                "value": "领航员", "source_line_start": 1,
+                "source_line_end": 1,
+            },
+        ]})).extract(DocumentInput("doc", "chapter.md", "林澈的身份是领航员。"))
+
+        status = parsed.model_execution.safe_dict()
+        self.assertEqual({"schema_wrong_type": 1}, status["record_rejections"])
+        self.assertEqual(
+            {"fact.core_text": 1}, status["schema_wrong_type_details"]
+        )
+        self.assertFalse(any("model" in row.provenance_sources for row in parsed.directives))
 
     def provider_for(self, payload: dict) -> OpenAICompatibleProvider:
         content = json.dumps(semantic_payload(payload), ensure_ascii=False)
@@ -329,6 +394,9 @@ class ModelExtractorTests(unittest.TestCase):
 
         self.assertTrue(provider.model_extraction_configured)
         self.assertEqual(1, len(calls))
+        system_prompt = json.loads(calls[0].content)["messages"][0]["content"]
+        self.assertIn("event 的 time 和 location 必须是非空 JSON 字符串", system_prompt)
+        self.assertIn("原文没有明确地点时省略整条 event", system_prompt)
         self.assertTrue(result.model_execution.enabled)
         self.assertTrue(result.model_execution.configured)
         self.assertTrue(result.model_used)

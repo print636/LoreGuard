@@ -14,6 +14,7 @@ from .domain import (
     ModelExecutionDiagnostics,
     ParsedDirective,
     SAFE_MODEL_RECORD_REJECTIONS,
+    SAFE_MODEL_SCHEMA_WRONG_TYPE_DETAILS,
     apply_semantic_quality_gate_with_provenance,
     directive_fingerprint,
     issue_fingerprint,
@@ -345,6 +346,17 @@ class AnalysisPipeline:
                         for row in model_documents
                     )
                 },
+                "schema_wrong_type_details": {
+                    detail: sum(
+                        row.get("schema_wrong_type_details", {}).get(detail, 0)
+                        for row in model_documents
+                    )
+                    for detail in sorted(SAFE_MODEL_SCHEMA_WRONG_TYPE_DETAILS)
+                    if any(
+                        row.get("schema_wrong_type_details", {}).get(detail, 0)
+                        for row in model_documents
+                    )
+                },
                 "provider_calls": provider_calls,
                 "logical_call_count": (
                     len(provider_calls) if isinstance(provider_calls, list) else None
@@ -540,6 +552,7 @@ def _safe_execution_dict(execution) -> dict:
         },
         "reason_codes": list(getattr(execution, "reason_codes", [])),
         "record_rejections": {},
+        "schema_wrong_type_details": {},
         "batch_used": bool(getattr(execution, "batch_used", False)),
         "batch_document_count": getattr(execution, "batch_document_count", 0),
         "batch_estimated_tokens": getattr(execution, "batch_estimated_tokens", 0),

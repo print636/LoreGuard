@@ -453,6 +453,18 @@ SAFE_MODEL_RECORD_REJECTIONS = frozenset({
     "semantic_labels_quarantined",
 })
 
+# This is a bounded diagnostic vocabulary, not a schema-repair permission.
+# Never persist a Pydantic error location, rejected field value or model text.
+SAFE_MODEL_SCHEMA_WRONG_TYPE_DETAILS = frozenset(
+    f"{kind}.{category}"
+    for kind in (
+        "fact", "event", "knows", "claims_knows", "item", "uses",
+        "world_rule", "world_assert", "open_question", "clarification",
+    )
+    for category in ("core_text", "core_list", "optional_text", "optional_bool")
+    if not (kind == "event" and category == "core_text")
+) | {"event.time", "event.location", "other"}
+
 
 @dataclass(slots=True)
 class ModelExecutionDiagnostics:
@@ -501,6 +513,9 @@ class ModelExecutionDiagnostics:
     # Counts observed isolated record failures only. Fatal envelope, attribution
     # and evidence-range failures are intentionally not represented here.
     record_rejections: dict[str, int] = field(default_factory=dict)
+    # One safe type-detail bucket per rejected record. This breakdown does not
+    # replace or increment the compatibility-level record_rejections counter.
+    schema_wrong_type_details: dict[str, int] = field(default_factory=dict)
     provider_calls: list[ProviderCallDiagnostics] | None = field(default_factory=list)
 
     @classmethod
@@ -554,6 +569,13 @@ class ModelExecutionDiagnostics:
         if reason not in SAFE_MODEL_RECORD_REJECTIONS:
             raise ValueError("unsupported model rejection category")
         self.record_rejections[reason] = self.record_rejections.get(reason, 0) + 1
+
+    def note_schema_wrong_type_detail(self, detail: str) -> None:
+        if detail not in SAFE_MODEL_SCHEMA_WRONG_TYPE_DETAILS:
+            raise ValueError("unsupported model schema type detail")
+        self.schema_wrong_type_details[detail] = (
+            self.schema_wrong_type_details.get(detail, 0) + 1
+        )
 
     def record_provider_call(
         self,
@@ -627,6 +649,13 @@ class ModelExecutionDiagnostics:
                 reason: count
                 for reason, count in sorted(self.record_rejections.items())
                 if reason in SAFE_MODEL_RECORD_REJECTIONS
+                and type(count) is int
+                and count >= 0
+            },
+            "schema_wrong_type_details": {
+                detail: count
+                for detail, count in sorted(self.schema_wrong_type_details.items())
+                if detail in SAFE_MODEL_SCHEMA_WRONG_TYPE_DETAILS
                 and type(count) is int
                 and count >= 0
             },

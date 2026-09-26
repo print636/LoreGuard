@@ -62,6 +62,8 @@ class BatchModelExtractionTests(unittest.TestCase):
         system = request["messages"][0]["content"]
         self.assertIn("同一 doc_ref、所填行号内的原文词组直接支持", system)
         self.assertIn("不要用摘要、近义改写、常识补全或跨行/跨文档拼接", system)
+        self.assertIn("event 的 time 和 location 必须是非空 JSON 字符串", system)
+        self.assertIn("原文没有明确地点时省略整条 event", system)
         user = request["messages"][1]["content"]
         self.assertIn('"doc_ref":"d1"', user)
         self.assertNotIn("real-a", user)
@@ -213,6 +215,7 @@ class BatchModelExtractionTests(unittest.TestCase):
                 ))
                 self.assertIn("evidence_range", status["reason_codes"])
                 self.assertIn("batch_protocol", status["reason_codes"])
+                self.assertEqual({}, status["schema_wrong_type_details"])
 
     def test_core_schema_error_cannot_hide_empty_evidence_range(self):
         invalid = fact("苏弦", "档案官")
@@ -305,6 +308,53 @@ class BatchModelExtractionTests(unittest.TestCase):
         self.assertTrue(all(
             row["succeeded_chunks"] == 1 for row in status["documents"]
         ))
+
+    def test_wrong_type_detail_keeps_valid_siblings_and_original_rejection_count(self):
+        invalid_fact = fact("林澈", "领航员")
+        invalid_fact["subject"] = []
+        invalid_event = {
+            "kind": "event", "time": "2040-01-01 10:00", "location": "西塔",
+            "participants": "苏弦", "source_line_start": 1,
+            "source_line_end": 1, "modality": "asserted",
+            "source_scope": "narrator", "certainty": "certain",
+        }
+        invalid_event_time = {**invalid_event, "participants": ["苏弦"], "time": []}
+        invalid_event_location = {
+            **invalid_event, "participants": ["苏弦"], "location": [],
+        }
+        result, calls = self.run_batch({"documents": [
+            {"doc_ref": "d1", "records": [fact("林澈", "领航员"), invalid_fact]},
+            {"doc_ref": "d2", "records": [
+                fact("苏弦", "档案官"), invalid_event,
+                invalid_event_time, invalid_event_location,
+            ]},
+        ]})
+
+        self.assertEqual(1, len(calls))
+        self.assertTrue(result.model_used)
+        status = result.diagnostics["model"]
+        self.assertEqual({"schema_wrong_type": 4}, status["record_rejections"])
+        self.assertEqual(
+            {
+                "event.core_list": 1, "event.time": 1,
+                "event.location": 1, "fact.core_text": 1,
+            },
+            status["schema_wrong_type_details"],
+        )
+        self.assertEqual(
+            [
+                {"fact.core_text": 1},
+                {"event.core_list": 1, "event.time": 1, "event.location": 1},
+            ],
+            [row["schema_wrong_type_details"] for row in status["documents"]],
+        )
+        self.assertEqual(
+            {"real-a", "real-b"},
+            {
+                row.evidence.document_id for row in result.directives
+                if "model" in row.provenance_sources
+            },
+        )
 
     def test_label_repair_survives_later_core_schema_invalid_sibling(self):
         candidate = fact("林澈", "领航员")

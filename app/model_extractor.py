@@ -233,6 +233,7 @@ SYSTEM_PROMPT = """你是 LoreGuard 的叙事状态抽取器，只抽取状态�
 唯一允许的记录格式如下（未标 optional 的字段全部必需）：
 - fact: kind, subject, predicate, value, time(optional), source_line_start, source_line_end。普通 fact 的 subject、predicate、value 尽量复制原文中的最小原子措辞，不得翻译或自创英文 predicate。明确的移动许可可使用 predicate=mobility_permission、value=instant_transport；明确的跨地点时间限制可使用 predicate=mobility_limit、value=forbidden；二者都应附原文明确的 origin、destination、bidirectional、status、valid_from、valid_until、current。明确的规则例外可使用 predicate=rule_exception、value=allowed/denied，并附 key、status、valid_from、valid_until、current。bidirectional/current 必须是 JSON boolean true/false，不是字符串。不得把模糊许可猜成有效状态
 - event: kind, id(optional), time, location, participants, source_line_start, source_line_end；participants 必须是非空字符串数组
+  event 的 time 和 location 必须是非空 JSON 字符串；地点必须由所引原文明确支持。原文没有明确地点时省略整条 event，不得用 null、数组、对象或编造地点填充
 - knows: kind, character, fact, time, source_line_start, source_line_end
 - claims_knows: kind, character, fact, time, source_line_start, source_line_end
 - item: kind, item, owner, time(optional), source_line_start, source_line_end
@@ -322,6 +323,74 @@ def _schema_rejection_reason(exc: ValidationError) -> str:
     ):
         return "schema_wrong_type"
     return "schema_other"
+
+
+_SCHEMA_CORE_TEXT_FIELDS: dict[str, frozenset[str]] = {
+    "fact": frozenset({"subject", "predicate", "value"}),
+    "event": frozenset({"time", "location"}),
+    "knows": frozenset({"character", "fact", "time"}),
+    "claims_knows": frozenset({"character", "fact", "time"}),
+    "item": frozenset({"item", "owner"}),
+    "uses": frozenset({"item", "user"}),
+    "world_rule": frozenset({"key", "value"}),
+    "world_assert": frozenset({"key", "value"}),
+    "open_question": frozenset({"question"}),
+    "clarification": frozenset({"summary"}),
+}
+_SCHEMA_OPTIONAL_TEXT_FIELDS: dict[str, frozenset[str]] = {
+    "fact": frozenset({
+        "time", "origin", "destination", "status", "valid_from",
+        "valid_until", "key",
+    }),
+    "event": frozenset({"id"}),
+    "item": frozenset({"time"}),
+    "uses": frozenset({"time"}),
+    "world_assert": frozenset({"actor", "time"}),
+}
+_SCHEMA_OPTIONAL_BOOL_FIELDS = frozenset({"bidirectional", "current"})
+
+
+def _schema_wrong_type_detail(raw_record: Any, exc: ValidationError) -> str:
+    """Return only a fixed kind/type-family bucket, never an error location.
+
+    Multiple distinct failures collapse to ``other``. This diagnostic cannot
+    repair a record or change the evidence/attribution validation path.
+    """
+    if not isinstance(raw_record, dict) or _schema_rejection_reason(exc) != "schema_wrong_type":
+        return "other"
+    kind = raw_record.get("kind")
+    if type(kind) is not str or kind not in _SCHEMA_CORE_TEXT_FIELDS:
+        return "other"
+    categories: set[str] = set()
+    for error in exc.errors(
+        include_url=False, include_context=False, include_input=False
+    ):
+        code = str(error.get("type", ""))
+        if not (
+            code.endswith(("_type", "_parsing"))
+            or code in {"int_from_float", "bool_parsing"}
+        ):
+            return "other"
+        location = error.get("loc", ())
+        if not isinstance(location, tuple):
+            return "other"
+        fields = frozenset(part for part in location if isinstance(part, str))
+        if kind == "event" and fields & _SCHEMA_CORE_TEXT_FIELDS[kind]:
+            event_fields = fields & _SCHEMA_CORE_TEXT_FIELDS[kind]
+            if len(event_fields) != 1:
+                return "other"
+            categories.add(next(iter(event_fields)))
+        elif fields & _SCHEMA_CORE_TEXT_FIELDS[kind]:
+            categories.add("core_text")
+        elif kind == "event" and "participants" in fields:
+            categories.add("core_list")
+        elif fields & _SCHEMA_OPTIONAL_TEXT_FIELDS.get(kind, frozenset()):
+            categories.add("optional_text")
+        elif kind == "fact" and fields & _SCHEMA_OPTIONAL_BOOL_FIELDS:
+            categories.add("optional_bool")
+        else:
+            return "other"
+    return f"{kind}.{next(iter(categories))}" if len(categories) == 1 else "other"
 
 
 def _validate_raw_evidence_boundary(
@@ -1594,9 +1663,12 @@ class ModelEnhancedExtractor:
                             executions[doc_index], "unresolved_invalid_records"
                         )
                         executions[doc_index].note("schema_validation")
-                        executions[doc_index].note_record_rejection(
-                            _schema_rejection_reason(exc)
-                        )
+                        schema_reason = _schema_rejection_reason(exc)
+                        executions[doc_index].note_record_rejection(schema_reason)
+                        if schema_reason == "schema_wrong_type":
+                            executions[doc_index].note_schema_wrong_type_detail(
+                                _schema_wrong_type_detail(raw_record, exc)
+                            )
                         continue
                     except ValueError as exc:
                         reason = {
@@ -1967,9 +2039,12 @@ class ModelEnhancedExtractor:
                             execution, "unresolved_invalid_records"
                         )
                         execution.note("schema_validation")
-                        execution.note_record_rejection(
-                            _schema_rejection_reason(exc)
-                        )
+                        schema_reason = _schema_rejection_reason(exc)
+                        execution.note_record_rejection(schema_reason)
+                        if schema_reason == "schema_wrong_type":
+                            execution.note_schema_wrong_type_detail(
+                                _schema_wrong_type_detail(raw_record, exc)
+                            )
                         parsed.warnings.append(
                             f"模型记录 #{index}（分块 {chunk.id}）不符合抽取协议（schema_validation），已安全跳过"
                         )
