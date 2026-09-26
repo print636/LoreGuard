@@ -40,6 +40,13 @@ See the [approved-axis v1 contract](docs/character-approved-axis-rfc.md) for
 the exact API and limits. This has not passed a separate cross-story real-model
 quality gate.
 
+`value` and `behavior_boundary` axes also have an experimental author-approved
+baseline binding path: an author supplies an object key, applicability scope,
+positive proposition, and explicit scope acknowledgment for a verified formal
+candidate. The server checks the frozen source, object identity, axis version,
+and hashes. This does **not** enable scoped draft matching or OOC issue creation;
+those remain disabled pending separate actor, scope, and direction verification.
+
 An author-confirmed character trait remains active even if its source document
 is later retired or reclassified as reference material. The character workbench
 offers an explicit, audited per-trait withdrawal with confirmation; it excludes
