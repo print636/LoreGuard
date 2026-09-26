@@ -259,7 +259,7 @@ python scripts/run_agent_acceptance.py --mock-oracle --require-gates
 - `data/evaluation/evidence_investigator_live/`：原生 function-calling Investigator 的冻结 DEV/holdout fixture；[fixture 协议](data/evaluation/evidence_investigator_live/README.md)、[只读验证器](data/evaluation/evidence_investigator_live/validate_fixture.py)、[真实 HTTP runner](scripts/run_evidence_investigator_live.py)、[双次 DEV 检查器](scripts/check_evidence_investigator_dev_pair.py)与[脱敏报告](docs/evidence-investigator-live-evaluation.md)分别承担数据冻结、接线运行、重复性校验和公开总结，模型原始交互与本地运行 artifact 不提交。
 - `data/evidence-retrieval-v1/`：44 个原创中文检索问题，其中首次冻结 holdout 为 28 问、55 条期望证据。混合 Recall@5 81.82%、All-evidence@5 71.43%、低词面 Recall@5 79.31%；低词面少 1 条未过门槛，完整结论见 [`docs/evidence-retrieval-v1-holdout.md`](docs/evidence-retrieval-v1-holdout.md)。
 - `data/issue-review-v1/`：12 例原创、开发者可见的证据复核 A/B，每例真实调用 3 次。local-context 为 4/12，rag-evidence 为 7/12；绝对 gate 仍为 `false`。只公开脱敏聚合结果，见 [`docs/issue-review-v1-result-20260907.md`](docs/issue-review-v1-result-20260907.md)。
-- [`data/character-ooc-return-season-dev-v1/`](data/character-ooc-return-season-dev-v1/README.md)：原创、开发者可见的游戏版本递进角色挑战素材，包含 5 个潜在 OOC 轴和 6 个负例，用于后续完整流程排障；尚未形成真实模型质量成绩。
+- [`data/character-ooc-return-season-dev-v1/`](data/character-ooc-return-season-dev-v1/README.md)：原创、开发者可见的游戏版本递进角色挑战素材，包含 5 个潜在 OOC 轴和 6 个负例。首次[真实模型 DEV 检查点](docs/return-season-live-evaluation-20260927.md)显示基线类型不符且新稿角色阶段部分覆盖，11 个案例均未获有效判定；尚未形成角色 OOC 质量成绩。
 
 完整数据位于 `data/evaluation-natural/`：40 个 dev 场景和 60 个 test 场景的 `scenario_id` 不重叠。它是模板生成的 `synthetic natural-language` 数据，不是人工标注集，也不能外推为生产准确率。评测 harness 运行 test 时只打开 `test.jsonl`，测试样本不进入 Prompt 或调参示例。
 
