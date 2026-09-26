@@ -88,10 +88,18 @@ async function mockApi(page: Page, state: MockState) {
       user: { id: "author", email: "author@example.test", display_name: "作者" },
       workspace: { id: "workspace", name: "创作工作区", kind: "personal", role: "owner" },
     };
-    else if (path === "/api/v1/projects") body = [{
-      id: projectId, name: "作者轴演示", description: "", active_document_count: 1,
-      created_at: "2026-09-01T00:00:00Z", latest_run: null,
-    }];
+    else if (path === "/api/v1/project-catalog" && method === "GET") {
+      const item = {
+        id: projectId, name: "作者轴演示", description: "", active_document_count: 1,
+        created_at: "2026-09-01T00:00:00Z", latest_run: null,
+      };
+      const page = Number(url.searchParams.get("page") || 1);
+      const pageSize = Number(url.searchParams.get("page_size") || 40);
+      const matches = (!url.searchParams.get("project_id") || url.searchParams.get("project_id") === projectId)
+        && (!url.searchParams.get("query") || item.name.includes(url.searchParams.get("query")!.trim()));
+      body = { page, page_size: pageSize, total: matches ? 1 : 0,
+        items: matches && page === 1 ? [item] : [] };
+    }
     else if (path === `${root}/documents`) body = [{
       id: "doc-axis", project_id: projectId, name: "人物设定.md", version: 1,
       active: true, created_at: "2026-09-01T00:00:00Z", content: sourceLine,

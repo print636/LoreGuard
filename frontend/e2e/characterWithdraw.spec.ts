@@ -23,10 +23,18 @@ test("a confirmed trait remains accessible after source retirement and can be ex
       user: { id: "user-1", email: "author@example.test", display_name: "作者" },
       workspace: { id: "workspace-1", name: "测试工作区", kind: "personal", role: "owner" },
     };
-    else if (path === "/api/v1/projects") body = [{
-      id: "project-1", name: "退役来源测试", description: "", created_at: "2026-09-01T00:00:00Z",
-      active_document_count: 0, latest_run: null,
-    }];
+    else if (path === "/api/v1/project-catalog" && route.request().method() === "GET") {
+      const item = {
+        id: "project-1", name: "退役来源测试", description: "", created_at: "2026-09-01T00:00:00Z",
+        active_document_count: 0, latest_run: null,
+      };
+      const page = Number(url.searchParams.get("page") || 1);
+      const pageSize = Number(url.searchParams.get("page_size") || 40);
+      const matches = (!url.searchParams.get("project_id") || url.searchParams.get("project_id") === item.id)
+        && (!url.searchParams.get("query") || item.name.includes(url.searchParams.get("query")!.trim()));
+      body = { page, page_size: pageSize, total: matches ? 1 : 0,
+        items: matches && page === 1 ? [item] : [] };
+    }
     else if (path === "/api/v1/projects/project-1/documents") body = [];
     else if (path === "/api/v1/projects/project-1/analysis-runs") body = [{
       id: "run-old", project_id: "project-1", status: "completed",

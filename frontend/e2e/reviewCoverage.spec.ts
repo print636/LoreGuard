@@ -19,16 +19,26 @@ async function mockCompletedRun(page: Page, state: { character: CharacterDiagnos
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
+    const method = route.request().method();
     let response: unknown;
     if (path === "/api/v1/auth/me") response = {
       mode: "anonymous",
       user: { id: "author", email: "author@example.test", display_name: "作者" },
       workspace: { id: "workspace", name: "创作工作区", kind: "personal", role: "owner" },
     };
-    else if (path === "/api/v1/projects") response = [{
-      id: projectId, name: "分节覆盖验收", description: "", active_document_count: 0,
-      created_at: "2026-09-26T00:00:00Z", latest_run: run,
-    }];
+    else if (path === "/api/v1/project-catalog" && method === "GET") {
+      const item = {
+        id: projectId, name: "分节覆盖验收", description: "", active_document_count: 0,
+        created_at: "2026-09-26T00:00:00Z",
+        latest_run: { id: runId, status: "completed", created_at: run.created_at, model_execution: null },
+      };
+      const page = Number(url.searchParams.get("page") || 1);
+      const pageSize = Number(url.searchParams.get("page_size") || 40);
+      const matches = (!url.searchParams.get("project_id") || url.searchParams.get("project_id") === projectId)
+        && (!url.searchParams.get("query") || item.name.includes(url.searchParams.get("query")!.trim()));
+      response = { page, page_size: pageSize, total: matches ? 1 : 0,
+        items: matches && page === 1 ? [item] : [] };
+    }
     else if (path === "/api/v1/account/model-provider") response = {};
     else if (path === `/api/v1/projects/${projectId}/documents`) response = [];
     else if (path === `/api/v1/projects/${projectId}/analysis-runs`) response = [run];

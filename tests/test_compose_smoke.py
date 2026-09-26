@@ -80,7 +80,7 @@ class ComposeSmokeTests(unittest.TestCase):
         self.assertEqual(command[:4], ["docker", "compose", "exec", "-T"])
         self.assertIn("BEGIN;", PGVECTOR_SMOKE_SQL)
         self.assertIn("ROLLBACK;", PGVECTOR_SMOKE_SQL)
-        self.assertIn("0018_character_axis_direction", PGVECTOR_SMOKE_SQL)
+        self.assertIn("0019_project_name_sort_key", PGVECTOR_SMOKE_SQL)
         self.assertIn("ck_character_trait_candidate_review_state", PGVECTOR_SMOKE_SQL)
         self.assertIn("ck_character_trait_review_decision", PGVECTOR_SMOKE_SQL)
         self.assertIn("character_trait_axis_immutable", PGVECTOR_SMOKE_SQL)

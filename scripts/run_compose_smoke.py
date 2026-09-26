@@ -30,7 +30,7 @@ DECLARE
     axis_direction_check_count integer;
 BEGIN
     SELECT version_num INTO current_revision FROM alembic_version;
-    IF current_revision <> '0018_character_axis_direction' THEN
+    IF current_revision <> '0019_project_name_sort_key' THEN
         RAISE EXCEPTION 'unexpected Alembic revision';
     END IF;
     SELECT count(*) INTO axis_direction_column_count

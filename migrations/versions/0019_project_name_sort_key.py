@@ -37,14 +37,26 @@ def upgrade() -> None:
     update = sa.text(
         "UPDATE projects SET name_sort_key = :sort_key WHERE id = :project_id"
     ).bindparams(sa.bindparam("sort_key", type_=sa.LargeBinary()))
+    # Advance through the primary key instead of repeatedly scanning every
+    # already-backfilled row for large pre-existing catalogs.
+    last_id: str | None = None
     while True:
-        rows = bind.execute(
-            sa.text(
-                "SELECT id, name FROM projects WHERE name_sort_key IS NULL "
-                "ORDER BY id LIMIT :batch_size"
-            ),
-            {"batch_size": _BATCH_SIZE},
-        ).all()
+        if last_id is None:
+            rows = bind.execute(
+                sa.text(
+                    "SELECT id, name FROM projects WHERE name_sort_key IS NULL "
+                    "ORDER BY id LIMIT :batch_size"
+                ),
+                {"batch_size": _BATCH_SIZE},
+            ).all()
+        else:
+            rows = bind.execute(
+                sa.text(
+                    "SELECT id, name FROM projects WHERE name_sort_key IS NULL "
+                    "AND id > :last_id ORDER BY id LIMIT :batch_size"
+                ),
+                {"last_id": last_id, "batch_size": _BATCH_SIZE},
+            ).all()
         if not rows:
             break
         bind.execute(
@@ -57,6 +69,7 @@ def upgrade() -> None:
                 for row in rows
             ],
         )
+        last_id = rows[-1].id
 
     if bind.execute(
         sa.text("SELECT 1 FROM projects WHERE name_sort_key IS NULL LIMIT 1")
