@@ -1808,6 +1808,40 @@ def test_character_runtime_support_trace_accepts_old_reports_and_rejects_bad_fla
         assert axis_live._runtime_provenance_digest(bad) is None
 
 
+def test_character_runtime_draft_trace_requires_fixed_pair_and_version():
+    value = _runtime_provenance()
+    limits = value["character_consistency_limits"]
+    limits.update({
+        "signal_draft_trace_v1": True,
+        "signal_draft_trace_version": "draft-signal-trace-v1",
+    })
+    assert axis_live._runtime_provenance_digest(value) is not None
+    limits.update({
+        "signal_full_line_echo_v2": True,
+        "signal_core_scope_v3": False,
+        "signal_support_id_v4": True,
+        "signal_support_segmenter_version": "assertion-index-v1",
+        "signal_draft_trace_v1": False,
+        "signal_draft_trace_version": None,
+    })
+    assert axis_live._runtime_provenance_digest(value) is not None
+    limits["signal_draft_trace_v1"] = True
+    limits["signal_draft_trace_version"] = "draft-signal-trace-v1"
+    assert axis_live._runtime_provenance_digest(value) is not None
+    for changed in (
+        {"signal_draft_trace_v1": "true"},
+        {"signal_draft_trace_v1": 1},
+        {"signal_draft_trace_version": "untrusted-version"},
+    ):
+        malformed = json.loads(json.dumps(value))
+        malformed["character_consistency_limits"].update(changed)
+        assert axis_live._runtime_provenance_digest(malformed) is None
+    for missing in ("signal_draft_trace_v1", "signal_draft_trace_version"):
+        malformed = json.loads(json.dumps(value))
+        del malformed["character_consistency_limits"][missing]
+        assert axis_live._runtime_provenance_digest(malformed) is None
+
+
 def test_public_support_trace_reprojects_all_fields_and_never_echoes_api_marker(monkeypatch):
     marker = "SECRET_URL_https://example.invalid/sk-example"
     valid_trace = {

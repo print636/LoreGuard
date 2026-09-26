@@ -56,6 +56,10 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION,
+    _CHARACTER_SIGNAL_DRAFT_TRACE_KEY,
+    _CHARACTER_SIGNAL_DRAFT_TRACE_VERSION_KEY,
+    _CHARACTER_SIGNAL_DRAFT_TRACE_VERSION,
+    _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS,
     _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
     _local_service_artifact_sha256,
 )
@@ -793,7 +797,10 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     if (
         set(capabilities) != _CAPABILITY_KEYS
         or any(type(flag) is not bool for flag in capabilities.values())
-        or set(limits) not in {
+        or (set(limits) & _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS) not in (
+            set(), set(_CHARACTER_SIGNAL_DRAFT_TRACE_KEYS)
+        )
+        or set(limits) - _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
             _CHARACTER_CONSISTENCY_LIMIT_KEYS
             | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY},
@@ -914,6 +921,14 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY] != (
             _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION
             if limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY] else None
+        )
+    ):
+        return None
+    if _CHARACTER_SIGNAL_DRAFT_TRACE_KEY in limits and (
+        type(limits[_CHARACTER_SIGNAL_DRAFT_TRACE_KEY]) is not bool
+        or limits[_CHARACTER_SIGNAL_DRAFT_TRACE_VERSION_KEY] != (
+            _CHARACTER_SIGNAL_DRAFT_TRACE_VERSION
+            if limits[_CHARACTER_SIGNAL_DRAFT_TRACE_KEY] else None
         )
     ):
         return None

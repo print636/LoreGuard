@@ -384,6 +384,13 @@ _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSION = "character-scope-review-p
 _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY = "signal_support_trace_v1"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY = "signal_support_trace_version"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION = "support-trace-v1"
+_CHARACTER_SIGNAL_DRAFT_TRACE_KEY = "signal_draft_trace_v1"
+_CHARACTER_SIGNAL_DRAFT_TRACE_VERSION_KEY = "signal_draft_trace_version"
+_CHARACTER_SIGNAL_DRAFT_TRACE_VERSION = "draft-signal-trace-v1"
+_CHARACTER_SIGNAL_DRAFT_TRACE_KEYS = frozenset({
+    _CHARACTER_SIGNAL_DRAFT_TRACE_KEY,
+    _CHARACTER_SIGNAL_DRAFT_TRACE_VERSION_KEY,
+})
 _INVESTIGATOR_INTEGER_LIMIT_KEYS = frozenset(
     {
         "max_seeds",
@@ -2951,9 +2958,14 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         return None
 
     character_limits = root.get("character_consistency_limits")
+    draft_trace_keys = (
+        set(character_limits) & _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
+        if type(character_limits) is dict else set()
+    )
     if (
         type(character_limits) is not dict
-        or set(character_limits) not in {
+        or draft_trace_keys not in (set(), set(_CHARACTER_SIGNAL_DRAFT_TRACE_KEYS))
+        or set(character_limits) - _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
             _CHARACTER_CONSISTENCY_LIMIT_KEYS
             | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY},
@@ -3084,6 +3096,18 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             return None
         safe_character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY] = variant
         safe_character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY] = trace_version
+    if draft_trace_keys:
+        variant = character_limits[_CHARACTER_SIGNAL_DRAFT_TRACE_KEY]
+        trace_version = character_limits[_CHARACTER_SIGNAL_DRAFT_TRACE_VERSION_KEY]
+        if (
+            type(variant) is not bool
+            or trace_version != (
+                _CHARACTER_SIGNAL_DRAFT_TRACE_VERSION if variant else None
+            )
+        ):
+            return None
+        safe_character_limits[_CHARACTER_SIGNAL_DRAFT_TRACE_KEY] = variant
+        safe_character_limits[_CHARACTER_SIGNAL_DRAFT_TRACE_VERSION_KEY] = trace_version
     for key, (minimum, maximum) in (
         _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS.items()
     ):

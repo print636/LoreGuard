@@ -1433,6 +1433,40 @@ def test_runtime_provenance_v4_requires_version_and_full_line_v2():
         assert _safe_runtime_provenance(malformed) is None
 
 
+def test_runtime_provenance_draft_trace_requires_fixed_pair_and_version():
+    value = runtime_provenance()
+    limits = value["character_consistency_limits"]
+    limits.update({
+        "signal_draft_trace_v1": True,
+        "signal_draft_trace_version": "draft-signal-trace-v1",
+    })
+    assert _safe_runtime_provenance(value) == value  # Independent of V4 support IDs.
+    limits.update({
+        "signal_full_line_echo_v2": True,
+        "signal_core_scope_v3": False,
+        "signal_support_id_v4": True,
+        "signal_support_segmenter_version": "assertion-index-v1",
+        "signal_draft_trace_v1": False,
+        "signal_draft_trace_version": None,
+    })
+    assert _safe_runtime_provenance(value) == value
+    limits["signal_draft_trace_v1"] = True
+    limits["signal_draft_trace_version"] = "draft-signal-trace-v1"
+    assert _safe_runtime_provenance(value) == value
+    for changed in (
+        {"signal_draft_trace_v1": "true"},
+        {"signal_draft_trace_v1": 1},
+        {"signal_draft_trace_version": "untrusted-version"},
+    ):
+        malformed = json.loads(json.dumps(value))
+        malformed["character_consistency_limits"].update(changed)
+        assert _safe_runtime_provenance(malformed) is None
+    for missing in ("signal_draft_trace_v1", "signal_draft_trace_version"):
+        malformed = json.loads(json.dumps(value))
+        del malformed["character_consistency_limits"][missing]
+        assert _safe_runtime_provenance(malformed) is None
+
+
 @pytest.mark.parametrize(
     ("key", "valid_maximum"),
     [
