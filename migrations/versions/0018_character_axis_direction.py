@@ -260,6 +260,8 @@ def downgrade() -> None:
         "SELECT 1 FROM character_trait_reviews WHERE decision = 'align' LIMIT 1"
     )).first() or bind.execute(sa.text(
         "SELECT 1 FROM character_trait_candidates WHERE axis_alignment IS NOT NULL LIMIT 1"
+    )).first() or bind.execute(sa.text(
+        "SELECT 1 FROM character_trait_reviews WHERE axis_alignment IS NOT NULL LIMIT 1"
     )).first():
         raise RuntimeError("cannot downgrade 0018 while author direction decisions exist")
     if bind.dialect.name == "sqlite":

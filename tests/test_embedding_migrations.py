@@ -120,6 +120,32 @@ class EmbeddingMigrationTests(unittest.TestCase):
             engine = create_engine(url)
             with engine.begin() as connection:
                 connection.exec_driver_sql(
+                    "UPDATE character_trait_reviews SET axis_alignment='same', "
+                    "axis_polarity='positive', axis_positive_proposition_sha256=? "
+                    "WHERE id='confirm-old'",
+                    ("c" * 64,),
+                )
+            engine.dispose()
+            with self.assertRaisesRegex(RuntimeError, "direction decisions"):
+                command.downgrade(config, "0017_character_trait_withdraw")
+            engine = create_engine(url)
+            with engine.begin() as connection:
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT version_num FROM alembic_version"
+                ).scalar_one(), HEAD_REVISION)
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT axis_alignment FROM character_trait_reviews "
+                    "WHERE id='confirm-old'"
+                ).scalar_one(), "same")
+                connection.exec_driver_sql(
+                    "UPDATE character_trait_reviews SET axis_alignment=NULL, "
+                    "axis_polarity=NULL, axis_positive_proposition_sha256=NULL "
+                    "WHERE id='confirm-old'"
+                )
+            engine.dispose()
+            engine = create_engine(url)
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
                     "UPDATE character_trait_axes SET positive_proposition='角色冒用签名', "
                     "positive_proposition_sha256=?, "
                     "positive_proposition_authored_at='2026-09-26 00:00:00' "
