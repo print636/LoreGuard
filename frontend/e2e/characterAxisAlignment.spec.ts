@@ -26,13 +26,25 @@ type MockState = {
   unexpected: string[];
   preciseEvidence?: boolean;
   mappingHashMismatch?: boolean;
+  scoped?: boolean;
+  scopeConflictOnce?: boolean;
+  scopedNoAxis?: boolean;
+  axisScope?: string;
+  decisionErrorOnce?: "character_trait_axis_source_unverified" | "character_trait_axis_integrity_invalid";
+  axisCreated?: boolean;
+  axisPostCount?: number;
 };
 
 function axis(state: MockState) {
   return {
-    id: axisId, project_id: projectId, trait_type: "core_personality", version: 1,
+    id: axisId, project_id: projectId, trait_type: state.scoped ? "behavior_boundary" : "core_personality", version: 1,
     display_name: "代签边界", definition: "是否未经同伴授权代其签名",
     definition_sha256: axisDefinitionHash,
+    ...(state.scoped ? {
+      comparison_key: "behavior_boundary:同伴签名",
+      applicability_scope: state.axisScope ?? "需要同伴签字时",
+      applicability_scope_sha256: "d".repeat(64),
+    } : {}),
     positive_proposition: state.proposition,
     positive_proposition_sha256: state.proposition ? propositionHash : null,
   };
@@ -40,7 +52,8 @@ function axis(state: MockState) {
 
 function candidate(state: MockState) {
   return {
-    id: candidateId, character_key: characterId, trait_type: "core_personality",
+    id: candidateId, character_key: characterId, trait_type: state.scoped ? "behavior_boundary" : "core_personality",
+    ...(state.scoped ? { comparison_key: "behavior_boundary:同伴签名" } : {}),
     trait_key: "signature_integrity", value: "不会擅自代同伴签名",
     polarity: "positive", origin: "explicit_setting", confidence: 0.91,
     source_run_id: "run-axis", scope_sha256: "frozen-axis-snapshot", revision: 1,
@@ -60,6 +73,7 @@ function candidate(state: MockState) {
       document_version: 1, document_role: "character_profile", publication_status: "published",
       authority_level: "canon", line_start: 1, line_end: 1, text: sourceLine,
       source_verified: true, source_text_exact: true, context_verified: false,
+      ...(state.scoped ? { context_verified: true, story_scope: { timeline_key: "main" } } : {}),
     }],
     support_bindings_status: state.preciseEvidence ? "verified" : "legacy",
     support_bindings_v1: state.preciseEvidence ? {
@@ -151,9 +165,30 @@ async function mockApi(page: Page, state: MockState) {
         document_name: "人物设定.md", document_version: 1,
         line_start: 1, line_end: 1, total: 0, context_verified: false }],
     };
-    else if (path === `${root}/character-trait-axes` && method === "GET") body = {
-      items: [axis(state)], total: 1, limit: 100, offset: 0,
-    };
+    else if (path === `${root}/character-trait-axes` && method === "GET") {
+      expect(url.searchParams.get("trait_type")).toBe("all");
+      body = {
+      items: state.scopedNoAxis && !state.axisCreated ? [] : state.scoped ? [axis(state), {
+        ...axis(state), id: "wrong-object-axis", comparison_key: "behavior_boundary:陌生人",
+      }, {
+        ...axis(state), id: "wrong-dimension-axis", trait_type: "value",
+        comparison_key: "value:同伴签名",
+      }] : [axis(state)], total: state.scopedNoAxis && !state.axisCreated ? 0 : state.scoped ? 3 : 1, limit: 100, offset: 0,
+      };
+    }
+    else if (path === `${root}/character-trait-axes` && method === "POST" && state.scoped) {
+      state.axisPostCount = (state.axisPostCount || 0) + 1;
+      expect(route.request().postDataJSON()).toEqual({
+        trait_type: "behavior_boundary", display_name: "代签边界",
+        definition: "是否未经同伴授权代其签名",
+        positive_proposition: proposition,
+        comparison_key: "behavior_boundary:同伴签名",
+        applicability_scope: "需要同伴签字时",
+      });
+      state.axisCreated = true;
+      await route.fulfill({ status: 201, json: axis(state) });
+      return;
+    }
     else if (path === `${root}/character-trait-axes/${axisId}` && method === "GET") body = axis(state);
     else if (path === `${root}/character-trait-axes/${axisId}/positive-proposition` && method === "POST") {
       state.propositionPostCount += 1;
@@ -173,9 +208,34 @@ async function mockApi(page: Page, state: MockState) {
     else if (path === `${candidateRoot}/decisions` && method === "POST") {
       state.decisionPostCount += 1;
       const input = route.request().postDataJSON();
+      if (state.scoped && !input.approved_axis_id) {
+        expect(input.scope_applicability_confirmed).toBeUndefined();
+        expect(input.expected_axis_applicability_scope_sha256).toBeUndefined();
+        state.confirmed = true;
+        body = { candidate: candidate(state), decision_id: "review-unbound", deduplicated: false };
+        await route.fulfill({ status: 200, json: body });
+        return;
+      }
       expect(input.approved_axis_id).toBe(axisId);
       expect(input.axis_alignment).toBe("opposite");
       expect(input.expected_axis_positive_proposition_sha256).toBe(propositionHash);
+      if (state.scoped) {
+        expect(input.expected_axis_applicability_scope_sha256).toBe("d".repeat(64));
+        expect(input.scope_applicability_confirmed).toBe(true);
+        if (state.decisionErrorOnce) {
+          const code = state.decisionErrorOnce;
+          state.decisionErrorOnce = undefined;
+          await route.fulfill({ status: 409, json: { detail: { code, message: "binding rejected" } } });
+          return;
+        }
+        if (state.scopeConflictOnce) {
+          state.scopeConflictOnce = false;
+          await route.fulfill({ status: 409, json: {
+            detail: { code: "character_trait_axis_scope_conflict", message: "适用情境已变化" },
+          } });
+          return;
+        }
+      }
       state.confirmed = true;
       state.mapped = true;
       body = { candidate: candidate(state), decision_id: "review-axis", deduplicated: false };
@@ -220,6 +280,118 @@ test("legacy axis 409 offers in-page recovery without discarding the author's ch
   await page.getByRole("button", { name: "确认归纳" }).click();
   await expect(page.getByText(/归纳已确认并写入角色档案/)).toBeVisible();
   expect(state.propositionPostCount).toBe(2);
+  expect(state.decisionPostCount).toBe(1);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("scoped boundary review requires author applicability and clears it after a 409 refresh", async ({ page }) => {
+  const state: MockState = {
+    confirmed: false, mapped: false, proposition, preciseEvidence: true,
+    scoped: true, scopeConflictOnce: true,
+    propositionPostCount: 0, decisionPostCount: 0, unexpected: [],
+  };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
+  const detail = page.getByRole("region", { name: "归纳证据详情" });
+  const axisSelect = detail.getByLabel("项目内已有轴");
+  await expect(axisSelect).toBeVisible();
+  await expect(axisSelect.locator("option")).toHaveCount(2);
+  await axisSelect.selectOption(axisId);
+  await expect(detail.locator(".candidateAxisDefinition").getByText(/适用情境：需要同伴签字时/)).toBeVisible();
+  await detail.getByRole("radio", { name: /反向：模型标签的正向状态与作者比较句相反/ }).check();
+  await detail.getByRole("button", { name: "确认归纳" }).click();
+  const scopeAck = detail.getByRole("checkbox", { name: /我已根据上方原文判断/ });
+  await page.setViewportSize({ width: 375, height: 900 });
+  const panelBox = await detail.getByRole("region", { name: "作者批准比较轴" }).boundingBox();
+  expect(panelBox).not.toBeNull();
+  expect(panelBox!.x).toBeGreaterThanOrEqual(0);
+  expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(376);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(376);
+  await expect(scopeAck).toBeFocused();
+  await expect(detail.getByText(/请根据原文判断这一情境确实适用/)).toBeVisible();
+  expect(state.decisionPostCount).toBe(0);
+  await scopeAck.check();
+  await detail.getByRole("button", { name: "确认归纳" }).click();
+  await expect(page.getByText(/作者轴适用情境已变化/)).toBeVisible();
+  await expect(axisSelect).toHaveValue("");
+  await expect(scopeAck).toHaveCount(0);
+  await axisSelect.selectOption(axisId);
+  await expect(scopeAck).not.toBeChecked();
+  await detail.getByRole("radio", { name: /反向：模型标签的正向状态与作者比较句相反/ }).check();
+  await scopeAck.check();
+  await detail.getByRole("button", { name: "确认归纳" }).click();
+  await expect(page.getByText(/归纳与适用情境已由作者确认/)).toBeVisible();
+  expect(state.decisionPostCount).toBe(2);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("scoped candidate can still be confirmed as an ordinary unbound profile item", async ({ page }) => {
+  const state: MockState = {
+    confirmed: false, mapped: false, proposition, preciseEvidence: true,
+    scoped: true, propositionPostCount: 0, decisionPostCount: 0, unexpected: [],
+  };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
+  await expect(page.getByText(/若不绑定比较轴，仍可确认普通角色特征/)).toBeVisible();
+  await page.getByRole("button", { name: "确认归纳" }).click();
+  await expect(page.getByText(/归纳已确认并写入角色档案/)).toBeVisible();
+  expect(state.decisionPostCount).toBe(1);
+  expect(state.unexpected).toEqual([]);
+});
+
+for (const [code, expectedMessage] of [
+  ["character_trait_axis_source_unverified", /缺少可核对的模型来源或精确原文证据/],
+  ["character_trait_axis_integrity_invalid", /作者轴定义未通过完整性核对/],
+] as const) {
+  test(`scoped binding explains ${code} and retains the pending candidate`, async ({ page }) => {
+    const longScope = "需要同伴签字且持续存在授权边界".repeat(12);
+    const state: MockState = {
+      confirmed: false, mapped: false, proposition, preciseEvidence: true,
+      scoped: true, axisScope: longScope, decisionErrorOnce: code,
+      propositionPostCount: 0, decisionPostCount: 0, unexpected: [],
+    };
+    await mockApi(page, state);
+    await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
+    const detail = page.getByRole("region", { name: "归纳证据详情" });
+    const axisSelect = detail.getByLabel("项目内已有轴");
+    await expect(axisSelect.locator(`option[value="${axisId}"]`)).toContainText("适用：");
+    await axisSelect.selectOption(axisId);
+    const acknowledgment = detail.locator(".candidateAxisScopeAcknowledgment");
+    await page.setViewportSize({ width: 375, height: 900 });
+    await expect(acknowledgment).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(376);
+    await detail.getByRole("radio", { name: /反向：模型标签的正向状态与作者比较句相反/ }).check();
+    await detail.getByRole("checkbox", { name: /我已根据上方原文判断/ }).check();
+    await detail.getByRole("button", { name: "确认归纳" }).click();
+    await expect(page.getByText(expectedMessage)).toBeVisible();
+    expect(state.confirmed).toBe(false);
+    expect(state.decisionPostCount).toBe(1);
+    expect(state.unexpected).toEqual([]);
+  });
+}
+
+test("author can create an object-scoped boundary axis and then confirm its situation separately", async ({ page }) => {
+  const state: MockState = {
+    confirmed: false, mapped: false, proposition, preciseEvidence: true,
+    scoped: true, scopedNoAxis: true,
+    propositionPostCount: 0, decisionPostCount: 0, unexpected: [],
+  };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
+  await page.getByRole("button", { name: "创建新轴" }).click();
+  await page.getByLabel("轴名称").fill("代签边界");
+  await page.getByLabel("轴定义").fill("是否未经同伴授权代其签名");
+  await page.getByLabel("轴的正向命题").fill(proposition);
+  await page.getByLabel("轴的适用情境").fill("需要同伴签字时");
+  await page.getByRole("button", { name: "先创建作者轴" }).click();
+  await expect(page.getByText(/已创建并选中/)).toBeVisible();
+  expect(state.axisPostCount).toBe(1);
+  await page.getByRole("radio", { name: /反向：模型标签的正向状态与作者比较句相反/ }).check();
+  const scopeAck = page.getByRole("checkbox", { name: /我已根据上方原文判断/ });
+  await expect(scopeAck).not.toBeChecked();
+  await scopeAck.check();
+  await page.getByRole("button", { name: "确认归纳" }).click();
+  await expect(page.getByText(/归纳与适用情境已由作者确认/)).toBeVisible();
   expect(state.decisionPostCount).toBe(1);
   expect(state.unexpected).toEqual([]);
 });

@@ -2,7 +2,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError } from "../../api/client";
 import EvidenceList from "./EvidenceList";
 import TargetEvidencePreview from "./TargetEvidencePreview";
-import { canCreateNewAxis, confirmedAxisPolarity, previewAxisPolarity, selectedProjectAxis, validateAxisDraft, validateAxisPositiveProposition } from "./axisReview";
+import { canCreateNewAxis, confirmedAxisPolarity, isScopedAxisDimension, previewAxisPolarity, scopedCandidateCanBind, selectableAxesForCandidate, selectedProjectAxis, selectedReviewAxis, validateApplicabilityScope, validateAxisDraft, validateAxisPositiveProposition, validScopedComparisonKey } from "./axisReview";
 import { advanceReviewScope, isCurrentReviewRequest } from "./reviewScope";
 import {
   candidateOriginNames,
@@ -58,9 +58,16 @@ type CandidateReviewProps = {
   onBack: () => void;
   onRetryAxes: () => void;
   onLoadMoreAxes: () => void;
-  onCreateAxis: (input: { display_name: string; definition: string; positive_proposition: string }) => Promise<CharacterTraitAxis>;
+  onCreateAxis: (input: {
+    trait_type: CharacterTraitAxis["trait_type"];
+    display_name: string;
+    definition: string;
+    positive_proposition: string;
+    comparison_key?: string;
+    applicability_scope?: string;
+  }) => Promise<CharacterTraitAxis>;
   onSetAxisProposition: (axis: CharacterTraitAxis, positiveProposition: string) => Promise<CharacterTraitAxis>;
-  onDecision: (decision: CandidateDecision, comment: string, axis: CharacterTraitAxis | null, alignment: "same" | "opposite" | null) => void;
+  onDecision: (decision: CandidateDecision, comment: string, axis: CharacterTraitAxis | null, alignment: "same" | "opposite" | null, scopeApplicabilityConfirmed: boolean) => void;
 };
 
 const polarityNames: Record<NonNullable<ProfileCandidate["polarity"]>, string> = {
@@ -152,6 +159,10 @@ export default function CandidateReview({
   const [axisName, setAxisName] = useState("");
   const [axisDefinition, setAxisDefinition] = useState("");
   const [axisPositiveProposition, setAxisPositiveProposition] = useState("");
+  const [applicabilityScope, setApplicabilityScope] = useState("");
+  const [scopeTouched, setScopeTouched] = useState(false);
+  const [scopeConfirmed, setScopeConfirmed] = useState(false);
+  const [scopeError, setScopeError] = useState("");
   const [legacyAxisProposition, setLegacyAxisProposition] = useState("");
   const [legacyAxisPropositionError, setLegacyAxisPropositionError] = useState("");
   const [legacyAxisPropositionBusy, setLegacyAxisPropositionBusy] = useState(false);
@@ -169,6 +180,8 @@ export default function CandidateReview({
   const axisNameRef = useRef<HTMLInputElement | null>(null);
   const axisDefinitionRef = useRef<HTMLTextAreaElement | null>(null);
   const axisPropositionRef = useRef<HTMLTextAreaElement | null>(null);
+  const applicabilityScopeRef = useRef<HTMLTextAreaElement | null>(null);
+  const scopeCheckboxRef = useRef<HTMLInputElement | null>(null);
   const alignmentRef = useRef<HTMLFieldSetElement | null>(null);
   const createErrorSummaryRef = useRef<HTMLDivElement | null>(null);
   const createPendingRef = useRef(false);
@@ -195,6 +208,10 @@ export default function CandidateReview({
     setAxisName("");
     setAxisDefinition("");
     setAxisPositiveProposition("");
+    setApplicabilityScope("");
+    setScopeTouched(false);
+    setScopeConfirmed(false);
+    setScopeError("");
     setLegacyAxisProposition("");
     setLegacyAxisPropositionError("");
     setLegacyAxisPropositionBusy(false);
@@ -215,24 +232,32 @@ export default function CandidateReview({
     // re-selection before any newer axis version or proposition is trusted.
     if (axisChoice) {
       setAxisNeedsRecheck(true);
-      setAxisChoiceError("轴列表已刷新。原选择已保留，请核对正向命题后重新选择，才能继续确认。");
+      setAxisChoiceError("轴列表已刷新。原选择已保留，请重新核对轴定义、命题与适用情境后再确认。");
     }
     setUpdatedAxis(null);
+    setCreatedAxis(null);
     setAlignmentChoice("uncertain");
     setAlignmentError("");
+    setScopeConfirmed(false);
+    setScopeError("");
     // This effect intentionally reacts to a server refresh, not each local
     // choice; the current value is captured when that refresh arrives.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [axisRefreshKey]);
 
-  const selectedAxis = (updatedAxis?.id === axisChoice ? updatedAxis : null) ||
-    selectedProjectAxis(axes, axisChoice) ||
-    (createdAxis?.id === axisChoice ? createdAxis : null);
+  const scopedCandidate = Boolean(selected && isScopedAxisDimension(selected.dimension));
+  const scopedEligible = Boolean(selected && scopedCandidateCanBind(selected));
+  const candidateAxes = selected ? selectableAxesForCandidate(axes, selected) : [];
+  const locallySelectedAxes = selected ? selectableAxesForCandidate(
+    [updatedAxis, createdAxis].filter((axis): axis is CharacterTraitAxis => Boolean(axis)), selected,
+  ) : [];
+  const selectedAxis = selectedReviewAxis(candidateAxes, locallySelectedAxes, axisChoice);
   const confirmedAxis = selected?.approved_axis_id
-    ? selectedProjectAxis(axes, selected.approved_axis_id)
+    ? selectedProjectAxis(candidateAxes, selected.approved_axis_id)
     : null;
   const confirmedMappedPolarity = selected ? confirmedAxisPolarity(selected, confirmedAxis) : null;
   const axisDraft = validateAxisDraft(axisName, axisDefinition, axisPositiveProposition);
+  const scopeDraft = validateApplicabilityScope(applicabilityScope);
   const canCreateAxis = canCreateNewAxis({
     loaded: axisLoaded,
     loading: axisLoading,
@@ -249,9 +274,10 @@ export default function CandidateReview({
   }, [createdMessage, axisMode]);
 
   function confirmCandidate() {
-    if (selected?.dimension === "core_personality") {
+    const mustBind = selected?.dimension === "core_personality";
+    if (selected && (mustBind || (scopedCandidate && (axisChoice || axisMode === "new")))) {
       if (!selectedAxis) {
-        setAxisChoiceError("请先选择已有作者轴，或创建新轴后再确认。");
+        setAxisChoiceError("请先选择适用于此候选的作者轴，或创建新轴后再确认。");
         requestAnimationFrame(() => {
           if (axisMode === "existing") axisSelectRef.current?.focus();
           else axisNameRef.current?.focus();
@@ -276,10 +302,23 @@ export default function CandidateReview({
         requestAnimationFrame(() => alignmentRef.current?.focus());
         return;
       }
+      if (scopedCandidate) {
+        if (!scopedEligible || !selectedAxis.applicability_scope || !selectedAxis.applicability_scope_sha256) {
+          setAxisChoiceError("这条候选或作者轴缺少可核对的对象、原文证据或适用情境；请保留待审。");
+          requestAnimationFrame(() => axisSelectRef.current?.focus());
+          return;
+        }
+        if (!scopeConfirmed) {
+          setScopeError("请根据原文判断这一情境确实适用，再勾选确认；不确定时保留待审。");
+          requestAnimationFrame(() => scopeCheckboxRef.current?.focus());
+          return;
+        }
+      }
     }
     setAxisChoiceError("");
     setAlignmentError("");
-    onDecision("confirm", comment, selectedAxis, selected?.dimension === "core_personality" && alignmentChoice !== "uncertain" ? alignmentChoice : null);
+    setScopeError("");
+    onDecision("confirm", comment, selectedAxis, selectedAxis && alignmentChoice !== "uncertain" ? alignmentChoice : null, scopedCandidate && Boolean(selectedAxis) && scopeConfirmed);
   }
 
   async function submitLegacyAxisProposition(event: FormEvent<HTMLFormElement>) {
@@ -311,14 +350,16 @@ export default function CandidateReview({
     setNameTouched(true);
     setDefinitionTouched(true);
     setPropositionTouched(true);
+    if (scopedCandidate) setScopeTouched(true);
     setCreateError("");
-    const invalid = Object.entries(axisDraft.errors).filter(([, message]) => message);
+    const invalid = Object.entries({ ...axisDraft.errors, ...(scopedCandidate ? { applicability_scope: scopeDraft.error } : {}) }).filter(([, message]) => message);
     if (invalid.length) {
       requestAnimationFrame(() => {
         if (invalid.length > 1) createErrorSummaryRef.current?.focus();
         else if (invalid[0]?.[0] === "display_name") axisNameRef.current?.focus();
         else if (invalid[0]?.[0] === "definition") axisDefinitionRef.current?.focus();
-        else axisPropositionRef.current?.focus();
+        else if (invalid[0]?.[0] === "positive_proposition") axisPropositionRef.current?.focus();
+        else applicabilityScopeRef.current?.focus();
       });
       return;
     }
@@ -328,14 +369,24 @@ export default function CandidateReview({
       isCurrentReviewRequest(reviewScopeRef.current, startedScope, createRequestRef.current, requestId);
     createPendingRef.current = true;
     try {
-      const created = await onCreateAxis(axisDraft.value);
+      if (!selected || (scopedCandidate && !scopedEligible)) return;
+      const created = await onCreateAxis({
+        trait_type: selected.dimension as CharacterTraitAxis["trait_type"],
+        ...axisDraft.value,
+        ...(scopedCandidate ? {
+          comparison_key: validScopedComparisonKey(selected) || undefined,
+          applicability_scope: scopeDraft.value,
+        } : {}),
+      });
       if (!isCurrentRequest()) return;
       setCreatedAxis(created);
       setAxisChoice(created.id);
       setAxisNeedsRecheck(false);
       setAxisMode("existing");
       setAxisChoiceError("");
-      setCreatedMessage(`“${created.display_name}”已创建并选中。请核对正向命题和证据，再明确选择方向。`);
+      setScopeConfirmed(false);
+      setScopeError("");
+      setCreatedMessage(`“${created.display_name}”已创建并选中。请核对命题、原文${scopedCandidate ? "与适用情境" : ""}，再明确选择方向。`);
     } catch (error) {
       if (isCurrentRequest()) setCreateError(axisCreateError(error));
     } finally {
@@ -614,23 +665,38 @@ export default function CandidateReview({
 
               <section className={`candidateDecision ${review?.allowed ? "ready" : "blocked"}`}>
                 <p>{review?.label}</p>
-                {selected.dimension === "core_personality" && selected.status === "pending" && (
+                {scopedCandidate && !scopedEligible && selected.status === "pending" && (
+                  <p className="candidateAxisHint" role="status">
+                    此候选暂不能绑定对象与情境比较轴：需明确设定来源、单条已核对的原文证据、有效对象键及明确方向。仍可按现有流程审核普通角色特征。
+                  </p>
+                )}
+                {(selected.dimension === "core_personality" || (scopedCandidate && scopedEligible)) && selected.status === "pending" && (
                   <section className="candidateAxisBinding" aria-labelledby={`candidate-axis-heading-${selected.id}`}>
                     <h4 id={`candidate-axis-heading-${selected.id}`}>作者批准比较轴</h4>
-                    <p>轴只定义“比较什么”，不代表当前候选一定正确。创建与确认分两步；绑定只影响之后创建的分析，既有报告不会改写。</p>
+                    <p>{scopedCandidate
+                      ? "先核对原文，再决定这条候选是否属于所选对象与情境。确认仅建立作者认可的角色基线；价值观和行为边界的新稿漂移检测仍在开发中。"
+                      : "轴只定义“比较什么”，不代表当前候选一定正确。创建与确认分两步；绑定只影响之后创建的分析，既有报告不会改写。"}</p>
+                    {scopedCandidate && (
+                      <div className="candidateAxisScopeReview">
+                        <b>当前候选</b>
+                        <p>{candidateDisplayStatement(selected)}</p>
+                        <p><strong>比较对象：</strong>{validScopedComparisonKey(selected)?.split(":").slice(1).join(":") || "未能核对"}</p>
+                        <p><strong>原文证据：</strong>{selected.supporting_evidence[0]?.text || "原文缺失"}</p>
+                      </div>
+                    )}
                     <div className="candidateAxisMode" role="group" aria-label="作者轴来源">
                       <button
                         type="button"
                         className={axisMode === "existing" ? "active" : ""}
                         aria-pressed={axisMode === "existing"}
-                        onClick={() => { setAxisMode("existing"); setAxisChoiceError(""); setAlignmentChoice("uncertain"); }}
+                        onClick={() => { setAxisMode("existing"); setAxisChoiceError(""); setAlignmentChoice("uncertain"); setScopeConfirmed(false); setScopeError(""); }}
                       >选择已有轴</button>
                       <button
                         type="button"
                         className={axisMode === "new" ? "active" : ""}
                         aria-pressed={axisMode === "new"}
                         disabled={!review?.allowed || !canCreateAxis || Boolean(decisionBusy) || axisCreateBusy}
-                        onClick={() => { setAxisMode("new"); setAxisChoice(""); setUpdatedAxis(null); setAxisNeedsRecheck(false); setAxisChoiceError(""); setAlignmentChoice("uncertain"); setCreatedMessage(""); }}
+                        onClick={() => { setAxisMode("new"); setAxisChoice(""); setUpdatedAxis(null); setAxisNeedsRecheck(false); setAxisChoiceError(""); setAlignmentChoice("uncertain"); setScopeConfirmed(false); setScopeError(""); setCreatedMessage(""); }}
                       >创建新轴</button>
                     </div>
                     {axisLoading && <p className="candidateAxisHint" role="status">正在读取当前项目的作者轴…</p>}
@@ -642,7 +708,7 @@ export default function CandidateReview({
                     )}
                     {axisListDirty && !axisError && (
                       <div className="candidateAxisPagination">
-                        <p>刚创建的轴已选中，可以继续确认本候选。若要再建新轴，请先刷新列表核对其它页面可能新增的轴。</p>
+                        <p>刚创建的轴已选中。请重新核对候选原文、轴定义和适用情境。若要再建新轴，请先刷新列表。</p>
                         <button type="button" onClick={onRetryAxes}>重新读取作者轴</button>
                       </div>
                     )}
@@ -665,22 +731,26 @@ export default function CandidateReview({
                           disabled={!review?.allowed || axisLoading || Boolean(decisionBusy) || axisCreateBusy}
                           aria-invalid={Boolean(axisChoiceError)}
                           aria-describedby={`candidate-axis-help-${selected.id}${axisChoiceError ? ` candidate-axis-error-${selected.id}` : ""}`}
-                          onChange={(event) => { setAxisChoice(event.target.value); setUpdatedAxis(null); setAxisNeedsRecheck(false); setLegacyAxisProposition(""); setLegacyAxisPropositionError(""); setAlignmentChoice("uncertain"); setAlignmentError(""); setAxisChoiceError(""); setCreatedMessage(""); }}
+                          onChange={(event) => { setAxisChoice(event.target.value); setUpdatedAxis(null); setAxisNeedsRecheck(false); setLegacyAxisProposition(""); setLegacyAxisPropositionError(""); setAlignmentChoice("uncertain"); setAlignmentError(""); setScopeConfirmed(false); setScopeError(""); setAxisChoiceError(""); setCreatedMessage(""); }}
                         >
                           <option value="">请选择比较轴</option>
-                          {axes.map((axis) => (
-                            <option key={axis.id} value={axis.id}>{axis.display_name} · v{axis.version}</option>
+                          {candidateAxes.map((axis) => (
+                            <option key={axis.id} value={axis.id}>{axis.display_name} · v{axis.version}{axis.applicability_scope ? ` · 适用：${Array.from(axis.applicability_scope).slice(0, 18).join("")}${Array.from(axis.applicability_scope).length > 18 ? "…" : ""}` : ""}</option>
                           ))}
-                          {createdAxis && !axes.some((axis) => axis.id === createdAxis.id) && (
-                            <option value={createdAxis.id}>{createdAxis.display_name} · v{createdAxis.version}（刚创建）</option>
+                          {createdAxis && locallySelectedAxes.some((axis) => axis.id === createdAxis.id) && !candidateAxes.some((axis) => axis.id === createdAxis.id) && (
+                            <option value={createdAxis.id}>{createdAxis.display_name} · v{createdAxis.version}{createdAxis.applicability_scope ? ` · 适用：${Array.from(createdAxis.applicability_scope).slice(0, 18).join("")}${Array.from(createdAxis.applicability_scope).length > 18 ? "…" : ""}` : ""}（刚创建）</option>
                           )}
                         </select>
                         <p id={`candidate-axis-help-${selected.id}`} className="candidateAxisHint">
-                          {axes.length ? "请核对定义与原文是否是同一语义轴；相近措辞不等于同一轴。" : "此项目还没有作者轴。读取完成后可创建新轴。"}
+                          {candidateAxes.length ? "请核对轴定义、对象、情境与原文；相近措辞不等于同一轴。" : scopedCandidate ? "尚无同维度、同对象的轴。可创建新轴，也可仅确认普通角色特征。" : "此项目还没有核心性格轴。读取完成后可创建新轴。"}
                         </p>
                         {selectedAxis && (
                           <div className="candidateAxisDefinition">
                             <b>{selectedAxis.display_name}</b><p>{selectedAxis.definition}</p>
+                            {scopedCandidate && <>
+                              <p><strong>比较对象：</strong>{selectedAxis.comparison_key?.split(":").slice(1).join(":")}</p>
+                              <p><strong>适用情境：</strong>{selectedAxis.applicability_scope}</p>
+                            </>}
                             <p><strong>作者比较句（轴正向）：</strong>{selectedAxis.positive_proposition || "尚未由作者定义"}</p>
                             <p>“正向”只是作者定义的比较坐标，不是好坏评价，也不代表这句话已在剧情中发生。</p>
                           </div>
@@ -689,10 +759,10 @@ export default function CandidateReview({
                           <button
                             type="button"
                             className="candidateAxisRecheck"
-                            onClick={() => { setAxisNeedsRecheck(false); setAxisChoiceError(""); setAlignmentChoice("uncertain"); }}
-                          >我已核对刷新后的轴定义与命题</button>
+                            onClick={() => { setAxisNeedsRecheck(false); setAxisChoiceError(""); setAlignmentChoice("uncertain"); setScopeConfirmed(false); setScopeError(""); }}
+                          >我已核对刷新后的轴定义{scopedCandidate ? "、对象、情境" : "与命题"}</button>
                         )}
-                        {selectedAxis && !selectedAxis.positive_proposition && (
+                        {selectedAxis && !scopedCandidate && !selectedAxis.positive_proposition && (
                           <form className="candidateAxisCreate" onSubmit={(event) => void submitLegacyAxisProposition(event)} noValidate>
                             <label htmlFor={`candidate-axis-legacy-proposition-${selected.id}`}>为旧作者轴补写正向命题</label>
                             <textarea
@@ -720,13 +790,14 @@ export default function CandidateReview({
                     {axisMode === "new" && (
                       <form className="candidateAxisCreate" onSubmit={(event) => void submitNewAxis(event)} noValidate>
                         {axisChoiceError && <p className="candidateFieldError" role="alert">{axisChoiceError}</p>}
-                        {createAttempted && Object.values(axisDraft.errors).filter(Boolean).length > 1 && (
+                        {createAttempted && Object.values({ ...axisDraft.errors, ...(scopedCandidate ? { applicability_scope: scopeDraft.error } : {}) }).filter(Boolean).length > 1 && (
                           <div className="candidateAxisErrorSummary" role="alert" tabIndex={-1} ref={createErrorSummaryRef}>
                             <b>请先修正以下内容</b>
                             <ul>
                               {axisDraft.errors.display_name && <li><a href={`#candidate-axis-name-${selected.id}`}>{axisDraft.errors.display_name}</a></li>}
                               {axisDraft.errors.definition && <li><a href={`#candidate-axis-definition-${selected.id}`}>{axisDraft.errors.definition}</a></li>}
                               {axisDraft.errors.positive_proposition && <li><a href={`#candidate-axis-proposition-${selected.id}`}>{axisDraft.errors.positive_proposition}</a></li>}
+                              {scopedCandidate && scopeDraft.error && <li><a href={`#candidate-axis-scope-${selected.id}`}>{scopeDraft.error}</a></li>}
                             </ul>
                           </div>
                         )}
@@ -742,7 +813,7 @@ export default function CandidateReview({
                           onChange={(event) => setAxisName(event.target.value)}
                           onBlur={() => setNameTouched(true)}
                         />
-                        <p id={`candidate-axis-name-help-${selected.id}`} className="candidateAxisHint">例如“涉及同伴安全的路线决策”。不要把正反方向写进名称。</p>
+                        <p id={`candidate-axis-name-help-${selected.id}`} className="candidateAxisHint">{scopedCandidate ? "给当前对象与情境的比较轴取一个便于识别的名称。" : "例如“涉及同伴安全的路线决策”。不要把正反方向写进名称。"}</p>
                         {(nameTouched || createAttempted) && axisDraft.errors.display_name && <p id={`candidate-axis-name-error-${selected.id}`} className="candidateFieldError" role="alert">{axisDraft.errors.display_name}</p>}
                         <label htmlFor={`candidate-axis-definition-${selected.id}`}>轴定义</label>
                         <textarea
@@ -756,7 +827,7 @@ export default function CandidateReview({
                           onChange={(event) => setAxisDefinition(event.target.value)}
                           onBlur={() => setDefinitionTouched(true)}
                         />
-                        <p id={`candidate-axis-definition-help-${selected.id}`} className="candidateAxisHint">说明比较的具体行为边界；另用正向命题明确判定方向。</p>
+                        <p id={`candidate-axis-definition-help-${selected.id}`} className="candidateAxisHint">说明比较的{scopedCandidate ? "价值取向或行为边界" : "具体行为边界"}；另用正向命题明确判定方向。</p>
                         {(definitionTouched || createAttempted) && axisDraft.errors.definition && <p id={`candidate-axis-definition-error-${selected.id}`} className="candidateFieldError" role="alert">{axisDraft.errors.definition}</p>}
                         <label htmlFor={`candidate-axis-proposition-${selected.id}`}>轴的正向命题</label>
                         <textarea
@@ -770,8 +841,27 @@ export default function CandidateReview({
                           onChange={(event) => setAxisPositiveProposition(event.target.value)}
                           onBlur={() => setPropositionTouched(true)}
                         />
-                        <p id={`candidate-axis-proposition-help-${selected.id}`} className="candidateAxisHint">例如“角色未经授权冒用同伴签名”。这只定义何为正向，不表示角色已这样做。</p>
+                        <p id={`candidate-axis-proposition-help-${selected.id}`} className="candidateAxisHint">{scopedCandidate ? "写出在当前对象与情境下用于比较的具体正向命题。" : "例如“角色未经授权冒用同伴签名”。"}这只定义何为正向，不表示角色已这样做。</p>
                         {(propositionTouched || createAttempted) && axisDraft.errors.positive_proposition && <p id={`candidate-axis-proposition-error-${selected.id}`} className="candidateFieldError" role="alert">{axisDraft.errors.positive_proposition}</p>}
+                        {scopedCandidate && (
+                          <>
+                            <p className="candidateAxisHint">比较对象取自已核对的候选对象键：{validScopedComparisonKey(selected)?.split(":").slice(1).join(":")}。新轴只对这个对象生效。</p>
+                            <label htmlFor={`candidate-axis-scope-${selected.id}`}>轴的适用情境</label>
+                            <textarea
+                              ref={applicabilityScopeRef}
+                              id={`candidate-axis-scope-${selected.id}`}
+                              value={applicabilityScope}
+                              maxLength={200}
+                              disabled={!review?.allowed || axisCreateBusy || Boolean(decisionBusy)}
+                              aria-invalid={Boolean((scopeTouched || createAttempted) && scopeDraft.error)}
+                              aria-describedby={`candidate-axis-scope-help-${selected.id}${(scopeTouched || createAttempted) && scopeDraft.error ? ` candidate-axis-scope-error-${selected.id}` : ""}`}
+                              onChange={(event) => { setApplicabilityScope(event.target.value); setScopeError(""); }}
+                              onBlur={() => setScopeTouched(true)}
+                            />
+                            <p id={`candidate-axis-scope-help-${selected.id}`} className="candidateAxisHint">写出何时、对谁、在什么条件下适用；不要写“任何时候”，除非原文确实如此。</p>
+                            {(scopeTouched || createAttempted) && scopeDraft.error && <p id={`candidate-axis-scope-error-${selected.id}`} className="candidateFieldError" role="alert">{scopeDraft.error}</p>}
+                          </>
+                        )}
                         <button type="submit" disabled={!review?.allowed || axisCreateBusy || Boolean(decisionBusy) || !canCreateAxis}>
                           {axisCreateBusy ? "正在创建作者轴…" : "先创建作者轴"}
                         </button>
@@ -797,6 +887,26 @@ export default function CandidateReview({
                         {alignmentError && <p id={`candidate-axis-alignment-error-${selected.id}`} className="candidateFieldError" role="alert">{alignmentError}</p>}
                       </fieldset>
                     )}
+                    {scopedCandidate && selectedAxis?.applicability_scope && (
+                      <div className="candidateAxisScopeAcknowledgment">
+                        <label htmlFor={`candidate-axis-scope-confirm-${selected.id}`}>
+                          <input
+                            ref={scopeCheckboxRef}
+                            id={`candidate-axis-scope-confirm-${selected.id}`}
+                            type="checkbox"
+                            checked={scopeConfirmed}
+                            disabled={!review?.allowed || Boolean(decisionBusy) || axisNeedsRecheck}
+                            aria-invalid={Boolean(scopeError)}
+                            aria-describedby={`candidate-axis-scope-confirm-help-${selected.id}${scopeError ? ` candidate-axis-scope-confirm-error-${selected.id}` : ""}`}
+                            onChange={(event) => { setScopeConfirmed(event.target.checked); setScopeError(""); }}
+                          />
+                          <span>我已根据上方原文判断：这条候选确实适用于“{selectedAxis.applicability_scope}”</span>
+                        </label>
+                        <p id={`candidate-axis-scope-confirm-help-${selected.id}`}>对象键相同不能证明情境适用；此判断由作者负责。不确定时暂不勾选，可保留待审。</p>
+                        {scopeError && <p id={`candidate-axis-scope-confirm-error-${selected.id}`} className="candidateFieldError" role="alert">{scopeError}</p>}
+                      </div>
+                    )}
+                    {scopedCandidate && <p className="candidateAxisHint">若不绑定比较轴，仍可确认普通角色特征；后续需要作者另行建立轴基线。</p>}
                   </section>
                 )}
                 <label htmlFor={`candidate-comment-${selected.id}`}>
@@ -822,7 +932,7 @@ export default function CandidateReview({
                   <button
                     type="button"
                     disabled={Boolean(decisionBusy) || !review?.allowed}
-                    onClick={() => onDecision("reject", comment, null, null)}
+                    onClick={() => onDecision("reject", comment, null, null, false)}
                   >
                     {candidateDecisionLabel("reject", decisionBusy)}
                   </button>

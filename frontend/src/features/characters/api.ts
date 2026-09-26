@@ -527,6 +527,10 @@ export function normalizeCharacterTraitAxis(
   const definition = text(source.definition);
   const version = positiveInteger(source.version);
   const digest = text(source.definition_sha256);
+  const traitType = source.trait_type;
+  const comparisonKey = optionalText(source.comparison_key);
+  const applicabilityScope = optionalText(source.applicability_scope);
+  const applicabilityScopeDigest = optionalText(source.applicability_scope_sha256);
   const rawProposition = source.positive_proposition;
   const rawPropositionDigest = source.positive_proposition_sha256;
   const positiveProposition = optionalText(rawProposition);
@@ -534,24 +538,32 @@ export function normalizeCharacterTraitAxis(
   if (
     !id ||
     source.project_id !== projectId ||
-    source.trait_type !== "core_personality" ||
+    (traitType !== "core_personality" && traitType !== "value" && traitType !== "behavior_boundary") ||
     !version ||
     !name ||
     !definition ||
     !/^[a-f0-9]{64}$/.test(digest) ||
     Boolean(positiveProposition) !== Boolean(positivePropositionDigest) ||
-    (positivePropositionDigest !== null && !/^[a-f0-9]{64}$/.test(positivePropositionDigest))
+    (positivePropositionDigest !== null && !/^[a-f0-9]{64}$/.test(positivePropositionDigest)) ||
+    (traitType === "core_personality" && (comparisonKey !== null || applicabilityScope !== null || applicabilityScopeDigest !== null)) ||
+    (traitType !== "core_personality" && (
+      !positiveProposition || !comparisonKey || !applicabilityScope ||
+      !applicabilityScopeDigest || !/^[a-f0-9]{64}$/.test(applicabilityScopeDigest)
+    ))
   ) {
     throw new TypeError("作者轴格式无效或不属于当前项目");
   }
   return {
     id,
     project_id: projectId,
-    trait_type: "core_personality",
+    trait_type: traitType,
     version,
     display_name: name,
     definition,
     definition_sha256: digest,
+    comparison_key: comparisonKey,
+    applicability_scope: applicabilityScope,
+    applicability_scope_sha256: applicabilityScopeDigest,
     positive_proposition: positiveProposition,
     positive_proposition_sha256: positivePropositionDigest,
     created_at: optionalText(source.created_at),
@@ -560,12 +572,16 @@ export function normalizeCharacterTraitAxis(
 
 export async function fetchCharacterTraitAxes(
   projectId: string,
-  input: { limit?: number; offset?: number } = {},
+  input: { limit?: number; offset?: number; trait_type?: CharacterTraitAxis["trait_type"] | "all" } = {},
   signal?: AbortSignal,
 ): Promise<CharacterTraitAxisPage> {
   const limit = input.limit ?? 100;
   const offset = input.offset ?? 0;
-  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  // The server defaults to core_personality for older clients. Reviews must
+  // request all dimensions so a newly created scoped axis remains selectable.
+  const params = new URLSearchParams({
+    limit: String(limit), offset: String(offset), trait_type: input.trait_type ?? "all",
+  });
   const source = requiredRecord(
     await apiJson<unknown>(`${characterTraitAxesPath(projectId)}?${params}`, { signal }),
     "作者轴列表",
@@ -592,7 +608,14 @@ export async function fetchCharacterTraitAxes(
 
 export async function createCharacterTraitAxis(
   projectId: string,
-  input: { display_name: string; definition: string; positive_proposition: string },
+  input: {
+    trait_type?: CharacterTraitAxis["trait_type"];
+    display_name: string;
+    definition: string;
+    positive_proposition: string;
+    comparison_key?: string;
+    applicability_scope?: string;
+  },
 ): Promise<CharacterTraitAxis> {
   // The creation endpoint does not yet offer server-side idempotency. Never
   // replay an uncertain request automatically or a transport loss could create
@@ -600,7 +623,7 @@ export async function createCharacterTraitAxis(
   const payload = await apiJson<unknown>(characterTraitAxesPath(projectId), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ trait_type: "core_personality", ...input }),
+    body: JSON.stringify({ trait_type: input.trait_type ?? "core_personality", ...input }),
   });
   return normalizeCharacterTraitAxis(payload, projectId);
 }

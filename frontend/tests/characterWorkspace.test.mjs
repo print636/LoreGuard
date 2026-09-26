@@ -25,8 +25,13 @@ import {
   appendAxisPage,
   canCreateNewAxis,
   confirmedAxisPolarity,
+  scopedCandidateCanBind,
+  selectableAxesForCandidate,
+  validateApplicabilityScope,
+  validScopedComparisonKey,
   previewAxisPolarity,
   selectedProjectAxis,
+  selectedReviewAxis,
   validateAxisDraft,
   validateAxisPositiveProposition,
 } from "../src/features/characters/axisReview.ts";
@@ -712,7 +717,7 @@ test("author axis list is project scoped and rejects malformed or cross-project 
   assert.equal(characterTraitAxesPath("project a"), "/api/v1/projects/project%20a/character-trait-axes");
   assert.equal(characterTraitAxisPath("project a", "axis/1"), "/api/v1/projects/project%20a/character-trait-axes/axis%2F1");
   globalThis.fetch = async (url) => {
-    assert.equal(String(url), "/api/v1/projects/project-1/character-trait-axes?limit=100&offset=0");
+    assert.equal(String(url), "/api/v1/projects/project-1/character-trait-axes?limit=100&offset=0&trait_type=all");
     return new Response(JSON.stringify({ items: [axis], total: 2, limit: 100, offset: 0 }), { status: 200 });
   };
   const page = await fetchCharacterTraitAxes("project-1");
@@ -725,6 +730,73 @@ test("author axis list is project scoped and rejects malformed or cross-project 
     items: [{ ...axis, project_id: "another-project" }], total: 1, limit: 100, offset: 0,
   }), { status: 200 });
   await assert.rejects(fetchCharacterTraitAxes("project-1"), /不属于当前项目/);
+});
+
+test("axis review uses the saved version until the list catches up, then trusts the newer list", () => {
+  const axis = { id: "axis-1", version: 1, positive_proposition: null };
+  const saved = { ...axis, version: 2, positive_proposition: "始终告知同伴" };
+  const refreshed = { ...axis, version: 3, positive_proposition: "必须事先告知同伴" };
+  assert.equal(selectedReviewAxis([axis], [saved], axis.id), saved);
+  assert.equal(selectedReviewAxis([refreshed], [saved], axis.id), refreshed);
+  assert.equal(selectedReviewAxis([], [saved], axis.id), saved);
+  assert.equal(selectedReviewAxis([axis], [], axis.id), axis);
+});
+
+test("scoped axis options require the candidate dimension and exact object key", () => {
+  const evidence = { ...candidate().supporting_evidence[0], context_verified: true, document_role: "character_profile" };
+  const scoped = candidate({
+    dimension: "value", comparison_key: "value:家人", polarity: "positive",
+    support_bindings_status: "verified", support_bindings_v1: { bindings: [{}] },
+    supporting_evidence: [evidence],
+  });
+  const axis = (id, trait_type, comparison_key) => ({
+    id, trait_type, comparison_key, applicability_scope: "家庭危机时",
+    applicability_scope_sha256: "a".repeat(64),
+  });
+  assert.equal(validScopedComparisonKey(scoped), "value:家人");
+  assert.equal(scopedCandidateCanBind(scoped), true);
+  assert.deepEqual(selectableAxesForCandidate([
+    axis("matching", "value", "value:家人"),
+    axis("other-object", "value", "value:同伴"),
+    axis("other-dimension", "behavior_boundary", "behavior_boundary:家人"),
+  ], scoped).map(({ id }) => id), ["matching"]);
+  assert.equal(scopedCandidateCanBind({ ...scoped, polarity: "unclear" }), false);
+  assert.equal(scopedCandidateCanBind({ ...scoped, status: "stale" }), false);
+  assert.equal(scopedCandidateCanBind({ ...scoped, origin: "unknown" }), false);
+  assert.equal(scopedCandidateCanBind({ ...scoped, support_bindings_status: "legacy" }), false);
+  assert.equal(validScopedComparisonKey({ ...scoped, comparison_key: "value: 家人" }), null);
+  assert.deepEqual(selectableAxesForCandidate([axis("matching", "value", "value:家人")], {
+    ...scoped, comparison_key: "value: 家人",
+  }), []);
+  assert.equal(validateApplicabilityScope(" ").error.includes("适用"), true);
+  assert.equal(validateApplicabilityScope("  家庭\n危机时 ").value, "家庭 危机时");
+});
+
+test("scoped axis adapter requires object, situation and hashes before review", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const scoped = {
+    id: "axis-scoped", project_id: "project-1", trait_type: "value", version: 1,
+    display_name: "家人优先", definition: "家庭危机时是否照顾家人",
+    definition_sha256: "a".repeat(64), comparison_key: "value:家人",
+    applicability_scope: "家庭危机时", applicability_scope_sha256: "b".repeat(64),
+    positive_proposition: "优先照顾家人", positive_proposition_sha256: "c".repeat(64),
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    items: [scoped], total: 1, limit: 100, offset: 0,
+  }));
+  assert.equal((await fetchCharacterTraitAxes("project-1")).items[0].applicability_scope, "家庭危机时");
+  for (const damaged of [
+    { ...scoped, applicability_scope_sha256: null },
+    { ...scoped, applicability_scope_sha256: "not-a-hash" },
+    { ...scoped, comparison_key: null },
+    { ...scoped, positive_proposition: null, positive_proposition_sha256: null },
+  ]) {
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      items: [damaged], total: 1, limit: 100, offset: 0,
+    }));
+    await assert.rejects(fetchCharacterTraitAxes("project-1"), /作者轴格式无效/);
+  }
 });
 
 test("author axis creation sends CSRF once and does not replay uncertain POST", async (context) => {
@@ -750,6 +822,47 @@ test("author axis creation sends CSRF once and does not replay uncertain POST", 
     positive_proposition: "危急决策前征询当值同伴",
   }), /connection lost/);
   assert.equal(calls, 1);
+});
+
+test("scoped axis creation and review submit the authored object and explicit scope acknowledgment", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  context.after(() => { globalThis.fetch = originalFetch; globalThis.document = originalDocument; });
+  globalThis.document = { cookie: "loreguard_csrf=scoped-axis-token" };
+  const requests = [];
+  const axis = {
+    id: "axis-scoped", project_id: "project-1", trait_type: "behavior_boundary",
+    version: 1, display_name: "代签边界", definition: "是否未经允许代签",
+    definition_sha256: "a".repeat(64), comparison_key: "behavior_boundary:同伴签名",
+    applicability_scope: "需要同伴签字时", applicability_scope_sha256: "b".repeat(64),
+    positive_proposition: "未经许可不代签", positive_proposition_sha256: "c".repeat(64),
+  };
+  globalThis.fetch = async (url, init) => {
+    requests.push({ path: String(url), body: JSON.parse(init.body), headers: new Headers(init.headers) });
+    return new Response(JSON.stringify(String(url).endsWith("/decisions")
+      ? { candidate: candidate({ status: "confirmed", dimension: "behavior_boundary" }) }
+      : axis), { status: String(url).endsWith("/decisions") ? 200 : 201 });
+  };
+  const created = await createCharacterTraitAxis("project-1", {
+    trait_type: "behavior_boundary", display_name: "代签边界",
+    definition: "是否未经允许代签", positive_proposition: "未经许可不代签",
+    comparison_key: "behavior_boundary:同伴签名", applicability_scope: "需要同伴签字时",
+  });
+  assert.equal(created.applicability_scope_sha256, "b".repeat(64));
+  await submitCandidateDecision("project-1", "林澈", "candidate-1", {
+    decision: "confirm", comment: "原文显示在此情境适用", expected_revision: 3,
+    approved_axis_id: created.id, expected_axis_version: created.version,
+    axis_alignment: "same",
+    expected_axis_positive_proposition_sha256: created.positive_proposition_sha256,
+    expected_axis_applicability_scope_sha256: created.applicability_scope_sha256,
+    scope_applicability_confirmed: true,
+  });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].body.comparison_key, "behavior_boundary:同伴签名");
+  assert.equal(requests[0].body.applicability_scope, "需要同伴签字时");
+  assert.equal(requests[1].body.scope_applicability_confirmed, true);
+  assert.equal(requests[1].body.expected_axis_applicability_scope_sha256, "b".repeat(64));
+  assert.ok(requests.every((request) => request.headers.get("X-CSRF-Token") === "scoped-axis-token"));
 });
 
 test("axis draft validates on meaningful normalized content", () => {

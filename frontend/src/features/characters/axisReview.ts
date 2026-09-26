@@ -10,6 +10,59 @@ function normalizedText(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
 }
 
+export function isScopedAxisDimension(
+  dimension: ProfileCandidate["dimension"],
+): dimension is "value" | "behavior_boundary" {
+  return dimension === "value" || dimension === "behavior_boundary";
+}
+
+export function validScopedComparisonKey(candidate: ProfileCandidate): string | null {
+  if (!isScopedAxisDimension(candidate.dimension) || !candidate.comparison_key) return null;
+  const key = candidate.comparison_key;
+  const prefix = `${candidate.dimension}:`;
+  const object = key.startsWith(prefix) ? key.slice(prefix.length) : "";
+  return key.length <= 200 && object && !/[:\s\p{C}]/u.test(object) &&
+    object.normalize("NFKC").toLowerCase() === object ? key : null;
+}
+
+export function selectableAxesForCandidate(
+  axes: CharacterTraitAxis[],
+  candidate: ProfileCandidate,
+): CharacterTraitAxis[] {
+  if (candidate.dimension === "core_personality") {
+    return axes.filter((axis) => axis.trait_type === "core_personality");
+  }
+  const key = validScopedComparisonKey(candidate);
+  return key ? axes.filter((axis) =>
+    axis.trait_type === candidate.dimension && axis.comparison_key === key &&
+    Boolean(axis.applicability_scope && axis.applicability_scope_sha256),
+  ) : [];
+}
+
+export function scopedCandidateCanBind(candidate: ProfileCandidate): boolean {
+  return Boolean(
+    validScopedComparisonKey(candidate) && candidate.status === "pending" &&
+    candidate.reviewable && candidate.origin === "explicit_setting" &&
+    candidate.source_verified && candidate.support_bindings_status === "verified" &&
+    candidate.support_bindings_v1?.bindings.length &&
+    candidate.supporting_evidence.length === 1 &&
+    candidate.supporting_evidence[0].context_verified &&
+    candidate.supporting_evidence[0].document_role === "character_profile" &&
+    (candidate.polarity === "positive" || candidate.polarity === "negative"),
+  );
+}
+
+export function validateApplicabilityScope(value: string): { value: string; error: string } {
+  const scope = normalizedText(value);
+  const length = Array.from(scope).length;
+  return {
+    value: scope,
+    error: !scope ? "请描述这条比较轴适用的具体情境。"
+      : length > 200 ? "适用情境不能超过 200 字。"
+        : "",
+  };
+}
+
 export function validateAxisDraft(
   displayName: string,
   definition: string,
@@ -97,6 +150,17 @@ export function selectedProjectAxis(
   selectedId: string,
 ): CharacterTraitAxis | null {
   return axes.find((axis) => axis.id === selectedId) ?? null;
+}
+
+/** Prefer a newly saved version while the list still contains its older copy. */
+export function selectedReviewAxis(
+  listedAxes: CharacterTraitAxis[],
+  localAxes: CharacterTraitAxis[],
+  selectedId: string,
+): CharacterTraitAxis | null {
+  const listed = selectedProjectAxis(listedAxes, selectedId);
+  const local = selectedProjectAxis(localAxes, selectedId);
+  return local && (!listed || local.version > listed.version) ? local : listed;
 }
 
 export function appendAxisPage(

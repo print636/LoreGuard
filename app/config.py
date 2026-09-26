@@ -304,6 +304,9 @@ class Settings(BaseSettings):
     # Anonymous draft record dispositions across logical package attempts.
     # Opt-in diagnostics only; it does not change admission or retry policy.
     character_signal_draft_trace_v1: bool = False
+    # Opt-in exact source-line restoration for a draft model's short echo.
+    # The excerpt itself must independently prove the proposed direct claim.
+    character_signal_draft_source_excerpt_repair_v1: bool = False
     # A draft chunk can receive bounded, one-trait-at-a-time recall calls for
     # undercovered confirmed traits. Keep the selected set no larger than the
     # content-free context boundary; the shared stage budget remains final.

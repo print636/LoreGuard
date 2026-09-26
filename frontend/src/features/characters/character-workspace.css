@@ -506,6 +506,16 @@
 .candidateAxisDefinition b { color: var(--text); }
 .candidateAxisDefinition p { margin: 4px 0 0; color: var(--text-2); line-height: 1.6; }
 .candidateAxisDefinition, .characterAxisAlignmentPanel > p, .candidateAxisAlignment > p { overflow-wrap: anywhere; }
+.candidateAxisScopeReview { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: rgba(183, 162, 255, .06); overflow-wrap: anywhere; }
+.candidateAxisScopeReview b { color: var(--text); }
+.candidateAxisScopeReview p { margin: 6px 0 0; color: var(--text-2); line-height: 1.65; white-space: pre-wrap; }
+.candidateAxisScopeReview strong { color: var(--text); }
+.candidateAxisScopeAcknowledgment { min-width: 0; margin: 14px 0 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: 9px; background: rgba(183, 162, 255, .05); overflow-wrap: anywhere; }
+.candidateAxisScopeAcknowledgment label { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin: 0; color: var(--text); font-size: 14px; line-height: 1.6; cursor: pointer; }
+.candidateAxisScopeAcknowledgment label span { min-width: 0; overflow-wrap: anywhere; }
+.candidateAxisScopeAcknowledgment input[type="checkbox"] { flex: none; width: 18px; height: 18px; margin: 3px 0 0; accent-color: var(--lavender); }
+.candidateAxisScopeAcknowledgment p { margin: 8px 0 0; color: var(--text-2); font-size: 13px; line-height: 1.6; }
+.candidateAxisScopeAcknowledgment input[aria-invalid="true"] { outline: 2px solid var(--danger); outline-offset: 2px; }
 .candidateFieldError { margin: 0; color: var(--danger); font-size: 13px; line-height: 1.5; }
 .candidateAxisCreate > button { justify-self: start; min-height: 44px; margin-top: 5px; }
 .candidateAxisError,

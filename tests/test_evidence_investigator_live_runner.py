@@ -1467,6 +1467,39 @@ def test_runtime_provenance_draft_trace_requires_fixed_pair_and_version():
         assert _safe_runtime_provenance(malformed) is None
 
 
+def test_runtime_provenance_draft_excerpt_repair_requires_fixed_pair_and_version():
+    value = runtime_provenance()
+    limits = value["character_consistency_limits"]
+    limits.update({
+        "signal_draft_source_excerpt_repair_v1": False,
+        "signal_draft_source_excerpt_repair_version": None,
+    })
+    assert _safe_runtime_provenance(value) == value
+    limits.update({
+        "signal_draft_trace_v1": True,
+        "signal_draft_trace_version": "draft-signal-trace-v1",
+        "signal_draft_source_excerpt_repair_v1": True,
+        "signal_draft_source_excerpt_repair_version": "draft-source-excerpt-repair-v1",
+    })
+    assert _safe_runtime_provenance(value) == value
+    for changed in (
+        {"signal_draft_source_excerpt_repair_v1": "true"},
+        {"signal_draft_source_excerpt_repair_v1": 1},
+        {"signal_draft_source_excerpt_repair_version": "unknown"},
+        {"signal_draft_source_excerpt_repair_version": None},
+    ):
+        malformed = json.loads(json.dumps(value))
+        malformed["character_consistency_limits"].update(changed)
+        assert _safe_runtime_provenance(malformed) is None
+    for missing in (
+        "signal_draft_source_excerpt_repair_v1",
+        "signal_draft_source_excerpt_repair_version",
+    ):
+        malformed = json.loads(json.dumps(value))
+        del malformed["character_consistency_limits"][missing]
+        assert _safe_runtime_provenance(malformed) is None
+
+
 @pytest.mark.parametrize(
     ("key", "valid_maximum"),
     [

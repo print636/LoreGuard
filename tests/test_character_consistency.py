@@ -838,6 +838,447 @@ def test_signal_repeated_evidence_mismatch_stays_fail_closed():
     assert "private-rejected-response-context" not in result.model_dump_json()
 
 
+def _draft_excerpt_record(source_excerpt: str, **overrides) -> dict:
+    values = {
+        "character": "林澈",
+        "dimension": "contextual_behavior",
+        "trait_key": "document_sealing",
+        "statement": "林澈亲手封存了重要账册",
+        "polarity": "neutral",
+        "stability": "temporary",
+        "observation_kind": "action",
+        "context": "",
+        "key_object": "",
+        "evidence": source_excerpt,
+    }
+    values.update(overrides)
+    return valid_signal_record(**values)
+
+
+def test_draft_source_excerpt_repair_is_opt_in_and_binds_full_source_line():
+    excerpt = "林澈亲手封存了重要账册"
+    source = f"场景7：{excerpt}。"
+    payload = json.dumps({"records": [_draft_excerpt_record(excerpt)]}, ensure_ascii=False)
+    chunk = CharacterSignalChunk("draft-excerpt", "draft.md", source, 10, "draft")
+
+    default = CharacterSignalExtractor(
+        SequenceProvider(payload, payload), settings=settings()
+    ).extract(chunk)
+    enabled = CharacterSignalExtractor(
+        SequenceProvider(payload),
+        settings=settings(character_signal_draft_source_excerpt_repair_v1=True),
+    ).extract(chunk)
+
+    assert default.signals == ()
+    assert default.diagnostics.reason_counts == {"evidence_mismatch": 2}
+    assert enabled.diagnostics.outcome == "completed"
+    assert enabled.diagnostics.attempted_calls == 1
+    assert enabled.diagnostics.reason_counts == {"draft_source_excerpt_repaired": 1}
+    assert len(enabled.signals) == 1
+    assert enabled.signals[0].evidence.text == source
+    assert excerpt not in json.dumps(enabled.diagnostics.reason_counts, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "林澈亲手封存账册一事只是传言。",
+        "林澈亲手封存账册，只是传言。",
+        "林澈并未亲手封存账册。",
+        "林澈声称亲手封存账册。",
+        "林澈的学徒亲手封存账册。",
+        "如果周尧离开，林澈亲手封存账册。",
+        "林澈如果听到警报，就亲手封存账册。",
+    ),
+)
+def test_draft_action_does_not_turn_unobserved_claim_into_character_fact(source: str):
+    record = valid_signal_record(
+        dimension="contextual_behavior",
+        trait_key="record_sealing",
+        statement="林澈亲手封存账册",
+        polarity="neutral",
+        stability="temporary",
+        observation_kind="action",
+        key_object="",
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload, payload), settings=settings()
+    ).extract(CharacterSignalChunk("unobserved-action", "draft.md", source, 10, "draft"))
+
+    assert result.signals == ()
+    assert result.diagnostics.reason_counts == {"character_support": 2}
+
+
+@pytest.mark.parametrize(
+    ("source", "kind"),
+    (
+        ("林澈亲手封存账册一事只是传言。", "state_description"),
+        ("林澈或许亲手封存账册。", "action"),
+        ("林澈决定亲手封存账册。", "decision"),
+        ("林澈准备亲手封存账册。", "action"),
+        ("林澈亲手封存账册，后来证实真正动手的是周尧。", "action"),
+    ),
+)
+def test_draft_action_claim_cannot_omit_source_uncertainty_or_correction(
+    source: str, kind: str,
+):
+    record = valid_signal_record(
+        dimension="contextual_behavior",
+        trait_key="record_sealing",
+        statement="林澈亲手封存账册",
+        polarity="neutral",
+        stability="temporary",
+        observation_kind=kind,
+        key_object="",
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload, payload), settings=settings()
+    ).extract(CharacterSignalChunk("unproven-action", "draft.md", source, 10, "draft"))
+
+    assert result.signals == ()
+    assert result.diagnostics.reason_counts == {"character_support": 2}
+
+
+def test_draft_rumored_command_cannot_bypass_with_speech_dimension():
+    source = "林澈大声命令驱逐村民一事只是传言。"
+    record = valid_signal_record(
+        dimension="speech_pattern",
+        trait_key="public_command",
+        statement="林澈大声命令驱逐村民",
+        polarity="neutral",
+        stability="temporary",
+        observation_kind="action",
+        key_object="",
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload, payload), settings=settings()
+    ).extract(CharacterSignalChunk("rumored-command", "draft.md", source, 10, "draft"))
+
+    assert result.signals == ()
+    assert result.diagnostics.reason_counts == {"character_support": 2}
+
+
+@pytest.mark.parametrize(
+    ("source", "statement"),
+    (
+        ("林澈亲手封存账册。", "林澈亲手封存账册"),
+        ("林澈声称亲手封存账册。", "林澈声称亲手封存账册"),
+        ("林澈的确亲手封存账册。", "林澈的确亲手封存账册"),
+        ("林澈亲手封存账册。周尧说这只是传言。", "林澈亲手封存账册"),
+        ("林澈亲手封存账册，周尧说这只是传言。", "林澈亲手封存账册"),
+        ("林澈亲手封存谣言记录。", "林澈亲手封存谣言记录"),
+        ("林澈亲手封存账册一事并非传言。", "林澈亲手封存账册"),
+        ("林澈亲手封存账册一事不是传言。", "林澈亲手封存账册"),
+        ("林澈亲手封存账册一事不只是传言。", "林澈亲手封存账册"),
+        ("林澈亲手封存账册并指出周尧的说法是谣言。", "林澈亲手封存账册"),
+        ("林澈决定亲手封存账册。", "林澈决定亲手封存账册"),
+    ),
+)
+def test_draft_action_keeps_direct_action_or_actual_speech(
+    source: str, statement: str,
+):
+    record = valid_signal_record(
+        dimension="contextual_behavior",
+        trait_key="record_sealing",
+        statement=statement,
+        polarity="neutral",
+        stability="temporary",
+        observation_kind="action",
+        key_object="",
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload), settings=settings()
+    ).extract(CharacterSignalChunk("observed-action", "draft.md", source, 10, "draft"))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+
+
+def test_draft_possessive_decision_is_not_another_characters_action():
+    source = "林澈的决定令整个团队改道。"
+    record = valid_signal_record(
+        dimension="contextual_behavior",
+        trait_key="route_decision",
+        statement="林澈的决定令整个团队改道",
+        polarity="neutral",
+        stability="temporary",
+        observation_kind="decision",
+        key_object="",
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload), settings=settings()
+    ).extract(CharacterSignalChunk("own-decision", "draft.md", source, 10, "draft"))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+
+
+def test_draft_paraphrased_real_action_survives_other_persons_rumor():
+    source = "林澈亲自封存账册并指出周尧的说法是谣言。"
+    record = valid_signal_record(
+        dimension="contextual_behavior",
+        trait_key="record_sealing",
+        statement="林澈封存账册",
+        polarity="neutral",
+        stability="temporary",
+        observation_kind="action",
+        key_object="",
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload), settings=settings()
+    ).extract(CharacterSignalChunk("other-rumor", "draft.md", source, 10, "draft"))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+
+
+def test_draft_unobserved_action_cannot_bypass_guard_with_decision_kind():
+    source = "林澈声称亲手封存账册。"
+    record = valid_signal_record(
+        dimension="contextual_behavior",
+        trait_key="record_sealing",
+        statement="林澈亲手封存账册",
+        polarity="neutral",
+        stability="temporary",
+        observation_kind="decision",
+        key_object="",
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload, payload), settings=settings()
+    ).extract(CharacterSignalChunk("reported-decision", "draft.md", source, 10, "draft"))
+
+    assert result.signals == ()
+    assert result.diagnostics.reason_counts == {"character_support": 2}
+
+
+def test_draft_state_description_can_keep_the_characters_own_possessive_state():
+    source = "林澈的左手因旧伤而疼痛。"
+    record = valid_signal_record(
+        dimension="contextual_behavior",
+        trait_key="left_hand_pain",
+        statement="林澈的左手因旧伤而疼痛",
+        polarity="neutral",
+        stability="temporary",
+        observation_kind="state_description",
+        key_object="",
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload), settings=settings()
+    ).extract(CharacterSignalChunk("possessive-state", "draft.md", source, 10, "draft"))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+
+
+@pytest.mark.parametrize("model_kind", ("preference_expression", "action"))
+def test_draft_direct_preference_self_report_remains_a_preference_expression(
+    model_kind: str,
+):
+    source = "林澈说自己喜欢蜜瓜。"
+    record = valid_signal_record(
+        dimension="preference",
+        trait_key="melon_preference",
+        statement="林澈喜欢蜜瓜",
+        polarity="positive",
+        stability="temporary",
+        observation_kind=model_kind,
+        key_object="蜜瓜",
+        evidence=source,
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload), settings=settings()
+    ).extract(CharacterSignalChunk("preference-self-report", "draft.md", source, 10, "draft"))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].observation_kind == "preference_expression"
+
+
+def test_draft_source_excerpt_repair_refuses_object_or_value_dimension():
+    excerpt = "叶簪再次拒绝无居籍船民登船"
+    source = f"场景7：{excerpt}。"
+    record = _draft_excerpt_record(
+        excerpt,
+        character="叶簪",
+        dimension="value",
+        trait_key="boarding_eligibility",
+        statement=excerpt,
+        polarity="negative",
+        key_object="无居籍船民",
+        stability="situational",
+    )
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload, payload),
+        settings=settings(character_signal_draft_source_excerpt_repair_v1=True),
+    ).extract(CharacterSignalChunk("draft-object-excerpt", "draft.md", source, 10, "draft"))
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"evidence_mismatch": 2}
+
+
+@pytest.mark.parametrize(
+    "qualifier",
+    (
+        "一事只是传言",
+        "一事是编造",
+        "的说法不属实",
+        "一事是谣言",
+        "一事尚待查证",
+    ),
+)
+def test_draft_source_excerpt_repair_refuses_truncated_epistemic_qualifier(
+    qualifier: str,
+):
+    statement = "林澈亲手封存了重要账册"
+    excerpt = statement + qualifier
+    payload = json.dumps({"records": [_draft_excerpt_record(excerpt)]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload, payload),
+        settings=settings(character_signal_draft_source_excerpt_repair_v1=True),
+    ).extract(CharacterSignalChunk("epistemic-excerpt", "draft.md", "场景7：" + excerpt + "。", 10, "draft"))
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"evidence_mismatch": 2}
+
+
+@pytest.mark.parametrize(
+    ("source", "record"),
+    [
+        (
+            "广场广播传出一段像叶簪说“无居籍者不配登船”的声音。"
+            "这段声音是他人拼接旧录音做成的假播报，叶簪没有发布命令。",
+            _draft_excerpt_record(
+                "叶簪说“无居籍者不配登船”",
+                character="叶簪", statement="叶簪说无居籍者不配登船",
+            ),
+        ),
+        (
+            "学徒把南侧读数偷偷改低。柳泛发现改动并恢复原值；她没有参与篡改。",
+            _draft_excerpt_record(
+                "学徒把南侧读数偷偷改低",
+                character="柳泛", statement="柳泛把南侧读数偷偷改低",
+            ),
+        ),
+        (
+            "林澈亲手封存了重要账册，周尧随后偷偷拆开封条。",
+            _draft_excerpt_record(
+                "林澈亲手封存了重要账册",
+                statement="林澈随后偷偷拆开封条",
+            ),
+        ),
+        (
+            "林澈亲手封存了重要账册，周尧随后检查封条。",
+            _draft_excerpt_record("林澈亲手封存了重要账册"),
+        ),
+        (
+            "林澈亲手封存了重要账册，周尧随后检查蜜瓜。",
+            _draft_excerpt_record(
+                "林澈亲手封存了重要账册",
+                dimension="value", key_object="蜜瓜",
+            ),
+        ),
+        (
+            "场景7：林澈亲手封存账册随后周尧拿走蜜瓜。",
+            _draft_excerpt_record(
+                "林澈亲手封存账册随后周尧拿走蜜瓜",
+                statement="林澈亲手封存账册随后周尧拿走蜜瓜",
+                dimension="value", key_object="蜜瓜",
+            ),
+        ),
+        (
+            "林澈亲手封存了重要账册，周尧随后检查封条。",
+            _draft_excerpt_record("林澈亲手封存了重要账册？"),
+        ),
+        (
+            "林澈亲手封存了重要账册，后来证实这一行记录是伪造的。",
+            _draft_excerpt_record("林澈亲手封存了重要账册"),
+        ),
+        (
+            "林澈亲手封存了重要账册，实际上这是别人伪造的记录。",
+            _draft_excerpt_record("林澈亲手封存了重要账册"),
+        ),
+        (
+            "林澈亲手封存了重要账册；核查后才知道真正动手的是周尧。",
+            _draft_excerpt_record("林澈亲手封存了重要账册"),
+        ),
+        (
+            "林澈亲手封存了重要账册，周尧随后检查封条。\n"
+            "林澈亲手封存了重要账册，记录员复核封条。",
+            _draft_excerpt_record("林澈亲手封存了重要账册"),
+        ),
+        (
+            "林澈亲手封存了普通账册，周尧随后检查封条。\n"
+            "林澈亲手封存了重要账册，记录员复核封条。",
+            _draft_excerpt_record("林澈亲手封存了重要账册"),
+        ),
+    ],
+)
+def test_draft_source_excerpt_repair_does_not_borrow_other_clause_or_actor(
+    source: str, record: dict,
+):
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(payload, payload),
+        settings=settings(character_signal_draft_source_excerpt_repair_v1=True),
+    ).extract(CharacterSignalChunk("draft-unsafe-excerpt", "draft.md", source, 10, "draft"))
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"evidence_mismatch": 2}
+
+
+def test_draft_source_excerpt_repair_keeps_formal_and_multiline_strict():
+    excerpt = "林澈亲手封存了重要账册"
+    source = f"{excerpt}，周尧检查封条。\n第二行记录。"
+    record = _draft_excerpt_record(excerpt, source_line_end=11)
+    payload = json.dumps({"records": [record]}, ensure_ascii=False)
+    enabled = settings(character_signal_draft_source_excerpt_repair_v1=True)
+
+    draft = CharacterSignalExtractor(
+        SequenceProvider(payload, payload), settings=enabled,
+    ).extract(CharacterSignalChunk("multiline-excerpt", "draft.md", source, 10, "draft"))
+    formal = CharacterSignalExtractor(
+        SequenceProvider(payload, payload), settings=enabled,
+    ).extract(CharacterSignalChunk("formal-excerpt", "profile.md", source, 10, "formal_character_profile"))
+
+    assert draft.signals == formal.signals == ()
+    assert draft.diagnostics.reason_counts == formal.diagnostics.reason_counts == {
+        "evidence_mismatch": 2
+    }
+
+
+def test_draft_source_excerpt_repair_rejects_invalid_runtime_copy_before_call():
+    invalid = settings().model_copy(update={
+        "character_signal_draft_source_excerpt_repair_v1": "true",
+    })
+    provider = FakeProvider('{"records":[]}')
+    with pytest.raises(RuntimeError, match="prompt variant flags must be bool"):
+        CharacterSignalExtractor(provider, settings=invalid).extract(
+            CharacterSignalChunk("invalid-repair-flag", "draft.md", "林澈关门。", 10, "draft")
+        )
+    assert provider.calls == []
+
+
 def test_question_mark_presentation_difference_never_admits_statement():
     source = "林澈一直喜欢蜜瓜。"
     rejected = valid_signal_record(evidence="林澈一直喜欢蜜瓜？")

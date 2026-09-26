@@ -1842,6 +1842,40 @@ def test_character_runtime_draft_trace_requires_fixed_pair_and_version():
         assert axis_live._runtime_provenance_digest(malformed) is None
 
 
+def test_character_runtime_draft_excerpt_repair_requires_fixed_pair_and_version():
+    value = _runtime_provenance()
+    limits = value["character_consistency_limits"]
+    limits.update({
+        "signal_draft_source_excerpt_repair_v1": False,
+        "signal_draft_source_excerpt_repair_version": None,
+    })
+    off_digest = axis_live._runtime_provenance_digest(value)
+    assert off_digest is not None
+    limits.update({
+        "signal_draft_trace_v1": True,
+        "signal_draft_trace_version": "draft-signal-trace-v1",
+        "signal_draft_source_excerpt_repair_v1": True,
+        "signal_draft_source_excerpt_repair_version": "draft-source-excerpt-repair-v1",
+    })
+    assert axis_live._runtime_provenance_digest(value) not in {None, off_digest}
+    for changed in (
+        {"signal_draft_source_excerpt_repair_v1": "true"},
+        {"signal_draft_source_excerpt_repair_v1": 1},
+        {"signal_draft_source_excerpt_repair_version": "unknown"},
+        {"signal_draft_source_excerpt_repair_version": None},
+    ):
+        malformed = json.loads(json.dumps(value))
+        malformed["character_consistency_limits"].update(changed)
+        assert axis_live._runtime_provenance_digest(malformed) is None
+    for missing in (
+        "signal_draft_source_excerpt_repair_v1",
+        "signal_draft_source_excerpt_repair_version",
+    ):
+        malformed = json.loads(json.dumps(value))
+        del malformed["character_consistency_limits"][missing]
+        assert axis_live._runtime_provenance_digest(malformed) is None
+
+
 def test_public_support_trace_reprojects_all_fields_and_never_echoes_api_marker(monkeypatch):
     marker = "SECRET_URL_https://example.invalid/sk-example"
     valid_trace = {
@@ -2899,6 +2933,7 @@ def test_run_summary_exposes_static_budget_reason_without_leaking_unknown_keys(m
                 },
                 "reason_counts": {
                     "token_budget": 1,
+                    "draft_source_excerpt_repaired": 2,
                     "untrusted_credential_sk-example": 1,
                 },
                 "usage": {"attempted_calls": 6, "charged_tokens": 60_000},
@@ -2916,7 +2951,9 @@ def test_run_summary_exposes_static_budget_reason_without_leaking_unknown_keys(m
     assert public["processed_chunks"] == 7
     assert public["model_uncalled_chunks"] == 1
     assert public["model_incomplete_chunks"] == 1
-    assert public["reason_counts"] == {"token_budget": 1}
+    assert public["reason_counts"] == {
+        "token_budget": 1, "draft_source_excerpt_repaired": 2,
+    }
     assert public["unreported_reason_entries"] == 1
     assert "untrusted_credential" not in json.dumps(public)
 

@@ -221,16 +221,21 @@ export type CandidateDecisionIn = {
   expected_axis_version?: number;
   axis_alignment?: "same" | "opposite";
   expected_axis_positive_proposition_sha256?: string;
+  expected_axis_applicability_scope_sha256?: string;
+  scope_applicability_confirmed?: true;
 };
 
 export type CharacterTraitAxis = {
   id: string;
   project_id: string;
-  trait_type: "core_personality";
+  trait_type: "core_personality" | "value" | "behavior_boundary";
   version: number;
   display_name: string;
   definition: string;
   definition_sha256: string;
+  comparison_key: string | null;
+  applicability_scope: string | null;
+  applicability_scope_sha256: string | null;
   positive_proposition: string | null;
   positive_proposition_sha256: string | null;
   created_at: string | null;

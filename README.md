@@ -60,6 +60,15 @@ coverage rather than promoted to a definite contradiction. This intentionally
 loses some valid dialogue recall; it is not a general speaker-understanding
 claim or a new real-model OOC accuracy result.
 
+For draft actions, a narrow source-bound check rejects obvious non-occurrence,
+rumor, hypothetical, and possessive-other-actor claims before they become
+character observations. It does not resolve complex cross-sentence meaning.
+An opt-in, default-off source-excerpt repair can restore a single model-quoted
+draft action to its exact full source line only when both the excerpt and full
+line independently pass the existing binding checks; it never relaxes formal
+baseline evidence requirements. Incomplete model packages still yield partial
+coverage rather than silently recycling a provisional record into OOC issues.
+
 Context inference is single-document and limited to 30,000 characters and 2,000 lines; larger inputs require manual context assignment. It is not a story rewrite, bulk classifier, authority decision, or production-accuracy claim. See the [V1 workflow and API contract](docs/guided-review-batch-v1.md) and the [full Chinese guide](README.zh-CN.md).
 
 Relevant API entry points are:

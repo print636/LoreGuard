@@ -89,6 +89,7 @@ _MAX_SIGNAL_REGENERATION_METADATA_CHARS = 8_192
 ASSERTION_INDEX_V1 = "assertion-index-v1"
 SUPPORT_TRACE_V1 = "support-trace-v1"
 DRAFT_SIGNAL_TRACE_V1 = "draft-signal-trace-v1"
+DRAFT_SOURCE_EXCERPT_REPAIR_V1 = "draft-source-excerpt-repair-v1"
 _MAX_SUPPORT_CLAUSES_PER_CHUNK = 256
 _MAX_SUPPORT_CLAUSES_PER_LINE = 64
 _MAX_SUPPORT_PROMPT_CHARS = 20_000
@@ -296,9 +297,47 @@ _REPORTED_OR_QUOTED_SPEECH = re.compile(
     r"\b(?:said|says|stated|claimed|answered|asked|read)\b.{0,8}[,:]",
     re.IGNORECASE,
 )
+_DRAFT_SOURCE_EXCERPT_INERT_PREFIX = re.compile(
+    r"(?:【[A-Za-z0-9_-]{1,12}】|"
+    r"(?:场景|段落|章节|记录)[A-Za-z0-9_-]{0,6}[：:]|"
+    r"[0-9]{1,6}[.、)]|[-*])?\s*"
+)
+_DRAFT_SOURCE_EXCERPT_INERT_SUFFIX = re.compile(r"\s*[。.．]?\s*")
+_DRAFT_SOURCE_EXCERPT_MULTI_ACTION = re.compile(
+    r"(?:随后|接着|然后|同时|转而|而后|却|但是|由|让|请|叫|派|交给|"
+    r"看见|看到|听见|听到|转述)"
+)
 _UNSAFE_COREFERENCE_BRANCH = re.compile(
     r"(?:如果|假如|假设|倘若|若是|否则|要么|或者|或是|"
     r"另一条线|另一分支|分支|结局|可能|也许|设想)"
+)
+_DRAFT_UNREAL_ACTION_PREFIX = re.compile(
+    r"^(?:并未|没有|从未|未曾|不曾|尚未|没能|未能|并没有|"
+    r"如果|假如|假设|倘若|若是|一旦|除非|假定|"
+    r"或许|可能|也许|疑似|似乎|准备|计划|打算|决定|想要|试图|尝试|将要|即将)"
+)
+_DRAFT_REPORTED_ACTION_PREFIX = re.compile(
+    r"^(?:声称|宣称|自称|据称|据说|传闻|听说|说自己|表示自己|"
+    r"说|说道|表示|讲述|自述)"
+)
+_DRAFT_UNVERIFIED_ACTION_SUFFIX = re.compile(
+    r"(?:(?:一事|此事|这件事|的说法)?"
+    r"(?:只是|不过是|纯属|原来是|其实是|根本是|是)"
+    r"(?:传言|谣言|假消息|杜撰|编造|虚构)|"
+    r"(?:一事|此事|这件事|的说法)?"
+    r"(?:不属实|尚待查证|尚未证实|并未发生|根本没发生))"
+)
+_DRAFT_POSSESSIVE_OTHER_ACTOR = re.compile(
+    r"^的(?:学徒|助手|朋友|同伴|队友|搭档|下属|部下|弟子|学生|同事|"
+    r"哥哥|姐姐|弟弟|妹妹|父亲|母亲|导师)"
+)
+_DRAFT_OTHER_ACTOR_CORRECTION = re.compile(
+    r"^(?:后来|事后|最终|核查后)?(?:证实|查明|确认|发现|才知道)"
+    r"(?:真正|实际|亲自)?(?:动手|执行|完成此事|做这件事)(?:的|者)?是"
+    r"(?P<actor>[\u4e00-\u9fffA-Za-z]{2,6})$"
+)
+_DRAFT_CONDITIONAL_CLAUSE = re.compile(
+    r"^(?:如果|假如|假设|倘若|若是|一旦|除非|假定)"
 )
 _UNSAFE_COREFERENCE_PARTICIPANTS = re.compile(
     r"(?:两人|二人|双方|众人|大家|各自|"
@@ -952,6 +991,7 @@ class _ValidatedSignalPackage:
     raw_records: int = 0
     rejected_records: int = 0
     ignored_duplicate_records: int = 0
+    draft_source_excerpt_repairs: int = 0
     reason_counts: dict[str, int] | None = None
     evidence_mismatch_counts: dict[EvidenceMismatchKind, int] | None = None
     core_label_scope_counts: dict[CoreLabelScopeKind, int] | None = None
@@ -1058,11 +1098,12 @@ def _validate_signal_prompt_variant_settings(settings: Settings) -> None:
     scope_review = settings.character_signal_scope_review_v1
     support_trace = settings.character_signal_support_trace_v1
     draft_trace = settings.character_signal_draft_trace_v1
+    draft_excerpt_repair = settings.character_signal_draft_source_excerpt_repair_v1
     if any(
         type(flag) is not bool
         for flag in (
             full_line, core_scope, support_id, semantic_scope, scope_review,
-            support_trace, draft_trace,
+            support_trace, draft_trace, draft_excerpt_repair,
         )
     ):
         raise RuntimeError("character signal prompt variant flags must be bool")
@@ -1565,6 +1606,10 @@ class CharacterSignalExtractor:
             if validation.complete:
                 clean = validation.signals
                 reasons: Counter[str] = Counter()
+                if validation.draft_source_excerpt_repairs:
+                    reasons["draft_source_excerpt_repaired"] = (
+                        validation.draft_source_excerpt_repairs
+                    )
                 mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
                 core_scope_counts: Counter[CoreLabelScopeKind] = Counter()
                 for attempt in validation_attempts:
@@ -1763,6 +1808,7 @@ def _validate_signal_package(
     accepted_groups: set[tuple[str | int | None, ...]] = set()
     accepted_signal_ids: set[str] = set()
     ignored_duplicate_records = 0
+    draft_source_excerpt_repairs = 0
     accepted_record_indices: list[int] = []
     duplicate_record_indices: list[int] = []
     failures: list[_SignalValidationFailure] = []
@@ -1794,6 +1840,14 @@ def _validate_signal_package(
             reasons["schema_validation"] += 1
             failures.append(_SignalValidationFailure(record_index, "schema_validation"))
             continue
+        repair_probe: CharacterSignal | None = None
+        if (
+            settings.character_signal_draft_source_excerpt_repair_v1
+            and chunk.source_kind == "draft"
+        ):
+            restored = _repair_draft_source_excerpt(record, chunk)
+            if restored is not None:
+                record, repair_probe = restored
         try:
             signal = _bind_record(
                 record,
@@ -1802,6 +1856,14 @@ def _validate_signal_package(
                 semantic_scope_v5=semantic_scope_v5,
                 scope_review_v1=scope_review_v1,
             )
+            if repair_probe is not None and (
+                signal.dimension != repair_probe.dimension
+                or signal.polarity != repair_probe.polarity
+                or signal.stability != repair_probe.stability
+                or signal.observation_kind != repair_probe.observation_kind
+                or signal.key_object != repair_probe.key_object
+            ):
+                raise ValueError("statement_support")
         except ValidationError:
             reasons["schema_validation"] += 1
             failures.append(_SignalValidationFailure(record_index, "schema_validation"))
@@ -1895,12 +1957,15 @@ def _validate_signal_package(
         accepted_signal_ids.add(signal.id)
         signals.append(signal)
         accepted_record_indices.append(record_index)
+        if repair_probe is not None:
+            draft_source_excerpt_repairs += 1
 
     return _ValidatedSignalPackage(
         signals=tuple(signals),
         raw_records=len(envelope.records),
         rejected_records=sum(reasons.values()),
         ignored_duplicate_records=ignored_duplicate_records,
+        draft_source_excerpt_repairs=draft_source_excerpt_repairs,
         reason_counts=dict(sorted(reasons.items())),
         evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
         core_label_scope_counts=dict(sorted(core_scope_counts.items())),
@@ -3749,6 +3814,77 @@ def _v5_provisional_scope(
     return _V5ScopeBinding(target, "", None)
 
 
+def _repair_draft_source_excerpt(
+    record: _RawCharacterSignal,
+    chunk: CharacterSignalChunk,
+) -> tuple[_RawCharacterSignal, CharacterSignal] | None:
+    """Restore one exact cited line only after its excerpt proves the claim.
+
+    This only restores an inert line marker and terminal period. Any omitted
+    narrative clause, qualifier, or correction makes the repair ineligible.
+    The original excerpt must itself support one direct named-actor action;
+    object-bearing records are not eligible for this formatting repair.
+    """
+
+    if (
+        chunk.source_kind != "draft"
+        or record.source_line_start != record.source_line_end
+        or not chunk.global_line_start <= record.source_line_start <= chunk.global_line_end
+    ):
+        return None
+    lines = chunk.content.splitlines()
+    selected = lines[record.source_line_start - chunk.global_line_start].strip()
+    excerpt = record.evidence
+    character = _compact(record.character)
+    statement = _compact(unicodedata.normalize("NFKC", record.statement)).casefold()
+    excerpt_claim = _compact(unicodedata.normalize("NFKC", excerpt)).casefold()
+    excerpt_offset = selected.find(excerpt)
+    if (
+        not selected
+        or len(selected) > 2_000
+        or not excerpt
+        or excerpt != excerpt.strip()
+        or any(mark in excerpt for mark in '\r\n"“”‘’「」『』')
+        or re.search(r"[，,。！？!?；;：:]", excerpt)
+        or len(excerpt_claim) < 10
+        or not excerpt.startswith(record.character)
+        or not statement.startswith(_compact(unicodedata.normalize("NFKC", character)).casefold())
+        or statement != excerpt_claim
+        or record.key_object.strip()
+        or record.dimension not in {"core_personality", "contextual_behavior"}
+        or record.observation_kind != "action"
+        or _DRAFT_SOURCE_EXCERPT_MULTI_ACTION.search(excerpt)
+        or _UNSAFE_COREFERENCE_BRANCH.search(excerpt)
+        or _REPORTED_OR_QUOTED_SPEECH.search(excerpt)
+        or _REPORTED_OR_QUOTED_SPEECH.search(selected)
+        or selected.count(excerpt) != 1
+        or sum(line.count(excerpt) for line in lines) != 1
+        or _DRAFT_SOURCE_EXCERPT_INERT_PREFIX.fullmatch(
+            selected[:excerpt_offset]
+        ) is None
+        or _DRAFT_SOURCE_EXCERPT_INERT_SUFFIX.fullmatch(
+            selected[excerpt_offset + len(excerpt):]
+        ) is None
+        or selected == excerpt
+    ):
+        return None
+    try:
+        excerpt_chunk = CharacterSignalChunk(
+            chunk.document_id,
+            chunk.document_name,
+            excerpt,
+            record.source_line_start,
+            "draft",
+        )
+        excerpt_signal = _bind_record(record, excerpt_chunk)
+        restored = _RECORD_ADAPTER.validate_python(
+            {**record.model_dump(), "evidence": selected}
+        )
+    except (ValidationError, ValueError):
+        return None
+    return restored, excerpt_signal
+
+
 def _bind_record(
     record: _RawCharacterSignal,
     chunk: CharacterSignalChunk,
@@ -3800,6 +3936,8 @@ def _bind_record(
         if _draft_statement_only_inside_quote(record, evidence_text):
             raise ValueError("character_support")
         if _draft_ambiguous_joint_pronoun_claim(record, evidence_text):
+            raise ValueError("character_support")
+        if _draft_action_occurrence_unproven(record, evidence_text):
             raise ValueError("character_support")
     if v4_clause is None and not _character_attribution_supported(
         record,
@@ -4079,6 +4217,101 @@ def _draft_ambiguous_joint_pronoun_claim(
         if joint.search(before):
             return True
     return False
+
+
+def _draft_action_occurrence_unproven(
+    record: _RawCharacterSignal, evidence: str
+) -> bool:
+    """Reject a draft action when its own clause marks it as unobserved.
+
+    This is a narrow textual guard, not a determination of narrative truth.
+    A cited speech act remains eligible when the statement retains the
+    reporting verb. Independent sentences are evaluated separately, so an
+    unrelated rumor does not erase an explicitly narrated action.
+    """
+
+    if record.dimension == "preference" and _draft_preference_assertion_supported(
+        record, evidence
+    ):
+        return False
+    clause, index, clauses, groups = _actor_relevant_evidence_clause(record, evidence)
+    normalized_clause = _compact(unicodedata.normalize("NFKC", clause)).casefold()
+    statement = _compact(unicodedata.normalize("NFKC", record.statement)).casefold()
+    character = _compact(unicodedata.normalize("NFKC", record.character)).casefold()
+    normalized_clause = re.sub(
+        r"^(?:(?:机密)?(?:原文|草稿|段落|章节|场景|记录)[^：:]{0,6})[：:]",
+        "",
+        normalized_clause,
+    )
+    if not character or not normalized_clause.startswith(character):
+        return False
+    tail = normalized_clause[len(character):]
+    claim = statement[len(character):] if statement.startswith(character) else statement
+
+    # A named subordinate is a separate actor. Other possessive subjects,
+    # including a character's own decision, are not rejected by this rule.
+    if _DRAFT_POSSESSIVE_OTHER_ACTOR.match(tail):
+        return True
+    head = _DRAFT_UNREAL_ACTION_PREFIX.match(tail)
+    if head is not None and not claim.startswith(head.group(0)):
+        return True
+    report = _DRAFT_REPORTED_ACTION_PREFIX.match(tail)
+    if report is not None and not claim.startswith(report.group(0)):
+        original_clause = unicodedata.normalize("NFKC", clause).casefold()
+        quote = re.search(r'[“"‘]([^”"’]+)[”"’]', original_clause)
+        before_quote = (
+            _compact(original_clause[:quote.start()]) if quote is not None else ""
+        )
+        directly_spoken = bool(
+            record.dimension == "speech_pattern"
+            and quote is not None
+            and statement in _compact(quote.group(1))
+            and re.match(
+                rf"^{re.escape(character)}(?:当众|轻声|大声|低声)?"
+                r"(?:说|说道|读出|念出|回答|朗读|宣读)",
+                before_quote,
+            )
+        )
+        if not directly_spoken:
+            return True
+    if not _DRAFT_UNVERIFIED_ACTION_SUFFIX.search(statement):
+        if normalized_clause.count(statement) == 1:
+            trailing = normalized_clause.split(statement, 1)[1]
+            if _DRAFT_UNVERIFIED_ACTION_SUFFIX.match(trailing):
+                return True
+        else:
+            qualifier = _DRAFT_UNVERIFIED_ACTION_SUFFIX.search(normalized_clause)
+            # A paraphrased claim has no unique source span to separate its
+            # qualifier from another proposition. Only an explicit other
+            # person's reported claim can isolate a later qualifier.
+            if qualifier is not None:
+                before_qualifier = normalized_clause[:qualifier.start()]
+                other_report = re.search(
+                    r"(?:并|同时|随后|接着)?(?:指出|说明|表示|提到|称|说)"
+                    r"(?P<other>[\u4e00-\u9fff]{2,4})$",
+                    before_qualifier,
+                )
+                if other_report is None or other_report.group("other") == character:
+                    return True
+    if index + 1 < len(clauses) and groups[index + 1] == groups[index]:
+        next_clause = _compact(unicodedata.normalize("NFKC", clauses[index + 1])).casefold()
+        if (
+            _DRAFT_UNVERIFIED_ACTION_SUFFIX.fullmatch(next_clause)
+            and not _DRAFT_UNVERIFIED_ACTION_SUFFIX.search(statement)
+        ):
+            return True
+        correction = _DRAFT_OTHER_ACTOR_CORRECTION.fullmatch(next_clause)
+        if correction is not None and correction.group("actor") != character:
+            return True
+    # "如果周尧离开，林澈封存账册" keeps its condition despite the
+    # second clause starting with the target's name. A new sentence resets it.
+    return any(
+        groups[prior] == groups[index]
+        and _DRAFT_CONDITIONAL_CLAUSE.match(
+            _compact(unicodedata.normalize("NFKC", clauses[prior]))
+        )
+        for prior in range(index)
+    )
 
 
 def _character_attribution_supported(

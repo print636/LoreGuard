@@ -391,6 +391,13 @@ _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS = frozenset({
     _CHARACTER_SIGNAL_DRAFT_TRACE_KEY,
     _CHARACTER_SIGNAL_DRAFT_TRACE_VERSION_KEY,
 })
+_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEY = "signal_draft_source_excerpt_repair_v1"
+_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION_KEY = "signal_draft_source_excerpt_repair_version"
+_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION = "draft-source-excerpt-repair-v1"
+_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS = frozenset({
+    _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEY,
+    _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION_KEY,
+})
 _INVESTIGATOR_INTEGER_LIMIT_KEYS = frozenset(
     {
         "max_seeds",
@@ -2962,10 +2969,20 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         set(character_limits) & _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
         if type(character_limits) is dict else set()
     )
+    draft_excerpt_repair_keys = (
+        set(character_limits) & _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
+        if type(character_limits) is dict else set()
+    )
     if (
         type(character_limits) is not dict
         or draft_trace_keys not in (set(), set(_CHARACTER_SIGNAL_DRAFT_TRACE_KEYS))
-        or set(character_limits) - _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS not in {
+        or draft_excerpt_repair_keys not in (
+            set(), set(_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS)
+        )
+        or set(character_limits) - (
+            _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
+            | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
+        ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
             _CHARACTER_CONSISTENCY_LIMIT_KEYS
             | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY},
@@ -3108,6 +3125,18 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             return None
         safe_character_limits[_CHARACTER_SIGNAL_DRAFT_TRACE_KEY] = variant
         safe_character_limits[_CHARACTER_SIGNAL_DRAFT_TRACE_VERSION_KEY] = trace_version
+    if draft_excerpt_repair_keys:
+        variant = character_limits[_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEY]
+        repair_version = character_limits[_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION_KEY]
+        if (
+            type(variant) is not bool
+            or repair_version != (
+                _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION if variant else None
+            )
+        ):
+            return None
+        safe_character_limits[_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEY] = variant
+        safe_character_limits[_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION_KEY] = repair_version
     for key, (minimum, maximum) in (
         _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS.items()
     ):

@@ -22,7 +22,7 @@ import {
   submitCandidateDecision,
 } from "./api";
 import CandidateReview from "./CandidateReview";
-import { appendAxisPage } from "./axisReview";
+import { appendAxisPage, isScopedAxisDimension, scopedCandidateCanBind, validScopedComparisonKey } from "./axisReview";
 import {
   advanceReviewScope,
   isCurrentReviewRequest,
@@ -79,7 +79,13 @@ function requestError(error: unknown): string {
       : null;
     if (code === "character_trait_axis_version_conflict") return "作者轴版本已变化，请刷新轴列表后重新选择。";
     if (code === "character_trait_axis_not_found") return "所选作者轴不存在或不属于当前项目，请刷新轴列表。";
-    if (code === "character_trait_axis_dimension_mismatch") return "所选作者轴不适用于这条核心性格候选，请重新选择。";
+    if (code === "character_trait_axis_dimension_mismatch") return "所选作者轴不适用于这条角色特征，请重新选择。";
+    if (code === "character_trait_axis_object_mismatch") return "候选对象与所选作者轴不一致；请刷新后核对对象。";
+    if (code === "character_trait_axis_scope_conflict") return "作者轴适用情境已变化；请刷新轴列表，再判断当前证据是否适用。";
+    if (code === "character_trait_axis_scope_confirmation_required") return "请先核对原文与轴的适用情境，并明确勾选适用性。";
+    if (code === "character_trait_axis_source_unverified") return "这条候选缺少可核对的模型来源或精确原文证据，暂不能绑定情境轴；请重新分析后审核。";
+    if (code === "character_trait_axis_integrity_invalid") return "作者轴定义未通过完整性核对；请刷新列表核对，若问题持续请检查项目数据。";
+    if (code === "character_trait_axis_legacy_overlap") return "相同对象已有正式特征；请在角色档案核对并撤销旧项，再重新确认。";
     if (code === "character_trait_axis_proposition_required") return "所选旧作者轴还没有正向命题，请先由作者补写并核对。";
     if (code === "character_trait_axis_proposition_conflict") return "作者轴正向命题已变化；原选择保留，请刷新轴列表并重新核对。";
     if (code === "character_trait_axis_alignment_required") return "当前候选还没有可核对的同向/反向映射；不确定时请保留待审。";
@@ -451,7 +457,7 @@ export default function CharacterWorkspace({
     if (
       !projectId || !route.candidateId ||
       candidate?.id !== route.candidateId ||
-      candidate.dimension !== "core_personality" ||
+      (candidate.dimension !== "core_personality" && !isScopedAxisDimension(candidate.dimension)) ||
       !canBrowseCharacters
     ) {
       setAxisLoading(false);
@@ -460,7 +466,7 @@ export default function CharacterWorkspace({
     const controller = new AbortController();
     const startedScope = reviewScopeRef.current;
     setAxisLoading(true);
-    void fetchCharacterTraitAxes(projectId, { limit: 100, offset: 0 }, controller.signal)
+    void fetchCharacterTraitAxes(projectId, { limit: 100, offset: 0, trait_type: "all" }, controller.signal)
       .then((page) => {
         if (controller.signal.aborted || !isCurrentReviewScope(reviewScopeRef.current, startedScope)) return;
         setAxisItems(page.items);
@@ -571,7 +577,7 @@ export default function CharacterWorkspace({
     setAxisMoreBusy(true);
     setAxisMoreError("");
     try {
-      const page = await fetchCharacterTraitAxes(projectId, { limit: 100, offset: axisFetchedCount });
+      const page = await fetchCharacterTraitAxes(projectId, { limit: 100, offset: axisFetchedCount, trait_type: "all" });
       if (!isCurrentReviewRequest(reviewScopeRef.current, startedScope, axisMoreRequestRef.current, requestId)) return;
       let merged: CharacterTraitAxis[];
       try {
@@ -595,12 +601,24 @@ export default function CharacterWorkspace({
     }
   }
 
-  async function createAxis(input: { display_name: string; definition: string; positive_proposition: string }): Promise<CharacterTraitAxis> {
+  async function createAxis(input: {
+    trait_type: CharacterTraitAxis["trait_type"];
+    display_name: string;
+    definition: string;
+    positive_proposition: string;
+    comparison_key?: string;
+    applicability_scope?: string;
+  }): Promise<CharacterTraitAxis> {
     if (
       !route.characterId || !route.candidateId ||
       candidate?.id !== route.candidateId ||
       candidate.character_id !== route.characterId ||
-      candidate.dimension !== "core_personality" ||
+      input.trait_type !== candidate.dimension ||
+      (isScopedAxisDimension(candidate.dimension) && (
+        !scopedCandidateCanBind(candidate) ||
+        input.comparison_key !== validScopedComparisonKey(candidate) ||
+        !input.applicability_scope
+      )) ||
       axisCreatePendingRef.current
     ) {
       throw new Error("请重新选择要审核的角色候选。");
@@ -660,6 +678,7 @@ export default function CharacterWorkspace({
     comment: string,
     selectedAxis: CharacterTraitAxis | null,
     alignment: "same" | "opposite" | null,
+    scopeApplicabilityConfirmed: boolean,
   ) {
     if (
       !candidate || !route.characterId || !route.candidateId ||
@@ -674,6 +693,16 @@ export default function CharacterWorkspace({
     if (decision === "confirm" && candidate.dimension === "core_personality" &&
       (!selectedAxis?.positive_proposition_sha256 || !alignment)) {
       setActionError("请先核对作者轴正向命题，再明确选择同向或反向；不确定时保留待审。");
+      return;
+    }
+    if (decision === "confirm" && selectedAxis && isScopedAxisDimension(candidate.dimension) && (
+      !scopedCandidateCanBind(candidate) ||
+      selectedAxis.trait_type !== candidate.dimension ||
+      selectedAxis.comparison_key !== validScopedComparisonKey(candidate) ||
+      !selectedAxis.applicability_scope || !selectedAxis.applicability_scope_sha256 ||
+      !selectedAxis.positive_proposition_sha256 || !alignment || !scopeApplicabilityConfirmed
+    )) {
+      setActionError("请重新核对候选证据、比较对象、适用情境与方向，并勾选适用性后再确认。");
       return;
     }
     const startedScope = reviewScopeRef.current;
@@ -699,6 +728,12 @@ export default function CharacterWorkspace({
                 expected_axis_version: selectedAxis.version,
                 axis_alignment: alignment || undefined,
                 expected_axis_positive_proposition_sha256: selectedAxis.positive_proposition_sha256 || undefined,
+                ...(isScopedAxisDimension(candidate.dimension) && selectedAxis.applicability_scope_sha256
+                  ? {
+                      expected_axis_applicability_scope_sha256: selectedAxis.applicability_scope_sha256,
+                      scope_applicability_confirmed: true as const,
+                    }
+                  : {}),
               }
             : {}),
         },
@@ -711,7 +746,9 @@ export default function CharacterWorkspace({
       setCandidateReload((value) => value + 1);
       setAnnouncement(
         decision === "confirm"
-          ? "归纳已确认并写入角色档案；作者轴只影响之后创建的分析，既有报告不会改写。"
+          ? selectedAxis && isScopedAxisDimension(candidate.dimension)
+            ? "归纳与适用情境已由作者确认，写入角色档案基线。价值观和行为边界的新稿漂移检测仍在开发中；既有报告不变。"
+            : "归纳已确认并写入角色档案；作者轴只影响之后创建的分析，既有报告不会改写。"
           : "归纳已驳回，决定已保留在审核记录中。",
       );
       setListReload((value) => value + 1);
@@ -734,6 +771,10 @@ export default function CharacterWorkspace({
             "character_trait_axis_version_conflict",
             "character_trait_axis_proposition_conflict",
             "character_trait_axis_proposition_required",
+            "character_trait_axis_scope_conflict",
+            "character_trait_axis_object_mismatch",
+            "character_trait_axis_not_found",
+            "character_trait_axis_integrity_invalid",
           ].includes(String(error.detail.detail.code))
         ) setAxisReload((value) => value + 1);
       }
@@ -1031,7 +1072,7 @@ export default function CharacterWorkspace({
                         onLoadMoreAxes={() => void loadMoreAxes()}
                         onCreateAxis={createAxis}
                         onSetAxisProposition={defineAxisProposition}
-                        onDecision={(decision, comment, axis, alignment) => void decide(decision, comment, axis, alignment)}
+                        onDecision={(decision, comment, axis, alignment, scopeConfirmed) => void decide(decision, comment, axis, alignment, scopeConfirmed)}
                       />
                     )}
                     {route.section === "drift" && (

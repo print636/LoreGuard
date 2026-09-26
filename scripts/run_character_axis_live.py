@@ -60,6 +60,10 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_SIGNAL_DRAFT_TRACE_VERSION_KEY,
     _CHARACTER_SIGNAL_DRAFT_TRACE_VERSION,
     _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS,
+    _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEY,
+    _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION_KEY,
+    _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION,
+    _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS,
     _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
     _local_service_artifact_sha256,
 )
@@ -120,6 +124,7 @@ SAFE_REASON_KEYS = frozenset({
     "unmatched_character_alias", "object_baseline_identity_unavailable",
     "drift_scope_unknown", "lower_authority_draft_scope_shadowed",
     "drift_release_unknown", "drift_release_inapplicable",
+    "draft_source_excerpt_repaired",
     "observation_limit", "below_sensitivity_threshold", "baseline_limit",
 })
 SAFE_SIGNAL_SOURCE_KINDS = frozenset({
@@ -794,13 +799,20 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or provider["thinking_configured"] != (thinking_mode is not None)
     ):
         return None
+    draft_excerpt_repair_keys = set(limits) & _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
     if (
         set(capabilities) != _CAPABILITY_KEYS
         or any(type(flag) is not bool for flag in capabilities.values())
         or (set(limits) & _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS) not in (
             set(), set(_CHARACTER_SIGNAL_DRAFT_TRACE_KEYS)
         )
-        or set(limits) - _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS not in {
+        or draft_excerpt_repair_keys not in (
+            set(), set(_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS)
+        )
+        or set(limits) - (
+            _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
+            | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
+        ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
             _CHARACTER_CONSISTENCY_LIMIT_KEYS
             | {_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY},
@@ -929,6 +941,14 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or limits[_CHARACTER_SIGNAL_DRAFT_TRACE_VERSION_KEY] != (
             _CHARACTER_SIGNAL_DRAFT_TRACE_VERSION
             if limits[_CHARACTER_SIGNAL_DRAFT_TRACE_KEY] else None
+        )
+    ):
+        return None
+    if draft_excerpt_repair_keys and (
+        type(limits[_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEY]) is not bool
+        or limits[_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION_KEY] != (
+            _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION
+            if limits[_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEY] else None
         )
     ):
         return None

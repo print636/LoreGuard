@@ -8,7 +8,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .config import Settings
 from .character_trait_extraction import (
-    ASSERTION_INDEX_V1, DRAFT_SIGNAL_TRACE_V1, SUPPORT_TRACE_V1,
+    ASSERTION_INDEX_V1, DRAFT_SIGNAL_TRACE_V1,
+    DRAFT_SOURCE_EXCERPT_REPAIR_V1, SUPPORT_TRACE_V1,
 )
 from .character_scope_review import SCOPE_REVIEW_PROMPT_V2, SCOPE_REVIEW_SCHEMA_V1
 from .embeddings import EmbeddingNotConfiguredError, OpenAICompatibleEmbeddingProvider
@@ -243,6 +244,13 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "signal_draft_trace_version": (
                 DRAFT_SIGNAL_TRACE_V1
                 if settings.character_signal_draft_trace_v1 else None
+            ),
+            "signal_draft_source_excerpt_repair_v1": (
+                settings.character_signal_draft_source_excerpt_repair_v1
+            ),
+            "signal_draft_source_excerpt_repair_version": (
+                DRAFT_SOURCE_EXCERPT_REPAIR_V1
+                if settings.character_signal_draft_source_excerpt_repair_v1 else None
             ),
             "signal_support_segmenter_version": (
                 ASSERTION_INDEX_V1 if settings.character_signal_support_id_v4 else None

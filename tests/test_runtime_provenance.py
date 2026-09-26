@@ -44,6 +44,23 @@ def configured_settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+def test_draft_source_excerpt_repair_is_default_off_and_versioned_in_provenance():
+    off = safe_runtime_provenance(configured_settings())
+    on = safe_runtime_provenance(configured_settings(
+        character_signal_draft_source_excerpt_repair_v1=True,
+    ))
+    off_limits = off["character_consistency_limits"]
+    on_limits = on["character_consistency_limits"]
+
+    assert off_limits["signal_draft_source_excerpt_repair_v1"] is False
+    assert off_limits["signal_draft_source_excerpt_repair_version"] is None
+    assert on_limits["signal_draft_source_excerpt_repair_v1"] is True
+    assert on_limits["signal_draft_source_excerpt_repair_version"] == (
+        "draft-source-excerpt-repair-v1"
+    )
+    assert off_limits != on_limits
+
+
 def test_runtime_provenance_is_content_free_and_records_effective_identity():
     result = safe_runtime_provenance(configured_settings())
     serialized = json.dumps(result, sort_keys=True)
