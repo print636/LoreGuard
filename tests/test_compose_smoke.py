@@ -1,9 +1,14 @@
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 from app.embeddings import EmbeddingProfile
-from scripts.run_compose_smoke import PGVECTOR_SMOKE_SQL, verify_pgvector_compose, wait_until_ready
+from scripts.run_compose_smoke import (
+    PGVECTOR_SMOKE_SQL,
+    verify_pgvector_compose,
+    wait_until_ready,
+)
 
 
 class ComposeSmokeTests(unittest.TestCase):
@@ -74,13 +79,24 @@ class ComposeSmokeTests(unittest.TestCase):
 
     @patch("scripts.run_compose_smoke.subprocess.run")
     def test_pgvector_check_is_non_model_transactional_and_fail_closed(self, execute):
-        execute.return_value.returncode = 0
+        head = CompletedProcess([], 0, stdout="test_revision_42 (head)\n", stderr="")
+        succeeded = CompletedProcess([], 0, stdout="", stderr="")
+        execute.side_effect = [head, succeeded]
         verify_pgvector_compose()
-        command = execute.call_args.args[0]
+        self.assertEqual(
+            execute.call_args_list[0].args[0],
+            ["docker", "compose", "exec", "-T", "api", "alembic", "heads"],
+        )
+        command = execute.call_args_list[1].args[0]
         self.assertEqual(command[:4], ["docker", "compose", "exec", "-T"])
+        self.assertIn("'test_revision_42'", execute.call_args_list[1].kwargs["input"])
+        self.assertNotIn(
+            "__EXPECTED_ALEMBIC_HEAD__", execute.call_args_list[1].kwargs["input"]
+        )
         self.assertIn("BEGIN;", PGVECTOR_SMOKE_SQL)
         self.assertIn("ROLLBACK;", PGVECTOR_SMOKE_SQL)
-        self.assertIn("0019_project_name_sort_key", PGVECTOR_SMOKE_SQL)
+        self.assertIn("revision_count <> 1", PGVECTOR_SMOKE_SQL)
+        self.assertIn("__EXPECTED_ALEMBIC_HEAD__", PGVECTOR_SMOKE_SQL)
         self.assertIn("ck_character_trait_candidate_review_state", PGVECTOR_SMOKE_SQL)
         self.assertIn("ck_character_trait_review_decision", PGVECTOR_SMOKE_SQL)
         self.assertIn("character_trait_axis_immutable", PGVECTOR_SMOKE_SQL)
@@ -180,11 +196,18 @@ class ComposeSmokeTests(unittest.TestCase):
         self.assertNotIn(profile_ids["ci-c"], candidates)
         self.assertNotIn("embedding_api", PGVECTOR_SMOKE_SQL.lower())
 
-        execute.return_value.returncode = 1
-        execute.return_value.stderr = ""
-        execute.return_value.stdout = ""
+        execute.side_effect = [head, CompletedProcess([], 1, stdout="", stderr="")]
         with self.assertRaisesRegex(RuntimeError, "pgvector"):
             verify_pgvector_compose()
+
+    @patch("scripts.run_compose_smoke.subprocess.run")
+    def test_compose_check_rejects_multiple_migration_heads(self, execute):
+        execute.return_value = CompletedProcess(
+            [], 0, stdout="revision_a (head)\nrevision_b (head)\n", stderr=""
+        )
+        with self.assertRaisesRegex(RuntimeError, "exactly one Alembic head"):
+            verify_pgvector_compose()
+        execute.assert_called_once()
 
 
 if __name__ == "__main__":

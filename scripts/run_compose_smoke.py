@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import time
 from urllib.error import URLError
@@ -22,6 +23,7 @@ BEGIN;
 DO $$
 DECLARE
     current_revision text;
+    revision_count integer;
     vector_extension_count integer;
     vector_column_count integer;
     candidate_withdraw_check_count integer;
@@ -29,9 +31,11 @@ DECLARE
     axis_direction_column_count integer;
     axis_direction_check_count integer;
 BEGIN
-    SELECT version_num INTO current_revision FROM alembic_version;
-    IF current_revision <> '0019_project_name_sort_key' THEN
-        RAISE EXCEPTION 'unexpected Alembic revision';
+    SELECT count(*), max(version_num) INTO revision_count, current_revision
+      FROM alembic_version;
+    IF revision_count <> 1 OR current_revision <> '__EXPECTED_ALEMBIC_HEAD__' THEN
+        RAISE EXCEPTION 'unexpected Alembic revision (current %, expected %)',
+            current_revision, '__EXPECTED_ALEMBIC_HEAD__';
     END IF;
     SELECT count(*) INTO axis_direction_column_count
       FROM information_schema.columns
@@ -337,9 +341,28 @@ def wait_until_ready(base_url: str, timeout_seconds: float) -> None:
     raise RuntimeError(f"API did not become ready: {type(last_error).__name__}")
 
 
+def container_migration_head() -> str:
+    """Read the single Alembic head from the image whose database is under test."""
+
+    completed = subprocess.run(
+        ["docker", "compose", "exec", "-T", "api", "alembic", "heads"],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("Could not read the Compose API migration head")
+    match = re.fullmatch(r"([A-Za-z0-9_]+) \(head\)", completed.stdout.strip())
+    if match is None:
+        raise RuntimeError("Compose API must have exactly one Alembic head")
+    return match.group(1)
+
+
 def verify_pgvector_compose() -> None:
     """Verify the migrated Compose database without downloading any model."""
 
+    expected_head = container_migration_head()
     completed = subprocess.run(
         [
             "docker",
@@ -357,7 +380,7 @@ def verify_pgvector_compose() -> None:
             "-f",
             "-",
         ],
-        input=PGVECTOR_SMOKE_SQL,
+        input=PGVECTOR_SMOKE_SQL.replace("__EXPECTED_ALEMBIC_HEAD__", expected_head),
         text=True,
         capture_output=True,
         timeout=60,
