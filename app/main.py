@@ -84,7 +84,10 @@ from .character_traits import (
 )
 from .character_trait_extraction import stable_trait_identity, trait_keys_compatible
 from .character_support_bindings import verify_stored_support_bindings
-from .character_consistency_stage import _safe_context_label as _safe_axis_author_text
+from .character_consistency_stage import (
+    CHARACTER_CONSISTENCY_CHECKER_VERSION,
+    _safe_context_label as _safe_axis_author_text,
+)
 from .document_diff import build_document_diff
 from .docx_import import DocxImportError, extract_docx_text
 from .domain import CertaintyLevel, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
@@ -297,6 +300,10 @@ class CharacterTraitDecisionIn(BaseModel):
     expected_axis_positive_proposition_sha256: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+    expected_axis_applicability_scope_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    scope_applicability_confirmed: bool = Field(default=False, strict=True)
 
 
 class CharacterTraitAxisCreateIn(BaseModel):
@@ -3656,11 +3663,12 @@ def _confirmation_trait_identity_matches(
     *,
     intended_axis_id: str | None = None,
 ) -> bool:
-    if first.trait_type == "core_personality":
+    if first.trait_type in {"core_personality", "value", "behavior_boundary"}:
         first_axis_id = intended_axis_id or first.approved_axis_id
         second_axis_id = second.approved_axis_id
         if first_axis_id is not None or second_axis_id is not None:
-            # A one-sided binding does not silently approve the legacy label.
+            # An approved author axis is never inferred from a raw model label.
+            # This also lets distinct situation-scoped axes share an object.
             return (
                 first_axis_id is not None
                 and second_axis_id is not None
@@ -3689,6 +3697,46 @@ def _confirmation_trait_identity_matches(
         baseline_key=second.trait_key,
         observation_key=first.trait_key,
     )
+
+
+def _exact_scoped_axis_legacy_collision(
+    first: CharacterTraitCandidateRow,
+    second: CharacterTraitCandidateRow,
+    *,
+    intended_axis_id: str | None,
+) -> bool:
+    """An author axis cannot silently coexist with an unbound identical trait."""
+
+    if (
+        first.project_id != second.project_id
+        or first.character_key != second.character_key
+        or first.trait_type != second.trait_type
+        or first.trait_type not in {"value", "behavior_boundary"}
+        or bool(intended_axis_id or first.approved_axis_id)
+        == bool(second.approved_axis_id)
+    ):
+        return False
+    try:
+        first_key = _validated_comparison_key(
+            first.comparison_key, trait_type=first.trait_type
+        )
+        second_key = _validated_comparison_key(
+            second.comparison_key, trait_type=second.trait_type
+        )
+    except ValueError:
+        first_key = second_key = None
+    same_trait = (
+        stable_trait_identity(first.trait_type, first.trait_key)
+        == stable_trait_identity(second.trait_type, second.trait_key)
+    )
+    if first_key is not None and second_key is not None:
+        # A canonical object can have several model-authored labels. Leaving
+        # the old unbound row active would let it bypass the authored scope.
+        return first_key == second_key
+    # Old confirmed rows may predate persisted object keys. An identical raw
+    # trait label is ambiguous until the author explicitly retires or replaces
+    # that row; it cannot silently become a second active baseline.
+    return same_trait
 
 
 def _verify_confirmed_axis_peer(db, peer: CharacterTraitCandidateRow, axis: CharacterTraitAxisRow) -> None:
@@ -4886,6 +4934,8 @@ def decide_character_profile_candidate(
     if payload.approved_axis_id is None and (
         payload.axis_alignment is not None
         or payload.expected_axis_positive_proposition_sha256 is not None
+        or payload.expected_axis_applicability_scope_sha256 is not None
+        or payload.scope_applicability_confirmed
     ):
         raise HTTPException(
             422,
@@ -4930,6 +4980,80 @@ def decide_character_profile_candidate(
         )
         if row is None:
             raise HTTPException(404, "角色候选不存在")
+        scoped_axis = None
+        if payload.approved_axis_id is not None:
+            if row.trait_type not in {
+                "core_personality", "value", "behavior_boundary"
+            }:
+                raise HTTPException(
+                    422,
+                    detail={
+                        "code": "character_trait_axis_dimension_mismatch",
+                        "message": "比较轴不适用于该角色特征维度",
+                    },
+                )
+            if row.trait_type == "core_personality" and (
+                payload.expected_axis_applicability_scope_sha256 is not None
+                or payload.scope_applicability_confirmed
+            ):
+                raise HTTPException(
+                    422,
+                    detail={
+                        "code": "character_trait_axis_scope_not_applicable",
+                        "message": "核心性格比较轴不接受对象情境确认",
+                    },
+                )
+            if row.trait_type in {"value", "behavior_boundary"}:
+                if (
+                    not payload.scope_applicability_confirmed
+                    or payload.expected_axis_applicability_scope_sha256 is None
+                ):
+                    raise HTTPException(
+                        422,
+                        detail={
+                            "code": "character_trait_axis_scope_confirmation_required",
+                            "message": "请核对候选原文与比较轴适用情境，并提交情境摘要确认",
+                        },
+                    )
+                scoped_axis = db.scalar(
+                    select(CharacterTraitAxisRow).where(
+                        CharacterTraitAxisRow.id == payload.approved_axis_id,
+                        CharacterTraitAxisRow.project_id == project_id,
+                    )
+                )
+                if scoped_axis is None:
+                    raise HTTPException(
+                        404,
+                        detail={
+                            "code": "character_trait_axis_not_found",
+                            "message": "比较轴不存在",
+                        },
+                    )
+                if scoped_axis.trait_type != row.trait_type:
+                    raise HTTPException(
+                        422,
+                        detail={
+                            "code": "character_trait_axis_dimension_mismatch",
+                            "message": "比较轴与候选维度不一致",
+                        },
+                    )
+                axis_scope = scoped_axis.applicability_scope
+                if (
+                    not isinstance(axis_scope, str)
+                    or not _safe_axis_author_text(axis_scope)
+                    or axis_scope != " ".join(axis_scope.split())
+                    or hashlib.sha256(axis_scope.encode("utf-8")).hexdigest()
+                    != scoped_axis.applicability_scope_sha256
+                    or payload.expected_axis_applicability_scope_sha256
+                    != scoped_axis.applicability_scope_sha256
+                ):
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": "character_trait_axis_scope_conflict",
+                            "message": "比较轴适用情境已变化或无法核对，请刷新后重试",
+                        },
+                    )
         if payload.decision == "withdraw":
             # A confirmed profile entry is an author decision, independent of
             # whether its original source is still a formal/current document.
@@ -5134,23 +5258,7 @@ def decide_character_profile_candidate(
         approved_axis = None
         approved_axis_polarity = None
         if payload.approved_axis_id is not None:
-            if row.trait_type in {"value", "behavior_boundary"}:
-                raise HTTPException(
-                    409,
-                    detail={
-                        "code": "character_trait_axis_matching_unavailable",
-                        "message": "价值观或行为边界比较轴的对象与情境目标校验尚未启用",
-                    },
-                )
-            if row.trait_type != "core_personality":
-                raise HTTPException(
-                    422,
-                    detail={
-                        "code": "character_trait_axis_dimension_mismatch",
-                        "message": "当前比较轴仅支持核心性格候选",
-                    },
-                )
-            approved_axis = db.scalar(
+            approved_axis = scoped_axis or db.scalar(
                 select(CharacterTraitAxisRow).where(
                     CharacterTraitAxisRow.id == payload.approved_axis_id,
                     CharacterTraitAxisRow.project_id == project_id,
@@ -5205,6 +5313,65 @@ def decide_character_profile_candidate(
                         "message": "比较轴正向命题与当前版本不一致，请刷新后重试",
                     },
                 )
+            if row.trait_type in {"value", "behavior_boundary"}:
+                if (
+                    approved_axis.positive_proposition_authored_at is None
+                    or not isinstance(approved_axis.definition, str)
+                    or not _safe_axis_author_text(approved_axis.definition)
+                    or approved_axis.definition
+                    != " ".join(approved_axis.definition.split())
+                    or hashlib.sha256(
+                        approved_axis.definition.encode("utf-8")
+                    ).hexdigest() != approved_axis.definition_sha256
+                ):
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": "character_trait_axis_integrity_invalid",
+                            "message": "作者比较轴定义无法核对，请刷新后重试",
+                        },
+                    )
+                try:
+                    candidate_object_key = _validated_comparison_key(
+                        row.comparison_key, trait_type=row.trait_type
+                    )
+                    axis_object_key = _validated_comparison_key(
+                        approved_axis.comparison_key,
+                        trait_type=approved_axis.trait_type,
+                    )
+                except ValueError:
+                    candidate_object_key = axis_object_key = None
+                if candidate_object_key is None or candidate_object_key != axis_object_key:
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": "character_trait_axis_object_mismatch",
+                            "message": "候选对象与作者比较轴对象不一致",
+                        },
+                    )
+                provenance = row.provenance
+                if (
+                    support_status != "verified"
+                    or row.support_binding_mode != "required_v1"
+                    or row.origin != "explicit_setting"
+                    or row.stability not in {"stable", "core"}
+                    or row.generator_version
+                    != CHARACTER_CONSISTENCY_CHECKER_VERSION
+                    or not isinstance(provenance, dict)
+                    or provenance.get("schema_version") != 1
+                    or provenance.get("stage") != "character_signal_extraction"
+                    or provenance.get("source_kind") != "formal_character_profile"
+                    or provenance.get("evidence_count") != 1
+                    or not isinstance(row.evidence, list)
+                    or len(row.evidence) != 1
+                ):
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": "character_trait_axis_source_unverified",
+                            "message": "此候选缺少新式模型抽取与精确证据核对，不能绑定作者情境轴",
+                        },
+                    )
             try:
                 approved_axis_polarity = axis_polarity_for_alignment(
                     row.polarity, payload.axis_alignment
@@ -5233,6 +5400,20 @@ def decide_character_profile_candidate(
                 for other in confirmed:
                     if other.approved_axis_id == approved_axis.id:
                         _verify_confirmed_axis_peer(db, other, approved_axis)
+            if any(
+                other.id != row.supersedes_candidate_id
+                and _exact_scoped_axis_legacy_collision(
+                    row, other, intended_axis_id=payload.approved_axis_id
+                )
+                for other in confirmed
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_axis_legacy_overlap",
+                        "message": "相同对象已有未绑定或已绑定的正式设定；请先撤销旧项",
+                    },
+                )
             unverified_axis_peers = [
                 other for other in confirmed
                 if approved_axis is not None
@@ -5300,16 +5481,24 @@ def decide_character_profile_candidate(
                     if replaced is None:
                         raise ValueError("superseded candidate is missing")
                     _verify_reused_review_chain(db, replaced)
-                    if row.trait_type == "core_personality" and (
+                    if row.trait_type in {
+                        "core_personality", "value", "behavior_boundary"
+                    } and (
                         payload.approved_axis_id is not None
                         or replaced.approved_axis_id is not None
                     ):
                         if (
-                            payload.approved_axis_id is None
-                            or replaced.approved_axis_id
-                            != payload.approved_axis_id
-                            or replaced.approved_axis_version
-                            != payload.expected_axis_version
+                            not _exact_scoped_axis_legacy_collision(
+                                row, replaced,
+                                intended_axis_id=payload.approved_axis_id,
+                            )
+                            and (
+                                payload.approved_axis_id is None
+                                or replaced.approved_axis_id
+                                != payload.approved_axis_id
+                                or replaced.approved_axis_version
+                                != payload.expected_axis_version
+                            )
                         ):
                             raise HTTPException(
                                 409,

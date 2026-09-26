@@ -19,6 +19,7 @@ from app.character_traits import (
     verified_character_trait_review_chain,
 )
 from app.character_support_bindings import support_bindings_sha256
+from app.character_consistency_stage import CHARACTER_CONSISTENCY_CHECKER_VERSION
 from app.auth import AuthContext, get_auth_context
 from app.db import (
     AnalysisDiagnosticRow,
@@ -117,6 +118,7 @@ def _candidate(
     actor_anchor_id: str | None = None,
     label_anchor_id: str | None = None,
     scope_relation: str = "local",
+    model_candidate: bool = False,
 ) -> str:
     with SessionLocal() as db:
         snapshot = db.scalar(
@@ -178,8 +180,19 @@ def _candidate(
                     "label_anchor_id": label_anchor_id,
                     "scope_relation": scope_relation,
                 }]} if support_id is not None else {}),
-                "generator_version": "api-contract-test-v1",
-                "provenance": {"extractor": "test", "record_index": 0},
+                "generator_version": (
+                    CHARACTER_CONSISTENCY_CHECKER_VERSION
+                    if model_candidate else "api-contract-test-v1"
+                ),
+                "provenance": (
+                    {
+                        "schema_version": 1,
+                        "stage": "character_signal_extraction",
+                        "evidence_count": 1,
+                        "source_kind": "formal_character_profile",
+                    }
+                    if model_candidate else {"extractor": "test", "record_index": 0}
+                ),
                 "supersedes_candidate_id": supersedes_candidate_id,
             },
         )
@@ -1862,9 +1875,9 @@ def test_author_scoped_axis_requires_explicit_object_situation_and_stays_unbound
                 ),
             },
         )
-        assert attempted.status_code == 409, attempted.text
+        assert attempted.status_code == 422, attempted.text
         assert attempted.json()["detail"]["code"] == (
-            "character_trait_axis_matching_unavailable"
+            "character_trait_axis_scope_confirmation_required"
         )
         with SessionLocal() as db:
             candidate = db.get(CharacterTraitCandidateRow, candidate_id)
@@ -1875,6 +1888,496 @@ def test_author_scoped_axis_requires_explicit_object_situation_and_stays_unbound
         assert unbound.status_code == 201, unbound.text
         assert unbound.json()["candidate"]["review_state"] == "confirmed"
         assert unbound.json()["candidate"]["approved_axis_id"] is None
+
+
+@pytest.mark.parametrize("trait_type", ("value", "behavior_boundary"))
+def test_author_scoped_axis_requires_verified_model_source_and_explicit_scope_ack(
+    trait_type: str,
+):
+    content = "林澈在家庭危机中始终把保护家人放在首位。"
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client, content=content)
+        run = _completed_run(client, project["id"])
+        base = f"/api/v1/projects/{project['id']}/character-trait-axes"
+        axis_response = client.post(base, json={
+            "trait_type": trait_type,
+            "display_name": "危机时保护家人",
+            "definition": "家庭危机中是否优先保护家人",
+            "positive_proposition": "林澈在家庭危机中优先保护家人",
+            "comparison_key": f"{trait_type}:家人",
+            "applicability_scope": "家庭危机发生时",
+        })
+        assert axis_response.status_code == 201, axis_response.text
+        axis = axis_response.json()
+        candidate_id = _candidate(
+            project["id"], run["id"], trait_type=trait_type,
+            trait_key="保护家人的原则", comparison_key=f"{trait_type}:家人",
+            value="林澈在家庭危机中始终把保护家人放在首位",
+            support_id="L1:A1", model_candidate=True,
+        )
+        path = _decision_path(project["id"], candidate_id)
+        decision = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": axis["id"], "expected_axis_version": 1,
+            "axis_alignment": "same",
+            "expected_axis_positive_proposition_sha256": (
+                axis["positive_proposition_sha256"]
+            ),
+            "expected_axis_applicability_scope_sha256": (
+                axis["applicability_scope_sha256"]
+            ),
+            "scope_applicability_confirmed": True,
+        }
+        no_ack = client.post(
+            path, json={**decision, "scope_applicability_confirmed": False},
+        )
+        assert no_ack.status_code == 422, no_ack.text
+        assert no_ack.json()["detail"]["code"] == (
+            "character_trait_axis_scope_confirmation_required"
+        )
+        missing_hash = client.post(
+            path, json={**decision, "expected_axis_applicability_scope_sha256": None},
+        )
+        assert missing_hash.status_code == 422, missing_hash.text
+        stale_hash = client.post(
+            path,
+            json={
+                **decision,
+                "expected_axis_applicability_scope_sha256": "0" * 64,
+            },
+        )
+        assert stale_hash.status_code == 409, stale_hash.text
+        assert stale_hash.json()["detail"]["code"] == (
+            "character_trait_axis_scope_conflict"
+        )
+        headers = {"Idempotency-Key": f"scoped-{uuid4().hex}"}
+        accepted = client.post(path, json=decision, headers=headers)
+        assert accepted.status_code == 201, accepted.text
+        body = accepted.json()
+        assert body["candidate"]["approved_axis_id"] == axis["id"]
+        assert body["candidate"]["axis_alignment"] == "same"
+        assert body["candidate"]["axis_polarity"] == "positive"
+        replay = client.post(path, json=decision, headers=headers)
+        assert replay.status_code == 201, replay.text
+        assert replay.json()["deduplicated"] is True
+        assert replay.json()["decision_id"] == body["decision_id"]
+        assert client.post(
+            path, json={**decision, "scope_applicability_confirmed": False},
+            headers=headers,
+        ).status_code == 422
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            review = db.get(CharacterTraitReviewRow, body["decision_id"])
+            assert row.review_state == "confirmed"
+            assert row.lock_version == 1
+            assert row.approved_axis_id == review.approved_axis_id == axis["id"]
+            assert row.axis_positive_proposition_sha256 == (
+                review.axis_positive_proposition_sha256
+            )
+            assert review.axis_positive_proposition_sha256 == (
+                axis["positive_proposition_sha256"]
+            )
+        next_run = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            snapshot = db.scalar(select(AnalysisRunCharacterTraitInputRow).where(
+                AnalysisRunCharacterTraitInputRow.run_id == next_run["id"],
+                AnalysisRunCharacterTraitInputRow.candidate_id == candidate_id,
+            ))
+            assert snapshot is not None
+            assert snapshot.payload_sha256 == payload_sha256(snapshot.payload)
+            assert snapshot.payload["approved_axis_comparison_key"] == (
+                f"{trait_type}:家人"
+            )
+            assert snapshot.payload["approved_axis_applicability_scope"] == (
+                "家庭危机发生时"
+            )
+            assert snapshot.payload["approved_axis_applicability_scope_sha256"] == (
+                axis["applicability_scope_sha256"]
+            )
+
+
+@pytest.mark.parametrize("trait_type", ("value", "behavior_boundary"))
+def test_scoped_axis_rejects_wrong_object_or_unverified_source(trait_type: str):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈在家庭危机中始终保护家人。"
+        )
+        run = _completed_run(client, project["id"])
+        axis_response = client.post(
+            f"/api/v1/projects/{project['id']}/character-trait-axes",
+            json={
+                "trait_type": trait_type,
+                "display_name": "保护家人",
+                "definition": "危机时是否保护家人",
+                "positive_proposition": "林澈在危机中保护家人",
+                "comparison_key": f"{trait_type}:家人",
+                "applicability_scope": "家庭危机发生时",
+            },
+        )
+        assert axis_response.status_code == 201, axis_response.text
+        axis = axis_response.json()
+        decision = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": axis["id"], "expected_axis_version": 1,
+            "axis_alignment": "same",
+            "expected_axis_positive_proposition_sha256": (
+                axis["positive_proposition_sha256"]
+            ),
+            "expected_axis_applicability_scope_sha256": (
+                axis["applicability_scope_sha256"]
+            ),
+            "scope_applicability_confirmed": True,
+        }
+        wrong_object = _candidate(
+            project["id"], run["id"], trait_type=trait_type,
+            trait_key="保护家人的原则", comparison_key=f"{trait_type}:朋友",
+            value="林澈在家庭危机中始终保护家人",
+            support_id="L1:A1", model_candidate=True,
+        )
+        mismatch = client.post(
+            _decision_path(project["id"], wrong_object), json=decision,
+        )
+        assert mismatch.status_code == 409, mismatch.text
+        assert mismatch.json()["detail"]["code"] == (
+            "character_trait_axis_object_mismatch"
+        )
+        synthetic = _candidate(
+            project["id"], run["id"], trait_type=trait_type,
+            trait_key="protect_family", comparison_key=f"{trait_type}:家人",
+            value="林澈在家庭危机中始终保护家人",
+            support_id="L1:A1",
+        )
+        unverified = client.post(
+            _decision_path(project["id"], synthetic), json=decision,
+        )
+        assert unverified.status_code == 409, unverified.text
+        assert unverified.json()["detail"]["code"] == (
+            "character_trait_axis_source_unverified"
+        )
+        with SessionLocal() as db:
+            for candidate_id in (wrong_object, synthetic):
+                row = db.get(CharacterTraitCandidateRow, candidate_id)
+                assert row.review_state == "pending"
+                assert row.approved_axis_id is None
+
+
+def test_same_object_scoped_axes_in_different_situations_stay_distinct():
+    content = (
+        "林澈在家庭危机中始终保护家人。\n"
+        "林澈在平常日子不把家人放在首位。"
+    )
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client, content=content)
+        run = _completed_run(client, project["id"])
+        base = f"/api/v1/projects/{project['id']}/character-trait-axes"
+        axes = []
+        for label, scope in (
+            ("危机时保护家人", "家庭危机发生时"),
+            ("日常优先照顾家人", "平常日子"),
+        ):
+            response = client.post(base, json={
+                "trait_type": "value", "display_name": label,
+                "definition": label,
+                "positive_proposition": f"林澈{label}",
+                "comparison_key": "value:家人",
+                "applicability_scope": scope,
+            })
+            assert response.status_code == 201, response.text
+            axes.append(response.json())
+        first = _candidate(
+            project["id"], run["id"], trait_type="value",
+            trait_key="保护家人的原则", comparison_key="value:家人",
+            value="林澈在家庭危机中始终保护家人", polarity="positive",
+            line_start=1, support_id="L1:A1", model_candidate=True,
+        )
+        second = _candidate(
+            project["id"], run["id"], trait_type="value",
+            trait_key="保护家人的原则", comparison_key="value:家人",
+            value="林澈在平常日子不把家人放在首位", polarity="negative",
+            line_start=2, line_end=2, support_id="L2:A1",
+            model_candidate=True,
+        )
+
+        def decision(axis: dict) -> dict:
+            return {
+                "decision": "confirm", "expected_revision": 0,
+                "approved_axis_id": axis["id"], "expected_axis_version": 1,
+                "axis_alignment": "same",
+                "expected_axis_positive_proposition_sha256": (
+                    axis["positive_proposition_sha256"]
+                ),
+                "expected_axis_applicability_scope_sha256": (
+                    axis["applicability_scope_sha256"]
+                ),
+                "scope_applicability_confirmed": True,
+            }
+
+        stale_selection = client.post(
+            _decision_path(project["id"], second),
+            json={
+                **decision(axes[1]),
+                "expected_axis_applicability_scope_sha256": (
+                    axes[0]["applicability_scope_sha256"]
+                ),
+            },
+        )
+        assert stale_selection.status_code == 409, stale_selection.text
+        assert stale_selection.json()["detail"]["code"] == (
+            "character_trait_axis_scope_conflict"
+        )
+        for candidate_id, axis in ((first, axes[0]), (second, axes[1])):
+            accepted = client.post(
+                _decision_path(project["id"], candidate_id), json=decision(axis),
+            )
+            assert accepted.status_code == 201, accepted.text
+            assert accepted.json()["candidate"]["approved_axis_id"] == axis["id"]
+        assert axes[0]["id"] != axes[1]["id"]
+
+
+def test_scoped_axis_opposite_raw_polarity_uses_author_proposition_direction():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈在家庭危机中绝不会抛弃家人。"
+        )
+        run = _completed_run(client, project["id"])
+        axis_response = client.post(
+            f"/api/v1/projects/{project['id']}/character-trait-axes",
+            json={
+                "trait_type": "behavior_boundary",
+                "display_name": "不抛弃家人",
+                "definition": "家庭危机时是否坚守家人",
+                "positive_proposition": "林澈在家庭危机中坚守家人",
+                "comparison_key": "behavior_boundary:家人",
+                "applicability_scope": "家庭危机发生时",
+            },
+        )
+        assert axis_response.status_code == 201, axis_response.text
+        axis = axis_response.json()
+        candidate_id = _candidate(
+            project["id"], run["id"], trait_type="behavior_boundary",
+            trait_key="抛弃家人", comparison_key="behavior_boundary:家人",
+            value="林澈在家庭危机中绝不会抛弃家人", polarity="negative",
+            support_id="L1:A1", model_candidate=True,
+        )
+        path = _decision_path(project["id"], candidate_id)
+        decision = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": axis["id"], "expected_axis_version": 1,
+            "axis_alignment": "opposite",
+            "expected_axis_positive_proposition_sha256": (
+                axis["positive_proposition_sha256"]
+            ),
+            "expected_axis_applicability_scope_sha256": (
+                axis["applicability_scope_sha256"]
+            ),
+            "scope_applicability_confirmed": True,
+        }
+        stale_version = client.post(
+            path, json={**decision, "expected_axis_version": 2},
+        )
+        assert stale_version.status_code == 409, stale_version.text
+        assert stale_version.json()["detail"]["code"] == (
+            "character_trait_axis_version_conflict"
+        )
+        accepted = client.post(path, json=decision)
+        assert accepted.status_code == 201, accepted.text
+        assert accepted.json()["candidate"]["polarity"] == "negative"
+        assert accepted.json()["candidate"]["axis_polarity"] == "positive"
+
+
+def test_same_scoped_axis_conflict_cannot_hide_behind_different_model_labels():
+    content = (
+        "林澈在家庭危机中保护家人。\n"
+        "林澈在家庭危机中抛弃家人。"
+    )
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client, content=content)
+        run = _completed_run(client, project["id"])
+        axis_response = client.post(
+            f"/api/v1/projects/{project['id']}/character-trait-axes",
+            json={
+                "trait_type": "behavior_boundary",
+                "display_name": "家人保护边界",
+                "definition": "危机中是否守护家人",
+                "positive_proposition": "林澈在家庭危机中保护家人",
+                "comparison_key": "behavior_boundary:家人",
+                "applicability_scope": "家庭危机发生时",
+            },
+        )
+        assert axis_response.status_code == 201, axis_response.text
+        axis = axis_response.json()
+        first = _candidate(
+            project["id"], run["id"], trait_type="behavior_boundary",
+            trait_key="守护家人", comparison_key="behavior_boundary:家人",
+            value="林澈在家庭危机中保护家人", polarity="positive",
+            line_start=1, line_end=1, support_id="L1:A1",
+            model_candidate=True,
+        )
+        second = _candidate(
+            project["id"], run["id"], trait_type="behavior_boundary",
+            trait_key="抛弃家人", comparison_key="behavior_boundary:家人",
+            value="林澈在家庭危机中抛弃家人", polarity="positive",
+            line_start=2, line_end=2, support_id="L2:A1",
+            model_candidate=True,
+        )
+        decision = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": axis["id"], "expected_axis_version": 1,
+            "expected_axis_positive_proposition_sha256": (
+                axis["positive_proposition_sha256"]
+            ),
+            "expected_axis_applicability_scope_sha256": (
+                axis["applicability_scope_sha256"]
+            ),
+            "scope_applicability_confirmed": True,
+        }
+        first_result = client.post(
+            _decision_path(project["id"], first),
+            json={**decision, "axis_alignment": "same"},
+        )
+        assert first_result.status_code == 201, first_result.text
+        second_result = client.post(
+            _decision_path(project["id"], second),
+            json={**decision, "axis_alignment": "opposite"},
+        )
+        assert second_result.status_code == 409, second_result.text
+        assert second_result.json()["detail"]["code"] == (
+            "character_trait_confirmation_conflict"
+        )
+        with SessionLocal() as db:
+            assert db.get(CharacterTraitCandidateRow, second).review_state == "pending"
+
+
+@pytest.mark.parametrize("bound_first", (False, True))
+@pytest.mark.parametrize("legacy_keyless", (False, True))
+def test_exact_scoped_and_unbound_legacy_overlap_requires_explicit_supersession(
+    bound_first: bool,
+    legacy_keyless: bool,
+):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈在家庭危机中始终保护家人。"
+        )
+        run = _completed_run(client, project["id"])
+        axis_response = client.post(
+            f"/api/v1/projects/{project['id']}/character-trait-axes",
+            json={
+                "trait_type": "value", "display_name": "保护家人",
+                "definition": "危机中是否保护家人",
+                "positive_proposition": "林澈在危机中保护家人",
+                "comparison_key": "value:家人",
+                "applicability_scope": "家庭危机发生时",
+            },
+        )
+        assert axis_response.status_code == 201, axis_response.text
+        axis = axis_response.json()
+        bound_decision = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": axis["id"], "expected_axis_version": 1,
+            "axis_alignment": "same",
+            "expected_axis_positive_proposition_sha256": (
+                axis["positive_proposition_sha256"]
+            ),
+            "expected_axis_applicability_scope_sha256": (
+                axis["applicability_scope_sha256"]
+            ),
+            "scope_applicability_confirmed": True,
+        }
+
+        def make_candidate(*, bound: bool, replaces: str | None = None) -> str:
+            return _candidate(
+                project["id"], run["id"], trait_type="value",
+                trait_key="保护家人的原则",
+                comparison_key=(
+                    "value:家人" if bound or not legacy_keyless else None
+                ),
+                value="林澈在家庭危机中始终保护家人",
+                support_id="L1:A1" if bound else None,
+                model_candidate=bound,
+                supersedes_candidate_id=replaces,
+            )
+
+        def confirm(candidate_id: str, *, bound: bool):
+            return client.post(
+                _decision_path(project["id"], candidate_id),
+                json=(
+                    bound_decision if bound else
+                    {"decision": "confirm", "expected_revision": 0}
+                ),
+            )
+
+        first = make_candidate(bound=bound_first)
+        accepted_first = confirm(first, bound=bound_first)
+        assert accepted_first.status_code == 201, accepted_first.text
+        other = make_candidate(bound=not bound_first)
+        overlap = confirm(other, bound=not bound_first)
+        assert overlap.status_code == 409, overlap.text
+        assert overlap.json()["detail"]["code"] == (
+            "character_trait_axis_legacy_overlap"
+        )
+        linked = make_candidate(bound=not bound_first, replaces=first)
+        replacement = confirm(linked, bound=not bound_first)
+        assert replacement.status_code == 201, replacement.text
+        with SessionLocal() as db:
+            assert db.get(CharacterTraitCandidateRow, first).review_state == "superseded"
+            assert db.get(CharacterTraitCandidateRow, other).review_state == "pending"
+            assert db.get(CharacterTraitCandidateRow, linked).review_state == "confirmed"
+
+
+def test_scoped_axis_and_legacy_synonym_cannot_coexist_on_same_object():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈在家庭危机中始终保护家人。"
+        )
+        run = _completed_run(client, project["id"])
+        axis_response = client.post(
+            f"/api/v1/projects/{project['id']}/character-trait-axes",
+            json={
+                "trait_type": "value", "display_name": "家人守护原则",
+                "definition": "危机中是否守护家人",
+                "positive_proposition": "林澈在危机中守护家人",
+                "comparison_key": "value:家人",
+                "applicability_scope": "家庭危机发生时",
+            },
+        )
+        assert axis_response.status_code == 201, axis_response.text
+        axis = axis_response.json()
+        bound_id = _candidate(
+            project["id"], run["id"], trait_type="value",
+            trait_key="家人守护原则", comparison_key="value:家人",
+            value="林澈在家庭危机中始终保护家人",
+            support_id="L1:A1", model_candidate=True,
+        )
+        bound = client.post(
+            _decision_path(project["id"], bound_id),
+            json={
+                "decision": "confirm", "expected_revision": 0,
+                "approved_axis_id": axis["id"], "expected_axis_version": 1,
+                "axis_alignment": "same",
+                "expected_axis_positive_proposition_sha256": (
+                    axis["positive_proposition_sha256"]
+                ),
+                "expected_axis_applicability_scope_sha256": (
+                    axis["applicability_scope_sha256"]
+                ),
+                "scope_applicability_confirmed": True,
+            },
+        )
+        assert bound.status_code == 201, bound.text
+        legacy_id = _candidate(
+            project["id"], run["id"], trait_type="value",
+            trait_key="家庭保护取向", comparison_key="value:家人",
+            value="林澈在家庭危机中始终保护家人",
+        )
+        overlap = _confirm(client, project["id"], legacy_id)
+        assert overlap.status_code == 409, overlap.text
+        assert overlap.json()["detail"]["code"] == (
+            "character_trait_axis_legacy_overlap"
+        )
+        withdrawn = _withdraw(client, project["id"], bound_id)
+        assert withdrawn.status_code == 201, withdrawn.text
+        accepted = _confirm(client, project["id"], legacy_id)
+        assert accepted.status_code == 201, accepted.text
 
 
 def test_author_axis_confirmation_binds_atomically_and_same_axis_blocks_different_raw_labels():
