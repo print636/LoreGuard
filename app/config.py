@@ -18,6 +18,7 @@ _SENSITIVE_SETTING_INPUTS = frozenset(
         # documentation recommends secret indirection.
         "database_url",
         "redis_url",
+        "eval_isolation_instance_id",
     }
 )
 
@@ -86,6 +87,9 @@ class Settings(BaseSettings):
         default="", max_length=64, pattern=r"^(?:|[a-f0-9]{40,64})$"
     )
     database_url: str = "sqlite:///./loreguard.db"
+    # Opt-in identity for an explicitly provisioned, file-backed evaluation
+    # database. The identifier is never an authorization credential.
+    eval_isolation_instance_id: str = Field(default="", repr=False, max_length=36)
     redis_url: str = "redis://localhost:6379/0"
     use_celery: bool = False
     deployment_environment: Literal["local", "production"] = "local"
@@ -617,6 +621,14 @@ class Settings(BaseSettings):
     def validate_auth_security_boundary(self):
         """Fail closed when authentication is enabled without its trust root."""
 
+        if self.eval_isolation_instance_id and (
+            self.deployment_environment != "local"
+            or self.auth_mode != "anonymous"
+            or self.use_celery
+        ):
+            raise ValueError(
+                "evaluation isolation requires a local anonymous in-process service"
+            )
         if self.auth_mode == "required" and len(self.auth_secret_key) < 32:
             raise ValueError(
                 "AUTH_MODE=required requires AUTH_SECRET_KEY with at least 32 characters"

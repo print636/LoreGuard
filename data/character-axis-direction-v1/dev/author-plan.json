@@ -1,0 +1,25 @@
+{
+  "schema_version": "character-axis-direction-author-plan-v1",
+  "suite": "dev",
+  "world_id": "tidelight-harbor",
+  "review_protocol": {
+    "reviewer": "human_author",
+    "show": ["frozen_target_clause", "candidate_raw_trait_key", "candidate_raw_polarity", "axis_positive_proposition", "candidate_evidence"],
+    "choices": ["same", "opposite", "uncertain"],
+    "uncertain_action": "leave_pending",
+    "alignment_source": "explicit_human_review_of_candidate_and_source"
+  },
+  "axes": [
+    {"axis_key": "dev_partner_risk_notice", "positive_proposition": "角色在非保密的日常航路调整中向共同值守搭档说明已知风险。"},
+    {"axis_key": "dev_public_route_briefing", "positive_proposition": "角色独自面向陌生水手主持航路说明并回答临时追问。"},
+    {"axis_key": "dev_partner_signature", "positive_proposition": "角色未经搭档本人授权冒用搭档签名确认换班。"},
+    {"axis_key": "dev_shift_error_to_novice", "positive_proposition": "角色面对港务审计时把自己的错误推给刚入港的新人。"}
+  ],
+  "targets": [
+    {"candidate_key": "dev_risk_notice", "source_document": "02-character-profiles.md", "source_line": 4, "target_quote": "先向共同值守的搭档说明会影响其航船的风险", "expected_axis_polarity": "positive"},
+    {"candidate_key": "dev_public_briefing", "source_document": "02-character-profiles.md", "source_line": 7, "target_quote": "不敢独自面对陌生水手主持航路说明", "expected_axis_polarity": "negative"},
+    {"candidate_key": "dev_hot_ginger_plum", "source_document": "02-character-profiles.md", "source_line": 10, "target_quote": "喜欢热姜梅露", "expected_axis_polarity": null},
+    {"candidate_key": "dev_partner_signature", "source_document": "02-character-profiles.md", "source_line": 13, "target_quote": "不会冒用搭档签名替对方确认换班", "expected_axis_polarity": "negative"},
+    {"candidate_key": "dev_shift_error", "source_document": "02-character-profiles.md", "source_line": 16, "target_quote": "不会把自己的错误推给刚入港的新人", "expected_axis_polarity": "negative"}
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": "character-axis-direction-author-plan-v1",
+  "suite": "transfer",
+  "world_id": "v2_transfer_qijing_frosttide",
+  "review_protocol": {
+    "reviewer": "human_author",
+    "show": ["frozen_target_clause", "candidate_raw_trait_key", "candidate_raw_polarity", "axis_positive_proposition", "candidate_evidence"],
+    "choices": ["same", "opposite", "uncertain"],
+    "uncertain_action": "leave_pending",
+    "alignment_source": "explicit_human_review_of_candidate_and_source"
+  },
+  "axes": [
+    {"axis_key": "v2t_double_signoff", "positive_proposition": "角色开启公共幕门前坚持由两名不同见证人完成鸣钥签名核验。"},
+    {"axis_key": "v2t_own_error_accountability", "positive_proposition": "角色如实承担自己造成的巡检错误责任。"},
+    {"axis_key": "v2t_public_mentor_challenge", "positive_proposition": "角色在居民面前公开反对可能伤害居民的师父命令。"},
+    {"axis_key": "v2t_private_record_copying", "positive_proposition": "角色在口述者尚未授权时亲自复制由自己保管的私人口述档案。"},
+    {"axis_key": "v2t_teammate_evacuating", "positive_proposition": "角色在灰潮救援时等待最后一名危险中的队友撤出后才离开。"}
+  ],
+  "targets": [
+    {"candidate_key": "v2t_signoff", "source_document": "02-character-profiles.md", "source_line": 5, "target_quote": "许砚灯始终坚持幕门鸣钥的双人签名核验", "expected_axis_polarity": "positive"},
+    {"candidate_key": "v2t_accountability", "source_document": "02-character-profiles.md", "source_line": 7, "target_quote": "曲霁会如实承认自己算错的巡检数据", "expected_axis_polarity": "positive"},
+    {"candidate_key": "v2t_challenge_growth", "source_document": "02-character-profiles.md", "source_line": 9, "target_quote": "温弦通常不敢当众反驳师父的命令", "expected_axis_polarity": "negative"},
+    {"candidate_key": "v2t_hot_pepper_cake", "source_document": "02-character-profiles.md", "source_line": 11, "target_quote": "童画喜欢趁热吃热椒饼", "expected_axis_polarity": null},
+    {"candidate_key": "v2t_archive_consent", "source_document": "02-character-profiles.md", "source_line": 13, "target_quote": "罗月绝不在口述者未授权时复制由自己保管的私人口述档案", "expected_axis_polarity": "negative"},
+    {"candidate_key": "v2t_last_teammate", "source_document": "02-character-profiles.md", "source_line": 15, "target_quote": "杭泊在救援时坚持等最后一名队友撤出", "expected_axis_polarity": "positive"}
+  ]
+}

@@ -58,7 +58,12 @@ from .db import (
     ProjectRow,
     RunEventRow,
     SessionLocal,
+    engine,
     init_db,
+)
+from .evaluation_isolation import (
+    EvaluationIsolationUnavailable,
+    read_live_identity,
 )
 from .provider_credentials import (
     ProviderCredentialError,
@@ -143,6 +148,16 @@ from .time_utils import utc_now_naive
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     validate_provider_security_configuration(settings)
+    if settings.eval_isolation_instance_id:
+        # Prove the marker and the *connected* SQLite file before ordinary
+        # migrations can write to a mistakenly targeted daily database.
+        try:
+            read_live_identity(
+                engine, settings.eval_isolation_instance_id,
+                require_product_schema=False,
+            )
+        except EvaluationIsolationUnavailable:
+            raise RuntimeError("evaluation_isolation_unavailable") from None
     init_db()
     yield
 
@@ -1817,6 +1832,24 @@ def health() -> dict:
         },
         "runtime_provenance": safe_runtime_provenance(settings),
     }
+
+
+@app.get("/api/v1/evaluation/isolation-identity")
+def evaluation_isolation_identity(response: Response) -> dict:
+    """Expose only opaque identities from an explicitly provisioned live DB."""
+
+    response.headers["Cache-Control"] = "no-store"
+    if not settings.eval_isolation_instance_id:
+        raise HTTPException(404, detail={"code": "evaluation_isolation_unavailable"})
+    try:
+        return read_live_identity(
+            engine, settings.eval_isolation_instance_id,
+            require_product_schema=True,
+        )
+    except EvaluationIsolationUnavailable:
+        raise HTTPException(
+            503, detail={"code": "evaluation_isolation_unavailable"}
+        ) from None
 
 
 def _provider_check_suggestions(category: str) -> list[str]:

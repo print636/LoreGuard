@@ -1,0 +1,22 @@
+{
+  "schema_version": "character-axis-direction-manifest-v1",
+  "dataset_boundary": {
+    "developer_visible": true,
+    "blind_holdout": false,
+    "production_quality": false
+  },
+  "source_dataset": "character-axis-challenge-v2",
+  "source_manifest_sha256": "3d428f156d2b5fd752a46eddb8a23ebeefff83cb221c2d02eaa8ac87891755b3",
+  "suites": {
+    "dev": {
+      "world_id": "tidelight-harbor",
+      "case_count": 5,
+      "author_plan_sha256": "4fad1c01d535c29fe116d61f4b63a14f1a38a76b1b0d7b8afc52568de2d4133c"
+    },
+    "transfer": {
+      "world_id": "v2_transfer_qijing_frosttide",
+      "case_count": 6,
+      "author_plan_sha256": "c957ae815976dc0791d6fa105ab8f3a8148e3ef6d45ef2a28973f0b8ae1f228b"
+    }
+  }
+}
