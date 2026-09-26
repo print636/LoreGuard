@@ -37,6 +37,8 @@
 
 若要用自己的首章直接体验：新建项目并导入正文，将该文档的身份核对为“故事正文 + 草稿/审阅中”并确认，进入“文稿校验”，勾选本次章节后点击“开始校验”。没有在用的正式设定时页面会显示“仅新稿自检”；它只冻结勾选的章节，不会把其他草稿升级为背景。页面与运行诊断会提示模型和角色 OOC 的实际覆盖，不应把零问题解释为整部故事已通过审查。
 
+作者决定把章节作为后续版本的历史依据时，在“资料上下文”中选择当前活动的已确认草稿/审阅中章节，点击“作者定稿并发布”并再次确认。审查完成不会自动发布，审查报告也不是发布许可；即使尚无完整审查报告，作者仍可在警示后自行决定。发布只影响之后新建的分析，不改写历史报告。首章发布后，即使尚无完整角色基线，仍可选择下一章做带已发布历史背景的有限审查；角色 OOC 是否覆盖须看该次运行诊断。
+
 ### Docker Compose
 
 ```bash
@@ -257,6 +259,7 @@ python scripts/run_agent_acceptance.py --mock-oracle --require-gates
 - `data/evaluation/evidence_investigator_live/`：原生 function-calling Investigator 的冻结 DEV/holdout fixture；[fixture 协议](data/evaluation/evidence_investigator_live/README.md)、[只读验证器](data/evaluation/evidence_investigator_live/validate_fixture.py)、[真实 HTTP runner](scripts/run_evidence_investigator_live.py)、[双次 DEV 检查器](scripts/check_evidence_investigator_dev_pair.py)与[脱敏报告](docs/evidence-investigator-live-evaluation.md)分别承担数据冻结、接线运行、重复性校验和公开总结，模型原始交互与本地运行 artifact 不提交。
 - `data/evidence-retrieval-v1/`：44 个原创中文检索问题，其中首次冻结 holdout 为 28 问、55 条期望证据。混合 Recall@5 81.82%、All-evidence@5 71.43%、低词面 Recall@5 79.31%；低词面少 1 条未过门槛，完整结论见 [`docs/evidence-retrieval-v1-holdout.md`](docs/evidence-retrieval-v1-holdout.md)。
 - `data/issue-review-v1/`：12 例原创、开发者可见的证据复核 A/B，每例真实调用 3 次。local-context 为 4/12，rag-evidence 为 7/12；绝对 gate 仍为 `false`。只公开脱敏聚合结果，见 [`docs/issue-review-v1-result-20260907.md`](docs/issue-review-v1-result-20260907.md)。
+- [`data/character-ooc-return-season-dev-v1/`](data/character-ooc-return-season-dev-v1/README.md)：原创、开发者可见的游戏版本递进角色挑战素材，包含 5 个潜在 OOC 轴和 6 个负例，用于后续完整流程排障；尚未形成真实模型质量成绩。
 
 完整数据位于 `data/evaluation-natural/`：40 个 dev 场景和 60 个 test 场景的 `scenario_id` 不重叠。它是模板生成的 `synthetic natural-language` 数据，不是人工标注集，也不能外推为生产准确率。评测 harness 运行 test 时只打开 `test.jsonl`，测试样本不进入 Prompt 或调参示例。
 

@@ -1,0 +1,50 @@
+{
+  "schema_version": "character-ooc-return-season-manifest-v1",
+  "world_id": "shanchao-return-season",
+  "license": "Apache-2.0",
+  "dataset_boundary": {
+    "original_synthetic_story": true,
+    "developer_visible": true,
+    "blind_holdout": false,
+    "production_quality": false
+  },
+  "documents_in_import_order": [
+    {
+      "file": "01-world-setting.md",
+      "document_role": "canon",
+      "resolution_state": "confirmed",
+      "publication_status": "published",
+      "scope": {"schema_version": 1, "timeline_key": "main", "release": {"key": "v1.0", "ordinal": 10}, "branch": {"path": ["main"]}}
+    },
+    {
+      "file": "02-character-profiles.md",
+      "document_role": "character_profile",
+      "resolution_state": "confirmed",
+      "publication_status": "published",
+      "scope": {"schema_version": 1, "timeline_key": "main", "release": {"key": "v1.0", "ordinal": 10}, "branch": {"path": ["main"]}}
+    },
+    {
+      "file": "03-published-main-v1.0.md",
+      "document_role": "chapter",
+      "resolution_state": "confirmed",
+      "publication_status": "published",
+      "scope": {"schema_version": 1, "timeline_key": "main", "release": {"key": "v1.0", "ordinal": 10}, "branch": {"path": ["main"]}}
+    },
+    {
+      "file": "04-published-main-v1.1.md",
+      "document_role": "chapter",
+      "resolution_state": "confirmed",
+      "publication_status": "published",
+      "scope": {"schema_version": 1, "timeline_key": "main", "release": {"key": "v1.1", "ordinal": 11}, "branch": {"path": ["main"]}}
+    },
+    {
+      "file": "05-draft-event-v1.2.md",
+      "document_role": "chapter",
+      "resolution_state": "confirmed",
+      "publication_status": "draft",
+      "scope": {"schema_version": 1, "timeline_key": "main", "release": {"key": "v1.2", "ordinal": 12}, "branch": {"path": ["main"]}}
+    }
+  ],
+  "oracle_file": "oracle.json",
+  "author_review_plan_file": "review-plan.json"
+}

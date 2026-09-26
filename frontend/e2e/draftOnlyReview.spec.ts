@@ -216,6 +216,49 @@ test("服务端在提交瞬间检测到正式资料竞态时展示恢复指引�
   expect(state.unexpected).toEqual([]);
 });
 
+test("首章发布后即使没有角色基线，仍可用已确认历史审查新稿的其他一致性", async ({ page }) => {
+  const state: MockState = {
+    documents: [
+      document("published-first", "chapter", "published"),
+      document("next-draft", "chapter", "draft"),
+    ],
+    posts: [], documentReads: 0, unexpected: [],
+  };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/check`);
+  const review = page.locator(".guidedReviewLaunch");
+  await expect(review).toContainText("正式背景已确认，但角色基线尚未达到完整可核对状态");
+  await expect(review).toContainText("未覆盖角色不会被判为“通过”");
+  const start = review.getByRole("button", { name: /^开始校验/ });
+  await expect(start).toBeDisabled();
+  await review.getByRole("checkbox", { name: /next-draft.md/ }).check();
+  await start.click();
+  await expect.poll(() => state.posts.length).toBe(1);
+  expect(state.posts[0]).toEqual({
+    mode: "draft_review", sensitivity: "balanced", target_document_ids: ["next-draft"],
+  });
+  expect(state.documentReads).toBeGreaterThanOrEqual(2);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("有已发布历史但另有待确认正式资料时，不能绕过确认进入有限覆盖审查", async ({ page }) => {
+  const state: MockState = {
+    documents: [
+      document("published-first", "chapter", "published"),
+      document("next-draft", "chapter", "draft"),
+      document("unconfirmed-setting", "canon", "unknown", "unresolved"),
+    ],
+    posts: [], documentReads: 0, unexpected: [],
+  };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/check`);
+  const review = page.locator(".guidedReviewLaunch");
+  await expect(review).toContainText("可能作为正式背景的资料仍需核对");
+  await expect(review.getByRole("button", { name: /^开始校验/ })).toHaveCount(0);
+  expect(state.posts).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+});
+
 test("完成的仅新稿报告明确写出 1 份目标、0 份背景及 OOC 限制，不将线索冒称确认问题", async ({ page }, testInfo) => {
   const state: MockState = {
     documents: [document("draft", "chapter", "draft")],

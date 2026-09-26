@@ -351,6 +351,15 @@ class AnalysisRunIn(BaseModel):
     ] = "balanced"
 
 
+class PublishChapterIn(BaseModel):
+    """Author-initiated chapter release with optimistic source identities."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1, strict=True)
+    expected_document_version: int = Field(ge=1, strict=True)
+
+
 class NarrativeContextInferenceIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -398,6 +407,47 @@ def _begin_project_write_transaction(db) -> None:
     """
     if db.get_bind().dialect.name == "sqlite":
         db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def _has_confirmed_draft_chapter_history(db, document_ids: list[str]) -> bool:
+    """Detect a pending chapter even after a later role/status correction."""
+    if not document_ids:
+        return False
+    return db.scalar(
+        select(DocumentNarrativeContextRevisionRow.id)
+        .where(
+            DocumentNarrativeContextRevisionRow.document_id.in_(document_ids),
+            DocumentNarrativeContextRevisionRow.resolution_state == "confirmed",
+            DocumentNarrativeContextRevisionRow.authority_tier == "draft",
+            DocumentNarrativeContextRevisionRow.publication_status.in_(
+                ("draft", "in_review")
+            ),
+        )
+        .limit(1)
+    ) is not None
+
+
+def _reject_replacement_publish_bypass(
+    db,
+    *,
+    resolved_role: str,
+    narrative_context: NarrativeContextInput | None,
+    superseded_document_ids: list[str],
+) -> None:
+    if (
+        resolved_role == "chapter"
+        and narrative_context is not None
+        and narrative_context.resolution_state == "confirmed"
+        and narrative_context.publication_status == "published"
+        and _has_confirmed_draft_chapter_history(db, superseded_document_ids)
+    ):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "chapter_publish_endpoint_required",
+                "message": "请先将待审章节保存为新草稿版本，再由作者手动发布",
+            },
+        )
 
 
 def _run_in_workspace(db, run_id: str, workspace_id: str) -> AnalysisRunRow | None:
@@ -2785,10 +2835,29 @@ def create_document_narrative_context_revision(
         if document is None:
             raise HTTPException(404, "文档不存在")
         legacy = db.get(DocumentContextRow, document_id)
+        current_role = legacy.document_role if legacy else DEFAULT_DOCUMENT_ROLE
         role = (
             payload.document_role
-            or (legacy.document_role if legacy else DEFAULT_DOCUMENT_ROLE)
+            or current_role
         )
+        if document.active and role == "chapter" and payload.publication_status == "published":
+            latest = latest_context_revisions(db, [document_id]).get(document_id)
+            already_published = (
+                current_role == "chapter"
+                and latest is not None
+                and latest.resolution_state == "confirmed"
+                and latest.publication_status == "published"
+            )
+            if not already_published and _has_confirmed_draft_chapter_history(
+                db, [document_id]
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "chapter_publish_endpoint_required",
+                        "message": "待审章节转为已发布历史须由作者使用发布操作确认",
+                    },
+                )
         try:
             if legacy is None:
                 legacy = DocumentContextRow(
@@ -2837,6 +2906,144 @@ def create_document_narrative_context_revision(
         }
 
 
+@app.post(
+    "/api/v1/projects/{project_id}/documents/{document_id}/publish",
+    status_code=201,
+)
+def publish_chapter(
+    project_id: str,
+    document_id: str,
+    payload: PublishChapterIn,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    """Publish one confirmed active draft only on an explicit author request."""
+    with SessionLocal() as db:
+        _begin_project_write_transaction(db)
+        project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if project is None:
+            raise HTTPException(404, "项目不存在")
+        document = db.scalar(
+            select(DocumentRow)
+            .where(
+                DocumentRow.id == document_id,
+                DocumentRow.project_id == project_id,
+            )
+            .with_for_update()
+        )
+        if document is None:
+            raise HTTPException(404, "文档不存在")
+        if not document.active:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "document_not_active",
+                    "message": "文档已有更新版本，请刷新后选择当前活动版本",
+                },
+            )
+        if document.version != payload.expected_document_version:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "document_version_conflict",
+                    "message": "文档版本已变化，请刷新后重新确认发布",
+                    "actual_version": document.version,
+                },
+            )
+        legacy = db.get(DocumentContextRow, document_id)
+        role = legacy.document_role if legacy else DEFAULT_DOCUMENT_ROLE
+        if role != "chapter":
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "document_not_publishable",
+                    "message": "只有剧情章节可通过此入口发布",
+                },
+            )
+        latest = latest_context_revisions(db, [document_id]).get(document_id)
+        if latest is not None and (
+            latest.resolution_state == "confirmed"
+            and latest.publication_status == "published"
+        ):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "chapter_already_published",
+                    "message": "章节已发布，请刷新查看最新状态",
+                },
+            )
+        actual_revision = latest.revision if latest is not None else 0
+        if actual_revision != payload.expected_revision:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "narrative_context_revision_conflict",
+                    "message": "章节上下文已变化，请刷新后重新确认发布",
+                    "actual_revision": actual_revision,
+                },
+            )
+        if latest is None or latest.resolution_state != "confirmed":
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "chapter_context_unconfirmed",
+                    "message": "请先确认章节资料身份，再决定是否发布",
+                },
+            )
+        if latest.publication_status not in {"draft", "in_review"}:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "chapter_not_draft_or_in_review",
+                    "message": "只有草稿或审阅中章节可手动发布",
+                },
+            )
+        try:
+            row = add_context_revision(
+                db,
+                project_id=project_id,
+                document_id=document_id,
+                document_role="chapter",
+                resolution_state="confirmed",
+                publication_status="published",
+                scope=latest.scope_payload,
+                origin="explicit",
+                created_by_user_id=context.user_id,
+                expected_revision=payload.expected_revision,
+            )
+            db.commit()
+        except NarrativeContextRevisionConflict as exc:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "narrative_context_revision_conflict",
+                    "message": "章节上下文已变化，请刷新后重新确认发布",
+                    "actual_revision": exc.actual_revision,
+                },
+            ) from None
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "narrative_context_revision_conflict",
+                    "message": "章节上下文已变化，请刷新后重新确认发布",
+                },
+            ) from None
+        return {
+            **serialize_narrative_context_revision(row),
+            "document_role": "chapter",
+            "document_version": document.version,
+        }
+
+
 @app.post("/api/v1/projects/{project_id}/documents/text", status_code=201)
 def create_text_document(
     project_id: str,
@@ -2868,6 +3075,12 @@ def create_text_document(
             payload.replace_document_id,
             payload.document_role,
             payload.story_scope,
+        )
+        _reject_replacement_publish_bypass(
+            db,
+            resolved_role=document_role,
+            narrative_context=payload.narrative_context,
+            superseded_document_ids=superseded,
         )
         row = DocumentRow(project_id=project_id, name=payload.name, content=payload.content, version=version)
         try:
@@ -3039,6 +3252,12 @@ async def upload_document(
             replace_document_id,
             document_role,
             story_scope,
+        )
+        _reject_replacement_publish_bypass(
+            db,
+            resolved_role=resolved_role,
+            narrative_context=parsed_narrative_context,
+            superseded_document_ids=superseded,
         )
         row = DocumentRow(project_id=project_id, name=file.filename, content=content, version=version)
         try:

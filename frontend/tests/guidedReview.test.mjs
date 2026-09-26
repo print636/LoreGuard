@@ -8,6 +8,7 @@ import {
   contextDraft,
   contextStatus,
   findCurrentBaselineRun,
+  formalBackgroundStillCurrent,
   guidedDocumentState,
   hasCompletedBaselineRun,
   isLoadedContextForDocument,
@@ -391,6 +392,43 @@ test("draft-only preflight rejects a changed selected draft before creating a ru
   }], ["draft-a"]), false);
   assert.equal(selectedDraftsStillCurrent([confirmedDraft], [], ["draft-a"]), false);
   assert.equal(selectedDraftsStillCurrent([confirmedDraft], [confirmedDraft], []), false);
+});
+
+test("finite-coverage review keeps only unchanged confirmed formal background", () => {
+  const confirmedHistory = document({
+    id: "history",
+    document_role: "chapter",
+    narrative_context: {
+      revision: 2,
+      resolution_state: "confirmed",
+      publication_status: "published",
+      scope_sha256: "history-scope",
+      scope: { schema_version: 1, timeline_key: "main" },
+    },
+  });
+  const draft = document({
+    id: "draft",
+    document_role: "chapter",
+    narrative_context: {
+      revision: 1,
+      resolution_state: "confirmed",
+      publication_status: "draft",
+      scope_sha256: "draft-scope",
+      scope: { schema_version: 1, timeline_key: "main" },
+    },
+  });
+  const source = [confirmedHistory, draft];
+  assert.equal(formalBackgroundStillCurrent(source, source), true);
+  assert.equal(formalBackgroundStillCurrent(source, [draft]), false);
+  assert.equal(formalBackgroundStillCurrent(source, [{ ...confirmedHistory, version: 2 }, draft]), false);
+  assert.equal(formalBackgroundStillCurrent(source, [{
+    ...confirmedHistory,
+    narrative_context: { ...confirmedHistory.narrative_context, resolution_state: "unresolved" },
+  }, draft]), false);
+  assert.equal(formalBackgroundStillCurrent(source, [confirmedHistory, draft,
+    document({ id: "new-setting", document_role: "canon" }),
+  ]), false);
+  assert.equal(formalBackgroundStillCurrent([draft], [draft]), false);
 });
 
 test("completed baseline recovery uses the nested durable review batch contract", () => {

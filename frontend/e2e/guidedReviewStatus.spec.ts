@@ -209,8 +209,9 @@ test("基线读取失败可重试，选稿保留；窄屏下警告和键盘入�
   await review.getByRole("checkbox", { name: /第一章.md/ }).check();
   state.statusFailures = 1;
   await page.reload();
-  await expect(review.getByRole("alert")).toContainText("请重试");
-  await expect(review.getByRole("button", { name: /^开始校验/ })).toHaveCount(0);
+  await expect(review.getByRole("alert")).toContainText("无法读取角色基线汇总");
+  await expect(review).toContainText("正式背景已确认，但角色基线尚未达到完整可核对状态");
+  await expect(review.getByRole("button", { name: /^开始校验/ })).toBeEnabled();
   const retry = review.getByRole("button", { name: "重试读取基线状态" });
   await retry.focus();
   await retry.press("Enter");
@@ -223,18 +224,22 @@ test("基线读取失败可重试，选稿保留；窄屏下警告和键盘入�
   expect(state.unexpected).toEqual([]);
 });
 
-test("零已确认特征或过期基线不能被项目级待确认数解锁", async ({ page }) => {
+test("零已确认特征或过期基线不能声称 OOC 就绪，但正式背景仍支持有限审查", async ({ page }) => {
   const state: MockState = { confirmed: 0, pending: 206, posts: [], unexpected: [] };
   await mockApi(page, state);
   await page.goto(`/app/projects/${projectId}/check`);
   const review = page.locator(".guidedReviewLaunch");
   await expect(review).toContainText("项目级角色档案中暂无已确认特征");
-  await expect(review.getByRole("button", { name: /^开始校验/ })).toHaveCount(0);
+  await expect(review).toContainText("未覆盖角色不会被判为“通过”");
+  await expect(review.getByRole("button", { name: /^开始校验/ })).toBeDisabled();
+  await review.getByRole("checkbox", { name: /第一章.md/ }).check();
+  await expect(review.getByRole("button", { name: /^开始校验/ })).toBeEnabled();
   state.confirmed = 3;
   state.sourceRun = "older-run";
   await page.reload();
   await expect(review).toContainText("并非来自当前冻结资料的完整运行");
-  await expect(review.getByRole("button", { name: /^开始校验/ })).toHaveCount(0);
+  await expect(review).toContainText("正式背景已确认，但角色基线尚未达到完整可核对状态");
+  await expect(review.getByRole("button", { name: /^开始校验/ })).toBeEnabled();
   expect(state.posts).toEqual([]);
   expect(state.unexpected).toEqual([]);
 });
@@ -307,7 +312,8 @@ test("提交前发现另一标签页撤销最后特征时，刷新卡片且不�
   await review.getByRole("button", { name: /^开始校验/ }).click();
   await expect(review.getByRole("alert")).toContainText("本次没有启动任务");
   await expect(review).toContainText("项目级角色档案中暂无已确认特征");
-  await expect(review.getByRole("button", { name: /^开始校验/ })).toHaveCount(0);
+  await expect(review).toContainText("未覆盖角色不会被判为“通过”");
+  await expect(review.getByRole("button", { name: /^开始校验/ })).toBeEnabled();
   expect(state.statusRequests).toEqual(["baseline-current", "baseline-current"]);
   expect(state.posts).toEqual([]);
   state.confirmed = 3;
@@ -326,7 +332,7 @@ test("提交前基线查询断线时保留选稿、不提交任务，并提供�
   state.statusFailures = 1;
   await review.getByRole("button", { name: /^开始校验/ }).click();
   await expect(review.getByRole("alert").last()).toContainText("提交前复核失败，本次没有启动任务");
-  await expect(review.getByRole("button", { name: /^开始校验/ })).toHaveCount(0);
+  await expect(review.getByRole("button", { name: /^开始校验/ })).toBeEnabled();
   expect(state.posts).toEqual([]);
   await review.getByRole("button", { name: "重试读取基线状态" }).click();
   await expect(review.getByRole("checkbox", { name: /第一章.md/ })).toBeChecked();

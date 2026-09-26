@@ -1,0 +1,68 @@
+{
+  "schema_version": "character-ooc-return-season-review-plan-v1",
+  "world_id": "shanchao-return-season",
+  "dataset_boundary": {
+    "developer_visible": true,
+    "blind_holdout": false,
+    "production_quality": false
+  },
+  "author_confirmation_required": true,
+  "status": "proposed_not_confirmed",
+  "approved_axes_to_review": [
+    {
+      "axis_key": "shelter_eligibility_without_registry",
+      "character_key": "叶簪",
+      "display_name": "无居籍船民的避风资格",
+      "positive_proposition": "叶簪在绿讯期间给予无居籍船民与有居籍者同等避风资格。",
+      "trait_type": "core_personality",
+      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 4},
+      "historical_support": [{"document_name": "03-published-main-v1.0.md", "fragment_id": "H01", "line": 3}, {"document_name": "03-published-main-v1.0.md", "fragment_id": "H02", "line": 4}],
+      "proposed_alignment": "same",
+      "review_note": "只适用于绿讯或同等非紧急场景；红讯按伤情分流不是此轴的反向证据。"
+    },
+    {
+      "axis_key": "notify_affected_waiters",
+      "character_key": "叶簪",
+      "display_name": "登船变更告知受影响者",
+      "positive_proposition": "叶簪改动已通知的登船安排时，会告知受影响的等候者。",
+      "trait_type": "core_personality",
+      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A02", "line": 5},
+      "historical_support": [{"document_name": "03-published-main-v1.0.md", "fragment_id": "H01", "line": 3}, {"document_name": "03-published-main-v1.0.md", "fragment_id": "H02", "line": 4}],
+      "proposed_alignment": "same",
+      "review_note": "判断的是受影响者是否被告知，不把席位公平轴或普通公示措辞混作同一轴。"
+    },
+    {
+      "axis_key": "medical_identity_consent",
+      "character_key": "迟蘅",
+      "display_name": "可识别病史公开的授权边界",
+      "positive_proposition": "迟蘅公开可识别的姓名与病况前，会核对覆盖具体内容和受众的本人许可。",
+      "trait_type": "core_personality",
+      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A03", "line": 8},
+      "historical_support": [{"document_name": "03-published-main-v1.0.md", "fragment_id": "H03", "line": 5}],
+      "proposed_alignment": "same",
+      "review_note": "封闭的指定照护队通报、匿名紧急通报与向所有游客公开并不等价。"
+    },
+    {
+      "axis_key": "forecast_uncertainty_disclosure",
+      "character_key": "柳泛",
+      "display_name": "未核实预报的不确定性说明",
+      "positive_proposition": "柳泛发布未核实的风向推算时，会向接收者说明不确定性。",
+      "trait_type": "core_personality",
+      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A04", "line": 11},
+      "historical_support": [{"document_name": "03-published-main-v1.0.md", "fragment_id": "H04", "line": 6}],
+      "proposed_alignment": "same",
+      "review_note": "本轴只审查对外表述，不把仪器错误或使用人工观察本身当成角色偏移。"
+    },
+    {
+      "axis_key": "raw_observation_integrity",
+      "character_key": "柳泛",
+      "display_name": "原始观测保留与更正附记",
+      "positive_proposition": "柳泛保留原始观测值，发现问题时另附更正说明。",
+      "trait_type": "core_personality",
+      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A05", "line": 12},
+      "historical_support": [{"document_name": "03-published-main-v1.0.md", "fragment_id": "H04", "line": 6}, {"document_name": "04-published-main-v1.1.md", "fragment_id": "H05", "line": 3}],
+      "proposed_alignment": "same",
+      "review_note": "必须证明柳泛本人覆盖原值，不能把学徒篡改或追加更正记录归给她。"
+    }
+  ]
+}

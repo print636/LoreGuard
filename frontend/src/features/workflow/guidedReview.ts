@@ -444,6 +444,34 @@ export function selectedDraftsStillCurrent(
   });
 }
 
+/**
+ * A degraded review may use confirmed formal material without a complete
+ * character baseline. Recheck the whole potential-authority set so a new,
+ * unconfirmed, or changed source does not slip into the visible plan.
+ */
+export function formalBackgroundStillCurrent(
+  documents: GuidedDocument[],
+  freshDocuments: GuidedDocument[],
+): boolean {
+  const candidates = documents.filter(blocksDraftOnlyReview);
+  const freshCandidates = freshDocuments.filter(blocksDraftOnlyReview);
+  if (!candidates.length || candidates.length !== freshCandidates.length) return false;
+  if (candidates.some((document) => !isBaselineDocument(document) || !isConfirmed(document))) return false;
+  if (freshCandidates.some((document) => !isBaselineDocument(document) || !isConfirmed(document))) return false;
+  const freshById = new Map(freshCandidates.map((document) => [document.id, document]));
+  return candidates.every((document) => {
+    const fresh = freshById.get(document.id);
+    return Boolean(
+      fresh &&
+      fresh.document_role === document.document_role &&
+      fresh.version === document.version &&
+      fresh.narrative_context?.publication_status === document.narrative_context?.publication_status &&
+      contextRevision(fresh.narrative_context) === contextRevision(document.narrative_context) &&
+      fresh.narrative_context?.scope_sha256 === document.narrative_context?.scope_sha256,
+    );
+  });
+}
+
 export function guidedDocumentState(documents: GuidedDocument[]) {
   const active = documents.filter((document) => document.active);
   const baseline = active.filter(isBaselineDocument);

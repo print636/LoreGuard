@@ -13,13 +13,15 @@ a non-secret provider revision before Celery dispatch. See the
 
 ## Guided review workflow
 
-The recommended path is `baseline_build` -> human confirmation of character-profile candidates -> `draft_review`:
+For character-OOC coverage, the recommended path is `baseline_build` -> human confirmation of character-profile candidates -> `draft_review`:
 
 1. Import documents and confirm each document's role, publication status and narrative scope. An explicit AI inference request may propose these fields with source evidence, but the server always stores it as `origin=model_inferred`, `resolution_state=inferred`, and unresolved authority. It never auto-confirms or promotes model output.
 2. Run `baseline_build` to freeze only confirmed canon, character profiles and published history as background. Draft, unconfirmed and retired inputs are excluded with visible reasons. If the default-off character-consistency stage is enabled, it may produce candidates; a human must confirm or reject them.
 3. Run `draft_review` with confirmed draft or in-review chapters as targets. The server—not the client—derives compatible confirmed background, and freezes `target`/`background` roles with document versions and context snapshots. Background-only findings are not presented as draft issues.
 
 For a project that has only draft chapters and no active formal setting or published history, the guided page also offers a chapter-only first review. The author still confirms each selected chapter's draft status; the request explicitly freezes the target IDs and opts into `no_formal_context_expected`. If formal material appears before submission, the server rejects the run instead of silently changing its scope. Model extraction can still run, but without formal background or applicable confirmed character traits, this is **not** a completed character-OOC review. Confirmed traits can remain active after their source document is retired; actual coverage is reported per run.
+
+Publishing a draft chapter as history is a separate, explicit author action in the document-context workbench; finishing an analysis never publishes it. The confirmation explains that a report is not a publication license, and the author may publish despite absent or partial review coverage. Publication affects future runs only; earlier input snapshots and reports stay frozen. After the first chapter is published, a new draft can still receive a limited review against confirmed formal background without a complete character baseline. Such a run must not be described as a completed character-OOC review.
 
 For new `core_personality` candidates, the character workbench now lets the author
 choose or create a project-scoped, immutable v1 comparison axis before confirming

@@ -41,9 +41,58 @@ type InferenceFailure = {
   recovery: InferenceRecovery;
 };
 
+type PublishTarget = {
+  projectId: string;
+  documentId: string;
+  documentName: string;
+  documentVersion: number;
+  contextRevision: number;
+};
+
+type PublishedContext = NarrativeContext & {
+  document_id: string;
+  document_role: string;
+  document_version: number;
+};
+
+function publishFailure(error: unknown): string {
+  if (error instanceof ApiError) {
+    const payload = error.detail && typeof error.detail === "object"
+      ? error.detail as { detail?: unknown }
+      : null;
+    const detail = payload?.detail && typeof payload.detail === "object"
+      ? payload.detail as { code?: unknown }
+      : null;
+    switch (detail?.code) {
+      case "document_version_conflict":
+      case "narrative_context_revision_conflict":
+        return "文稿版本或资料上下文已变化。发布结果未改写当前页面；请重新读取后核对再决定。";
+      case "chapter_already_published":
+        return "这份章节已在其他页面发布。请重新读取最新状态，勿重复提交。";
+      case "document_not_active":
+        return "这份文稿已不再是活动版本。请重新读取并选择当前版本。";
+      case "document_not_publishable":
+      case "chapter_context_unconfirmed":
+      case "chapter_not_draft_or_in_review":
+        return "文稿已不满足发布条件。请重新读取并确认其类型、发布状态和上下文。";
+    }
+    if (error.status === 404) return "文稿或项目已不可访问。请重新读取项目资料。";
+  }
+  return "发布结果暂无法确认；请重新读取文稿状态后再决定，勿直接重复提交。";
+}
+
 function requestMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 409) {
+      const payload = error.detail && typeof error.detail === "object"
+        ? error.detail as { detail?: unknown }
+        : null;
+      const detail = payload?.detail && typeof payload.detail === "object"
+        ? payload.detail as { code?: unknown }
+        : null;
+      if (detail?.code === "chapter_publish_endpoint_required") {
+        return "当前章节不能通过普通资料保存升格为已发布。请先保存为已确认草稿或审阅中，再使用“作者定稿并发布”入口。";
+      }
       return "这份资料已在其他页面更新。请重新读取后再保存，当前页面没有覆盖新内容。";
     }
     if (error.status === 422) {
@@ -148,10 +197,19 @@ export default function NarrativeContextWorkbench({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [inferring, setInferring] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [publishTarget, setPublishTarget] = useState<PublishTarget | null>(null);
+  const [publishError, setPublishError] = useState("");
   const [error, setError] = useState("");
   const [inferenceError, setInferenceError] = useState<InferenceFailure | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const errorRef = useRef<HTMLDivElement | null>(null);
+  const publishErrorRef = useRef<HTMLDivElement | null>(null);
+  const publishDialogRef = useRef<HTMLDialogElement | null>(null);
+  const publishTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const publishInFlightRef = useRef(false);
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
 
   useEffect(() => {
     if (!selected) {
@@ -204,6 +262,14 @@ export default function NarrativeContextWorkbench({
     return () => controller.abort();
   }, [projectId, selected?.id]);
 
+  useEffect(() => {
+    // A route or selected-document change must not keep a confirmation dialog
+    // pointing at an earlier project/document.
+    if (publishDialogRef.current?.open) publishDialogRef.current.close();
+    setPublishTarget(null);
+    setPublishError("");
+  }, [projectId, selected?.id]);
+
   function update<K extends keyof NarrativeContextDraft>(
     key: K,
     value: NarrativeContextDraft[K],
@@ -220,10 +286,22 @@ export default function NarrativeContextWorkbench({
       !draft ||
       loadedDocumentId !== selected.id ||
       saving ||
-      inferring
+      inferring ||
+      publishing
     ) return;
     const document = selected;
     const draftSnapshot = { ...draft };
+    if (
+      document.document_role === "chapter" &&
+      remoteContext?.resolution_state === "confirmed" &&
+      (remoteContext.publication_status === "draft" || remoteContext.publication_status === "in_review") &&
+      draftSnapshot.documentRole === "chapter" &&
+      draftSnapshot.publicationStatus === "published"
+    ) {
+      setError("当前草稿不能通过普通保存直接转成已发布。请先保存其他改动，再使用下方“作者定稿并发布”入口确认。");
+      requestAnimationFrame(() => errorRef.current?.focus());
+      return;
+    }
     try {
       setSaving(true);
       setError("");
@@ -259,7 +337,7 @@ export default function NarrativeContextWorkbench({
   }
 
   async function inferContext() {
-    if (!selected || loadedDocumentId !== selected.id || inferring || saving) return;
+    if (!selected || loadedDocumentId !== selected.id || inferring || saving || publishing) return;
     const document = selected;
     try {
       setInferring(true);
@@ -293,12 +371,101 @@ export default function NarrativeContextWorkbench({
     }
   }
 
+  function openPublishDialog() {
+    if (
+      !selected || !remoteContext || !draft ||
+      selected.document_role !== "chapter" ||
+      remoteContext.resolution_state !== "confirmed" ||
+      !["draft", "in_review"].includes(remoteContext.publication_status) ||
+      contextRevision(remoteContext) < 1 ||
+      selected.version < 1 ||
+      JSON.stringify(draft) !== JSON.stringify(contextDraft(selected, remoteContext)) ||
+      disabled || saving || inferring || publishing ||
+      loadedDocumentId !== selected.id
+    ) return;
+    setPublishError("");
+    setPublishTarget({
+      projectId,
+      documentId: selected.id,
+      documentName: selected.name,
+      documentVersion: selected.version,
+      contextRevision: contextRevision(remoteContext),
+    });
+    publishDialogRef.current?.showModal();
+  }
+
+  function closePublishDialog() {
+    if (publishInFlightRef.current) return;
+    publishDialogRef.current?.close();
+  }
+
+  async function publishChapter() {
+    if (!publishTarget || publishInFlightRef.current) return;
+    const target = publishTarget;
+    publishInFlightRef.current = true;
+    setPublishing(true);
+    setPublishError("");
+    try {
+      const published = await apiJson<PublishedContext>(
+        `/api/v1/projects/${encodeURIComponent(target.projectId)}/documents/${encodeURIComponent(target.documentId)}/publish`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: target.contextRevision,
+            expected_document_version: target.documentVersion,
+          }),
+        },
+      );
+      if (
+        published.document_id !== target.documentId ||
+        published.document_role !== "chapter" ||
+        published.document_version !== target.documentVersion ||
+        published.resolution_state !== "confirmed" ||
+        published.publication_status !== "published" ||
+        contextRevision(published) <= target.contextRevision
+      ) {
+        throw new TypeError("发布响应与当前文稿不一致，请重新读取状态。");
+      }
+      if (projectIdRef.current !== target.projectId || selectedIdRef.current !== target.documentId) return;
+      onSaved(target.documentId, "chapter", published);
+      setRemoteContext(published);
+      setDraft(contextDraft({ ...selected!, document_role: "chapter" }, published));
+      setAnnouncement(`“${target.documentName}”已由你定稿并发布。后续新稿审查可将这份历史正文作为正式背景；系统未据此认定剧情无误。`);
+      publishDialogRef.current?.close();
+    } catch (reason) {
+      if (projectIdRef.current !== target.projectId || selectedIdRef.current !== target.documentId) return;
+      setPublishError(publishFailure(reason));
+      requestAnimationFrame(() => publishErrorRef.current?.focus());
+    } finally {
+      publishInFlightRef.current = false;
+      setPublishing(false);
+    }
+  }
+
   if (!activeDocuments.length) return null;
   const status = contextStatus(remoteContext || selected?.narrative_context);
   const inference = remoteContext?.inference || null;
   const selectedContextReady = isLoadedContextForDocument(loadedDocumentId, selected?.id);
-  const editorDisabled = disabled || saving || inferring || !selectedContextReady;
-  const navigationLocked = contextNavigationLocked(saving, inferring);
+  const editorDisabled = disabled || saving || inferring || publishing || !selectedContextReady;
+  const navigationLocked = contextNavigationLocked(saving || publishing, inferring);
+  const unsavedContextChanges = Boolean(
+    draft && selected && remoteContext &&
+    JSON.stringify(draft) !== JSON.stringify(contextDraft(selected, remoteContext)),
+  );
+  const showPublishAction = Boolean(
+    selected?.document_role === "chapter" &&
+    remoteContext &&
+    (remoteContext.publication_status === "draft" || remoteContext.publication_status === "in_review"),
+  );
+  const canPublish = Boolean(
+    showPublishAction &&
+    remoteContext?.resolution_state === "confirmed" &&
+    contextRevision(remoteContext) >= 1 &&
+    selected && selected.version >= 1 &&
+    !unsavedContextChanges &&
+    !editorDisabled,
+  );
 
   return (
     <section className="contextWorkbench" aria-labelledby="context-workbench-title">
@@ -439,9 +606,17 @@ export default function NarrativeContextWorkbench({
                     disabled={editorDisabled}
                     onChange={(event) => update("publicationStatus", event.target.value as NarrativeContextDraft["publicationStatus"])}
                   >
-                    {publicationStatuses.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    {publicationStatuses
+                      .filter(([value]) => !(
+                        value === "published" &&
+                        draft.documentRole === "chapter" &&
+                        selected.document_role === "chapter" &&
+                        remoteContext?.resolution_state === "confirmed" &&
+                        (remoteContext.publication_status === "draft" || remoteContext.publication_status === "in_review")
+                      ))
+                      .map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                   </select>
-                  <small>草稿/审阅中用于新稿审查；当前只有“已发布”正文会进入角色基线，已归档资料仅保留记录。</small>
+                  <small>草稿/审阅中用于新稿审查。已有历史可标注“已发布”；当前草稿定稿请使用下方专用入口。已归档资料仅保留记录。</small>
                 </label>
                 <label>
                   <span>时间线</span>
@@ -490,6 +665,61 @@ export default function NarrativeContextWorkbench({
                 </button>
                 <small>保存会生成新的上下文修订，不会改写文稿内容。</small>
               </div>
+              {showPublishAction && (
+                <section className="contextPublishAction" aria-label="作者定稿与发布">
+                  <div>
+                    <h4>作者定稿与发布</h4>
+                    <p>发布后，这份章节会成为后续新稿审查可引用的已发布历史。审查报告只提供线索，不是发布许可或质量保证。</p>
+                    {!canPublish && (
+                      <small>{remoteContext?.resolution_state !== "confirmed"
+                        ? "请先确认这份章节的资料上下文。"
+                        : unsavedContextChanges
+                          ? "请先保存当前上下文改动，再定稿发布。"
+                          : "请先完成资料读取，再定稿发布。"}</small>
+                    )}
+                  </div>
+                  <button
+                    ref={publishTriggerRef}
+                    type="button"
+                    disabled={!canPublish}
+                    onClick={openPublishDialog}
+                  >作者定稿并发布…</button>
+                </section>
+              )}
+              {selected.document_role === "chapter" && remoteContext?.publication_status === "published" && (
+                <p className="contextPublishedNote" role="status">此章节已发布；后续新稿审查可将其作为已发布历史。定稿不代表系统认定剧情无误。</p>
+              )}
+              <dialog
+                ref={publishDialogRef}
+                className="contextPublishDialog"
+                aria-labelledby="context-publish-title"
+                onCancel={(event) => { if (publishInFlightRef.current) event.preventDefault(); }}
+                onClose={() => {
+                  setPublishTarget(null);
+                  setPublishError("");
+                  publishTriggerRef.current?.focus();
+                }}
+              >
+                <h4 id="context-publish-title">确认由作者定稿并发布</h4>
+                <p>将“{publishTarget?.documentName || selected.name}”v{publishTarget?.documentVersion || selected.version} 标为已发布，保留原有时间线与分支。此后它可作为后续新稿的正式历史背景。</p>
+                <p className="contextPublishWarning">发布是作者决定，不表示系统认定剧情无误。即使没有审查报告、覆盖不完整或报告仍有问题线索，你仍可自行决定；请先自行核对文稿。</p>
+                {publishError && (
+                  <div ref={publishErrorRef} className="contextError" role="alert" tabIndex={-1}>
+                    <b>发布状态未确认</b>
+                    <p>{publishError}</p>
+                    <button type="button" disabled={publishing} onClick={() => {
+                      closePublishDialog();
+                      if (selected) void loadContext(selected);
+                    }}>关闭并重新读取</button>
+                  </div>
+                )}
+                <div className="contextPublishDialogActions">
+                  <button type="button" disabled={publishing} onClick={closePublishDialog}>继续修改</button>
+                  <button type="button" disabled={publishing || Boolean(publishError)} onClick={() => void publishChapter()}>
+                    {publishing ? "发布中…" : "确认发布此章节"}
+                  </button>
+                </div>
+              </dialog>
             </>
           )}
         </div>

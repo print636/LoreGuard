@@ -1,0 +1,159 @@
+{
+  "schema_version": "character-ooc-return-season-oracle-v1",
+  "world_id": "shanchao-return-season",
+  "dataset_boundary": {
+    "developer_visible": true,
+    "blind_holdout": false,
+    "production_quality": false
+  },
+  "scope": {
+    "timeline_key": "main",
+    "confirmed_formal_documents": ["01-world-setting.md", "02-character-profiles.md"],
+    "published_history_documents": ["03-published-main-v1.0.md", "04-published-main-v1.1.md"],
+    "target_draft_document": "05-draft-event-v1.2.md",
+    "target_release": {"key": "v1.2", "ordinal": 12}
+  },
+  "scoring_contract": {
+    "positive_axis_count": 5,
+    "hard_negative_count": 6,
+    "requires_confirmed_author_axes": true,
+    "complete_coverage_required_for_quality_claim": true,
+    "partial_or_unknown_is_not_negative_success": true,
+    "candidate_count_is_not_issue_count": true
+  },
+  "cases": [
+    {
+      "case_id": "p1_registry_exclusion",
+      "kind": "potential_ooc",
+      "axis_key": "shelter_eligibility_without_registry",
+      "character_key": "叶簪",
+      "expected_when_complete": "conflict",
+      "min_independent_observations": 2,
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 4}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D01", "line": 3}, {"document_name": "05-draft-event-v1.2.md", "fragment_id": "D02", "line": 4}],
+      "context": [{"document_name": "01-world-setting.md", "fragment_id": "W02", "line": 4}],
+      "reason": "两次绿讯、不同批次、尚有空席；叶簪本人因居籍取消席位，不是伤情分流。"
+    },
+    {
+      "case_id": "p2_hidden_boarding_changes",
+      "kind": "potential_ooc",
+      "axis_key": "notify_affected_waiters",
+      "character_key": "叶簪",
+      "expected_when_complete": "conflict",
+      "min_independent_observations": 2,
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A02", "line": 5}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D03", "line": 6}, {"document_name": "05-draft-event-v1.2.md", "fragment_id": "D04", "line": 7}],
+      "context": [],
+      "reason": "两次独立名单变更均由叶簪下令隐瞒，受影响者已收到旧安排；与 P1 的资格问题是不同轴。"
+    },
+    {
+      "case_id": "p3_unconsented_patient_publicity",
+      "kind": "potential_ooc",
+      "axis_key": "medical_identity_consent",
+      "character_key": "迟蘅",
+      "expected_when_complete": "conflict",
+      "min_independent_observations": 2,
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A03", "line": 8}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D07", "line": 12}, {"document_name": "05-draft-event-v1.2.md", "fragment_id": "D08", "line": 13}],
+      "context": [{"document_name": "01-world-setting.md", "fragment_id": "W03", "line": 5}],
+      "reason": "两名不同病人均未授权对外展示可识别病史，也不存在迫近危险。"
+    },
+    {
+      "case_id": "p4_false_forecast_certainty",
+      "kind": "potential_ooc",
+      "axis_key": "forecast_uncertainty_disclosure",
+      "character_key": "柳泛",
+      "expected_when_complete": "conflict",
+      "min_independent_observations": 2,
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A04", "line": 11}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D11", "line": 17}, {"document_name": "05-draft-event-v1.2.md", "fragment_id": "D12", "line": 18}],
+      "context": [],
+      "reason": "不同日期、明确知晓未核实，却两次向公众宣称风向已证实；不是单纯预测失准。"
+    },
+    {
+      "case_id": "p5_raw_measurement_overwrite",
+      "kind": "potential_ooc",
+      "axis_key": "raw_observation_integrity",
+      "character_key": "柳泛",
+      "expected_when_complete": "conflict",
+      "min_independent_observations": 2,
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A05", "line": 12}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D13", "line": 19}, {"document_name": "05-draft-event-v1.2.md", "fragment_id": "D14", "line": 20}],
+      "context": [{"document_name": "01-world-setting.md", "fragment_id": "W03", "line": 5}],
+      "reason": "两条不同原始读数被柳泛本人直接覆盖，均无更正附记；不能与 P4 的对外表述合并。"
+    },
+    {
+      "case_id": "n1_emergency_medical_triage",
+      "kind": "hard_negative",
+      "axis_key": "shelter_eligibility_without_registry",
+      "character_key": "叶簪",
+      "expected_when_complete": "no_issue",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 4}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D05", "line": 9}],
+      "context": [{"document_name": "01-world-setting.md", "fragment_id": "W02", "line": 4}],
+      "reason": "红讯中按伤情让重伤者先登船，仍给轻伤船民保留后续席位；不是因居籍排除。"
+    },
+    {
+      "case_id": "n2_spliced_voice_not_actor",
+      "kind": "hard_negative",
+      "axis_key": "shelter_eligibility_without_registry",
+      "character_key": "叶簪",
+      "expected_when_complete": "no_issue",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 4}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D06", "line": 10}],
+      "context": [{"document_name": "01-world-setting.md", "fragment_id": "W04", "line": 6}],
+      "reason": "完整场景有原件与剪接记录，广播言语不是叶簪的命令。"
+    },
+    {
+      "case_id": "n3_consent_within_named_audience",
+      "kind": "hard_negative",
+      "axis_key": "medical_identity_consent",
+      "character_key": "迟蘅",
+      "expected_when_complete": "no_issue",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A03", "line": 8}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D09", "line": 14}],
+      "context": [],
+      "reason": "病人亲口许可了具体内容与三人受众，迟蘅只在相符频道发送。"
+    },
+    {
+      "case_id": "n4_anonymous_imminent_hazard_notice",
+      "kind": "hard_negative",
+      "axis_key": "medical_identity_consent",
+      "character_key": "迟蘅",
+      "expected_when_complete": "no_issue",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A03", "line": 8}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D10", "line": 15}],
+      "context": [{"document_name": "01-world-setting.md", "fragment_id": "W02", "line": 4}],
+      "reason": "已发生红讯，救援队收到最低必要的匿名水箱信息，没有可识别病史。"
+    },
+    {
+      "case_id": "n5_apprentice_tampering_not_lufan",
+      "kind": "hard_negative",
+      "axis_key": "raw_observation_integrity",
+      "character_key": "柳泛",
+      "expected_when_complete": "no_issue",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A05", "line": 12}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D15", "line": 21}],
+      "context": [],
+      "reason": "篡改者是学徒，柳泛发现后恢复原值并追加说明；不能因同场出现就错归属。"
+    },
+    {
+      "case_id": "n6_causal_change_of_data_source",
+      "kind": "hard_negative",
+      "axis_key": "forecast_uncertainty_disclosure",
+      "character_key": "柳泛",
+      "expected_when_complete": "no_issue",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A04", "line": 11}, {"document_name": "02-character-profiles.md", "fragment_id": "A05", "line": 12}],
+      "draft": [{"document_name": "05-draft-event-v1.2.md", "fragment_id": "D16", "line": 22}],
+      "context": [{"document_name": "04-published-main-v1.1.md", "fragment_id": "H05", "line": 3}, {"document_name": "04-published-main-v1.1.md", "fragment_id": "H06", "line": 4}],
+      "reason": "已发布的传感器篡改事件解释新增人工观察来源；新稿仍标明来源和不确定性，不构成原则反转。"
+    }
+  ],
+  "human_adjudication": [
+    "真实作品里必须由策划确认所谓绿讯或红讯是否与当前场景一致；不能从一句警报名称猜测危险程度。",
+    "病人许可须由策划判断所覆盖的具体病况、接收者与时间，匿名信息若可与其他资料重新识别也要重新裁决。",
+    "声音剪接或其他伪造证据的来源可信度不能由角色名或台词相同来推定。",
+    "角色改变方法与改变原则不同；已发布剧情是否足以支撑成长或例外，要让作者最终确认。",
+    "模型可以提出证据线索；确认角色特征、接受或驳回问题和发布新稿仍由作者决定。"
+  ]
+}

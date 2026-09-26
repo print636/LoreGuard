@@ -183,6 +183,41 @@
 .contextActions { align-items: center; margin-top: 14px; }
 .contextActions .quietPrimary { width: auto; min-height: 44px; margin: 0; }
 .contextActions > small { color: var(--color-text-muted, var(--muted)); font-size: 12px; }
+.contextPublishAction {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 18px;
+  padding: 15px;
+  border: 1px solid var(--color-border-strong, var(--line-strong));
+  border-radius: 12px;
+  background: var(--color-subtle, rgba(183,162,255,.08));
+}
+.contextPublishAction > div { min-width: 0; }
+.contextPublishAction h4 { margin: 0; color: var(--color-text, var(--text)); font-size: 15px; }
+.contextPublishAction p { margin: 5px 0 0; color: var(--color-text-secondary, var(--text-2)); font-size: 13px; line-height: 1.6; }
+.contextPublishAction small { display: block; margin-top: 6px; color: var(--color-warning, var(--warning)); line-height: 1.5; }
+.contextPublishAction > button { flex: 0 0 auto; min-height: 44px; margin: 0; }
+.contextPublishedNote { margin: 14px 0 0; padding: 11px 13px; color: var(--color-success, var(--success)); border-left: 3px solid currentColor; background: var(--color-subtle, rgba(183,162,255,.08)); font-size: 13px; line-height: 1.55; }
+.contextPublishDialog {
+  width: min(540px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: 22px;
+  overflow: auto;
+  color: var(--color-text, var(--text));
+  border: 1px solid var(--color-border-strong, var(--line-strong));
+  border-radius: 16px;
+  background: var(--color-page, #0d0a1e);
+  box-shadow: 0 24px 72px rgba(0, 0, 0, .5);
+}
+.contextPublishDialog::backdrop { background: rgba(4, 3, 15, .76); }
+.contextPublishDialog h4 { margin: 0 0 10px; font-size: 19px; }
+.contextPublishDialog > p { margin: 0 0 12px; color: var(--color-text-secondary, var(--text-2)); line-height: 1.65; }
+.contextPublishDialog .contextPublishWarning { padding: 11px 13px; color: var(--color-warning, var(--warning)); border-left: 3px solid currentColor; background: var(--color-subtle, rgba(183,162,255,.08)); }
+.contextPublishDialogActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.contextPublishDialogActions button { min-height: 44px; margin: 0; }
+.contextPublishDialogActions button:last-child { color: var(--color-page, #0d0a1e); background: var(--color-lavender, var(--lavender)); }
 
 .guidedReviewLaunch { container-type: inline-size; min-width: 0; }
 .guidedReviewHead { padding-bottom: 18px; border-bottom: 1px solid var(--color-border, var(--line)); }
@@ -278,6 +313,10 @@
   .contextWideField { grid-column: auto; }
   .contextActions .quietPrimary,
   .draftReviewSelection .startValidation { width: 100%; }
+  .contextPublishAction { align-items: stretch; flex-direction: column; }
+  .contextPublishAction > button { width: 100%; }
+  .contextPublishDialog { padding: 17px; }
+  .contextPublishDialogActions button { flex: 1 1 150px; }
   .contextInferenceAction,
   .contextInferenceReview > header,
   .contextInferenceReview li > div { align-items: stretch; flex-direction: column; }

@@ -10,8 +10,11 @@ import {
   analysisRunRequest,
   blocksDraftOnlyReview,
   findCurrentBaselineRun,
+  formalBackgroundStillCurrent,
   guidedDocumentState,
   hasCompletedBaselineRun,
+  isBaselineDocument,
+  isConfirmed,
   selectedDraftsStillCurrent,
   type AnalysisRunRequest,
   type BaselineRunSummary,
@@ -110,6 +113,9 @@ export default function GuidedReviewLaunch({
   });
   const baselineRunCompleted = hasCompletedBaselineRun(runs);
   const currentBaselineRun = findCurrentBaselineRun(documents, runs);
+  const unresolvedFormal = documentState.active.filter((document) =>
+    blocksDraftOnlyReview(document) && (!isBaselineDocument(document) || !isConfirmed(document)),
+  );
 
   const confirmedDraftIdKey = documentState.confirmedDrafts.map((document) => document.id).join(":");
   const confirmedDraftIds = new Set(documentState.confirmedDrafts.map((document) => document.id));
@@ -135,7 +141,7 @@ export default function GuidedReviewLaunch({
   }, [storageKey, projectLoading, documents.length, confirmedDraftIdKey, draftSelection.storageKey]);
 
   useEffect(() => {
-    if (!projectId || !currentBaselineRun || documentState.unresolvedBaseline.length) {
+    if (!projectId || !currentBaselineRun || unresolvedFormal.length) {
       setProfiles({ loading: false, error: "", projectId: null, requestedRunId: null, status: null });
       return;
     }
@@ -155,14 +161,14 @@ export default function GuidedReviewLaunch({
         if (error instanceof DOMException && error.name === "AbortError") return;
         setProfiles({
           loading: false,
-          error: "暂时无法读取完整的角色基线汇总。请重试；未知状态不会解锁新稿审查。",
+          error: "暂时无法读取角色基线汇总。未知状态不会视作 OOC 基线已就绪；已确认正式资料仍可用于其他一致性审查。",
           projectId,
           requestedRunId: currentBaselineRun.id,
           status: null,
         });
       });
     return () => controller.abort();
-  }, [projectId, currentBaselineRun?.id, documentState.unresolvedBaseline.length, statusRefresh]);
+  }, [projectId, currentBaselineRun?.id, unresolvedFormal.length, statusRefresh]);
 
   useEffect(() => {
     // The component can be reused when the selected project, account, or
@@ -192,13 +198,17 @@ export default function GuidedReviewLaunch({
   );
   const contextsReady =
     documentState.baseline.length > 0 &&
-    documentState.unresolvedBaseline.length === 0;
+    unresolvedFormal.length === 0;
   const profilesReady =
+    contextsReady &&
     Boolean(currentBaselineRun) &&
     !profilesLoading &&
     !profiles.error &&
     hasReadyCharacterBaseline(currentBaselineRun, status);
-  const draftsReady = (profilesReady || draftOnlyAvailable) && documentState.confirmedDrafts.length > 0;
+  const formalFallbackAvailable = contextsReady && !profilesReady &&
+    (!currentBaselineRun || !profilesLoading);
+  const draftsReady = (profilesReady || draftOnlyAvailable || formalFallbackAvailable) &&
+    documentState.confirmedDrafts.length > 0;
 
   async function startBaseline() {
     if (!contextsReady || busy || action) return;
@@ -215,13 +225,13 @@ export default function GuidedReviewLaunch({
 
   async function startDraftReview() {
     if (!draftsReady || busy || action || preflightControllerRef.current || !selectedDraftIds.length ||
-      (!draftOnlyAvailable && !currentBaselineRun)) return;
+      (!draftOnlyAvailable && !formalFallbackAvailable && !currentBaselineRun)) return;
     const controller = new AbortController();
     preflightControllerRef.current = controller;
     try {
       setAction("review");
       setReviewError("");
-      if (draftOnlyAvailable) {
+      if (draftOnlyAvailable || formalFallbackAvailable) {
         let freshDocuments: GuidedDocument[];
         try {
           freshDocuments = await apiJson<GuidedDocument[]>(
@@ -234,15 +244,19 @@ export default function GuidedReviewLaunch({
           return;
         }
         if (controller.signal.aborted) return;
-        if (freshDocuments.some(blocksDraftOnlyReview)) {
+        if (draftOnlyAvailable && freshDocuments.some(blocksDraftOnlyReview)) {
           setReviewError("项目已有正式资料或待确认的正式资料，本次没有启动自检。请刷新项目并先确认资料、建立角色基线。");
+          return;
+        }
+        if (formalFallbackAvailable && !formalBackgroundStillCurrent(documents, freshDocuments)) {
+          setReviewError("正式背景的版本或确认状态已变化，本次没有启动任务。请刷新项目并重新核对资料。");
           return;
         }
         if (!selectedDraftsStillCurrent(documents, freshDocuments, selectedDraftIds)) {
           setReviewError("所选新稿的版本或资料状态已变化，本次没有启动任务。请刷新项目后重新选择。");
           return;
         }
-        await onStart(analysisRunRequest("draft_review", sensitivity, selectedDraftIds, true));
+        await onStart(analysisRunRequest("draft_review", sensitivity, selectedDraftIds, draftOnlyAvailable));
       } else if (currentBaselineRun) {
         let freshStatus: CharacterBaselineStatus;
         try {
@@ -251,7 +265,7 @@ export default function GuidedReviewLaunch({
           if (controller.signal.aborted) return;
           setProfiles({
             loading: false,
-            error: "提交前无法复核角色基线。请重试读取状态；未知状态不会解锁审查。",
+            error: "提交前无法复核角色基线。未知状态不会视作 OOC 基线已就绪；可改走下方有限覆盖审查。",
             projectId,
             requestedRunId: currentBaselineRun.id,
             status: null,
@@ -306,7 +320,9 @@ export default function GuidedReviewLaunch({
           <h2>{draftOnlyAvailable ? "从新稿开始故事自检" : "从正式资料到新稿审查"}</h2>
           <p>{draftOnlyAvailable
             ? "目前没有生效的正式世界观或历史正文。选择本次要检查的草稿；之后仍可补充正式资料并建立角色基线。"
-            : "先建立可核对的角色基线，再只选择这次需要审查的新稿。每次运行都会冻结输入。"}</p>
+            : formalFallbackAvailable
+              ? "已确认正式资料可先支撑其他一致性审查；补充角色基线可提高 OOC 覆盖。每次运行都会冻结输入。"
+              : "先建立可核对的角色基线，再只选择这次需要审查的新稿。每次运行都会冻结输入。"}</p>
         </div>
         <fieldset className="sensitivityControl">
           <legend>角色变化敏感度</legend>
@@ -341,11 +357,11 @@ export default function GuidedReviewLaunch({
               <p className="stageNotice">正在读取资料状态…</p>
             ) : documentState.baseline.length === 0 ? (
               <p className="stageNotice warning">还没有可建立基线的正式资料。请确认世界观、角色档案或已发布历史章节；参考材料不会自动成为基线。</p>
-            ) : documentState.unresolvedBaseline.length > 0 ? (
+            ) : unresolvedFormal.length > 0 ? (
               <p className="stageNotice warning">
-                {documentState.unresolvedBaseline.length} 份正式资料仍待确认：
-                {documentState.unresolvedBaseline.slice(0, 3).map((document) => document.name).join("、")}
-                {documentState.unresolvedBaseline.length > 3 ? " 等" : ""}
+                {unresolvedFormal.length} 份可能作为正式背景的资料仍需核对类型、发布状态或确认：
+                {unresolvedFormal.slice(0, 3).map((document) => document.name).join("、")}
+                {unresolvedFormal.length > 3 ? " 等" : ""}
               </p>
             ) : (
               <p className="stageNotice success">{documentState.baseline.length} 份正式资料已确认，可建立角色基线。</p>
@@ -358,8 +374,10 @@ export default function GuidedReviewLaunch({
           <span className="stageNumber" aria-hidden="true">2</span>
           <div className="stageBody">
             <header>
-              <div><h3>建立并确认角色基线</h3><p>AI 从正式资料归纳候选；只有你确认的条目才进入角色档案。</p></div>
-              <b>{profilesReady ? "已就绪" : contextsReady ? "进行中" : "未解锁"}</b>
+              <div><h3>建立并确认角色基线</h3><p>{formalFallbackAvailable
+                ? "可选增强：AI 从正式资料归纳候选，只有你确认的特征才用于提高角色 OOC 覆盖。其他一致性审查可先进行。"
+                : "AI 从正式资料归纳候选；只有你确认的条目才进入角色档案。"}</p></div>
+              <b>{profilesReady ? "已就绪" : contextsReady ? "可选增强" : "待确认资料"}</b>
             </header>
             {!contextsReady ? (
               <p className="stageNotice">完成上一步后才能开始角色归纳，页面不会绕过未确认上下文。</p>
@@ -420,8 +438,10 @@ export default function GuidedReviewLaunch({
           <span className="stageNumber" aria-hidden="true">{draftOnlyAvailable ? "1" : "3"}</span>
           <div className="stageBody">
             <header>
-              <div><h3>{draftOnlyAvailable ? "选择新稿开始自检" : "选择新稿开始审查"}</h3><p>一次可检查单章，也可勾选同一批次的多个章节。</p></div>
-              <b>{draftsReady ? "可开始" : draftOnlyAvailable ? "待确认新稿" : "未解锁"}</b>
+              <div><h3>{draftOnlyAvailable ? "选择新稿开始自检" : "选择新稿开始审查"}</h3><p>{formalFallbackAvailable
+                ? "已确认正式背景可用于其他一致性审查；一次可勾选一章或一批新稿。"
+                : "一次可检查单章，也可勾选同一批次的多个章节。"}</p></div>
+              <b>{draftsReady ? "可开始" : draftOnlyAvailable || formalFallbackAvailable ? "待确认新稿" : "未解锁"}</b>
             </header>
             {reviewError && <p className="stageReviewError" role="alert">{reviewError}</p>}
             {draftOnlyAvailable && (
@@ -432,7 +452,10 @@ export default function GuidedReviewLaunch({
                 )}
               </div>
             )}
-            {!profilesReady && !draftOnlyAvailable ? (
+            {formalFallbackAvailable && (
+              <p className="stageNotice warning">正式背景已确认，但角色基线尚未达到完整可核对状态。本次仍可检查新稿的其他一致性问题；已确认角色特征可能参与 OOC，未覆盖角色不会被判为“通过”。实际背景与角色覆盖请以冻结输入和运行诊断为准。</p>
+            )}
+            {!profilesReady && !draftOnlyAvailable && !formalFallbackAvailable ? (
               <p className="stageNotice">完成角色基线确认后，才能用它审查新稿中的性格、偏好与行为漂移。</p>
             ) : documentState.confirmedDrafts.length === 0 ? (
               <>
@@ -443,7 +466,9 @@ export default function GuidedReviewLaunch({
               <div className="draftReviewSelection">
                 <p className="stageNotice draftReviewScopeNote">{draftOnlyAvailable
                   ? "仅分析勾选的新稿；其他草稿不会悄悄成为背景。其他一致性检查仍可运行。"
-                  : "上方为项目级汇总，不保证所选章节中的每个角色都有已确认特征；未覆盖角色不会获得角色 OOC 判断，其他一致性检查仍可运行。"}</p>
+                  : formalFallbackAvailable
+                    ? "仅把已确认且与所选新稿作用域兼容的正式资料作为背景；未选草稿不作背景，角色 OOC 可能弃权。"
+                    : "上方为项目级汇总，不保证所选章节中的每个角色都有已确认特征；未覆盖角色不会获得角色 OOC 判断，其他一致性检查仍可运行。"}</p>
                 <fieldset>
                   <legend>本次待审新稿</legend>
                   {documentState.confirmedDrafts.map((document) => (
@@ -465,7 +490,7 @@ export default function GuidedReviewLaunch({
                   onClick={() => void startDraftReview()}
                 >
                   {busy ? "正在校验…" : action === "review"
-                    ? draftOnlyAvailable ? "正在复核项目资料…" : "正在复核角色基线…"
+                    ? draftOnlyAvailable || formalFallbackAvailable ? "正在复核项目资料…" : "正在复核角色基线…"
                     : `开始校验${selectedDraftIds.length ? `（${selectedDraftIds.length} 份）` : ""}`}
                 </button>
               </div>
