@@ -308,7 +308,8 @@ class PgAxisDirectionMigrationTests(unittest.TestCase):
             engine = create_engine(url)
             try:
                 _seed_populated_0017(engine)
-                command.upgrade(config, HEAD)
+                # The API uses the current ORM, including columns added after 0018.
+                command.upgrade(config, "head")
                 ready = Barrier(2)
 
                 def author(proposition: str) -> tuple[int, str | None]:

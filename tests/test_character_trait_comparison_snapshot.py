@@ -64,6 +64,9 @@ def test_approved_axis_snapshot_freezes_definition_and_checks_review_provenance(
         id=candidate.approved_axis_id,
         project_id=candidate.project_id,
         trait_type="core_personality",
+        comparison_key=None,
+        applicability_scope=None,
+        applicability_scope_sha256=None,
         version=1,
         display_name="同伴协商",
         definition=definition,
@@ -84,6 +87,9 @@ def test_approved_axis_snapshot_freezes_definition_and_checks_review_provenance(
     assert payload["approved_axis_definition_sha256"] == axis.definition_sha256
     assert payload["axis_alignment"] == "legacy_unverified"
     assert payload["axis_polarity"] is None
+    assert "approved_axis_comparison_key" not in payload
+    assert "approved_axis_applicability_scope" not in payload
+    assert "approved_axis_applicability_scope_sha256" not in payload
     assert payload_sha256(payload) != payload_sha256(candidate_snapshot_payload(candidate, review))
 
     review.approved_axis_id = "22222222-2222-4222-8222-222222222222"
@@ -118,6 +124,9 @@ def test_verified_axis_snapshot_keeps_raw_and_author_directions_separate(monkeyp
         id=candidate.approved_axis_id,
         project_id=candidate.project_id,
         trait_type="core_personality",
+        comparison_key=None,
+        applicability_scope=None,
+        applicability_scope_sha256=None,
         version=1,
         display_name="冒用签名",
         definition=definition,
@@ -141,6 +150,9 @@ def test_verified_axis_snapshot_keeps_raw_and_author_directions_separate(monkeyp
     assert payload["axis_alignment"] == "opposite"
     assert payload["axis_polarity"] == "negative"
     assert payload["axis_positive_proposition_sha256"] == proposition_hash
+    assert "approved_axis_comparison_key" not in payload
+    assert "approved_axis_applicability_scope" not in payload
+    assert "approved_axis_applicability_scope_sha256" not in payload
     candidate.axis_positive_proposition_sha256 = "0" * 64
     with pytest.raises(ValueError, match="alignment is invalid"):
         _confirmed_trait_snapshot_payload(database, candidate, review)

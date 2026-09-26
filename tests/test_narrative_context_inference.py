@@ -11,6 +11,7 @@ import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, inspect, select
 
@@ -605,5 +606,5 @@ def test_context_inference_migration_is_additive_from_review_batch_head():
             revision = connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
             ).scalar_one()
-            assert revision == "0019_project_name_sort_key"
+            assert revision == ScriptDirectory.from_config(config).get_current_head()
         engine.dispose()
