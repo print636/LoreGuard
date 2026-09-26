@@ -31,6 +31,7 @@ from app.character_consistency_stage import (
     _target_has_sufficient_recall_evidence,
     _target_with_existing_evidence_ranges,
     _targeted_completion_reserve,
+    _draft_preference_coverage_gaps,
     _trusted_axis_binding,
     _trait_applies_to_release,
 )
@@ -1631,7 +1632,7 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
 
 def test_qualified_preference_from_confirmed_profile_reaches_review_without_identity_rewrite():
     profile_line = "林澈一直喜欢冰镇蜜瓜，这是他的稳定偏好。"
-    draft_line = "林澈当着众人的面说：“我一直最讨厌蜜瓜，闻到味道就想离开。”"
+    draft_line = "林澈一直最讨厌蜜瓜。"
     with TestClient(app) as client:
         project = client.post(
             "/api/v1/projects", json={"name": f"限定对象补桥-{uuid4().hex}"}
@@ -5499,6 +5500,245 @@ def test_empty_model_extraction_is_explicitly_partial_not_clean():
         assert result.diagnostics["outcome"] == "partial"
         assert result.diagnostics["material_coverage"] == "partial"
         assert result.diagnostics["reason_counts"]["no_draft_signals"] == 1
+
+
+def _confirmed_melon_project(client: TestClient) -> dict:
+    project = client.post(
+        "/api/v1/projects", json={"name": f"偏好覆盖哨兵-{uuid4().hex}"}
+    ).json()
+    _create_document(
+        client, project["id"], name="profile.md", role="character_profile",
+        content="林澈喜欢蜜瓜。",
+        narrative_context=_context(publication="published"),
+    )
+    seed = _new_run(client, project["id"])
+    _run_stage(
+        seed,
+        QueueProvider(_response(_record(
+            evidence="林澈喜欢蜜瓜。", polarity="positive",
+            kind="explicit_declaration",
+        ))),
+    )
+    _confirm_only_candidate(client, project["id"], seed)
+    return project
+
+
+def _confirmed_iced_melon_project(client: TestClient) -> dict:
+    project = client.post(
+        "/api/v1/projects", json={"name": f"冰镇偏好覆盖-{uuid4().hex}"}
+    ).json()
+    record = {
+        **_record(
+            evidence="林澈喜欢冰镇蜜瓜。", polarity="positive",
+            kind="explicit_declaration", statement="喜欢冰镇蜜瓜",
+        ),
+        "key_object": "冰镇蜜瓜",
+    }
+    _create_document(
+        client, project["id"], name="profile.md", role="character_profile",
+        content="林澈喜欢冰镇蜜瓜。",
+        narrative_context=_context(publication="published"),
+    )
+    seed = _new_run(client, project["id"])
+    _run_stage(seed, QueueProvider(_response(record)))
+    _confirm_only_candidate(client, project["id"], seed)
+    return project
+
+
+@pytest.mark.parametrize(
+    ("draft", "expected_coverage", "expected_bridge_gaps"),
+    [
+        ("林澈讨厌蜜瓜。", "partial", 1),
+        ("林澈讨厌蜜瓜味糖。", "complete", 0),
+        ("林澈喜欢蜜瓜。", "complete", 0),
+        ("林澈讨厌温热蜜瓜。", "complete", 0),
+        ("苏青讨厌蜜瓜。林澈走过。", "complete", 0),
+    ],
+)
+def test_empty_focused_reply_respects_only_existing_iced_object_bridge(
+    draft: str, expected_coverage: str, expected_bridge_gaps: int,
+):
+    with TestClient(app) as client:
+        project = _confirmed_iced_melon_project(client)
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content=draft, narrative_context=_context(publication="draft"),
+        )
+        formal = {
+            **_record(
+                evidence="林澈喜欢冰镇蜜瓜。", polarity="positive",
+                kind="explicit_declaration", statement="喜欢冰镇蜜瓜",
+            ),
+            "key_object": "冰镇蜜瓜",
+        }
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(_response(formal), *(_response() for _ in range(12))),
+            remaining_run_tokens=100_000,
+            character_consistency_stage_token_budget=100_000,
+        )
+
+    assert result.issues == ()
+    assert result.diagnostics["material_coverage"] == expected_coverage
+    assert result.diagnostics["outcome"] == (
+        "partial" if expected_coverage == "partial" else "completed"
+    )
+    assert result.diagnostics["reason_counts"].get(
+        "draft_preference_modifier_bridge_unextracted", 0
+    ) == expected_bridge_gaps
+    assert result.diagnostics["counts"]["targeted_empty_pass_count"] >= 1
+
+
+def test_iced_bridge_coverage_does_not_generalize_to_one_character_object():
+    target = CharacterSignalTarget(
+        character="林澈", dimension="preference",
+        trait_key="tea_preference", comparison_key="preference:冰镇茶",
+        baseline_polarity="positive", requested_polarity="negative",
+        baseline_hint="喜欢冰镇茶",
+    )
+    gaps = _draft_preference_coverage_gaps(
+        CharacterSignalChunk(
+            document_id="draft-1", document_name="draft.md",
+            content="林澈讨厌茶。", global_line_start=1,
+            source_kind="draft",
+        ),
+        (target,), (),
+    )
+    assert gaps == {}
+
+
+@pytest.mark.parametrize(
+    ("draft", "expected_reason"),
+    [
+        ("林澈讨厌蜜瓜。", "draft_preference_direct_evidence_unextracted"),
+        (
+            "林澈在排练中说：“我讨厌蜜瓜。”",
+            "draft_preference_semantic_coverage_uncertain",
+        ),
+    ],
+)
+def test_empty_focused_preference_reply_cannot_certify_clean_draft(
+    draft: str, expected_reason: str,
+):
+    with TestClient(app) as client:
+        project = _confirmed_melon_project(client)
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content=draft, narrative_context=_context(publication="draft"),
+        )
+        provider = QueueProvider(
+            _response(_record(
+                evidence="林澈喜欢蜜瓜。", polarity="positive",
+                kind="explicit_declaration",
+            )),
+            *(_response() for _ in range(8)),
+        )
+        result = _run_stage(_new_run(client, project["id"]), provider)
+
+    assert result.issues == ()
+    assert result.diagnostics["outcome"] == "partial"
+    assert result.diagnostics["material_coverage"] == "partial"
+    assert result.diagnostics["reason_counts"][expected_reason] == 1
+    assert result.diagnostics["counts"]["targeted_empty_pass_count"] >= 1
+    assert draft not in json.dumps(result.diagnostics, ensure_ascii=False)
+
+
+def test_irrelevant_quoted_material_does_not_degrade_frozen_preference_coverage():
+    with TestClient(app) as client:
+        project = _confirmed_melon_project(client)
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content=(
+                "林澈说：“今天开会。”\n"
+                "苏青说：“我讨厌蜜瓜。”\n"
+                "林澈说：“我讨厌葡萄。”"
+            ),
+            narrative_context=_context(publication="draft"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(
+                _response(_record(
+                    evidence="林澈喜欢蜜瓜。", polarity="positive",
+                    kind="explicit_declaration",
+                )),
+                *(_response() for _ in range(8)),
+            ),
+            remaining_run_tokens=100_000,
+            character_consistency_stage_token_budget=100_000,
+        )
+
+    assert result.issues == ()
+    assert result.diagnostics["outcome"] == "completed"
+    assert result.diagnostics["material_coverage"] == "complete"
+    assert not any(
+        key.startswith("draft_preference_")
+        for key in result.diagnostics["reason_counts"]
+    )
+
+
+def test_preference_coverage_guard_reads_old_frozen_body_after_live_replacement():
+    with TestClient(app) as client:
+        project = _confirmed_melon_project(client)
+        original = _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content="林澈在排练中说：“我讨厌蜜瓜。”",
+            narrative_context=_context(publication="draft"),
+        )
+        old_run = _new_run(client, project["id"])
+        replacement = client.post(
+            f"/api/v1/projects/{project['id']}/documents/text",
+            json={
+                "name": "draft.md", "document_role": "chapter",
+                "replace_document_id": original["id"],
+                "content": "林澈走进会议室。",
+                "narrative_context": _context(publication="draft"),
+            },
+        )
+        assert replacement.status_code == 201, replacement.text
+        result = _run_stage(
+            old_run,
+            QueueProvider(
+                _response(_record(
+                    evidence="林澈喜欢蜜瓜。", polarity="positive",
+                    kind="explicit_declaration",
+                )),
+                *(_response() for _ in range(8)),
+            ),
+        )
+
+    assert result.issues == ()
+    assert result.diagnostics["outcome"] == "partial"
+    assert result.diagnostics["reason_counts"]["draft_preference_semantic_coverage_uncertain"] == 1
+
+
+def test_preference_coverage_is_per_source_line_not_any_chunk_observation():
+    target = CharacterSignalTarget(
+        character="林澈", dimension="preference",
+        trait_key="melon_preference", comparison_key="preference:蜜瓜",
+        baseline_polarity="positive", requested_polarity="negative",
+        baseline_hint="喜欢蜜瓜",
+    )
+    line = "林澈喜欢蜜瓜，但他在排练中说：“我讨厌蜜瓜。”"
+    observation = CharacterSignal(
+        id="cs_" + "a" * 32, character="林澈", dimension="preference",
+        trait_key="melon_preference", statement="喜欢蜜瓜",
+        polarity="positive", stability="stable",
+        observation_kind="explicit_declaration", source_kind="draft",
+        key_object="蜜瓜",
+        evidence=EvidenceSpan(
+            document_id="draft-1", document_name="draft.md",
+            line_start=1, line_end=1, text="林澈喜欢蜜瓜",
+        ),
+    )
+    gaps = _draft_preference_coverage_gaps(
+        CharacterSignalChunk(
+            document_id="draft-1", document_name="draft.md", content=line,
+            global_line_start=1, source_kind="draft",
+        ),
+        (target,), (observation,),
+    )
+    assert gaps == {"draft_preference_semantic_coverage_uncertain": 1}
 
 
 def test_service_internal_character_stage_failure_still_completes_baseline_run():

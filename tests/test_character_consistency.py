@@ -936,10 +936,10 @@ def test_evidence_mismatch_diagnostics_keep_mixed_failed_attempts_without_admiss
 def test_draft_preference_rejects_object_and_attitude_spliced_across_lines():
     source = (
         "周尧递来一盘冰镇蜜瓜。\n"
-        "林澈说：\"我一直最讨厌蜜瓜。\""
+        "林澈一直最讨厌蜜瓜。"
     )
     mixed = valid_signal_record(
-        statement="林澈说我一直最讨厌蜜瓜",
+        statement="林澈一直最讨厌蜜瓜",
         polarity="negative",
         stability="temporary",
         observation_kind="preference_expression",
@@ -949,7 +949,7 @@ def test_draft_preference_rejects_object_and_attitude_spliced_across_lines():
         context="private-mixed-record-context",
     )
     general = valid_signal_record(
-        statement="林澈说我一直最讨厌蜜瓜",
+        statement="林澈一直最讨厌蜜瓜",
         polarity="negative",
         stability="temporary",
         observation_kind="preference_expression",
@@ -2151,7 +2151,7 @@ def test_qualified_preference_bridge_requires_opposed_direct_whole_object_claim(
 
 
 def test_targeted_qualified_preference_accepts_general_opposition_without_rewriting_object():
-    line = "林澈说：“我一直最讨厌蜜瓜，闻到味道就想离开。”"
+    line = "林澈一直最讨厌蜜瓜。"
     record = valid_signal_record(
         trait_key="melon_preference",
         statement=line,
@@ -2224,7 +2224,9 @@ def test_targeted_qualified_preference_rejects_compound_even_if_model_uses_subst
     [
         ("林澈记下周尧一直讨厌蜜瓜。", "character_support"),
         ("林澈说：“周尧一直讨厌蜜瓜。”", "character_support"),
-        ("林澈和周尧都讨厌蜜瓜。", "targeted_target_mismatch"),
+        # The draft assertion guard now rejects a jointly attributed claim
+        # before the later targeted-only identity check.
+        ("林澈和周尧都讨厌蜜瓜。", "statement_support"),
     ],
 )
 def test_targeted_qualified_preference_does_not_reassign_other_speakers(line, reason):
@@ -4075,7 +4077,7 @@ def test_negated_stable_preference_label_does_not_override_model_stability():
 
 
 def test_stability_normalization_does_not_rewrite_draft_source():
-    evidence = "林澈喜欢冰镇蜜瓜，这是一项长期稳定偏好。"
+    evidence = "林澈喜欢冰镇蜜瓜。"
     record = valid_signal_record(
         statement="林澈喜欢冰镇蜜瓜",
         stability="core",
@@ -4123,7 +4125,7 @@ def test_stability_normalization_does_not_rewrite_draft_source():
                 "observation_kind": "dialogue",
                 "key_object": "melons",
             },
-            "preference_expression",
+            None,
         ),
         (
             "林澈没有说自己讨厌蜜瓜，只是把蜜瓜放回桌上。",
@@ -4218,8 +4220,14 @@ def test_draft_preference_kind_is_grounded_in_direct_object_expression(
         CharacterSignalChunk("draft-kind-preference", "draft.md", evidence, 20, "draft")
     )
 
-    assert len(result.signals) == 1
-    assert result.signals[0].observation_kind == expected_kind
+    if expected_kind is None:
+        # Intentionally lose quoted recall until source-span semantic review
+        # can prove the speaker and that the utterance is an actual preference.
+        assert result.signals == ()
+        assert result.diagnostics.outcome == "degraded"
+    else:
+        assert len(result.signals) == 1
+        assert result.signals[0].observation_kind == expected_kind
 
 
 @pytest.mark.parametrize(

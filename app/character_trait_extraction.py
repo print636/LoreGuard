@@ -3474,7 +3474,13 @@ def _bind_record(
         evidence_text,
         source_kind=chunk.source_kind,
     ):
-        raise ValueError("character_support")
+        if not (
+            chunk.source_kind == "draft"
+            and record.dimension == "preference"
+            and _DIRECT_PREFERENCE_CUE.search(record.statement)
+            and _draft_preference_assertion_supported(record, evidence_text)
+        ):
+            raise ValueError("character_support")
     scoped_core_label = None
     scoped_evidence = None
     if chunk.source_kind == "formal_character_profile" and not scope_review_v1:
@@ -3573,6 +3579,16 @@ def _bind_record(
         and dimension == "preference"
         and not _draft_preference_object_bound_to_claim(record, evidence_text)
     ):
+        raise ValueError("statement_support")
+    if (
+        chunk.source_kind == "draft"
+        and dimension == "preference"
+        and observation_kind == "preference_expression"
+        and not _draft_preference_assertion_supported(record, evidence_text)
+    ):
+        # Model-supplied kind/polarity and an exact source line do not prove
+        # that the target actually uttered the preference. Hypothetical,
+        # performed and nested other-speaker quotes remain only source text.
         raise ValueError("statement_support")
     evidence = EvidenceSpan(
         document_id=chunk.document_id,
@@ -4588,6 +4604,165 @@ def _direct_preference_expression(evidence: str, key_object: str) -> bool:
             normalized,
             re.IGNORECASE,
         )
+    )
+
+
+_DRAFT_PREF_QUOTE_MARKS = frozenset('"“”‘’「」『』')
+
+
+def _draft_preference_assertion_supported(
+    record: _RawCharacterSignal, evidence: str
+) -> bool:
+    return _draft_preference_proves_direct(
+        evidence,
+        character=record.character,
+        key_object=record.key_object,
+        polarity=record.polarity,
+        record=record,
+    )
+
+
+def draft_preference_context_requires_review(
+    source: str, *, character: str, key_object: str
+) -> bool:
+    """Flag relevant draft preference text outside the automatic proof subset.
+
+    Called before trusting a model's empty extraction as complete coverage.
+    This only raises a conservative warning; it never creates a signal.
+    """
+
+    normalized = unicodedata.normalize("NFKC", source)
+    if not draft_preference_context_is_relevant(
+        normalized, character=character, key_object=key_object
+    ):
+        return False
+    return not any(
+        _draft_preference_proves_direct(
+            normalized,
+            character=character,
+            key_object=key_object,
+            polarity=direction,
+            record=None,
+        )
+        for direction in ("positive", "negative")
+    )
+
+
+def draft_preference_context_is_relevant(
+    source: str, *, character: str, key_object: str
+) -> bool:
+    """Conservatively locate a baseline-bound preference mention in a draft.
+
+    A relevant line is not a proven observation. In particular, an empty
+    model answer cannot make such a line a completed negative finding.
+    """
+
+    normalized = unicodedata.normalize("NFKC", source)
+    return bool(
+        _compact(unicodedata.normalize("NFKC", character)).casefold()
+        in _compact(normalized).casefold()
+        and _direct_preference_expression(normalized, key_object)
+    )
+
+
+def _draft_preference_proves_direct(
+    evidence: str,
+    *,
+    character: str,
+    key_object: str,
+    polarity: SignalPolarity,
+    record: _RawCharacterSignal | None,
+) -> bool:
+    """Recognize only a small, independently provable draft-preference subset.
+
+    A model-proposed preference is not a fact merely because its words occur
+    on an evidence line. Quoted speech, conditional or compound narration,
+    performance, dreams and corrections require semantic review; this simple
+    binder deliberately rejects them rather than certifying a conflict.
+    """
+
+    source = unicodedata.normalize("NFKC", evidence).strip()
+    if (
+        not source
+        or any(mark in source for mark in _DRAFT_PREF_QUOTE_MARKS)
+        or _OBSERVATION_KIND_INSTRUCTION.search(source)
+        or re.search(r"[？?！!]", source)
+    ):
+        return False
+    character = _compact(unicodedata.normalize("NFKC", character)).casefold()
+    key_object = _compact(unicodedata.normalize("NFKC", key_object)).casefold()
+    if not character or not key_object:
+        return False
+
+    # The already established sole-actor adjacent-pronoun proof is the only
+    # admitted cross-sentence route. It does not invent an anaphoric actor.
+    pair = _safe_pronoun_pair(source, character=character)
+    if pair is not None:
+        observation, pronoun_start, pronoun_end = pair
+        if record is None or not _safe_adjacent_pronoun_attribution(record, source):
+            return False
+        source = (
+            observation[:pronoun_start] + character + observation[pronoun_end:]
+        )
+    elif "\n" in source:
+        return False
+
+    source = _compact(source).casefold()
+    source = re.sub(
+        r"^(?:(?:机密|待审)?(?:原文|草稿|段落|章节|场景|记录)[^：:]{0,8})[：:]",
+        "",
+        source,
+    )
+    if source.endswith(("。", ".")):
+        source = source[:-1]
+    if re.search(r"[。.;；]", source):
+        # A later narrator qualification may rescind an earlier assertion.
+        return False
+
+    direct = _v4_preference_object_direction(source, character, key_object)
+    if direct == polarity:
+        return True
+
+    # A subjectless continuation inherits a named, direct preference only
+    # across one comma, never from a quoted/conditional/other-actor clause.
+    parts = re.split(r"[，,]", source)
+    if len(parts) == 2:
+        first = _single_direct_formal_preference_claim(parts[0], character)
+        second = (
+            _single_direct_formal_preference_claim(
+                character + parts[1][1:], character
+            )
+            if re.match(r"^(?:也|还|并)", parts[1])
+            else None
+        )
+        if (
+            first is not None
+            and second is not None
+            and first[1] != second[1]
+        ):
+            return (first[1] == key_object and first[0] == polarity) or (
+                second[1] == key_object and second[0] == polarity
+            )
+        return False
+
+    # Only explicit self-attribution is admissible here. Third-party reports,
+    # playacting and indirect language cannot match the entire source string.
+    if not source.startswith(character):
+        return False
+    tail = source[len(character):]
+    frame = re.match(
+        r"^(?:(?:明确|亲口|当众)?(?:说道|表示|承认|坦言|声称|重申|说)"
+        r"[：:]?(?:自己|我)?|"
+        r"(?:转述|复述)自己(?:刚才|之前|先前|曾经)?"
+        r"(?:说过|讲过|表示过)(?:的话)?[：:]?(?:自己|我)?)",
+        tail,
+    )
+    if frame is None:
+        return False
+    claimed = character + tail[frame.end():]
+    return (
+        _v4_preference_object_direction(claimed, character, key_object)
+        == polarity
     )
 
 

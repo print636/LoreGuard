@@ -34,7 +34,10 @@ from .character_trait_extraction import (
     CharacterSignalTarget,
     PendingTraitCandidate,
     SupportTraceV1,
+    _draft_preference_proves_direct,
     build_pending_trait_candidates,
+    draft_preference_context_is_relevant,
+    draft_preference_context_requires_review,
     preference_modifier_bridge,
     safe_pronoun_evidence_range,
     stable_trait_identity,
@@ -760,6 +763,14 @@ class CharacterConsistencyStage:
                 reason_counts["targeted_target_limit"] += omitted
                 partial = True
             if not selected_targets:
+                preference_gaps = _draft_preference_coverage_gaps(
+                    chunk,
+                    server_contexts[source.document.id].targets,
+                    extraction.draft_observations,
+                )
+                if preference_gaps:
+                    partial = True
+                    reason_counts.update(preference_gaps)
                 continue
 
             targeted_passes_scheduled += len(selected_targets)
@@ -1001,6 +1012,14 @@ class CharacterConsistencyStage:
                         targeted_verification_signals_added += 1
             if chunk_targets_complete:
                 targeted_fully_processed_draft_chunks += 1
+            preference_gaps = _draft_preference_coverage_gaps(
+                chunk,
+                server_contexts[source.document.id].targets,
+                tuple(chunk_observations),
+            )
+            if preference_gaps:
+                partial = True
+                reason_counts.update(preference_gaps)
 
         signals = tuple(all_signals.values())
         # Count final server-deduplicated signals, not per-chunk clean model
@@ -1829,6 +1848,125 @@ def _target_with_existing_evidence_ranges(
             **target.model_dump(),
             "existing_evidence_ranges": ranges,
         }
+    )
+
+
+def _frozen_preference_target_object(
+    target: CharacterSignalTarget,
+) -> str | None:
+    """Return a canonical, frozen object anchor, never a guessed trait label."""
+
+    if target.dimension != "preference":
+        return None
+    prefix = "preference:"
+    if not target.comparison_key.startswith(prefix):
+        return None
+    anchor = target.comparison_key[len(prefix):]
+    if (
+        not anchor
+        or _key(anchor) != anchor
+        or stable_trait_identity("preference", "", anchor)
+        != target.comparison_key
+    ):
+        return None
+    return anchor
+
+
+def _draft_preference_coverage_gaps(
+    chunk: CharacterSignalChunk,
+    targets: tuple[CharacterSignalTarget, ...],
+    observations: tuple[CharacterSignal, ...],
+) -> Counter[str]:
+    """Conservatively flag frozen preference material with no proven coverage.
+
+    This is a bounded static warning, not a conflict classifier. We inspect
+    individual original lines so an unrelated quotation elsewhere in a long
+    draft cannot contaminate a direct preference statement. A complex line
+    stays uncertain even if another clause on it produced an observation:
+    today's signal has no clause-level semantic-review certificate.
+    """
+
+    gaps: Counter[str] = Counter()
+    for target in targets:
+        object_anchor = _frozen_preference_target_object(target)
+        if object_anchor is None:
+            continue
+        for line_number, line in enumerate(
+            chunk.content.splitlines(), start=chunk.global_line_start
+        ):
+            matched = any(
+                _signal_matches_target(observation, target)
+                and observation.evidence.document_id == chunk.document_id
+                and observation.evidence.line_start <= line_number
+                <= observation.evidence.line_end
+                for observation in observations
+            )
+            if not draft_preference_context_is_relevant(
+                line, character=target.character, key_object=object_anchor
+            ):
+                if not matched and _direct_frozen_preference_bridge_source(
+                    chunk, target, object_anchor, line_number, line
+                ):
+                    gaps["draft_preference_modifier_bridge_unextracted"] += 1
+                continue
+            if draft_preference_context_requires_review(
+                line, character=target.character, key_object=object_anchor
+            ):
+                gaps["draft_preference_semantic_coverage_uncertain"] += 1
+                continue
+            if not matched:
+                gaps["draft_preference_direct_evidence_unextracted"] += 1
+    return gaps
+
+
+def _direct_frozen_preference_bridge_source(
+    chunk: CharacterSignalChunk,
+    target: CharacterSignalTarget,
+    object_anchor: str,
+    line_number: int,
+    line: str,
+) -> bool:
+    """Ask the existing narrow 冰镇 bridge about a proven opposite claim.
+
+    The temporary signal is only a static relevance probe. It never enters
+    extraction, persistence, review, or an issue. Direction comes from the
+    extractor's independent direct-assertion binder, not our probe fields.
+    """
+
+    if not object_anchor.startswith("冰镇"):
+        return False
+    general = object_anchor[len("冰镇"):]
+    if len(general) < 2 or not _draft_preference_proves_direct(
+        line,
+        character=target.character,
+        key_object=general,
+        polarity=target.requested_polarity,
+        record=None,
+    ):
+        return False
+    probe = CharacterSignal(
+        id="cs_" + "0" * 32,
+        character=target.character,
+        dimension="preference",
+        trait_key=target.trait_key,
+        statement="static bridge coverage probe",
+        polarity=target.requested_polarity,
+        stability="temporary",
+        observation_kind="explicit_declaration",
+        key_object=general,
+        source_kind="draft",
+        evidence=EvidenceSpan(
+            document_id=chunk.document_id,
+            document_name=chunk.document_name,
+            line_start=line_number,
+            line_end=line_number,
+            text=line,
+        ),
+    )
+    return preference_modifier_bridge(
+        baseline_comparison_key=target.comparison_key,
+        baseline_polarity=target.baseline_polarity,
+        observation=probe,
     )
 
 

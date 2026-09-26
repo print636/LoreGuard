@@ -36,6 +36,13 @@ offers an explicit, audited per-trait withdrawal with confirmation; it excludes
 the trait from future runs without changing historical run snapshots. Withdrawn
 traits remain visible in the profile archive and cannot be silently restored.
 
+Draft preference review currently auto-binds only unambiguous, unquoted direct
+statements or explicitly attributed self-reports. Quoted, conditional, staged,
+or retrospectively corrected speech is conservatively marked as incomplete
+coverage rather than promoted to a definite contradiction. This intentionally
+loses some valid dialogue recall; it is not a general speaker-understanding
+claim or a new real-model OOC accuracy result.
+
 Context inference is single-document and limited to 30,000 characters and 2,000 lines; larger inputs require manual context assignment. It is not a story rewrite, bulk classifier, authority decision, or production-accuracy claim. See the [V1 workflow and API contract](docs/guided-review-batch-v1.md) and the [full Chinese guide](README.zh-CN.md).
 
 Relevant API entry points are:
