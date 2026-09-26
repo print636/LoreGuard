@@ -518,6 +518,10 @@ body.loreguard-workspace { overflow: hidden; }
 
 .projectSkeleton { display: grid; gap: 1px; padding-top: var(--space-2); }
 .projectSkeleton i { display: block; height: 80px; background: var(--color-skeleton); border-bottom: 1px solid var(--color-border); }
+.projectPagination { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--color-border); color: var(--color-text-secondary); font-size: 14px; }
+.projectPagination > div { display: flex; align-items: center; gap: var(--space-2); }
+.projectPagination button { min-height: 44px; }
+.projectPagination button[aria-disabled="true"] { opacity: .45; cursor: default; }
 
 .startupPage,
 .notFoundPage { display: grid; place-content: center; justify-items: center; gap: var(--space-4); width: 100%; max-width: none; min-height: 100dvh; margin: 0; padding: var(--space-5); text-align: center; background: var(--color-page-deep); }
@@ -589,6 +593,8 @@ body.loreguard-workspace { overflow: hidden; }
   .projectListSection { padding: var(--space-4); }
   .projectListHeader { align-items: stretch; flex-direction: column; }
   .projectListTools { display: grid; grid-template-columns: 1fr auto; }
+  .projectPagination { align-items: stretch; flex-direction: column; }
+  .projectPagination > div { justify-content: space-between; }
   .searchField input { width: 100%; }
   .productPage .projectRow { grid-template-columns: minmax(0, 1fr) 26px; gap: var(--space-2); padding-block: var(--space-4); }
   .projectRow > span:not(.projectRowIdentity) { display: none; }

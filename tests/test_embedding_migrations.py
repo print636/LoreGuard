@@ -21,7 +21,7 @@ from app.narrative_context import payload_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0018_character_axis_direction"
+HEAD_REVISION = "0019_project_name_sort_key"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
@@ -132,7 +132,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
             with engine.begin() as connection:
                 self.assertEqual(connection.exec_driver_sql(
                     "SELECT version_num FROM alembic_version"
-                ).scalar_one(), HEAD_REVISION)
+                ).scalar_one(), "0018_character_axis_direction")
                 self.assertEqual(connection.exec_driver_sql(
                     "SELECT axis_alignment FROM character_trait_reviews "
                     "WHERE id='confirm-old'"

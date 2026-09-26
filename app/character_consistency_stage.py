@@ -23,7 +23,10 @@ from .character_drift import (
     prepare_character_drift,
     promote_character_drift,
 )
-from .character_scope_review import ScopeReviewSourceIdentity
+from .character_scope_review import (
+    SCOPE_REVIEW_SLOT_CONFLICT_KINDS,
+    ScopeReviewSourceIdentity,
+)
 from .character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
@@ -338,6 +341,7 @@ class CharacterConsistencyStage:
         usage = _Usage()
         reason_counts: Counter[str] = Counter()
         evidence_mismatch_counts: Counter[str] = Counter()
+        scope_review_slot_conflict_counts: Counter[str] = Counter()
         core_label_scope_counts: Counter[str] = Counter()
         evidence_mismatch_chunks: list[dict[str, Any]] = []
         evidence_mismatch_chunks_omitted = 0
@@ -773,6 +777,15 @@ class CharacterConsistencyStage:
                 "primary_extraction", extraction,
                 source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
             )
+            raw_slot_counts = getattr(
+                extraction.diagnostics, "scope_review_slot_conflict_counts", {}
+            )
+            if isinstance(raw_slot_counts, dict):
+                scope_review_slot_conflict_counts.update({
+                    key: value for key, value in raw_slot_counts.items()
+                    if key in SCOPE_REVIEW_SLOT_CONFLICT_KINDS
+                    and type(value) is int and 0 < value <= 1_000_000
+                })
             raw_core_counts = getattr(
                 extraction.diagnostics, "core_label_scope_counts", {}
             )
@@ -1569,6 +1582,7 @@ class CharacterConsistencyStage:
             ),
             token_admission_events=token_admission_events,
             evidence_mismatch_counts=evidence_mismatch_counts,
+            scope_review_slot_conflict_counts=scope_review_slot_conflict_counts,
             evidence_mismatch_chunks=evidence_mismatch_chunks,
             evidence_mismatch_chunks_omitted_count=(
                 evidence_mismatch_chunks_omitted
@@ -3694,6 +3708,7 @@ def _diagnostics(
     accepted_draft_observation_refs_truncated: bool = False,
     token_admission_events: list[dict[str, int | str | None]] | None = None,
     evidence_mismatch_counts: Counter[str] | None = None,
+    scope_review_slot_conflict_counts: Counter[str] | None = None,
     evidence_mismatch_chunks: list[dict[str, Any]] | None = None,
     evidence_mismatch_chunks_omitted_count: int = 0,
     core_label_scope_counts: Counter[str] | None = None,
@@ -3729,6 +3744,9 @@ def _diagnostics(
         "reason_counts": dict(sorted(reasons.items())),
         "evidence_mismatch_counts": dict(
             sorted((evidence_mismatch_counts or {}).items())
+        ),
+        "scope_review_slot_conflict_counts": dict(
+            sorted((scope_review_slot_conflict_counts or {}).items())
         ),
         "evidence_mismatch_chunks": list(evidence_mismatch_chunks or ()),
         "evidence_mismatch_chunks_omitted_count": (
@@ -3779,6 +3797,7 @@ def _empty_stage_result(
         "token_admission_events": [],
         "reason_counts": {},
         "evidence_mismatch_counts": {},
+        "scope_review_slot_conflict_counts": {},
         "evidence_mismatch_chunks": [],
         "evidence_mismatch_chunks_omitted_count": 0,
         "core_label_scope_counts": {},

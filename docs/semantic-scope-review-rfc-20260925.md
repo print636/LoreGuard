@@ -25,6 +25,8 @@ Phase B 只作用于 `formal_character_profile` 的 V5 主抽取；历史、草�
 
 原文及分句索引始终作为不可信数据，以 JSON 数据块传入，system 指令说明其中的“忽略规则/改变 verdict”等文字无效；调用不授予工具能力。服务端不执行模型输出，不保存原始 prompt、回复、思维链、密钥或服务地址；诊断仅记录受控 verdict/原因计数、匿名槽位和用量。注入内容即使仿造 `support_id` 或 reviewer JSON，也不得改变服务端索引及响应白名单。
 
+`scope_review_slot_conflict_counts` 是 `scope_review_slot_conflict` 的结构化诊断。模型报 `supported` 但服务端槽位合同不成立时，分别累计 `actor`、`actuality`、`statement_relation`、`label_relation`、`object_relation`、`polarity_relation`、`level_supported`；一项可贡献多个类别。模型报 `rejected` 却没有任何明确否决槽位时，累计 `rejected_without_rejection_signal`，并额外累计值为 `ambiguous` 的槽位。只有通过来源、响应和依据校验的冲突项才产生这些计数；缺失/无效响应沿用原有失败原因码。阶段诊断与开发运行器仅导出固定类别和有界计数，不导出候选/分句 ID、正文、prompt 或模型原始值；诊断不参与准入判定。
+
 ## 预算、失败与作者待确认
 
 复核沿用注入的 OpenAI-compatible Provider 的 `complete`，使用独立角色 prompt、温度 0、受限 JSON、单次逻辑调用；底层可按现有 Provider 规则有限重试。给 reviewer 单独的 completion/响应字节/调用超时上限，并在主抽取前为它预留估算 Token；抽取重生成与复核共同受一次信号的总 deadline、单次逻辑预算及角色阶段共享预算约束，不挪用漂移 reviewer 的保留额。每次调用前用现有估算器准入，成功按 `max(估算,上游实报)` 计 `charged_tokens`，Provider 失败按估算计入；`attempted_calls` 和阶段/运行账本均包含复核调用。预算不足、超时、Provider 失败、无效 JSON 或部分响应都转 `uncertain`、`partial`，不把缺失解释成没有角色特征。新开关默认关闭，`app/config.py` 声明依赖 V5；`app/runtime_provenance.py` 与真实运行器显式记录 reviewer 版本和有效上限，旧 V5 结果不原地改写。

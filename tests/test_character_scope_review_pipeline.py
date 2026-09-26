@@ -258,6 +258,29 @@ def test_mixed_package_retains_only_supported_and_tracks_uncertain():
     assert result.diagnostics.support_trace.final_accepted_slots == (1,)
 
 
+def test_slot_conflict_counts_are_content_free_and_do_not_admit_candidate():
+    line = "桑衍喜欢蜜瓜。"
+    record = _record(line, support_id="L2:A1", statement="桑衍喜欢蜜瓜")
+    result, provider = _extract(
+        line,
+        ReviewingProvider([record], [{
+            "actor": "other", "actuality": "question",
+            "statement_relation": "ambiguous", "object_relation": "different",
+        }]),
+    )
+    assert len(provider.calls) == 2
+    assert result.signals == result.pending_candidates == ()
+    assert result.diagnostics.outcome == "partial"
+    assert result.diagnostics.reason_counts == {"scope_review_slot_conflict": 1}
+    assert result.diagnostics.scope_review_slot_conflict_counts == {
+        "actor": 1, "actuality": 1, "statement_relation": 1,
+        "object_relation": 1,
+    }
+    serialized = json.dumps(result.diagnostics.model_dump(mode="json"), ensure_ascii=False)
+    for private in (line, "桑衍", "蜜瓜", "frozen-input-1", "document-1", "L2:A1"):
+        assert private not in serialized
+
+
 def test_contradicted_statement_cannot_pass_even_with_correct_actor_and_object():
     line = "桑衍喜欢蜜瓜。"
     proposed = _record(line, support_id="L2:A1", statement="桑衍讨厌蜜瓜")
@@ -402,6 +425,41 @@ def test_stage_passes_frozen_run_identity_and_keeps_rejected_local_out_of_candid
     assert result.diagnostics["usage"]["attempted_calls"] == 2
     assert provider.review_payload["request"]["run_input_id"] == "server-frozen-row-9"
     assert provider.review_payload["request"]["document_version"] == 7
+
+
+def test_stage_exports_only_slot_conflict_categories_and_counts():
+    line = "桑衍喜欢蜜瓜。"
+    frozen = "## 桑衍\n" + line + "\n"
+    document = DocumentInput("document-1", "profile.md", frozen, role="character_profile")
+    provider = ReviewingProvider(
+        [_record(line, support_id="L2:A1", statement="桑衍喜欢蜜瓜")],
+        [{"actor": "other", "statement_relation": "contradicted"}],
+    )
+    stage = CharacterConsistencyStage(settings=_settings(), provider=provider)
+    source = _FrozenDocument(
+        input_id="private-run-input-9", document=document, document_version=7,
+        content_sha256=hashlib.sha256(frozen.encode("utf-8")).hexdigest(),
+        ordinal=1, source_kind="formal_character_profile",
+        source_reason="formal_character_profile", scope=None,
+        resolution_state="confirmed", publication_status="published",
+        authority_tier="formal_character_profile",
+    )
+    stage._bind_frozen_documents = lambda *args, **kwargs: [source]
+    stage._load_confirmed_traits = lambda *args, **kwargs: []
+    result = stage.run(
+        None, run_id="private-run-1", project_id="private-project-1",
+        documents=[document], metadata=[], remaining_run_tokens=30_000,
+    )
+    assert result.diagnostics["reason_counts"]["scope_review_slot_conflict"] == 1
+    assert result.diagnostics["scope_review_slot_conflict_counts"] == {
+        "actor": 1, "statement_relation": 1,
+    }
+    serialized = json.dumps(result.diagnostics, ensure_ascii=False)
+    for private in (
+        line, "桑衍", "蜜瓜", "private-run-input-9", "private-run-1",
+        "private-project-1", "document-1", "L2:A1",
+    ):
+        assert private not in serialized
 
 
 @pytest.mark.parametrize("strip_refs", (False, True))

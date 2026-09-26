@@ -6,6 +6,7 @@ sqlalchemy==2.0.43
 alembic==1.15.2
 pgvector==0.3.6
 psycopg[binary]==3.2.9
+pypinyin==0.55.0
 python-multipart==0.0.20
 defusedxml==0.7.1
 celery==5.5.3

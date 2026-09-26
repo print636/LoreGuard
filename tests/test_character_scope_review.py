@@ -421,19 +421,54 @@ def test_supported_basis_rejects_unrelated_same_line_clause_without_order_requir
     assert rejected.decisions[0].basis_ids == ()
 
 
-@pytest.mark.parametrize("wrong_slot", (
-    {"actor": "other"},
-    {"actuality": "reported"},
-    {"label_relation": "different_axis"},
-    {"object_relation": "different"},
-    {"polarity_relation": "opposite"},
-    {"level_supported": "no"},
+@pytest.mark.parametrize("wrong_slot, slot_name", (
+    ({"actor": "other"}, "actor"),
+    ({"actuality": "reported"}, "actuality"),
+    ({"statement_relation": "contradicted"}, "statement_relation"),
+    ({"label_relation": "different_axis"}, "label_relation"),
+    ({"object_relation": "different"}, "object_relation"),
+    ({"polarity_relation": "opposite"}, "polarity_relation"),
+    ({"level_supported": "no"}, "level_supported"),
 ))
-def test_supported_with_contradictory_slot_becomes_uncertain(wrong_slot: dict):
+def test_supported_with_contradictory_slot_becomes_uncertain(
+    wrong_slot: dict, slot_name: str,
+):
     request, identity, frozen_content = _request()
     result = _evaluate(request, identity, frozen_content, _item(request, **wrong_slot))
     assert result.decisions[0].verdict == "uncertain"
     assert result.decisions[0].reason == "slot_conflict"
+    assert result.decisions[0].slot_conflicts == (slot_name,)
+    assert "slot_conflicts" not in result.decisions[0].model_dump()
+
+
+def test_multiple_supported_slot_conflicts_are_all_classified():
+    request, identity, frozen_content = _request()
+    result = _evaluate(request, identity, frozen_content, _item(
+        request, actor="ambiguous", statement_relation="ambiguous",
+        label_relation="none", level_supported="ambiguous",
+    ))
+    assert result.decisions[0].verdict == "uncertain"
+    assert result.decisions[0].reason == "slot_conflict"
+    assert result.decisions[0].slot_conflicts == (
+        "actor", "statement_relation", "label_relation", "level_supported",
+    )
+
+
+@pytest.mark.parametrize("proposal_changes, item_changes, expected_slot", (
+    ({"label_anchor_id": None, "scope_relation": "same_actor_continuation"},
+     {"label_relation": "ambiguous"}, "label_relation"),
+    ({"key_object": ""}, {"object_relation": "same"}, "object_relation"),
+    ({"polarity": "neutral"}, {"polarity_relation": "same"}, "polarity_relation"),
+))
+def test_proposal_dependent_slot_expectations_are_classified(
+    proposal_changes: dict, item_changes: dict, expected_slot: str,
+):
+    request, identity, frozen_content = _request(
+        proposals=(_proposal(**proposal_changes),)
+    )
+    result = _evaluate(request, identity, frozen_content, _item(request, **item_changes))
+    assert result.decisions[0].reason == "slot_conflict"
+    assert result.decisions[0].slot_conflicts == (expected_slot,)
 
 
 @pytest.mark.parametrize("statement_relation,verdict,expected,reason", (
@@ -451,6 +486,12 @@ def test_statement_relation_controls_verdict(
     result = _evaluate(request, identity, frozen_content, item)
     assert result.decisions[0].verdict == expected
     assert result.decisions[0].reason == reason
+    if reason == "slot_conflict":
+        expected_conflicts = (
+            ("statement_relation",) if verdict == "supported"
+            else ("statement_relation", "rejected_without_rejection_signal")
+        )
+        assert result.decisions[0].slot_conflicts == expected_conflicts
 
 
 @pytest.mark.parametrize("change", ("missing", "extra", "invalid"))
@@ -502,6 +543,25 @@ def test_rejected_without_any_negative_slot_is_an_inconsistent_response():
     result = _evaluate(request, identity, frozen_content, _item(request, verdict="rejected"))
     assert result.decisions[0].verdict == "uncertain"
     assert result.decisions[0].reason == "slot_conflict"
+    assert result.decisions[0].slot_conflicts == (
+        "rejected_without_rejection_signal",
+    )
+
+
+def test_rejected_without_negative_signal_identifies_ambiguous_slots():
+    request, identity, frozen_content = _request()
+    result = _evaluate(request, identity, frozen_content, _item(
+        request, verdict="rejected", actor="ambiguous", actuality="ambiguous",
+        statement_relation="ambiguous", label_relation="ambiguous",
+        object_relation="ambiguous", polarity_relation="ambiguous",
+        level_supported="ambiguous",
+    ))
+    assert result.decisions[0].reason == "slot_conflict"
+    assert result.decisions[0].slot_conflicts == (
+        "actor", "actuality", "statement_relation", "label_relation",
+        "object_relation", "polarity_relation", "level_supported",
+        "rejected_without_rejection_signal",
+    )
 
 
 def test_uncertain_and_malformed_or_oversized_responses_never_support():

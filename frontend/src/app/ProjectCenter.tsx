@@ -2,7 +2,6 @@ import {
   FormEvent,
   MouseEvent,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -16,7 +15,6 @@ import {
   type ImportFilePlan,
 } from "./importPlan";
 import {
-  backendTimestamp,
   projectNextAction,
   relativeProjectDate,
 } from "./projectPresentation";
@@ -42,6 +40,42 @@ type ProjectSummary = {
   active_document_count: number;
   latest_run: RunSummary | null;
 };
+
+type CatalogResponse = {
+  page: number;
+  page_size: number;
+  total: number;
+  items: ProjectSummary[];
+};
+
+const CATALOG_PAGE_SIZE = 40;
+type CatalogCriteria = { page: number; query: string; sort: "recent" | "name" };
+
+function catalogCriteriaFromUrl(): CatalogCriteria {
+  const params = new URLSearchParams(window.location.search);
+  const requestedPage = Number(params.get("page"));
+  return {
+    page: Number.isInteger(requestedPage) && requestedPage >= 1 && requestedPage <= 100_000
+      ? requestedPage : 1,
+    query: (params.get("query") || "").trim().slice(0, 160),
+    sort: params.get("sort") === "name" ? "name" : "recent",
+  };
+}
+
+function replaceCatalogUrl(criteria: CatalogCriteria) {
+  const params = new URLSearchParams(window.location.search);
+  if (criteria.page === 1) params.delete("page");
+  else params.set("page", String(criteria.page));
+  if (criteria.query) params.set("query", criteria.query);
+  else params.delete("query");
+  if (criteria.sort === "recent") params.delete("sort");
+  else params.set("sort", criteria.sort);
+  const search = params.toString();
+  const path = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
+  if (path !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+    browserNavigate(path, { replace: true });
+  }
+}
 
 type ProjectCenterProps = {
   identity: SessionIdentity;
@@ -111,11 +145,16 @@ function followSpaLink(event: MouseEvent<HTMLAnchorElement>) {
 }
 
 export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterProps) {
+  const initialCatalog = catalogCriteriaFromUrl();
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [page, setPage] = useState(initialCatalog.page);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState("");
   const [error, setError] = useState("");
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<"recent" | "name">("recent");
+  const [query, setQuery] = useState(initialCatalog.query);
+  const [appliedQuery, setAppliedQuery] = useState(initialCatalog.query);
+  const [sort, setSort] = useState<"recent" | "name">(initialCatalog.sort);
   const [samplePending, setSamplePending] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [modelSource, setModelSource] = useState(
@@ -127,17 +166,71 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
   const [entryPending, setEntryPending] = useState(false);
   const [entryError, setEntryError] = useState("");
   const entryNameRef = useRef<HTMLInputElement | null>(null);
+  const catalogRequestRef = useRef(0);
+  const catalogBusyRef = useRef(false);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const catalogCriteriaRef = useRef<CatalogCriteria>(initialCatalog);
 
-  async function loadProjects() {
+  async function loadProjects(next: Partial<typeof catalogCriteriaRef.current> = {}) {
+    const criteria = { ...catalogCriteriaRef.current, ...next };
+    catalogCriteriaRef.current = criteria;
+    const request = ++catalogRequestRef.current;
+    catalogBusyRef.current = true;
+    setPage(criteria.page);
+    setAppliedQuery(criteria.query);
+    setLoading(true);
+    setCatalogError("");
+    setProjects([]);
+    const params = new URLSearchParams({
+      page: String(criteria.page),
+      page_size: String(CATALOG_PAGE_SIZE),
+      query: criteria.query,
+      sort: criteria.sort,
+    });
     try {
-      setLoading(true);
-      setError("");
-      setProjects(await apiJson<ProjectSummary[]>("/api/v1/projects"));
+      const result = await apiJson<CatalogResponse>(`/api/v1/project-catalog?${params}`);
+      if (request !== catalogRequestRef.current) return;
+      setProjects(result.items);
+      setPage(result.page);
+      setTotal(result.total);
     } catch (reason) {
-      setError(`${apiErrorDetail(reason)} 项目列表没有被清空，你可以重试。`);
+      if (request === catalogRequestRef.current) {
+        setCatalogError(`${apiErrorDetail(reason)} 请重试加载这一页。`);
+      }
     } finally {
-      setLoading(false);
+      if (request === catalogRequestRef.current) {
+        catalogBusyRef.current = false;
+        setLoading(false);
+      }
     }
+  }
+
+  function changeCatalog(next: Partial<CatalogCriteria>) {
+    const criteria = { ...catalogCriteriaRef.current, ...next };
+    void loadProjects(criteria);
+    replaceCatalogUrl(criteria);
+  }
+
+  function searchProjects(value: string) {
+    setQuery(value);
+    setPage(1);
+    ++catalogRequestRef.current;
+    catalogBusyRef.current = true;
+    setLoading(true);
+    setProjects([]);
+    setCatalogError("");
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => {
+      searchTimerRef.current = null;
+      changeCatalog({ page: 1, query: value.trim() });
+    }, 300);
+  }
+
+  function sortProjects(value: "recent" | "name") {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = null;
+    setSort(value);
+    changeCatalog({ page: 1, query: query.trim(), sort: value });
   }
 
   async function loadModelSource() {
@@ -154,22 +247,24 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
   useEffect(() => {
     void loadProjects();
     void loadModelSource();
+    const syncCatalogFromHistory = () => {
+      if (window.location.pathname !== "/app") return;
+      const criteria = catalogCriteriaFromUrl();
+      const current = catalogCriteriaRef.current;
+      if (criteria.page === current.page && criteria.query === current.query && criteria.sort === current.sort) return;
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+      searchTimerRef.current = null;
+      setQuery(criteria.query);
+      setSort(criteria.sort);
+      void loadProjects(criteria);
+    };
+    window.addEventListener("popstate", syncCatalogFromHistory);
+    return () => {
+      ++catalogRequestRef.current;
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+      window.removeEventListener("popstate", syncCatalogFromHistory);
+    };
   }, []);
-
-  const visibleProjects = useMemo(() => {
-    const keyword = query.trim().toLocaleLowerCase();
-    return projects
-      .filter((project) =>
-        !keyword ||
-        project.name.toLocaleLowerCase().includes(keyword) ||
-        project.description.toLocaleLowerCase().includes(keyword),
-      )
-      .sort((a, b) =>
-        sort === "name"
-          ? a.name.localeCompare(b.name, "zh-CN")
-          : backendTimestamp(b.created_at) - backendTimestamp(a.created_at),
-      );
-  }, [projects, query, sort]);
 
   async function openSample() {
     try {
@@ -400,16 +495,16 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
 
         <section className="projectListSection" aria-labelledby="project-list-title">
           <div className="projectListHeader">
-            <h2 id="project-list-title">最近项目</h2>
+            <h2 id="project-list-title">项目列表</h2>
             <div className="projectListTools">
               <label className="searchField">
                 <span className="srOnly">搜索项目</span>
                 <SearchIcon />
-                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目" type="search" />
+                <input value={query} onChange={(event) => searchProjects(event.target.value)} placeholder="搜索项目" type="search" maxLength={160} />
               </label>
               <label className="sortField">
                 <span className="srOnly">项目排序</span>
-                <select value={sort} onChange={(event) => setSort(event.target.value as "recent" | "name")}>
+                <select value={sort} onChange={(event) => sortProjects(event.target.value as "recent" | "name")}>
                   <option value="recent">最近创建</option>
                   <option value="name">按名称</option>
                 </select>
@@ -417,25 +512,36 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
             </div>
           </div>
 
+          <div className="projectCatalogResults" aria-busy={loading}>
           {loading ? (
             <div className="projectSkeleton" aria-label="正在加载项目" aria-busy="true">
               <i /><i /><i />
             </div>
-          ) : projects.length === 0 ? (
+          ) : catalogError ? (
+            <div className="filteredEmpty" role="alert">
+              <p>{catalogError}</p>
+              <button type="button" onClick={() => void loadProjects()}>重试加载</button>
+            </div>
+          ) : total === 0 && !appliedQuery ? (
             <div className="projectEmpty">
               <div className="emptyBookSpirit" aria-hidden="true"><i /><i /><b>··</b></div>
               <h3>还没有项目</h3>
               <p>导入现有文稿，或从原创样例了解一次完整校验。无需先准备世界观设定。</p>
               <button className={entryMode ? "" : "quietPrimary"} type="button" onClick={() => openEntry("import")}>导入已有故事</button>
             </div>
-          ) : visibleProjects.length === 0 ? (
+          ) : total === 0 ? (
             <div className="filteredEmpty">
-              <p>没有匹配“{query}”的项目。</p>
-              <button type="button" onClick={() => setQuery("")}>清除搜索</button>
+              <p>没有匹配“{appliedQuery}”的项目。试试其他关键词。</p>
+              <button type="button" onClick={() => searchProjects("")}>清除搜索</button>
+            </div>
+          ) : projects.length === 0 ? (
+            <div className="filteredEmpty">
+              <p>这一页没有项目。</p>
+              <button type="button" onClick={() => changeCatalog({ page: 1 })}>返回第一页</button>
             </div>
           ) : (
             <ul className="projectList">
-              {visibleProjects.map((project) => {
+              {projects.map((project) => {
                 const nextAction = projectNextAction(project);
                 const latestModelExecution = project.latest_run
                   ? describeRunModelExecution(
@@ -457,6 +563,17 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
                 );
               })}
             </ul>
+          )}
+          </div>
+          {total > 0 && (
+            <nav className="projectPagination" aria-label="项目分页" aria-busy={loading}>
+              <span role="status">{loading ? `正在加载第 ${page} 页…` : catalogError ? "这一页加载失败" : `第 ${(page - 1) * CATALOG_PAGE_SIZE + 1}–${Math.min(page * CATALOG_PAGE_SIZE, total)} 项，共 ${total} 项`}</span>
+              <div>
+                <button type="button" aria-disabled={loading || page <= 1} onClick={() => { if (!catalogBusyRef.current && page > 1) changeCatalog({ page: page - 1 }); }}>上一页</button>
+                <span>{loading || catalogError ? `第 ${page} 页` : `第 ${page} / ${Math.ceil(total / CATALOG_PAGE_SIZE)} 页`}</span>
+                <button type="button" aria-disabled={loading || page * CATALOG_PAGE_SIZE >= total} onClick={() => { if (!catalogBusyRef.current && page * CATALOG_PAGE_SIZE < total) changeCatalog({ page: page + 1 }); }}>下一页</button>
+              </div>
+            </nav>
           )}
         </section>
       </main>

@@ -27,6 +27,7 @@ from .character_scope_review import (
     ScopeReviewLine,
     ScopeReviewProposal,
     ScopeReviewRequest,
+    ScopeReviewSlotConflict,
     ScopeReviewSourceIdentity,
 )
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT, run_scope_review
@@ -781,6 +782,10 @@ class CharacterSignalDiagnostics(BaseModel):
     evidence_mismatch_counts: dict[EvidenceMismatchKind, int] = Field(
         default_factory=dict
     )
+    # Internal aggregation; the stage publishes an independently bounded map.
+    scope_review_slot_conflict_counts: dict[ScopeReviewSlotConflict, int] = Field(
+        default_factory=dict, exclude=True
+    )
     core_label_scope_counts: dict[CoreLabelScopeKind, int] = Field(
         default_factory=dict
     )
@@ -1465,6 +1470,12 @@ class CharacterSignalExtractor:
                     total_prompt_tokens += review_outcome.prompt_tokens
                     total_completion_tokens += review_outcome.completion_tokens
                     total_charged_tokens += review_outcome.charged_tokens
+                slot_conflict_counts = Counter(
+                    conflict
+                    for decision in (review_outcome.decisions if review_outcome else ())
+                    if decision.reason == "slot_conflict"
+                    for conflict in decision.slot_conflicts
+                )
                 candidates = build_pending_trait_candidates(clean)
                 observations = tuple(
                     row for row in clean if row.source_kind == "draft"
@@ -1499,6 +1510,9 @@ class CharacterSignalExtractor:
                         ),
                         reason_counts=dict(sorted(reasons.items())),
                         evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
+                        scope_review_slot_conflict_counts=dict(
+                            sorted(slot_conflict_counts.items())
+                        ),
                         core_label_scope_counts=dict(sorted(core_scope_counts.items())),
                         accepted_model_core_without_literal_label_count=sum(
                             signal.source_kind == "formal_character_profile"

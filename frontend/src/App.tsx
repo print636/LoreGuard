@@ -201,8 +201,15 @@ type Project = {
   description: string;
   created_at: string;
   active_document_count: number;
-  latest_run: RunInfo | null;
+  latest_run: { id: string; status: string; created_at: string; model_execution?: unknown } | null;
 };
+type ProjectCatalog = {
+  page: number;
+  page_size: number;
+  total: number;
+  items: Project[];
+};
+const CATALOG_PAGE_SIZE = 40;
 type Diagnostics = {
   model?: ModelDiagnostics;
   character_consistency?: CharacterConsistencyDiagnostics;
@@ -387,6 +394,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [activeView, setActiveView, routedProjectId, routedRunId, routeSearch] =
     useWorkspaceRoute();
   const [projects, setProjects] = useState<Project[]>([]);
+  const [catalogPage, setCatalogPage] = useState(1);
+  const [catalogTotal, setCatalogTotal] = useState(0);
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogAppliedQuery, setCatalogAppliedQuery] = useState("");
+  const [catalogSort, setCatalogSort] = useState<"recent" | "name">("recent");
+  const [catalogError, setCatalogError] = useState("");
+  const [selectedProjectSummary, setSelectedProjectSummary] = useState<Project | null>(null);
+  const [selectedProjectError, setSelectedProjectError] = useState("");
   const [project, setProject] = useState("");
   const [projectName, setProjectName] = useState("");
   const [docs, setDocs] = useState<Doc[]>([]);
@@ -454,6 +469,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const runMutationRef = useRef(false);
   const quickMutationRef = useRef(false);
   const terminalHandledRef = useRef(new Set<string>());
+  const catalogRequestRef = useRef(0);
+  const catalogBusyRef = useRef(false);
+  const selectedProjectRequestRef = useRef(0);
+  const catalogSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const catalogCriteriaRef = useRef({ page: 1, query: "", sort: "recent" as "recent" | "name" });
+  const currentProjectRef = useRef("");
   const visibleIssues = useMemo(
     () =>
       issues.filter((issue) => {
@@ -512,7 +533,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       ),
     [runInfo, acceptedModelExecution],
   );
-  const selectedProject = projects.find((row) => row.id === project);
+  const selectedProject = projects.find((row) => row.id === project)
+    ?? (selectedProjectSummary?.id === project ? selectedProjectSummary : null);
+  const projectOptions = selectedProject && !projects.some((row) => row.id === selectedProject.id)
+    ? [selectedProject, ...projects]
+    : projects;
   const activeDocuments = useMemo(
     () => docs.filter((row) => row.active),
     [docs],
@@ -542,9 +567,93 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setVisualError("");
     setFocusedIssue(null);
   }
-  async function loadProjects() {
-    const rows = await apiJson<Project[]>("/api/v1/projects");
-    setProjects(rows);
+  async function loadSelectedProjectSummary(id: string) {
+    const request = ++selectedProjectRequestRef.current;
+    if (!id) {
+      setSelectedProjectSummary(null);
+      setSelectedProjectError("");
+      return;
+    }
+    setSelectedProjectError("");
+    try {
+      const params = new URLSearchParams({
+        page: "1",
+        page_size: String(CATALOG_PAGE_SIZE),
+        project_id: id,
+      });
+      const result = await apiJson<ProjectCatalog>(`/api/v1/project-catalog?${params}`);
+      if (request !== selectedProjectRequestRef.current || currentProjectRef.current !== id) return;
+      setSelectedProjectSummary(result.items[0] || null);
+    } catch (error) {
+      if (request !== selectedProjectRequestRef.current || currentProjectRef.current !== id) return;
+      setSelectedProjectError(`当前项目摘要加载失败：${String(error)}`);
+    }
+  }
+
+  async function loadProjects(next: Partial<typeof catalogCriteriaRef.current> = {}): Promise<"loaded" | "failed" | "stale"> {
+    const criteria = { ...catalogCriteriaRef.current, ...next };
+    catalogCriteriaRef.current = criteria;
+    const request = ++catalogRequestRef.current;
+    catalogBusyRef.current = true;
+    setCatalogPage(criteria.page);
+    setCatalogAppliedQuery(criteria.query);
+    setProjectsLoading(true);
+    setCatalogError("");
+    setProjects([]);
+    const params = new URLSearchParams({
+      page: String(criteria.page),
+      page_size: String(CATALOG_PAGE_SIZE),
+      query: criteria.query,
+      sort: criteria.sort,
+    });
+    try {
+      const result = await apiJson<ProjectCatalog>(`/api/v1/project-catalog?${params}`);
+      if (request !== catalogRequestRef.current) return "stale";
+      setProjects(result.items);
+      setCatalogPage(result.page);
+      setCatalogTotal(result.total);
+      const currentId = currentProjectRef.current;
+      if (currentId) {
+        const current = result.items.find((row) => row.id === currentId);
+        if (current) {
+          ++selectedProjectRequestRef.current;
+          setSelectedProjectSummary(current);
+        }
+        else void loadSelectedProjectSummary(currentId);
+      }
+      return "loaded";
+    } catch (error) {
+      if (request !== catalogRequestRef.current) return "stale";
+      setCatalogError(`项目列表加载失败：${String(error)}`);
+      return "failed";
+    } finally {
+      if (request === catalogRequestRef.current) {
+        catalogBusyRef.current = false;
+        setProjectsLoading(false);
+      }
+    }
+  }
+
+  function searchCatalog(value: string) {
+    setCatalogQuery(value);
+    setCatalogPage(1);
+    ++catalogRequestRef.current;
+    catalogBusyRef.current = true;
+    setProjectsLoading(true);
+    setProjects([]);
+    setCatalogError("");
+    if (catalogSearchTimerRef.current) clearTimeout(catalogSearchTimerRef.current);
+    catalogSearchTimerRef.current = setTimeout(() => {
+      catalogSearchTimerRef.current = null;
+      void loadProjects({ page: 1, query: value.trim() });
+    }, 300);
+  }
+
+  function sortCatalog(value: "recent" | "name") {
+    if (catalogSearchTimerRef.current) clearTimeout(catalogSearchTimerRef.current);
+    catalogSearchTimerRef.current = null;
+    setCatalogSort(value);
+    void loadProjects({ page: 1, query: catalogQuery.trim(), sort: value });
   }
   async function loadProviderHealth() {
     try {
@@ -566,15 +675,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     }
   }
   async function refreshProjects() {
-    try {
-      setProjectsLoading(true);
-      await loadProjects();
-      setMessage("项目列表已刷新");
-    } catch (error) {
-      setMessage(`刷新项目失败：${String(error)}`);
-    } finally {
-      setProjectsLoading(false);
-    }
+    if (catalogSearchTimerRef.current) clearTimeout(catalogSearchTimerRef.current);
+    catalogSearchTimerRef.current = null;
+    const result = await loadProjects({ query: catalogQuery.trim() });
+    if (result !== "stale") setMessage(result === "loaded" ? "当前页项目已刷新" : "刷新项目失败，请重试");
   }
   async function loadProject(
     id: string,
@@ -582,6 +686,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     requestedRunId: string | null = null,
   ) {
     const epoch = ++viewEpochRef.current;
+    currentProjectRef.current = id;
+    const knownProject = projects.find((row) => row.id === id);
+    if (knownProject) setSelectedProjectSummary(knownProject);
+    else if (selectedProjectSummary?.id !== id) setSelectedProjectSummary(null);
+    void loadSelectedProjectSummary(id);
     loadedRouteRef.current = `${id}:${requestedRunId || ""}`;
     setRouteProblem(null);
     if (syncRoute) {
@@ -1295,7 +1404,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           ?.focus(),
       );
     }
-    return () => streamRef.current?.close();
+    return () => {
+      streamRef.current?.close();
+      ++catalogRequestRef.current;
+      ++selectedProjectRequestRef.current;
+      if (catalogSearchTimerRef.current) clearTimeout(catalogSearchTimerRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -1563,16 +1677,39 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </button>
                   </div>
                   <div className="projectControls">
+                    <div className="workspaceCatalogTools">
+                      <label>
+                        <span>搜索项目</span>
+                        <input
+                          type="search"
+                          value={catalogQuery}
+                          maxLength={160}
+                          onChange={(event) => searchCatalog(event.target.value)}
+                          placeholder="名称或说明"
+                        />
+                      </label>
+                      <label>
+                        <span>排序</span>
+                        <select
+                          value={catalogSort}
+                          onChange={(event) => sortCatalog(event.target.value as "recent" | "name")}
+                        >
+                          <option value="recent">最近创建</option>
+                          <option value="name">按名称</option>
+                        </select>
+                      </label>
+                    </div>
                     <select
                       aria-label="选择项目"
+                      aria-busy={projectsLoading}
                       disabled={projectLoading}
                       value={project}
                       onChange={(event) => void loadProject(event.target.value)}
                     >
-                      <option value="">选择已有项目</option>
-                      {projects.map((row) => (
+                      <option value="">选择当前页项目</option>
+                      {projectOptions.map((row) => (
                         <option key={row.id} value={row.id}>
-                          {row.name} · {row.active_document_count} 文档 ·{" "}
+                          {row.id === project && !projects.some((item) => item.id === row.id) ? "当前项目 · " : ""}{row.name} · {row.active_document_count} 文档 ·{" "}
                           {row.latest_run?.status || "未运行"}
                         </option>
                       ))}
@@ -1594,6 +1731,29 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       {action === "create" ? "创建中…" : "新建项目"}
                     </button>
                   </div>
+                  <div className="workspaceCatalogFeedback" aria-busy={projectsLoading}>
+                    {projectsLoading && catalogTotal === 0 ? (
+                      <span role="status">正在加载项目…</span>
+                    ) : null}
+                    {catalogError ? (
+                      <span role="alert">{catalogError} <button type="button" onClick={() => void refreshProjects()}>重试</button></span>
+                    ) : !projectsLoading && catalogTotal === 0 ? (
+                      <span role="status">{catalogAppliedQuery ? `没有匹配“${catalogAppliedQuery}”的项目。` : "还没有项目。"}</span>
+                    ) : !projectsLoading && projects.length === 0 ? (
+                      <span role="status">这一页没有项目。<button type="button" onClick={() => void loadProjects({ page: 1 })}>返回第一页</button></span>
+                    ) : null}
+                    {catalogTotal > 0 && (
+                      <nav className="workspaceCatalogPagination" aria-label="工作区项目分页" aria-busy={projectsLoading}>
+                        <span role="status">{projectsLoading ? `正在加载第 ${catalogPage} 页…` : catalogError ? "这一页加载失败" : `第 ${(catalogPage - 1) * CATALOG_PAGE_SIZE + 1}–${Math.min(catalogPage * CATALOG_PAGE_SIZE, catalogTotal)} 项，共 ${catalogTotal} 项`}</span>
+                        <div>
+                          <button type="button" aria-disabled={projectsLoading || catalogPage <= 1} onClick={() => { if (!catalogBusyRef.current && catalogPage > 1) void loadProjects({ page: catalogPage - 1 }); }}>上一页</button>
+                          <span>{projectsLoading || catalogError ? `第 ${catalogPage} 页` : `第 ${catalogPage} / ${Math.ceil(catalogTotal / CATALOG_PAGE_SIZE)} 页`}</span>
+                          <button type="button" aria-disabled={projectsLoading || catalogPage * CATALOG_PAGE_SIZE >= catalogTotal} onClick={() => { if (!catalogBusyRef.current && catalogPage * CATALOG_PAGE_SIZE < catalogTotal) void loadProjects({ page: catalogPage + 1 }); }}>下一页</button>
+                        </div>
+                      </nav>
+                    )}
+                  </div>
+                  {selectedProjectError && <p className="hint" role="alert">{selectedProjectError} <button type="button" onClick={() => void loadSelectedProjectSummary(project)}>重试</button></p>}
                   {projectLoading ? (
                     <p className="hint">正在读取文档版本和运行历史…</p>
                   ) : (

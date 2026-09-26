@@ -30,6 +30,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from .config import get_settings
+from .project_sort import project_name_sort_key
 from .time_utils import utc_now_naive
 
 
@@ -181,6 +182,9 @@ class AccountProviderBindingRow(Base):
 
 class ProjectRow(Base):
     __tablename__ = "projects"
+    __table_args__ = (
+        Index("ix_projects_workspace_name_sort_id", "workspace_id", "name_sort_key", "id"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
         ForeignKey("workspaces.id", ondelete="RESTRICT"),
@@ -189,6 +193,15 @@ class ProjectRow(Base):
         index=True,
     )
     name: Mapped[str] = mapped_column(String(200))
+    # Nullable solely so SQLite can add/backfill this column without rebuilding
+    # the existing projects table. ORM and API inserts always populate it.
+    name_sort_key: Mapped[bytes | None] = mapped_column(
+        LargeBinary,
+        nullable=True,
+        default=lambda context: project_name_sort_key(
+            context.get_current_parameters()["name"]
+        ),
+    )
     description: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
     documents: Mapped[list["DocumentRow"]] = relationship(cascade="all, delete-orphan")

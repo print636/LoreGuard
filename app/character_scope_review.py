@@ -49,6 +49,19 @@ ReviewReason = Literal[
     "basis_invalid",
     "slot_conflict",
 ]
+ScopeReviewSlotConflict = Literal[
+    "actor",
+    "actuality",
+    "statement_relation",
+    "label_relation",
+    "object_relation",
+    "polarity_relation",
+    "level_supported",
+    "rejected_without_rejection_signal",
+]
+SCOPE_REVIEW_SLOT_CONFLICT_KINDS = frozenset(
+    ScopeReviewSlotConflict.__args__
+)
 
 
 class ScopeReviewSourceIdentity(BaseModel):
@@ -224,6 +237,8 @@ class ScopeReviewDecision(BaseModel):
     verdict: ReviewVerdict
     reason: ReviewReason
     basis_ids: tuple[str, ...] = ()
+    # Internal-only fixed categories; never persist proposal/source identifiers.
+    slot_conflicts: tuple[ScopeReviewSlotConflict, ...] = Field(default=(), exclude=True)
 
 
 class ScopeReviewEvaluation(BaseModel):
@@ -380,24 +395,32 @@ def classify_basis_invalid(
     return None
 
 
-def _slots_support(proposal: ScopeReviewProposal, item: ScopeReviewItem) -> bool:
-    if (
-        item.actor != "proposed"
-        or item.actuality != "asserted"
-        or item.statement_relation != "supported"
-    ):
-        return False
+def _support_slot_conflicts(
+    proposal: ScopeReviewProposal, item: ScopeReviewItem
+) -> tuple[ScopeReviewSlotConflict, ...]:
+    """Return every fixed slot that prevents a supported verdict."""
+    conflicts: list[ScopeReviewSlotConflict] = []
+    if item.actor != "proposed":
+        conflicts.append("actor")
+    if item.actuality != "asserted":
+        conflicts.append("actuality")
+    if item.statement_relation != "supported":
+        conflicts.append("statement_relation")
     if proposal.label_anchor_id is not None:
         if item.label_relation != "same_axis":
-            return False
+            conflicts.append("label_relation")
     elif item.label_relation not in {"same_axis", "none"}:
-        return False
+        conflicts.append("label_relation")
     if item.object_relation != ("same" if proposal.key_object else "not_applicable"):
-        return False
+        conflicts.append("object_relation")
     expected_polarity = (
         "same" if proposal.polarity in {"positive", "negative"} else "not_applicable"
     )
-    return item.polarity_relation == expected_polarity and item.level_supported == "yes"
+    if item.polarity_relation != expected_polarity:
+        conflicts.append("polarity_relation")
+    if item.level_supported != "yes":
+        conflicts.append("level_supported")
+    return tuple(conflicts)
 
 
 def _slots_reject(proposal: ScopeReviewProposal, item: ScopeReviewItem) -> bool:
@@ -420,6 +443,19 @@ def _slots_reject(proposal: ScopeReviewProposal, item: ScopeReviewItem) -> bool:
             and item.polarity_relation == "same"
         )
     )
+
+
+def _rejected_slot_conflicts(item: ScopeReviewItem) -> tuple[ScopeReviewSlotConflict, ...]:
+    """Record unresolved slots when a rejection has no explicit negative signal."""
+    conflicts: list[ScopeReviewSlotConflict] = []
+    for name in (
+        "actor", "actuality", "statement_relation", "label_relation",
+        "object_relation", "polarity_relation", "level_supported",
+    ):
+        if getattr(item, name) == "ambiguous":
+            conflicts.append(name)
+    conflicts.append("rejected_without_rejection_signal")
+    return tuple(conflicts)
 
 
 def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -491,15 +527,19 @@ def evaluate_scope_review(
     decisions: list[ScopeReviewDecision] = []
     for proposal in request.proposals:
         item = by_id[proposal.proposal_id]
+        slot_conflicts: tuple[ScopeReviewSlotConflict, ...] = ()
         if not _basis_valid(request, proposal, item):
             verdict: ReviewVerdict = "uncertain"
             reason: ReviewReason = "basis_invalid"
         elif item.verdict == "supported":
-            verdict = "supported" if _slots_support(proposal, item) else "uncertain"
+            slot_conflicts = _support_slot_conflicts(proposal, item)
+            verdict = "supported" if not slot_conflicts else "uncertain"
             reason = "supported" if verdict == "supported" else "slot_conflict"
         elif item.verdict == "rejected":
             verdict = "rejected" if _slots_reject(proposal, item) else "uncertain"
             reason = "reviewer_rejected" if verdict == "rejected" else "slot_conflict"
+            if reason == "slot_conflict":
+                slot_conflicts = _rejected_slot_conflicts(item)
         else:
             verdict = "uncertain"
             reason = "reviewer_uncertain"
@@ -509,5 +549,6 @@ def evaluate_scope_review(
             verdict=verdict,
             reason=reason,
             basis_ids=item.basis_ids if reason not in {"basis_invalid", "slot_conflict"} else (),
+            slot_conflicts=slot_conflicts,
         ))
     return ScopeReviewEvaluation(request_digest=request_digest(request), decisions=tuple(decisions))

@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import load_only
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
@@ -110,6 +111,7 @@ from .narrative_context_inference import (
     infer_narrative_context,
 )
 from .projections import project_graph, project_timeline, record_sort_key
+from .project_sort import project_name_sort_key
 from .provider import (
     OpenAICompatibleProvider,
     ProviderError,
@@ -767,6 +769,29 @@ def _safe_run_provider_execution(
         "configured": configured,
         "status": actual_status,
     }
+
+
+def _project_catalog_diagnostic_projection(run_ids: list[str], dialect_name: str):
+    """Select only provider-status evidence needed for project cards."""
+
+    payload = AnalysisDiagnosticRow.payload
+    sqlite_counter_types = (
+        (
+            func.json_type(payload, "$.model.attempted_chunks"),
+            func.json_type(payload, "$.model.succeeded_chunks"),
+            func.json_type(payload, "$.model.failed_chunks"),
+        )
+        if dialect_name == "sqlite" else ()
+    )
+    return select(
+        AnalysisDiagnosticRow.run_id,
+        payload[("model", "provider_calls")].as_json(),
+        payload[("model", "attempted_chunks")].as_json(),
+        payload[("model", "succeeded_chunks")].as_json(),
+        payload[("model", "failed_chunks")].as_json(),
+        payload[("usage_accounting", "provider_calls")].as_json(),
+        *sqlite_counter_types,
+    ).where(AnalysisDiagnosticRow.run_id.in_(run_ids))
 
 
 def serialize_run(row: AnalysisRunRow, db=None) -> dict:
@@ -2006,6 +2031,7 @@ def create_project(
         row = ProjectRow(
             workspace_id=context.workspace_id,
             name=payload.name,
+            name_sort_key=project_name_sort_key(payload.name),
             description=payload.description,
         )
         db.add(row); db.commit()
@@ -2044,6 +2070,147 @@ def list_projects(
                 "latest_run": serialize_run(latest_run, db) if latest_run else None,
             })
         return result
+
+
+@app.get("/api/v1/project-catalog")
+def list_project_catalog(
+    page: Annotated[int, Query(ge=1, le=100_000)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 40,
+    query: Annotated[str | None, Query(max_length=160)] = None,
+    sort: Literal["recent", "name"] = "recent",
+    project_id: Annotated[str | None, Query(min_length=1, max_length=36)] = None,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Return a bounded page of project cards without loading run details."""
+
+    filters = [ProjectRow.workspace_id == context.workspace_id]
+    if project_id is not None:
+        filters.append(ProjectRow.id == project_id)
+    if query and (search := query.strip()):
+        # Treat search text literally; % and _ are not user-controlled wildcards.
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        filters.append(or_(
+            ProjectRow.name.ilike(pattern, escape="\\"),
+            ProjectRow.description.ilike(pattern, escape="\\"),
+        ))
+
+    order_by = (
+        (ProjectRow.name_sort_key.asc(), ProjectRow.id.asc())
+        if sort == "name"
+        else (ProjectRow.created_at.desc(), ProjectRow.id.desc())
+    )
+    with SessionLocal() as db:
+        total = db.scalar(
+            select(func.count()).select_from(ProjectRow).where(*filters)
+        ) or 0
+        projects = db.scalars(
+            select(ProjectRow)
+            .where(*filters)
+            .order_by(*order_by)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+        if not projects:
+            return {"page": page, "page_size": page_size, "total": total, "items": []}
+
+        project_ids = [project.id for project in projects]
+        document_counts = dict(db.execute(
+            select(DocumentRow.project_id, func.count())
+            .where(DocumentRow.project_id.in_(project_ids), DocumentRow.active.is_(True))
+            .group_by(DocumentRow.project_id)
+        ).all())
+
+        # The scalar subquery can seek the newest row through the existing
+        # (project_id, created_at, id) index for each project on this page.
+        # ID breaks timestamp ties reproducibly on both SQLite and PostgreSQL.
+        latest_run_id = (
+            select(AnalysisRunRow.id)
+            .where(AnalysisRunRow.project_id == ProjectRow.id)
+            .order_by(AnalysisRunRow.created_at.desc(), AnalysisRunRow.id.desc())
+            .limit(1)
+            .correlate(ProjectRow)
+            .scalar_subquery()
+        )
+        page_latest_run_ids = (
+            select(latest_run_id)
+            .select_from(ProjectRow)
+            .where(ProjectRow.id.in_(project_ids))
+        )
+        latest_runs = {
+            run.project_id: run
+            for run in db.scalars(
+                select(AnalysisRunRow)
+                .options(load_only(
+                    AnalysisRunRow.id,
+                    AnalysisRunRow.project_id,
+                    AnalysisRunRow.status,
+                    AnalysisRunRow.created_at,
+                    AnalysisRunRow.provider_identity,
+                    AnalysisRunRow.prompt_tokens,
+                    AnalysisRunRow.completion_tokens,
+                ))
+                .where(AnalysisRunRow.id.in_(page_latest_run_ids))
+            )
+        }
+        # Only terminal runs with no reported token use need diagnostic
+        # evidence to distinguish provider failure from deterministic work.
+        diagnostic_run_ids = [
+            run.id for run in latest_runs.values()
+            if run.status not in {"queued", "running"}
+            and (run.prompt_tokens or 0) + (run.completion_tokens or 0) == 0
+        ]
+        diagnostic_payloads = {}
+        if diagnostic_run_ids:
+            # Extract only the fields read by _safe_run_provider_execution.
+            # In particular, story-sized diagnostics outside these paths never
+            # cross from the database into this catalog request.
+            for row in db.execute(
+                _project_catalog_diagnostic_projection(
+                    diagnostic_run_ids, db.bind.dialect.name
+                )
+            ):
+                (run_id, model_calls, attempted, succeeded, failed,
+                 usage_calls, *counter_types) = row
+                if counter_types:
+                    # SQLite JSON_EXTRACT represents JSON booleans as 1/0.
+                    # Restore their types so the safe classifier's strict
+                    # integer check cannot mistake true for a run counter.
+                    attempted, succeeded, failed = [
+                        True if kind == "true" else False if kind == "false" else value
+                        for value, kind in zip(
+                            (attempted, succeeded, failed), counter_types
+                        )
+                    ]
+                diagnostic_payloads[run_id] = {
+                    "model": {
+                        "provider_calls": model_calls,
+                        "attempted_chunks": attempted,
+                        "succeeded_chunks": succeeded,
+                        "failed_chunks": failed,
+                    },
+                    "usage_accounting": {"provider_calls": usage_calls},
+                }
+
+        items = []
+        for project in projects:
+            latest_run = latest_runs.get(project.id)
+            items.append({
+                "id": project.id,
+                "name": project.name,
+                "description": project.description,
+                "created_at": project.created_at,
+                "active_document_count": document_counts.get(project.id, 0),
+                "latest_run": ({
+                    "id": latest_run.id,
+                    "status": latest_run.status,
+                    "created_at": latest_run.created_at,
+                    "model_execution": _safe_run_provider_execution(
+                        latest_run, diagnostic_payloads.get(latest_run.id)
+                    ),
+                } if latest_run else None),
+            })
+        return {"page": page, "page_size": page_size, "total": total, "items": items}
 
 
 @app.get("/api/v1/projects/{project_id}")
@@ -2671,6 +2838,7 @@ def create_demo(
         project = ProjectRow(
             workspace_id=context.workspace_id,
             name="潮汐之门 · 自然文本体验",
+            name_sort_key=project_name_sort_key("潮汐之门 · 自然文本体验"),
             description="无需 API Key 的中文自然文本基线",
         )
         db.add(project); db.flush()
@@ -2714,6 +2882,7 @@ def create_advanced_demo(
         project = ProjectRow(
             workspace_id=context.workspace_id,
             name="静默海域 · 复杂多章节验收",
+            name_sort_key=project_name_sort_key("静默海域 · 复杂多章节验收"),
             description="原创三文档场景，覆盖时间、地点、知识、物品与世界规则",
         )
         db.add(project); db.flush()
