@@ -3483,6 +3483,11 @@ def _bind_record(
         else _compact(record.evidence) != _compact(evidence_text)
     ):
         raise ValueError("evidence_mismatch")
+    if v4_clause is None and chunk.source_kind == "draft":
+        if _draft_statement_only_inside_quote(record, evidence_text):
+            raise ValueError("character_support")
+        if _draft_ambiguous_joint_pronoun_claim(record, evidence_text):
+            raise ValueError("character_support")
     if v4_clause is None and not _character_attribution_supported(
         record,
         evidence_text,
@@ -3666,6 +3671,101 @@ def _directional_trait_key(value: str) -> bool:
         token in _DIRECTIONAL_TRAIT_KEY_TOKENS
         for token in re.findall(r"[A-Za-z]+", separated.casefold())
     )
+
+
+def _draft_statement_only_inside_quote(
+    record: _RawCharacterSignal, evidence: str
+) -> bool:
+    """A performed or reported sentence is not itself an observed action.
+
+    Only reject a model claim copied wholly from a matched quote when no
+    identical claim appears outside the quote. The speaker's real narration
+    and another actor's real same-line action remain independently eligible.
+    """
+
+    closers = {"「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
+    stack: list[tuple[str, int]] = []
+    spans: list[tuple[int, int]] = []
+    for offset, char in enumerate(evidence):
+        if stack and char == closers[stack[-1][0]]:
+            _, start = stack.pop()
+            if not stack:
+                spans.append((start, offset + 1))
+        elif char in closers:
+            stack.append((char, offset))
+    if not spans:
+        return False
+    claim = _compact(unicodedata.normalize("NFKC", record.statement)).casefold()
+    if len(claim) < 2:
+        return False
+    quoted = any(
+        claim in _compact(unicodedata.normalize("NFKC", evidence[start + 1:end - 1])).casefold()
+        for start, end in spans
+    )
+    if not quoted:
+        return False
+    # A character visibly saying or reading the words is real speech, even if
+    # the words describe fictional actions. Retain speech-pattern samples; the
+    # existing kind binder still prevents one utterance from becoming a stable
+    # manner of speaking. Other dimensions cannot borrow the quote as action.
+    if record.dimension == "speech_pattern":
+        spoken_before_quote = _compact(
+            unicodedata.normalize("NFKC", evidence[:spans[0][0]])
+        )
+        speaker = _compact(unicodedata.normalize("NFKC", record.character))
+        speech_clause = re.split(r"[，,。！？!?；;]", spoken_before_quote)[-1]
+        if re.match(
+            rf"^{re.escape(speaker)}(?:当众|轻声|大声|低声|照着[^：:]{{1,12}})?"
+            r"(?:说|说道|读出|念出|回答|朗读|宣读)",
+            speech_clause,
+        ):
+            return False
+    unquoted = []
+    cursor = 0
+    for start, end in spans:
+        unquoted.extend((evidence[cursor:start], "\ufff0"))
+        cursor = end
+    unquoted.append(evidence[cursor:])
+    outside = unicodedata.normalize("NFKC", "".join(unquoted)).casefold()
+    # A third person's unquoted report can repeat the quote verbatim. Only a
+    # separate independent clause headed by the actor's exact claim licenses
+    # the model to use that same wording as an observed action.
+    actual_clause = any(
+        _compact(clause).startswith(claim)
+        for clause in re.split(r"[，,。！？!?；;\n\ufff0]+", outside)
+    )
+    return not actual_clause
+
+
+def _draft_ambiguous_joint_pronoun_claim(
+    record: _RawCharacterSignal, evidence: str
+) -> bool:
+    """Reject a model's whole-line claim that smuggles a joint actor's '她/他'.
+
+    This is not general coreference: only a statement which itself includes a
+    later independent pronoun clause after an explicit two-person joint subject
+    is excluded. A separately named second actor's action remains available.
+    """
+
+    statement = _compact(unicodedata.normalize("NFKC", record.statement))
+    if statement not in _compact(unicodedata.normalize("NFKC", evidence)):
+        return False
+    character = _compact(unicodedata.normalize("NFKC", record.character))
+    if not character:
+        return False
+    joint = re.compile(
+        rf"^(?:{re.escape(character)}(?:和|与|同|跟|、)[\u4e00-\u9fff]{{2,4}}|"
+        rf"[\u4e00-\u9fff]{{2,4}}(?:和|与|同|跟|、){re.escape(character)})"
+        r"(?:一起|共同|并肩|各自|分别|同时)"
+    )
+    for match in re.finditer(
+        r"[，,。！？!?；;]\s*(?:(?:随后|此时|这时|接着)[，,]?)?[她他](?!们|的)",
+        statement,
+    ):
+        before = re.split(r"[。！？!?；;]", statement[:match.start()])[-1]
+        if joint.search(before):
+            return True
+    return False
 
 
 def _character_attribution_supported(

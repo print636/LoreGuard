@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from threading import Barrier
 from copy import deepcopy
 from unittest.mock import patch
@@ -9,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import (
     CheckConstraint, Column, JSON, MetaData, String, Table, create_engine,
-    select, text, update,
+    event, select, text, update,
 )
 from sqlalchemy.exc import IntegrityError
 
@@ -18,6 +19,7 @@ from app.character_traits import (
     verified_character_trait_review_chain,
 )
 from app.character_support_bindings import support_bindings_sha256
+from app.auth import AuthContext, get_auth_context
 from app.db import (
     AnalysisDiagnosticRow,
     AnalysisRunCharacterTraitInputRow,
@@ -27,8 +29,12 @@ from app.db import (
     CharacterTraitAxisRow,
     CharacterTraitCandidateRow,
     CharacterTraitReviewRow,
+    LOCAL_USER_ID,
+    ProjectRow,
+    WorkspaceRow,
     Base,
     SessionLocal,
+    engine,
 )
 from app.main import app, settings, write_limiter
 from app.narrative_context import payload_sha256
@@ -444,6 +450,285 @@ def test_character_roster_baseline_cutover_keeps_historical_confirmed_trait():
     assert [item["id"] for item in withdrawn_profile.json()["withdrawn_traits"]] == [
         candidate_id
     ]
+
+
+def test_character_baseline_status_counts_only_authorized_traits_and_current_pending():
+    with TestClient(app) as client:
+        project_response = client.post(
+            "/api/v1/projects", json={"name": f"状态汇总-{uuid4().hex}"}
+        )
+        assert project_response.status_code == 201, project_response.text
+        project_id = project_response.json()["id"]
+        path = f"/api/v1/projects/{project_id}/character-baseline-status"
+        empty = client.get(path)
+        assert empty.status_code == 200, empty.text
+        assert empty.json() == {
+            "total_characters": 0,
+            "confirmed_trait_count": 0,
+            "pending_candidate_count": 0,
+            "baseline_run_id": None,
+            "baseline_run_status": None,
+            "model_coverage": "unknown",
+            "coverage_detail": None,
+            "readiness": "no_documents",
+        }
+
+        document_response = client.post(
+            f"/api/v1/projects/{project_id}/documents/text",
+            json={
+                "name": "角色.md",
+                "content": "林澈喜欢蜜瓜。",
+                "document_role": "character_profile",
+                "narrative_context": {
+                    "resolution_state": "confirmed",
+                    "publication_status": "published",
+                },
+            },
+        )
+        assert document_response.status_code == 201, document_response.text
+        assert client.get(path).json()["readiness"] == "no_completed_run"
+
+        run = _completed_run(client, project_id)
+        with SessionLocal() as db:
+            db.add(AnalysisDiagnosticRow(run_id=run["id"], payload={
+                "character_consistency": {
+                    "outcome": "completed",
+                    "snapshot_bound": True,
+                    "material_coverage": "complete",
+                },
+            }))
+            db.commit()
+        assert client.get(path).json()["readiness"] == "not_generated"
+
+        own = _candidate(project_id, run["id"])
+        _candidate(project_id, run["id"], character_key="无关角色", trait_key="性格:谨慎")
+        pending = client.get(path)
+        assert pending.status_code == 200, pending.text
+        assert pending.json()["total_characters"] == 2
+        assert pending.json()["confirmed_trait_count"] == 0
+        assert pending.json()["pending_candidate_count"] == 2
+        assert pending.json()["model_coverage"] == "full"
+        assert pending.json()["readiness"] == "ready"
+        assert pending.json()["baseline_run_id"] == run["id"]
+        assert pending.json()["baseline_run_status"] == "completed"
+
+        approved = _confirm(client, project_id, own)
+        assert approved.status_code == 201, approved.text
+        confirmed = client.get(path)
+        assert confirmed.json()["confirmed_trait_count"] == 1
+        assert confirmed.json()["pending_candidate_count"] == 1
+        # An unrelated pending AI candidate remains visible as a warning, but
+        # it never inflates the author-confirmed baseline count.
+
+
+def test_character_baseline_status_keeps_historical_confirmed_but_not_old_pending():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        old = _completed_run(client, project["id"])
+        own = _candidate(project["id"], old["id"])
+        _candidate(
+            project["id"], old["id"], character_key="旧候选角色",
+            trait_key="性格:谨慎",
+        )
+        approved = _confirm(client, project["id"], own)
+        assert approved.status_code == 201, approved.text
+        current = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            db.add(AnalysisDiagnosticRow(run_id=current["id"], payload={
+                "character_consistency": {
+                    "outcome": "completed", "snapshot_bound": True,
+                    "material_coverage": "complete",
+                },
+            }))
+            db.commit()
+        later_draft = _completed_run(
+            client, project["id"], batch_mode="draft_review"
+        )
+        response = client.get(
+            f"/api/v1/projects/{project['id']}/character-baseline-status"
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["baseline_run_id"] == current["id"]
+        assert response.json()["baseline_run_id"] not in (old["id"], later_draft["id"])
+        assert response.json()["model_coverage"] == "full"
+        assert response.json()["confirmed_trait_count"] == 1
+        assert response.json()["pending_candidate_count"] == 0
+        assert response.json()["total_characters"] == 1
+        assert response.json()["readiness"] == "ready"
+
+
+def test_character_baseline_status_can_select_current_snapshot_when_old_run_finishes_last():
+    with TestClient(app) as client:
+        project, first_document = _project_and_document(client)
+        project_id = project["id"]
+        old = _completed_run(client, project_id)
+        _candidate(
+            project_id, old["id"], character_key="旧稿角色",
+            trait_key="性格:谨慎",
+        )
+
+        replacement = client.post(
+            f"/api/v1/projects/{project_id}/documents/text",
+            json={
+                "name": first_document["name"],
+                "content": "林澈现在仍然喜欢蜜瓜。",
+                "document_role": "character_profile",
+                "narrative_context": {
+                    "resolution_state": "confirmed",
+                    "publication_status": "published",
+                },
+            },
+        )
+        assert replacement.status_code == 201, replacement.text
+        assert replacement.json()["version"] == 2
+        current = _completed_run(client, project_id)
+        current_candidate = _candidate(project_id, current["id"])
+        approved = _confirm(client, project_id, current_candidate)
+        assert approved.status_code == 201, approved.text
+        with SessionLocal() as db:
+            old_row = db.get(AnalysisRunRow, old["id"])
+            current_row = db.get(AnalysisRunRow, current["id"])
+            old_row.completed_at = datetime(2026, 9, 26, 12)
+            current_row.completed_at = datetime(2026, 9, 26, 11)
+            db.add(AnalysisDiagnosticRow(run_id=current["id"], payload={
+                "character_consistency": {
+                    "outcome": "completed", "snapshot_bound": True,
+                    "material_coverage": "complete",
+                },
+            }))
+            old_snapshot = db.scalar(select(AnalysisRunInputRow).where(
+                AnalysisRunInputRow.run_id == old["id"],
+            ))
+            current_snapshot = db.scalar(select(AnalysisRunInputRow).where(
+                AnalysisRunInputRow.run_id == current["id"],
+            ))
+            assert old_snapshot.document_version == 1
+            assert current_snapshot.document_version == 2
+            db.commit()
+
+        path = f"/api/v1/projects/{project_id}/character-baseline-status"
+        global_latest = client.get(path)
+        selected = client.get(path, params={"baseline_run_id": current["id"]})
+        assert global_latest.status_code == 200, global_latest.text
+        assert global_latest.json()["baseline_run_id"] == old["id"]
+        assert global_latest.json()["pending_candidate_count"] == 1
+        assert selected.status_code == 200, selected.text
+        assert selected.json()["baseline_run_id"] == current["id"]
+        assert selected.json()["baseline_run_status"] == "completed"
+        assert selected.json()["model_coverage"] == "full"
+        assert selected.json()["readiness"] == "ready"
+        assert selected.json()["total_characters"] == 1
+        assert selected.json()["confirmed_trait_count"] == 1
+        assert selected.json()["pending_candidate_count"] == 0
+
+
+def test_character_baseline_status_rejects_nonbaseline_foreign_and_retired_legacy_run():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        other, _ = _project_and_document(client)
+        legacy = _completed_run(client, project["id"], batch_mode="full_review")
+        foreign = _completed_run(client, other["id"])
+        draft = _completed_run(client, project["id"], batch_mode="draft_review")
+        with patch("app.main.dispatch_analysis"):
+            queued = client.post(
+                f"/api/v1/projects/{project['id']}/analysis-runs"
+            )
+        assert queued.status_code == 202, queued.text
+        path = f"/api/v1/projects/{project['id']}/character-baseline-status"
+        valid_legacy = client.get(path, params={"baseline_run_id": legacy["id"]})
+        assert valid_legacy.status_code == 200, valid_legacy.text
+        assert valid_legacy.json()["baseline_run_id"] == legacy["id"]
+        for invalid_id in (foreign["id"], draft["id"], queued.json()["id"], str(uuid4())):
+            denied = client.get(path, params={"baseline_run_id": invalid_id})
+            assert denied.status_code == 404, denied.text
+        malformed = client.get(path, params={"baseline_run_id": ""})
+        assert malformed.status_code == 422, malformed.text
+
+        _completed_run(client, project["id"])
+        retired_legacy = client.get(path, params={"baseline_run_id": legacy["id"]})
+        assert retired_legacy.status_code == 404, retired_legacy.text
+
+
+def test_character_baseline_status_scopes_every_count_to_project_workspace():
+    foreign_workspace_id = str(uuid4())
+    foreign_project_id = str(uuid4())
+    with TestClient(app) as client:
+        own, _ = _project_and_document(client)
+        own_run = _completed_run(client, own["id"])
+        _candidate(own["id"], own_run["id"])
+        with SessionLocal() as db:
+            db.add(WorkspaceRow(id=foreign_workspace_id, name="foreign"))
+            db.flush()
+            db.add(ProjectRow(
+                id=foreign_project_id,
+                workspace_id=foreign_workspace_id,
+                name="foreign project",
+            ))
+            db.commit()
+        foreign_path = (
+            f"/api/v1/projects/{foreign_project_id}/character-baseline-status"
+        )
+        denied = client.get(foreign_path)
+        assert denied.status_code == 404
+        app.dependency_overrides[get_auth_context] = lambda: AuthContext(
+            user_id=LOCAL_USER_ID,
+            workspace_id=foreign_workspace_id,
+            role="owner",
+            anonymous=False,
+        )
+        try:
+            isolated = client.get(foreign_path)
+            reverse_denied = client.get(
+                f"/api/v1/projects/{own['id']}/character-baseline-status"
+            )
+        finally:
+            app.dependency_overrides.pop(get_auth_context, None)
+        assert isolated.status_code == 200, isolated.text
+        assert isolated.json()["total_characters"] == 0
+        assert isolated.json()["confirmed_trait_count"] == 0
+        assert isolated.json()["pending_candidate_count"] == 0
+        assert reverse_denied.status_code == 404
+
+
+def test_character_baseline_status_uses_bounded_aggregate_queries_above_100():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        for index in range(105):
+            _candidate(
+                project["id"], run["id"],
+                character_key=f"角色{index:03d}", trait_key=f"性格:{index:03d}",
+            )
+        statements: list[str] = []
+
+        def record_sql(_connection, _cursor, statement, _parameters,
+                       _context, _executemany):
+            if statement.lstrip().lower().startswith("select"):
+                statements.append(statement.lower())
+
+        event.listen(engine, "before_cursor_execute", record_sql)
+        try:
+            response = client.get(
+                f"/api/v1/projects/{project['id']}/character-baseline-status"
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", record_sql)
+        assert response.status_code == 200, response.text
+        assert response.json()["total_characters"] == 105
+        assert response.json()["pending_candidate_count"] == 105
+        assert response.json()["confirmed_trait_count"] == 0
+        # Authentication itself performs a few fixed SELECTs. Candidate
+        # scans remain three aggregate statements regardless of roster size.
+        assert len(statements) <= 11, statements
+        assert sum("character_trait_candidates" in s for s in statements) == 3
+        # The endpoint may select a character key for DISTINCT but must never
+        # hydrate every candidate's evidence, value or JSON context payload.
+        assert not any(
+            "character_trait_candidates.value" in statement
+            or "character_trait_candidates.evidence" in statement
+            or "character_trait_candidates.scope_payload" in statement
+            for statement in statements
+        )
 
 
 _COMPLETE_PRIMARY_CHUNK_COUNTS = {

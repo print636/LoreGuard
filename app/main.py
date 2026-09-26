@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, union, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import load_only
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -3414,6 +3414,152 @@ def _character_coverage_for_run(
     return "unknown", "角色一致性执行状态无法确认"
 
 
+def _latest_completed_character_baseline_run(db, project_id: str) -> AnalysisRunRow | None:
+    latest = db.scalar(
+        select(AnalysisRunRow)
+        .where(
+            AnalysisRunRow.project_id == project_id,
+            AnalysisRunRow.status == "completed",
+            AnalysisRunRow.batch_mode == "baseline_build",
+        )
+        .order_by(
+            AnalysisRunRow.completed_at.desc().nullslast(),
+            AnalysisRunRow.created_at.desc(),
+            AnalysisRunRow.id.desc(),
+        )
+        .limit(1)
+    )
+    if latest is not None:
+        return latest
+    # Compatibility for pre-guided-review projects. A completed draft_review
+    # is never a character baseline; as soon as a baseline_build completed,
+    # older full_review runs can no longer replace it.
+    return db.scalar(
+        select(AnalysisRunRow)
+        .where(
+            AnalysisRunRow.project_id == project_id,
+            AnalysisRunRow.status == "completed",
+            or_(
+                AnalysisRunRow.batch_mode == "full_review",
+                AnalysisRunRow.batch_mode.is_(None),
+            ),
+        )
+        .order_by(
+            AnalysisRunRow.completed_at.desc().nullslast(),
+            AnalysisRunRow.created_at.desc(),
+            AnalysisRunRow.id.desc(),
+        )
+        .limit(1)
+    )
+
+
+@app.get("/api/v1/projects/{project_id}/character-baseline-status")
+def get_character_baseline_status(
+    project_id: str,
+    baseline_run_id: Annotated[str | None, Query(min_length=1, max_length=36)] = None,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Bounded, project-wide readiness summary; never authorizes pending traits."""
+    with SessionLocal() as db:
+        if not _project_in_workspace(db, project_id, context.workspace_id):
+            raise HTTPException(404, "项目不存在")
+        active_document_count = db.scalar(
+            select(func.count())
+            .select_from(DocumentRow)
+            .where(
+                DocumentRow.project_id == project_id,
+                DocumentRow.active.is_(True),
+            )
+        ) or 0
+        if baseline_run_id is None:
+            latest = _latest_completed_character_baseline_run(db, project_id)
+        else:
+            latest = db.scalar(
+                select(AnalysisRunRow).where(
+                    AnalysisRunRow.id == baseline_run_id,
+                    AnalysisRunRow.project_id == project_id,
+                    AnalysisRunRow.status == "completed",
+                    or_(
+                        AnalysisRunRow.batch_mode == "baseline_build",
+                        AnalysisRunRow.batch_mode == "full_review",
+                        AnalysisRunRow.batch_mode.is_(None),
+                    ),
+                )
+            )
+            if latest is None:
+                raise HTTPException(404, "角色基线不存在")
+            if latest.batch_mode != "baseline_build":
+                # A full_review is a legacy baseline only until this project
+                # gains any completed baseline_build. Never let an explicit
+                # query revive a superseded legacy baseline.
+                completed_baseline = db.scalar(
+                    select(AnalysisRunRow.id)
+                    .where(
+                        AnalysisRunRow.project_id == project_id,
+                        AnalysisRunRow.status == "completed",
+                        AnalysisRunRow.batch_mode == "baseline_build",
+                    )
+                    .limit(1)
+                )
+                if completed_baseline is not None:
+                    raise HTTPException(404, "角色基线不存在")
+        reviewed_keys = select(CharacterTraitCandidateRow.character_key).where(
+            CharacterTraitCandidateRow.project_id == project_id,
+            CharacterTraitCandidateRow.review_state.in_(("confirmed", "withdrawn")),
+        )
+        if latest is None:
+            # Reviewed history survives later source retirement and remains
+            # discoverable, but no completed run is claimed in this response.
+            all_character_keys = reviewed_keys.distinct().subquery()
+        else:
+            latest_keys = select(CharacterTraitCandidateRow.character_key).where(
+                CharacterTraitCandidateRow.project_id == project_id,
+                CharacterTraitCandidateRow.source_run_id == latest.id,
+            )
+            all_character_keys = union(latest_keys, reviewed_keys).subquery()
+        total_characters = db.scalar(
+            select(func.count()).select_from(all_character_keys)
+        ) or 0
+        confirmed_trait_count = db.scalar(
+            select(func.count())
+            .select_from(CharacterTraitCandidateRow)
+            .where(
+                CharacterTraitCandidateRow.project_id == project_id,
+                CharacterTraitCandidateRow.review_state == "confirmed",
+            )
+        ) or 0
+        pending_candidate_count = (
+            db.scalar(
+                select(func.count())
+                .select_from(CharacterTraitCandidateRow)
+                .where(
+                    CharacterTraitCandidateRow.project_id == project_id,
+                    CharacterTraitCandidateRow.source_run_id == latest.id,
+                    CharacterTraitCandidateRow.review_state == "pending",
+                )
+            ) or 0
+        ) if latest is not None else 0
+        if not active_document_count:
+            readiness = "no_documents"
+        elif latest is None:
+            readiness = "no_completed_run"
+        elif not total_characters:
+            readiness = "not_generated"
+        else:
+            readiness = "ready"
+        model_coverage, coverage_detail = _character_coverage_for_run(db, latest)
+        return {
+            "total_characters": total_characters,
+            "confirmed_trait_count": confirmed_trait_count,
+            "pending_candidate_count": pending_candidate_count,
+            "baseline_run_id": latest.id if latest else None,
+            "baseline_run_status": latest.status if latest else None,
+            "model_coverage": model_coverage,
+            "coverage_detail": coverage_detail,
+            "readiness": readiness,
+        }
+
+
 @app.get("/api/v1/projects/{project_id}/characters")
 def list_characters(
     project_id: str,
@@ -3433,42 +3579,9 @@ def list_characters(
                 DocumentRow.active.is_(True),
             )
         ) or 0
-        latest_completed_run = db.scalar(
-            select(AnalysisRunRow)
-            .where(
-                AnalysisRunRow.project_id == project_id,
-                AnalysisRunRow.status == "completed",
-                AnalysisRunRow.batch_mode == "baseline_build",
-            )
-            .order_by(
-                AnalysisRunRow.completed_at.desc(),
-                AnalysisRunRow.created_at.desc(),
-                AnalysisRunRow.id.desc(),
-            )
-            .limit(1)
+        latest_completed_run = _latest_completed_character_baseline_run(
+            db, project_id
         )
-        if latest_completed_run is None:
-            # Compatibility for projects that created their character baseline
-            # before Guided Review Batch existed.  A completed draft_review is
-            # never a baseline, and the fallback is permanently disabled as
-            # soon as the project has any completed baseline_build.
-            latest_completed_run = db.scalar(
-                select(AnalysisRunRow)
-                .where(
-                    AnalysisRunRow.project_id == project_id,
-                    AnalysisRunRow.status == "completed",
-                    or_(
-                        AnalysisRunRow.batch_mode == "full_review",
-                        AnalysisRunRow.batch_mode.is_(None),
-                    ),
-                )
-                .order_by(
-                    AnalysisRunRow.completed_at.desc(),
-                    AnalysisRunRow.created_at.desc(),
-                    AnalysisRunRow.id.desc(),
-                )
-                .limit(1)
-            )
         latest_rows = (
             list(
                 db.scalars(

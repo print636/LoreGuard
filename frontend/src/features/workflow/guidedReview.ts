@@ -454,6 +454,8 @@ export type BaselineRunSummary = {
   id: string;
   status?: string;
   mode?: string | null;
+  created_at?: string | null;
+  completed_at?: string | null;
   input_snapshot_available?: boolean;
   input_documents?: Array<{
     document_id: string;
@@ -520,10 +522,23 @@ export function findCurrentBaselineRun<T extends BaselineRunSummary>(
   if (!baseline.length || baseline.some((document) => !isConfirmed(document))) {
     return null;
   }
-  return runs.find(
-    (run) =>
-      run.status === "completed" &&
-      (run.review_batch?.mode ?? run.mode) === "baseline_build" &&
-      baselineRunMatchesDocuments(run, baseline),
-  ) || null;
+  const descending = (left: string | null | undefined, right: string | null | undefined): number => {
+    // Existing completed rows may predate completed_at. They stay below dated
+    // rows, matching the server's completed_at DESC NULLS LAST ordering.
+    if (!left) return right ? 1 : 0;
+    if (!right) return -1;
+    return left === right ? 0 : left > right ? -1 : 1;
+  };
+  return runs
+    .filter(
+      (run) =>
+        run.status === "completed" &&
+        (run.review_batch?.mode ?? run.mode) === "baseline_build" &&
+        baselineRunMatchesDocuments(run, baseline),
+    )
+    .sort((left, right) =>
+      descending(left.completed_at, right.completed_at) ||
+      descending(left.created_at, right.created_at) ||
+      descending(left.id, right.id),
+    )[0] || null;
 }

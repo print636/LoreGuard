@@ -396,6 +396,43 @@ test("only a frozen baseline matching current versions and context revisions sta
   assert.equal(findCurrentBaselineRun([canon, document({ id: "new-canon", document_role: "canon" })], [run]), null);
 });
 
+test("the current matching baseline follows completion time, not creation order", () => {
+  const canon = document({
+    id: "canon",
+    document_role: "canon",
+    narrative_context: {
+      context_revision: 1,
+      resolution_state: "confirmed",
+      publication_status: "published",
+      scope: { schema_version: 1, timeline_key: "main" },
+      scope_sha256: "current-scope",
+    },
+  });
+  const shared = {
+    status: "completed",
+    input_snapshot_available: true,
+    review_batch: { mode: "baseline_build", background_document_ids: ["canon"] },
+    input_documents: [{
+      document_id: "canon",
+      document_version: 1,
+      document_role: "canon",
+      batch_role: "background",
+      narrative_context: {
+        context_revision: 1,
+        resolution_state: "confirmed",
+        publication_status: "published",
+        scope_sha256: "current-scope",
+      },
+    }],
+  };
+  const newerCreated = { ...shared, id: "run-B", created_at: "2026-09-26T10:02:00", completed_at: "2026-09-26T10:03:00" };
+  const laterCompleted = { ...shared, id: "run-A", created_at: "2026-09-26T10:01:00", completed_at: "2026-09-26T10:05:00" };
+  const oldLegacy = { ...shared, id: "run-old", created_at: "2026-09-26T10:04:00", completed_at: null };
+  assert.equal(findCurrentBaselineRun([canon], [newerCreated, oldLegacy, laterCompleted])?.id, "run-A");
+  const tied = { ...shared, id: "run-Z", created_at: laterCompleted.created_at, completed_at: laterCompleted.completed_at };
+  assert.equal(findCurrentBaselineRun([canon], [laterCompleted, tied])?.id, "run-Z");
+});
+
 test("current baseline matches only the eligible documents in the API frozen input", () => {
   const source = (id, role, status) => document({
     id,

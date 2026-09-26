@@ -19,10 +19,15 @@
 .contextWorkbench > header,
 .guidedReviewHead,
 .stageBody > header {
+  position: static;
+  top: auto;
+  z-index: auto;
   height: auto;
   padding-inline: 0;
   color: inherit;
   background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
   letter-spacing: normal;
 }
 .contextWorkbench > header,
@@ -215,8 +220,15 @@
 .stageNotice { margin: 13px 0 0; color: var(--color-text-secondary, var(--text-2)); font-size: 12px; line-height: 1.65; }
 .stageNotice.warning { color: var(--color-warning, var(--warning)); }
 .stageNotice.success { color: var(--color-success, var(--success)); }
+.stageReviewError { margin: 12px 0 0; padding: 10px 12px; color: var(--color-danger, var(--danger)); border-left: 3px solid currentColor; border-radius: 0 8px 8px 0; background: var(--color-danger-subtle, rgba(255,127,173,.1)); font-size: 12px; line-height: 1.6; }
 .stageBody > button { min-height: 42px; margin-top: 13px; }
 .stageBody > .quietPrimary { width: auto; }
+.stageStatusRecovery button,
+.stagePendingNotice button { min-height: 44px; margin-top: 10px; }
+.stageBaselineSummary { min-height: 52px; }
+.stagePendingNotice { margin-top: 12px; padding: 12px 14px; border-left: 3px solid var(--color-warning, var(--warning)); border-radius: 0 9px 9px 0; background: var(--color-subtle, rgba(183,162,255,.08)); }
+.stagePendingNotice .stageNotice { margin: 0; }
+.draftReviewScopeNote { margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--color-border, var(--line)); border-radius: 9px; background: var(--color-field, #100d24); }
 
 .draftReviewSelection { margin-top: 14px; }
 .draftReviewSelection fieldset { display: grid; gap: 1px; margin: 0 0 16px; padding: 0; border: 1px solid var(--color-border, var(--line)); border-radius: 10px; overflow: hidden; }
@@ -226,6 +238,7 @@
 .draftReviewSelection input { width: 18px; height: 18px; accent-color: var(--color-lavender, var(--lavender)); }
 .draftReviewSelection b,
 .draftReviewSelection small { display: block; }
+.draftReviewSelection b { overflow-wrap: anywhere; }
 .draftReviewSelection small { margin-top: 3px; color: var(--color-text-muted, var(--muted)); font-size: 12px; }
 .draftReviewSelection .startValidation { width: auto; min-width: 154px; min-height: 48px; margin: 0; }
 .guidedReviewBoundary { align-items: center; justify-content: flex-start; margin-top: 16px; padding: 12px; border: 1px solid var(--color-border, var(--line)); border-radius: 10px; background: var(--color-field, #100d24); }

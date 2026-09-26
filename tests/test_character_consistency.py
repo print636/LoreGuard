@@ -4152,7 +4152,10 @@ def test_stability_normalization_does_not_rewrite_draft_source():
                 "polarity": "negative",
                 "observation_kind": "action",
             },
-            "action",
+            # The actual action is reading the paper, not performing its
+            # quoted instruction. Treating this text as 林澈's action was a
+            # false attribution in the old assertion.
+            None,
         ),
         (
             "林澈拒绝接过蜜瓜。",

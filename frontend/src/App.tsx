@@ -2154,6 +2154,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               {project ? (
                 <GuidedReviewLaunch
                   projectId={project}
+                  selectionUserId={identity.user.id}
+                  selectionWorkspaceId={identity.workspace.id}
                   documents={docs}
                   runs={runs}
                   busy={busy}

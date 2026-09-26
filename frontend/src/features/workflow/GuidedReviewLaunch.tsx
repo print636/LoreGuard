@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { WorkspaceView } from "../../routing";
-import { fetchCharacters } from "../characters/api";
-import type { CharacterSummary } from "../characters/types";
+import {
+  fetchCharacterBaselineStatus,
+  hasReadyCharacterBaseline,
+  type CharacterBaselineStatus,
+} from "./baselineStatus";
 import {
   analysisRunRequest,
   findCurrentBaselineRun,
@@ -17,6 +20,8 @@ type RunSummary = BaselineRunSummary;
 
 type Props = {
   projectId: string;
+  selectionUserId: string;
+  selectionWorkspaceId: string;
   documents: GuidedDocument[];
   runs: RunSummary[];
   busy: boolean;
@@ -30,10 +35,9 @@ type Props = {
 type ProfileState = {
   loading: boolean;
   error: string;
-  items: CharacterSummary[];
-  total: number;
-  modelCoverage: "full" | "partial" | "rules_only" | "unknown";
-  sourceRunId: string | null;
+  projectId: string | null;
+  requestedRunId: string | null;
+  status: CharacterBaselineStatus | null;
 };
 
 const sensitivityOptions: Array<{
@@ -46,8 +50,33 @@ const sensitivityOptions: Array<{
   { value: "exploratory", label: "探索", detail: "发现更多角色变化线索，需更多人工复核" },
 ];
 
+function selectionStorageKey(userId: string, workspaceId: string, projectId: string): string {
+  return `loreguard:guided-review:drafts:${JSON.stringify([userId, workspaceId, projectId])}`;
+}
+
+function readDraftSelection(storageKey: string): string[] {
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(storageKey) || "[]");
+    return Array.isArray(value)
+      ? Array.from(new Set(value.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 200))).slice(0, 500)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveDraftSelection(storageKey: string, ids: string[]): void {
+  try {
+    window.sessionStorage.setItem(storageKey, JSON.stringify(ids));
+  } catch {
+    // Session storage is optional; selection still works for this visit.
+  }
+}
+
 export default function GuidedReviewLaunch({
   projectId,
+  selectionUserId,
+  selectionWorkspaceId,
   documents,
   runs,
   busy,
@@ -57,93 +86,109 @@ export default function GuidedReviewLaunch({
   onStart,
   onNavigate,
 }: Props) {
+  const storageKey = selectionStorageKey(selectionUserId, selectionWorkspaceId, projectId);
   const documentState = useMemo(() => guidedDocumentState(documents), [documents]);
   const [sensitivity, setSensitivity] = useState<ReviewSensitivity>("balanced");
-  const [selectedDraftIds, setSelectedDraftIds] = useState<string[]>([]);
+  const [draftSelection, setDraftSelection] = useState(() => ({
+    storageKey,
+    ids: readDraftSelection(storageKey),
+  }));
   const [action, setAction] = useState<"baseline" | "review" | null>(null);
   const [actionError, setActionError] = useState("");
+  const [reviewError, setReviewError] = useState("");
+  const [statusRefresh, setStatusRefresh] = useState(0);
+  const preflightControllerRef = useRef<AbortController | null>(null);
   const [profiles, setProfiles] = useState<ProfileState>({
     loading: false,
     error: "",
-    items: [],
-    total: 0,
-    modelCoverage: "unknown",
-    sourceRunId: null,
+    projectId: null,
+    requestedRunId: null,
+    status: null,
   });
   const baselineRunCompleted = hasCompletedBaselineRun(runs);
   const currentBaselineRun = findCurrentBaselineRun(documents, runs);
 
+  const confirmedDraftIdKey = documentState.confirmedDrafts.map((document) => document.id).join(":");
+  const confirmedDraftIds = new Set(documentState.confirmedDrafts.map((document) => document.id));
+  const selectedDraftIds = draftSelection.storageKey === storageKey
+    ? draftSelection.ids.filter((id) => confirmedDraftIds.has(id))
+    : [];
+
   useEffect(() => {
-    const valid = new Set(documentState.confirmedDrafts.map((document) => document.id));
-    setSelectedDraftIds((current) => current.filter((id) => valid.has(id)));
-  }, [documentState.confirmedDrafts.map((document) => document.id).join(":")]);
+    if (draftSelection.storageKey !== storageKey) {
+      setDraftSelection({ storageKey, ids: readDraftSelection(storageKey) });
+    }
+  }, [storageKey, draftSelection.storageKey]);
+
+  useEffect(() => {
+    if (projectLoading || documents.length === 0 || draftSelection.storageKey !== storageKey) return;
+    setDraftSelection((current) => {
+      if (current.storageKey !== storageKey) return current;
+      const next = current.ids.filter((id) => confirmedDraftIds.has(id));
+      if (next.length === current.ids.length) return current;
+      saveDraftSelection(storageKey, next);
+      return { storageKey, ids: next };
+    });
+  }, [storageKey, projectLoading, documents.length, confirmedDraftIdKey, draftSelection.storageKey]);
 
   useEffect(() => {
     if (!projectId || !currentBaselineRun || documentState.unresolvedBaseline.length) {
-      setProfiles({ loading: false, error: "", items: [], total: 0, modelCoverage: "unknown", sourceRunId: null });
+      setProfiles({ loading: false, error: "", projectId: null, requestedRunId: null, status: null });
       return;
     }
     const controller = new AbortController();
-    setProfiles((current) => ({ ...current, loading: true, error: "" }));
-    void fetchCharacters(
-      projectId,
-      { page: 1, pageSize: 100 },
-      controller.signal,
-    )
-      .then((page) => {
-        if (page.has_more) {
-          setProfiles({
-            loading: false,
-            error: "角色数量超过当前引导页可核对范围，请进入角色档案完成确认。",
-            items: page.items,
-            total: page.total,
-            modelCoverage: page.model_coverage,
-            sourceRunId: page.source_run_id,
-          });
-          return;
-        }
+    setProfiles({ loading: true, error: "", projectId, requestedRunId: currentBaselineRun.id, status: null });
+    void fetchCharacterBaselineStatus(projectId, currentBaselineRun.id, controller.signal)
+      .then((status) => {
         setProfiles({
           loading: false,
           error: "",
-          items: page.items,
-          total: page.total,
-          modelCoverage: page.model_coverage,
-          sourceRunId: page.source_run_id,
+          projectId,
+          requestedRunId: currentBaselineRun.id,
+          status,
         });
       })
       .catch((error) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
         setProfiles({
           loading: false,
-          error: "暂时无法读取角色基线状态。页面不会把未知状态当作已完成。",
-          items: [],
-          total: 0,
-          modelCoverage: "unknown",
-          sourceRunId: null,
+          error: "暂时无法读取完整的角色基线汇总。请重试；未知状态不会解锁新稿审查。",
+          projectId,
+          requestedRunId: currentBaselineRun.id,
+          status: null,
         });
       });
     return () => controller.abort();
-  }, [projectId, currentBaselineRun?.id, documentState.unresolvedBaseline.length]);
+  }, [projectId, currentBaselineRun?.id, documentState.unresolvedBaseline.length, statusRefresh]);
 
-  const pendingCandidates = profiles.items.reduce(
-    (sum, character) => sum + character.pending_candidate_count,
-    0,
+  useEffect(() => {
+    // The component can be reused when the selected project, account, or
+    // baseline changes. Discard the previous scope's pending action and copy.
+    setAction(null);
+    setActionError("");
+    setReviewError("");
+    return () => {
+      preflightControllerRef.current?.abort();
+      preflightControllerRef.current = null;
+    };
+  }, [projectId, currentBaselineRun?.id, storageKey]);
+
+  const status = profiles.projectId === projectId && profiles.requestedRunId === currentBaselineRun?.id
+    ? profiles.status
+    : null;
+  const profilesLoading = Boolean(currentBaselineRun) && (
+    profiles.loading || profiles.projectId !== projectId || profiles.requestedRunId !== currentBaselineRun?.id
   );
-  const confirmedItems = profiles.items.reduce(
-    (sum, character) => sum + character.confirmed_item_count,
-    0,
-  );
+  const pendingCandidates = status?.pending_candidate_count ?? 0;
+  const confirmedItems = status?.confirmed_trait_count ?? 0;
   const contextsReady =
     documentState.baseline.length > 0 &&
     documentState.unresolvedBaseline.length === 0;
   const profilesReady =
     Boolean(currentBaselineRun) &&
-    !profiles.loading &&
+    !profilesLoading &&
     !profiles.error &&
-    profiles.sourceRunId === currentBaselineRun?.id &&
-    profiles.modelCoverage === "full" &&
-    confirmedItems > 0 &&
-    pendingCandidates === 0;
+    hasReadyCharacterBaseline(currentBaselineRun, status);
   const draftsReady = profilesReady && documentState.confirmedDrafts.length > 0;
 
   async function startBaseline() {
@@ -160,25 +205,56 @@ export default function GuidedReviewLaunch({
   }
 
   async function startDraftReview() {
-    if (!draftsReady || busy || action) return;
+    if (!draftsReady || busy || action || preflightControllerRef.current || !currentBaselineRun || !selectedDraftIds.length) return;
+    const controller = new AbortController();
+    preflightControllerRef.current = controller;
     try {
       setAction("review");
-      setActionError("");
+      setReviewError("");
+      let freshStatus: CharacterBaselineStatus;
+      try {
+        freshStatus = await fetchCharacterBaselineStatus(projectId, currentBaselineRun.id, controller.signal);
+      } catch {
+        if (controller.signal.aborted) return;
+        setProfiles({
+          loading: false,
+          error: "提交前无法复核角色基线。请重试读取状态；未知状态不会解锁审查。",
+          projectId,
+          requestedRunId: currentBaselineRun.id,
+          status: null,
+        });
+        setReviewError("提交前复核失败，本次没有启动任务。请重试读取角色基线后再校验。");
+        return;
+      }
+      if (controller.signal.aborted) return;
+      setProfiles({ loading: false, error: "", projectId, requestedRunId: currentBaselineRun.id, status: freshStatus });
+      if (!hasReadyCharacterBaseline(currentBaselineRun, freshStatus)) {
+        setReviewError("角色基线状态已变化，本次没有启动任务。请核对上方角色档案状态后再校验。");
+        return;
+      }
       await onStart(analysisRunRequest("draft_review", sensitivity, selectedDraftIds));
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "新稿审查没有启动，请重试。");
+      setReviewError(error instanceof Error ? error.message : "新稿审查没有启动，请重试。");
     } finally {
-      setAction(null);
+      if (preflightControllerRef.current === controller) {
+        preflightControllerRef.current = null;
+        setAction(null);
+      }
     }
   }
 
   function toggleDraft(documentId: string) {
-    setSelectedDraftIds((current) =>
-      current.includes(documentId)
-        ? current.filter((id) => id !== documentId)
-        : [...current, documentId],
-    );
-    setActionError("");
+    setDraftSelection((current) => {
+      const visible = current.storageKey === storageKey
+        ? current.ids.filter((id) => confirmedDraftIds.has(id))
+        : [];
+      const next = visible.includes(documentId)
+        ? visible.filter((id) => id !== documentId)
+        : [...visible, documentId];
+      saveDraftSelection(storageKey, next);
+      return { storageKey, ids: next };
+    });
+    setReviewError("");
   }
 
   return (
@@ -253,32 +329,43 @@ export default function GuidedReviewLaunch({
                   {action === "baseline" ? "正在启动…" : baselineRunCompleted ? "重新建立角色基线" : "建立角色基线"}
                 </button>
               </>
-            ) : profiles.loading ? (
+            ) : profilesLoading ? (
               <p className="stageNotice" aria-busy="true">正在读取角色基线状态…</p>
             ) : profiles.error ? (
-              <p className="stageNotice warning">{profiles.error}</p>
-            ) : profiles.sourceRunId !== currentBaselineRun.id ? (
+              <div className="stageStatusRecovery" role="alert">
+                <p className="stageNotice warning">{profiles.error}</p>
+                <button type="button" onClick={() => { setReviewError(""); setStatusRefresh((count) => count + 1); }}>重试读取基线状态</button>
+              </div>
+            ) : !status || status.baseline_run_id !== currentBaselineRun.id || status.baseline_run_status !== "completed" ? (
               <>
-                <p className="stageNotice warning">角色档案并非来自当前冻结资料的基线运行，不能用于解锁新稿审查。</p>
+                <p className="stageNotice warning">角色基线汇总并非来自当前冻结资料的完整运行，不能用于解锁新稿审查。</p>
                 <button className="quietPrimary" type="button" disabled={busy || Boolean(action)} onClick={() => void startBaseline()}>重新建立角色基线</button>
               </>
-            ) : profiles.modelCoverage !== "full" ? (
+            ) : status.model_coverage !== "full" ? (
               <>
-                <p className="stageNotice warning">角色审查覆盖不完整（{profiles.modelCoverage}），不会把已有少量结果当作完整基线。</p>
+                <p className="stageNotice warning">角色审查覆盖不完整（{status.model_coverage}），不会把已有少量结果当作完整基线。</p>
                 <button className="quietPrimary" type="button" disabled={busy || Boolean(action)} onClick={() => void startBaseline()}>重新建立角色基线</button>
               </>
-            ) : pendingCandidates > 0 ? (
+            ) : status.readiness !== "ready" ? (
               <>
-                <p className="stageNotice warning">还有 {pendingCandidates} 条 AI 归纳候选待确认；当前已有 {confirmedItems} 条正式档案。</p>
-                <button type="button" onClick={() => onNavigate("characters")}>核对角色归纳</button>
+                <p className="stageNotice warning">角色基线尚未就绪（{status.readiness}），不会把未知状态当作可用档案。</p>
+                <button className="quietPrimary" type="button" disabled={busy || Boolean(action)} onClick={() => void startBaseline()}>重新建立角色基线</button>
               </>
             ) : confirmedItems === 0 ? (
               <>
-                <p className="stageNotice warning">本次还没有形成已确认角色档案。这不代表资料中没有角色。</p>
-                <button type="button" onClick={() => onNavigate("characters")}>查看角色档案</button>
+                <p className="stageNotice warning">项目级角色档案中暂无已确认特征{pendingCandidates > 0 ? `，还有 ${pendingCandidates} 条待确认候选` : ""}。这不代表资料中没有角色，也不能据此宣称角色审查已就绪。</p>
+                <button type="button" onClick={() => onNavigate("characters")}>核对角色档案</button>
               </>
             ) : (
-              <p className="stageNotice success">{profiles.total} 个角色、{confirmedItems} 条档案已确认，可用于新稿审查。</p>
+              <div className="stageBaselineSummary" aria-live="polite">
+                <p className="stageNotice success">项目级汇总：{status.total_characters} 个角色、{confirmedItems} 条已确认特征；当前角色基线可用于新稿审查。</p>
+                {pendingCandidates > 0 && (
+                  <div className="stagePendingNotice">
+                    <p className="stageNotice warning">另有 {pendingCandidates} 条待确认的 AI 归纳候选。它们不会作为正式角色设定参与审查；你可以先审查新稿，之后再核对候选。</p>
+                    <button type="button" onClick={() => onNavigate("characters")}>核对待确认候选</button>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </li>
@@ -290,6 +377,7 @@ export default function GuidedReviewLaunch({
               <div><h3>选择新稿开始审查</h3><p>一次可检查单章，也可勾选同一批次的多个章节。</p></div>
               <b>{draftsReady ? "可开始" : "未解锁"}</b>
             </header>
+            {reviewError && <p className="stageReviewError" role="alert">{reviewError}</p>}
             {!profilesReady ? (
               <p className="stageNotice">完成角色基线确认后，才能用它审查新稿中的性格、偏好与行为漂移。</p>
             ) : documentState.confirmedDrafts.length === 0 ? (
@@ -299,6 +387,7 @@ export default function GuidedReviewLaunch({
               </>
             ) : (
               <div className="draftReviewSelection">
+                <p className="stageNotice draftReviewScopeNote">上方为项目级汇总，不保证所选章节中的每个角色都有已确认特征；未覆盖角色不会获得角色 OOC 判断，其他一致性检查仍可运行。</p>
                 <fieldset>
                   <legend>本次待审新稿</legend>
                   {documentState.confirmedDrafts.map((document) => (
@@ -319,7 +408,7 @@ export default function GuidedReviewLaunch({
                   disabled={busy || Boolean(action) || selectedDraftIds.length === 0}
                   onClick={() => void startDraftReview()}
                 >
-                  {busy || action === "review" ? "正在校验…" : `开始校验${selectedDraftIds.length ? `（${selectedDraftIds.length} 份）` : ""}`}
+                  {busy ? "正在校验…" : action === "review" ? "正在复核角色基线…" : `开始校验${selectedDraftIds.length ? `（${selectedDraftIds.length} 份）` : ""}`}
                 </button>
               </div>
             )}
