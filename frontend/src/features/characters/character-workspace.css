@@ -340,8 +340,9 @@
   color: var(--text-2);
   line-height: 1.65;
 }
-.characterProfileGroups li .characterWithdrawConfirm .characterWithdrawError,
+.characterProfileGroups li > .characterWithdrawError,
 .characterWithdrawUnavailable { color: var(--danger); }
+.characterProfileGroups li > .characterWithdrawError { margin-top: 8px; }
 .characterProfileGroups li > .characterWithdrawOpen {
   min-height: 44px;
   margin-top: 11px;

@@ -781,7 +781,6 @@ export default function CharacterWorkspace({
     } catch (error) {
       if (!isCurrentRequest()) return;
       const message = requestError(error);
-      setActionError(`撤销结果需要核对：${message}`);
       setWithdrawError({
         id: item.id,
         message: error instanceof ApiError
@@ -977,6 +976,7 @@ export default function CharacterWorkspace({
                         withdrawBusyId={withdrawBusyId}
                         withdrawError={withdrawError}
                         onWithdraw={(item) => void withdrawConfirmedTrait(item)}
+                        onDismissWithdrawError={() => setWithdrawError(null)}
                         onWithdrawnPage={setWithdrawnPageNumber}
                         onRetryWithdrawn={() => setWithdrawnReload((value) => value + 1)}
                         onAligned={() => {

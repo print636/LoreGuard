@@ -110,6 +110,8 @@ test("a confirmed trait remains accessible after source retirement and can be ex
   await page.getByRole("button", { name: "确认撤销特征" }).click();
   await expect(page.getByText(/这条特征已在其他页面更新；档案正在刷新/)).toBeVisible();
   await expect(page.getByRole("button", { name: "撤销这条特征" })).toBeVisible();
+  await expect(page.locator(".characterWithdrawError")).toContainText("这条特征已在其他页面更新；档案正在刷新");
+  await expect(page.getByRole("alert").filter({ hasText: /这条特征已在其他页面更新；档案正在刷新/ })).toHaveCount(1);
   expect(postCount).toBe(1);
 
   await page.getByRole("button", { name: "撤销这条特征" }).click();

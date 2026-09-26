@@ -23,6 +23,7 @@ export default function CharacterProfile({
   withdrawBusyId,
   withdrawError,
   onWithdraw,
+  onDismissWithdrawError,
   onWithdrawnPage,
   onRetryWithdrawn,
   onAligned,
@@ -37,6 +38,7 @@ export default function CharacterProfile({
   withdrawBusyId: string | null;
   withdrawError: { id: string; message: string } | null;
   onWithdraw: (item: CharacterProfileItem) => void;
+  onDismissWithdrawError: () => void;
   onWithdrawnPage: (page: number) => void;
   onRetryWithdrawn: () => void;
   onAligned: () => void;
@@ -133,9 +135,6 @@ export default function CharacterProfile({
                         <div className="characterWithdrawConfirm" role="group" aria-label={`撤销“${item.statement}”`}>
                           <strong>确定撤销这条正式特征？</strong>
                           <p>撤销后，它不再参与之后新建的审查；已有运行报告不会改写。撤销记录会保留，不能在这里直接恢复。</p>
-                          {withdrawError?.id === item.id && (
-                            <p className="characterWithdrawError" role="alert">{withdrawError.message}</p>
-                          )}
                           <div className="characterWithdrawActions">
                             <button
                               type="button"
@@ -149,7 +148,7 @@ export default function CharacterProfile({
                               ref={cancelRef}
                               type="button"
                               disabled={withdrawBusyId !== null}
-                              onClick={() => setConfirmId(null)}
+                              onClick={() => { setConfirmId(null); onDismissWithdrawError(); }}
                             >保留特征</button>
                           </div>
                         </div>
@@ -161,6 +160,9 @@ export default function CharacterProfile({
                           aria-expanded={false}
                           onClick={() => { setAlignId(null); setConfirmId(item.id); }}
                         >撤销这条特征</button>
+                      )}
+                      {withdrawError?.id === item.id && (
+                        <p className="characterWithdrawError" role="alert">{withdrawError.message}</p>
                       )}
                       {item.revision === null && (
                         <p className="characterWithdrawUnavailable">档案缺少并发审核版本，暂不能撤销。请刷新档案后重试。</p>
