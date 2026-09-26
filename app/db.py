@@ -25,6 +25,7 @@ from sqlalchemy import (
     event,
     func,
     select,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
@@ -608,13 +609,39 @@ class CharacterTraitAxisRow(Base):
         UniqueConstraint(
             "id", "project_id", name="uq_character_trait_axis_project_identity"
         ),
-        UniqueConstraint(
+        Index(
+            "uq_character_trait_axis_core_definition",
+            "project_id", "definition_sha256", unique=True,
+            sqlite_where=text("trait_type = 'core_personality'"),
+            postgresql_where=text("trait_type = 'core_personality'"),
+        ),
+        Index(
+            "uq_character_trait_axis_scoped_definition",
             "project_id", "trait_type", "definition_sha256",
-            name="uq_character_trait_axis_definition",
+            "comparison_key", "applicability_scope_sha256", unique=True,
+            sqlite_where=text("trait_type IN ('value', 'behavior_boundary')"),
+            postgresql_where=text("trait_type IN ('value', 'behavior_boundary')"),
         ),
         CheckConstraint(
-            "trait_type = 'core_personality'",
+            "trait_type IN ('core_personality', 'value', 'behavior_boundary')",
             name="ck_character_trait_axis_type",
+        ),
+        CheckConstraint(
+            "(trait_type = 'core_personality' AND comparison_key IS NULL "
+            "AND applicability_scope IS NULL AND applicability_scope_sha256 IS NULL) "
+            "OR (trait_type IN ('value', 'behavior_boundary') "
+            "AND comparison_key IS NOT NULL "
+            "AND substr(comparison_key, 1, length(trait_type) + 1) = trait_type || ':' "
+            "AND length(comparison_key) > length(trait_type) + 1 "
+            "AND length(comparison_key) <= 200 "
+            "AND applicability_scope IS NOT NULL "
+            "AND length(applicability_scope) BETWEEN 1 AND 200 "
+            "AND applicability_scope_sha256 IS NOT NULL "
+            "AND length(applicability_scope_sha256) = 64 "
+            "AND positive_proposition IS NOT NULL "
+            "AND positive_proposition_sha256 IS NOT NULL "
+            "AND positive_proposition_authored_at IS NOT NULL)",
+            name="ck_character_trait_axis_object_scope",
         ),
         CheckConstraint("version = 1", name="ck_character_trait_axis_version"),
         CheckConstraint(
@@ -641,6 +668,12 @@ class CharacterTraitAxisRow(Base):
     display_name: Mapped[str] = mapped_column(String(80))
     definition: Mapped[str] = mapped_column(String(200))
     definition_sha256: Mapped[str] = mapped_column(String(64))
+    # Required on value/boundary axes. No historical core axis is backfilled.
+    comparison_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    applicability_scope: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    applicability_scope_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     # Explicit author proposition; historical axes stay unset until authored.
     positive_proposition: Mapped[str | None] = mapped_column(String(200), nullable=True)
     positive_proposition_sha256: Mapped[str | None] = mapped_column(

@@ -302,10 +302,14 @@ class CharacterTraitDecisionIn(BaseModel):
 class CharacterTraitAxisCreateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    trait_type: Literal["core_personality"] = "core_personality"
+    trait_type: Literal[
+        "core_personality", "value", "behavior_boundary"
+    ] = "core_personality"
     display_name: str = Field(min_length=1, max_length=80)
     definition: str = Field(min_length=1, max_length=200)
     positive_proposition: str | None = Field(default=None, min_length=1, max_length=200)
+    comparison_key: str | None = Field(default=None, min_length=1, max_length=200)
+    applicability_scope: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class CharacterTraitAxisPropositionIn(BaseModel):
@@ -1111,6 +1115,9 @@ def serialize_character_trait_axis(row: CharacterTraitAxisRow) -> dict:
         "display_name": row.display_name,
         "definition": row.definition,
         "definition_sha256": row.definition_sha256,
+        "comparison_key": row.comparison_key,
+        "applicability_scope": row.applicability_scope,
+        "applicability_scope_sha256": row.applicability_scope_sha256,
         "positive_proposition": row.positive_proposition,
         "positive_proposition_sha256": row.positive_proposition_sha256,
         "positive_proposition_authored_by_user_id": (
@@ -3297,15 +3304,17 @@ def list_character_trait_axes(
     project_id: str,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
+    trait_type: Literal[
+        "core_personality", "value", "behavior_boundary", "all"
+    ] = "core_personality",
     context: AuthContext = Depends(get_auth_context),
 ) -> dict:
     with SessionLocal() as db:
         if not _project_in_workspace(db, project_id, context.workspace_id):
             raise HTTPException(404, "项目不存在")
-        conditions = (
-            CharacterTraitAxisRow.project_id == project_id,
-            CharacterTraitAxisRow.trait_type == "core_personality",
-        )
+        conditions = [CharacterTraitAxisRow.project_id == project_id]
+        if trait_type != "all":
+            conditions.append(CharacterTraitAxisRow.trait_type == trait_type)
         total = db.scalar(
             select(func.count()).select_from(CharacterTraitAxisRow).where(*conditions)
         ) or 0
@@ -3360,6 +3369,56 @@ def _normalized_axis_proposition(value: str) -> tuple[str, str]:
     return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _new_axis_object_scope(
+    payload: CharacterTraitAxisCreateIn,
+) -> tuple[str | None, str | None, str | None]:
+    """Require the author to name both the object and situation on new axes."""
+
+    if payload.trait_type == "core_personality":
+        if payload.comparison_key is not None or payload.applicability_scope is not None:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "character_trait_axis_object_scope_not_applicable",
+                    "message": "核心性格比较轴不接受对象或情境字段",
+                },
+            )
+        return None, None, None
+    if (
+        payload.positive_proposition is None
+        or payload.comparison_key is None
+        or payload.applicability_scope is None
+    ):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "character_trait_axis_object_scope_required",
+                "message": "价值观或行为边界比较轴须由作者填写正向命题、对象键和适用情境",
+            },
+        )
+    try:
+        key = _validated_comparison_key(
+            payload.comparison_key, trait_type=payload.trait_type
+        )
+    except ValueError:
+        key = None
+    scope = " ".join(payload.applicability_scope.split())
+    if (
+        key is None
+        or not _safe_axis_author_text(key)
+        or not scope
+        or not _safe_axis_author_text(scope)
+    ):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "character_trait_axis_object_scope_invalid",
+                "message": "比较对象键或适用情境无效",
+            },
+        )
+    return key, scope, hashlib.sha256(scope.encode("utf-8")).hexdigest()
+
+
 @app.post(
     "/api/v1/projects/{project_id}/character-trait-axes/{axis_id}/positive-proposition"
 )
@@ -3383,6 +3442,14 @@ def set_character_trait_axis_positive_proposition(
         )
         if axis is None:
             raise HTTPException(404, "比较轴不存在")
+        if axis.trait_type != "core_personality":
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_axis_proposition_immutable",
+                    "message": "价值观或行为边界比较轴的正向命题在创建时已经确定",
+                },
+            )
         if axis.version != payload.expected_axis_version:
             raise HTTPException(
                 409,
@@ -3454,6 +3521,9 @@ def create_character_trait_axis(
         _normalized_axis_proposition(payload.positive_proposition)
         if payload.positive_proposition is not None else (None, None)
     )
+    comparison_key, applicability_scope, applicability_scope_hash = (
+        _new_axis_object_scope(payload)
+    )
     if not _safe_axis_author_text(display_name) or not _safe_axis_author_text(
         definition
     ):
@@ -3476,29 +3546,43 @@ def create_character_trait_axis(
         if project is None:
             raise HTTPException(404, "项目不存在")
         definition_sha256 = hashlib.sha256(definition.encode("utf-8")).hexdigest()
+        identity_conditions = [
+            CharacterTraitAxisRow.project_id == project_id,
+            CharacterTraitAxisRow.trait_type == payload.trait_type,
+            CharacterTraitAxisRow.definition_sha256 == definition_sha256,
+        ]
+        if payload.trait_type != "core_personality":
+            identity_conditions.extend((
+                CharacterTraitAxisRow.comparison_key == comparison_key,
+                CharacterTraitAxisRow.applicability_scope_sha256
+                == applicability_scope_hash,
+            ))
         existing = db.scalar(
-            select(CharacterTraitAxisRow).where(
-                CharacterTraitAxisRow.project_id == project_id,
-                CharacterTraitAxisRow.trait_type == "core_personality",
-                CharacterTraitAxisRow.definition_sha256 == definition_sha256,
-            )
+            select(CharacterTraitAxisRow).where(*identity_conditions)
         )
         if existing is not None:
             raise HTTPException(
                 409,
                 detail={
                     "code": "character_trait_axis_duplicate",
-                    "message": "相同定义的比较轴已存在，请从轴列表选择",
+                    "message": (
+                        "相同定义的比较轴已存在，请从轴列表选择"
+                        if payload.trait_type == "core_personality"
+                        else "相同定义、对象和适用情境的比较轴已存在，请从轴列表选择"
+                    ),
                     "existing_axis_id": existing.id,
                 },
             )
         axis = CharacterTraitAxisRow(
             project_id=project_id,
-            trait_type="core_personality",
+            trait_type=payload.trait_type,
             version=1,
             display_name=display_name,
             definition=definition,
             definition_sha256=definition_sha256,
+            comparison_key=comparison_key,
+            applicability_scope=applicability_scope,
+            applicability_scope_sha256=applicability_scope_hash,
             positive_proposition=positive_proposition,
             positive_proposition_sha256=positive_hash,
             positive_proposition_authored_by_user_id=(
@@ -5050,6 +5134,14 @@ def decide_character_profile_candidate(
         approved_axis = None
         approved_axis_polarity = None
         if payload.approved_axis_id is not None:
+            if row.trait_type in {"value", "behavior_boundary"}:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_axis_matching_unavailable",
+                        "message": "价值观或行为边界比较轴的对象与情境目标校验尚未启用",
+                    },
+                )
             if row.trait_type != "core_personality":
                 raise HTTPException(
                     422,

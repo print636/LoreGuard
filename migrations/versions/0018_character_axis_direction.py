@@ -317,12 +317,12 @@ def downgrade() -> None:
         "positive_proposition_sha256",
         "positive_proposition",
     )
-    if bind.dialect.name == "sqlite" and _has_check(
-        _AXIS, "ck_character_trait_axis_proposition_pair"
-    ):
+    if bind.dialect.name == "sqlite":
         # The referenced table's temporary absence during batch replacement
         # invalidates 0015 cross-table guards. Drop only those exact known
         # triggers, then restore them and the axis identity immutability guard.
+        # A nullable author FK was added inline in 0018; SQLite cannot DROP
+        # that column directly even when no physical proposition CHECK exists.
         for table in (_CANDIDATES, _REVIEWS):
             for action in ("insert", "update"):
                 op.execute(sa.text(
@@ -331,9 +331,10 @@ def downgrade() -> None:
         with op.batch_alter_table(
             _AXIS, recreate="always", reflect_kwargs={"resolve_fks": False}
         ) as batch:
-            batch.drop_constraint(
-                "ck_character_trait_axis_proposition_pair", type_="check"
-            )
+            if _has_check(_AXIS, "ck_character_trait_axis_proposition_pair"):
+                batch.drop_constraint(
+                    "ck_character_trait_axis_proposition_pair", type_="check"
+                )
             for name in axis_columns:
                 batch.drop_column(name)
         _restore_sqlite_axis_identity_immutability()

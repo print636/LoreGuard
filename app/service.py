@@ -36,11 +36,13 @@ from .character_traits import (
     MAX_CONFIRMED_TRAITS_PER_RUN,
     candidate_snapshot_comparison_key,
     candidate_snapshot_payload,
+    _validated_comparison_key,
     latest_confirm_reviews,
     verified_character_trait_review_chain,
 )
 from .character_consistency_stage import (
     CharacterConsistencyStage,
+    _safe_context_label,
     failed_character_consistency_stage,
 )
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
@@ -854,7 +856,7 @@ def _approved_axis_snapshot_fields(db, candidate, review) -> dict[str, Any]:
         axis is None
         or axis.project_id != candidate.project_id
         or axis.trait_type != candidate.trait_type
-        or axis.trait_type != "core_personality"
+        or axis.trait_type not in {"core_personality", "value", "behavior_boundary"}
         or axis.version != axis_version
         or not isinstance(axis.definition, str)
         or not 1 <= len(axis.definition) <= 200
@@ -876,6 +878,47 @@ def _approved_axis_snapshot_fields(db, candidate, review) -> dict[str, Any]:
         or sha256(proposition.encode("utf-8")).hexdigest() != proposition_hash
     ):
         raise ValueError("approved character axis proposition is invalid")
+    object_scope: dict[str, str] = {}
+    if axis.trait_type == "core_personality":
+        if any(
+            getattr(axis, name) is not None
+            for name in (
+                "comparison_key", "applicability_scope",
+                "applicability_scope_sha256",
+            )
+        ):
+            raise ValueError("core character axis has an object scope")
+    else:
+        try:
+            key = _validated_comparison_key(
+                axis.comparison_key, trait_type=axis.trait_type
+            )
+            candidate_key = _validated_comparison_key(
+                candidate.comparison_key, trait_type=candidate.trait_type
+            )
+        except ValueError as exc:
+            raise ValueError("approved character axis object is invalid") from exc
+        scope = axis.applicability_scope
+        if (
+            key is None
+            or candidate_key != key
+            or not _safe_context_label(key)
+            or not isinstance(scope, str)
+            or not _safe_context_label(scope)
+            or scope != " ".join(scope.split())
+            or sha256(scope.encode("utf-8")).hexdigest()
+            != axis.applicability_scope_sha256
+            or proposition is None
+            or axis.positive_proposition_authored_at is None
+        ):
+            raise ValueError("approved character axis object or scope is invalid")
+        object_scope = {
+            "approved_axis_comparison_key": key,
+            "approved_axis_applicability_scope": scope,
+            "approved_axis_applicability_scope_sha256": (
+                axis.applicability_scope_sha256
+            ),
+        }
     alignment = getattr(candidate, "axis_alignment", None)
     axis_polarity = getattr(candidate, "axis_polarity", None)
     approved_proposition_hash = getattr(
@@ -900,6 +943,11 @@ def _approved_axis_snapshot_fields(db, candidate, review) -> dict[str, Any]:
             raise ValueError("approved character axis alignment is invalid")
         # Confirmed legacy rows can be aligned later without rewriting the
         # original confirmation; the chain check above validates this path.
+    if (
+        axis.trait_type in {"value", "behavior_boundary"}
+        and alignment not in {"same", "opposite"}
+    ):
+        raise ValueError("scoped character axis alignment is missing")
     return {
         "approved_axis_id": axis.id,
         "approved_axis_version": axis.version,
@@ -910,6 +958,7 @@ def _approved_axis_snapshot_fields(db, candidate, review) -> dict[str, Any]:
         "axis_positive_proposition_sha256": proposition_hash,
         "axis_alignment": alignment,
         "axis_polarity": axis_polarity,
+        **object_scope,
     }
 
 

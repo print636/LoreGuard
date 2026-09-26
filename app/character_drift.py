@@ -64,6 +64,15 @@ class ConfirmedTraitSnapshot(BaseModel):
     approved_axis_definition_sha256: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$"
     )
+    approved_axis_comparison_key: str | None = Field(
+        default=None, min_length=1, max_length=200
+    )
+    approved_axis_applicability_scope: str | None = Field(
+        default=None, min_length=1, max_length=200
+    )
+    approved_axis_applicability_scope_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
     # The original polarity is relative to trait_key.  Author-reviewed axis
     # direction is a separate, frozen coordinate system.
     axis_positive_proposition: str | None = Field(default=None, min_length=1, max_length=200)
@@ -89,7 +98,9 @@ class ConfirmedTraitSnapshot(BaseModel):
             self.approved_axis_definition_sha256,
         )
         if any(value is not None for value in axis_fields):
-            if self.dimension != "core_personality" or any(
+            if self.dimension not in {
+                "core_personality", "value", "behavior_boundary"
+            } or any(
                 value is None for value in axis_fields
             ):
                 raise ValueError("approved character axis is incomplete")
@@ -105,6 +116,29 @@ class ConfirmedTraitSnapshot(BaseModel):
                 != self.approved_axis_definition_sha256
             ):
                 raise ValueError("approved character axis definition hash is invalid")
+        object_fields = (
+            self.approved_axis_comparison_key,
+            self.approved_axis_applicability_scope,
+            self.approved_axis_applicability_scope_sha256,
+        )
+        if self.dimension == "core_personality" or self.approved_axis_id is None:
+            if any(value is not None for value in object_fields):
+                raise ValueError("unscoped character axis has object metadata")
+        else:
+            key, scope, scope_hash = object_fields
+            prefix = f"{self.dimension}:"
+            if (
+                any(value is None for value in object_fields)
+                or not key.startswith(prefix)
+                or not key[len(prefix):]
+                or ":" in key[len(prefix):]
+                or any(char.isspace() for char in key)
+                or unicodedata.normalize("NFKC", key).casefold() != key
+                or scope != " ".join(scope.split())
+                or hashlib.sha256(scope.encode("utf-8")).hexdigest()
+                != scope_hash
+            ):
+                raise ValueError("approved character axis object or scope is invalid")
         positive = self.axis_positive_proposition
         positive_hash = self.axis_positive_proposition_sha256
         if (positive is None) != (positive_hash is None):
@@ -114,6 +148,12 @@ class ConfirmedTraitSnapshot(BaseModel):
             or hashlib.sha256(positive.encode("utf-8")).hexdigest() != positive_hash
         ):
             raise ValueError("approved character axis proposition hash is invalid")
+        if (
+            self.approved_axis_id is not None
+            and self.dimension in {"value", "behavior_boundary"}
+            and (positive is None or self.axis_alignment not in {"same", "opposite"})
+        ):
+            raise ValueError("scoped character axis direction is incomplete")
         if self.approved_axis_id is None:
             if any(
                 value is not None
@@ -128,6 +168,10 @@ class ConfirmedTraitSnapshot(BaseModel):
                 raise ValueError("legacy axis has a directional polarity")
         elif (
             positive is None
+            or (
+                self.dimension in {"value", "behavior_boundary"}
+                and self.approved_axis_applicability_scope is None
+            )
             or self.polarity not in {"positive", "negative"}
             or self.axis_polarity
             != (
@@ -301,6 +345,23 @@ CHARACTER_REVIEW_SYSTEM_PROMPT = """你是 LoreGuard 的角色一致性证据审
 
 def prepare_character_drift(case: CharacterDriftCase) -> PreparedCharacterDrift:
     baseline = case.baseline
+    if (
+        baseline.approved_axis_identity is not None
+        and baseline.dimension in {"value", "behavior_boundary"}
+    ):
+        # The targeted binder has not yet proved that the draft names this
+        # exact object in the author's situation. A bound ID alone is not a
+        # safe comparison for an object-bearing principle.
+        return PreparedCharacterDrift(
+            id=case.id,
+            subtype=_subtype(baseline.dimension),
+            case=case,
+            matching_observations=(),
+            candidate_level="none",
+            reviewer_eligible=False,
+            deterministic_conflict=False,
+            reason="scoped_axis_target_binding_unavailable",
+        )
     if baseline.approved_axis_identity is not None and not baseline.axis_direction_verified:
         return PreparedCharacterDrift(
             id=case.id,

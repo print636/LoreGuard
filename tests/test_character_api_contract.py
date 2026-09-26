@@ -1762,6 +1762,121 @@ def test_author_axis_creation_is_project_scoped_immutable_and_exact_duplicates_c
             db.rollback()
 
 
+@pytest.mark.parametrize(
+    ("trait_type", "comparison_key"),
+    (("value", "value:家人"), ("behavior_boundary", "behavior_boundary:家人")),
+)
+def test_author_scoped_axis_requires_explicit_object_situation_and_stays_unbound(
+    trait_type: str, comparison_key: str,
+):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client, content="林澈一直重视家人。"
+        )
+        run = _completed_run(client, project["id"])
+        base = f"/api/v1/projects/{project['id']}/character-trait-axes"
+        payload = {
+            "trait_type": trait_type,
+            "display_name": "家人原则",
+            "definition": "是否在家庭危机中优先保护家人",
+            "positive_proposition": "林澈在家庭危机中保护家人",
+            "comparison_key": comparison_key,
+            "applicability_scope": "家庭危机发生时",
+        }
+        for missing_field in (
+            "positive_proposition", "comparison_key", "applicability_scope"
+        ):
+            response = client.post(
+                base, json={key: value for key, value in payload.items()
+                            if key != missing_field},
+            )
+            assert response.status_code == 422, response.text
+            assert response.json()["detail"]["code"] == (
+                "character_trait_axis_object_scope_required"
+            )
+        wrong_key = client.post(
+            base, json={**payload, "comparison_key": "preference:家人"}
+        )
+        assert wrong_key.status_code == 422, wrong_key.text
+        assert wrong_key.json()["detail"]["code"] == (
+            "character_trait_axis_object_scope_invalid"
+        )
+        created = client.post(base, json=payload)
+        assert created.status_code == 201, created.text
+        axis = created.json()
+        assert axis["trait_type"] == trait_type
+        assert axis["comparison_key"] == comparison_key
+        assert axis["applicability_scope"] == "家庭危机发生时"
+        assert len(axis["applicability_scope_sha256"]) == 64
+        assert axis["positive_proposition_authored_at"] is not None
+        assert client.get(base).json()["items"] == []
+        selected_list = client.get(base, params={"trait_type": trait_type})
+        assert selected_list.status_code == 200, selected_list.text
+        assert selected_list.json()["items"] == [axis]
+        duplicate = client.post(base, json=payload)
+        assert duplicate.status_code == 409, duplicate.text
+        assert duplicate.json()["detail"]["code"] == "character_trait_axis_duplicate"
+        assert duplicate.json()["detail"]["existing_axis_id"] == axis["id"]
+        normalized_duplicate = client.post(
+            base, json={**payload, "applicability_scope": "\n家庭危机发生时\t"}
+        )
+        assert normalized_duplicate.status_code == 409, normalized_duplicate.text
+        assert normalized_duplicate.json()["detail"]["existing_axis_id"] == axis["id"]
+        other_object = client.post(
+            base, json={**payload, "comparison_key": f"{trait_type}:陌生人"}
+        )
+        assert other_object.status_code == 201, other_object.text
+        other_scope = client.post(
+            base, json={**payload, "applicability_scope": "平常日常时"}
+        )
+        assert other_scope.status_code == 201, other_scope.text
+        assert len({
+            axis["id"], other_object.json()["id"], other_scope.json()["id"]
+        }) == 3
+        selected_list = client.get(base, params={"trait_type": trait_type})
+        assert selected_list.status_code == 200, selected_list.text
+        assert selected_list.json()["total"] == 3
+        assert {item["id"] for item in selected_list.json()["items"]} == {
+            axis["id"], other_object.json()["id"], other_scope.json()["id"],
+        }
+        other_project, _ = _project_and_document(client)
+        assert client.get(
+            f"/api/v1/projects/{other_project['id']}/character-trait-axes"
+        ).json()["items"] == []
+        assert client.get(
+            f"/api/v1/projects/{other_project['id']}/character-trait-axes/{axis['id']}"
+        ).status_code == 404
+        candidate_id = _candidate(
+            project["id"], run["id"], trait_type=trait_type,
+            trait_key="保护家人的原则", comparison_key=comparison_key,
+            value="重视家人",
+        )
+        attempted = client.post(
+            _decision_path(project["id"], candidate_id),
+            json={
+                "decision": "confirm", "expected_revision": 0,
+                "approved_axis_id": axis["id"], "expected_axis_version": 1,
+                "axis_alignment": "same",
+                "expected_axis_positive_proposition_sha256": (
+                    axis["positive_proposition_sha256"]
+                ),
+            },
+        )
+        assert attempted.status_code == 409, attempted.text
+        assert attempted.json()["detail"]["code"] == (
+            "character_trait_axis_matching_unavailable"
+        )
+        with SessionLocal() as db:
+            candidate = db.get(CharacterTraitCandidateRow, candidate_id)
+            assert candidate.review_state == "pending"
+            assert candidate.lock_version == 0
+            assert candidate.approved_axis_id is None
+        unbound = _confirm(client, project["id"], candidate_id)
+        assert unbound.status_code == 201, unbound.text
+        assert unbound.json()["candidate"]["review_state"] == "confirmed"
+        assert unbound.json()["candidate"]["approved_axis_id"] is None
+
+
 def test_author_axis_confirmation_binds_atomically_and_same_axis_blocks_different_raw_labels():
     with TestClient(app) as client:
         project, _ = _project_and_document(client)
@@ -2169,6 +2284,24 @@ def test_author_axis_workspace_and_csrf_are_required_in_account_mode():
         assert outsider.get(axis_url).status_code == 404
         assert outsider.post(axis_url, json=body, headers=other_headers).status_code == 404
         axis = _create_axis(owner, project["id"], headers=owner_headers)
+        scoped_body = {
+            "trait_type": "value", "display_name": "家人原则",
+            "definition": "家庭危机时保护家人",
+            "positive_proposition": "林澈保护家人",
+            "comparison_key": "value:家人",
+            "applicability_scope": "家庭危机发生时",
+        }
+        assert owner.post(axis_url, json=scoped_body).status_code == 403
+        assert outsider.post(
+            axis_url, json=scoped_body, headers=other_headers
+        ).status_code == 404
+        scoped = owner.post(
+            axis_url, json=scoped_body, headers=owner_headers
+        )
+        assert scoped.status_code == 201, scoped.text
+        assert outsider.get(
+            f"{axis_url}/{scoped.json()['id']}"
+        ).status_code == 404
         run = _completed_run(owner, project["id"], headers=owner_headers)
         candidate_id = _candidate(
             project["id"], run["id"], trait_type="core_personality",
