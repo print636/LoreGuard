@@ -300,6 +300,7 @@ def test_targeted_mismatch_diagnostics_include_recall_and_verification_phases():
         result = _run_stage(
             _new_run(client, project["id"]), provider,
             character_signal_max_completion_tokens=512,
+            character_signal_draft_trace_v1=True,
         )
 
     diagnostics = result.diagnostics
@@ -324,6 +325,28 @@ def test_targeted_mismatch_diagnostics_include_recall_and_verification_phases():
     assert all(event["outcome"] == "completed" for event in events)
     assert diagnostics["evidence_mismatch_chunks_omitted_count"] == 0
     assert "private-draft.md" not in json.dumps(events, ensure_ascii=False)
+    draft_traces = diagnostics["draft_trace_chunks"]
+    assert [event["phase"] for event in draft_traces] == [
+        "primary_extraction", "targeted_recall", "targeted_verification",
+    ]
+    assert [event["target_ordinal"] for event in draft_traces] == [None, 1, 1]
+    assert all(event["source_document_ordinal"] == 1 for event in draft_traces)
+    assert all(event["document_chunk_ordinal"] == 1 for event in draft_traces)
+    assert all(event["stage_chunk_ordinal"] == 2 for event in draft_traces)
+    assert all(event["availability"] == "available" for event in draft_traces)
+    assert draft_traces[0]["trace"]["attempts"][0]["submitted_record_count"] == 0
+    assert [
+        event["reason"]
+        for trace_event in draft_traces[1:]
+        for event in trace_event["trace"]["attempts"][0]["events"]
+    ] == ["evidence_mismatch", "evidence_mismatch"]
+    assert all(trace_event["trace"]["final_state"] == "clean"
+               for trace_event in draft_traces)
+    assert diagnostics["draft_trace_chunks_omitted_count"] == 0
+    serialized_draft_traces = json.dumps(draft_traces, ensure_ascii=False)
+    assert all(private not in serialized_draft_traces for private in (
+        antecedent, observation, profile_line, "private-draft.md", "祁雾",
+    ))
 
 
 def _context(
@@ -1015,6 +1038,56 @@ def test_stage_support_trace_exports_validated_formal_chunk_only():
     assert all(value not in serialized for value in (
         profile_line, draft_line, "private-profile.md", "private-draft.md",
         "L1:A1", "L1:A2",
+    ))
+
+
+def test_stage_draft_trace_bounds_entries_and_marks_missing_trace_unavailable(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.character_consistency_stage._MAX_DRAFT_TRACE_CHUNKS", 1
+    )
+    private_lines = ("甲关上门。", "乙走出门。")
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"草稿匿名诊断-{uuid4().hex}"}
+        ).json()
+        for index, line in enumerate(private_lines):
+            _create_document(
+                client, project["id"], name=f"private-draft-{index}.md",
+                role="chapter", content=line,
+                narrative_context=_context(publication="draft"),
+            )
+        extraction = CharacterSignalExtractionResult(
+            diagnostics=CharacterSignalDiagnostics(
+                outcome="skipped", attempted_calls=0, raw_records=0,
+                accepted_records=0, rejected_records=0,
+            )
+        )
+        with patch(
+            "app.character_consistency_stage.CharacterSignalExtractor.extract",
+            return_value=extraction,
+        ) as mock_extract:
+            result = _run_stage(
+                _new_run(client, project["id"]), QueueProvider(),
+                character_signal_draft_trace_v1=True,
+            )
+
+    assert mock_extract.call_count == 2
+    assert result.diagnostics["draft_trace_chunks"] == [{
+        "source_document_ordinal": 0,
+        "document_chunk_ordinal": 1,
+        "stage_chunk_ordinal": 1,
+        "phase": "primary_extraction",
+        "target_ordinal": None,
+        "outcome": "skipped",
+        "availability": "unavailable",
+        "trace": None,
+    }]
+    assert result.diagnostics["draft_trace_chunks_omitted_count"] == 1
+    serialized = json.dumps(result.diagnostics["draft_trace_chunks"], ensure_ascii=False)
+    assert all(value not in serialized for value in (
+        *private_lines, "private-draft-0.md", "private-draft-1.md",
     ))
 
 

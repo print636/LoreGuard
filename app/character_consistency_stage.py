@@ -35,6 +35,7 @@ from .character_trait_extraction import (
     CharacterSignalChunk,
     CharacterSignalExtractor,
     CharacterSignalTarget,
+    DraftSignalTraceV1,
     PendingTraitCandidate,
     SupportTraceV1,
     _draft_preference_proves_direct,
@@ -156,6 +157,10 @@ _MAX_ACCEPTED_DRAFT_OBSERVATION_REFS = 64
 _MAX_TOKEN_ADMISSION_EVENTS = 24
 _MAX_EVIDENCE_MISMATCH_CHUNKS = 128
 _MAX_SUPPORT_TRACE_CHUNKS = 128
+_MAX_DRAFT_TRACE_CHUNKS = 128
+_DRAFT_TRACE_PHASES = frozenset({
+    "primary_extraction", "targeted_recall", "targeted_verification",
+})
 _SAFE_SIGNAL_OUTCOMES = frozenset(
     {"disabled", "completed", "partial", "degraded", "skipped"}
 )
@@ -326,6 +331,7 @@ class CharacterConsistencyStage:
             return _empty_stage_result(
                 "degraded", "invalid_remaining_budget",
                 support_trace_enabled=settings.character_signal_support_trace_v1,
+                draft_trace_enabled=settings.character_signal_draft_trace_v1,
             )
 
         stage_budget = min(
@@ -336,6 +342,7 @@ class CharacterConsistencyStage:
             return _empty_stage_result(
                 "skipped", "run_token_budget",
                 support_trace_enabled=settings.character_signal_support_trace_v1,
+                draft_trace_enabled=settings.character_signal_draft_trace_v1,
             )
 
         usage = _Usage()
@@ -347,6 +354,8 @@ class CharacterConsistencyStage:
         evidence_mismatch_chunks_omitted = 0
         support_trace_chunks: list[dict[str, Any]] = []
         support_trace_chunks_omitted = 0
+        draft_trace_chunks: list[dict[str, Any]] = []
+        draft_trace_chunks_omitted = 0
         frozen = self._bind_frozen_documents(
             db,
             run_id=run_id,
@@ -365,6 +374,7 @@ class CharacterConsistencyStage:
                     source_total=len(frozen),
                     source_eligible=0,
                     support_trace_enabled=settings.character_signal_support_trace_v1,
+                    draft_trace_enabled=settings.character_signal_draft_trace_v1,
                 )
             )
 
@@ -675,6 +685,46 @@ class CharacterConsistencyStage:
                 }
             )
 
+        def record_draft_trace(
+            phase: str,
+            extraction: object,
+            *,
+            source: _FrozenDocument,
+            chunk: object,
+            chunk_ordinal: int,
+            target_ordinal: int | None = None,
+        ) -> None:
+            nonlocal draft_trace_chunks_omitted
+            if (
+                not settings.character_signal_draft_trace_v1
+                or source.source_kind != "draft"
+                or phase not in _DRAFT_TRACE_PHASES
+            ):
+                return
+            if len(draft_trace_chunks) >= _MAX_DRAFT_TRACE_CHUNKS:
+                draft_trace_chunks_omitted += 1
+                return
+            diagnostics = getattr(extraction, "diagnostics", None)
+            raw_outcome = getattr(diagnostics, "outcome", None)
+            outcome = (
+                raw_outcome
+                if type(raw_outcome) is str and raw_outcome in _SAFE_SIGNAL_OUTCOMES
+                else "degraded"
+            )
+            trace = _validated_draft_trace_payload(
+                getattr(diagnostics, "draft_trace", None)
+            )
+            draft_trace_chunks.append({
+                "source_document_ordinal": source.ordinal,
+                "document_chunk_ordinal": original_chunk_ordinals[id(chunk)],
+                "stage_chunk_ordinal": chunk_ordinal,
+                "phase": phase,
+                "target_ordinal": target_ordinal,
+                "outcome": outcome,
+                "availability": "available" if trace is not None else "unavailable",
+                "trace": trace,
+            })
+
         def record_token_admission(
             phase: str,
             extraction: object,
@@ -762,6 +812,10 @@ class CharacterConsistencyStage:
                 model_completed_chunks += 1
             record_support_trace(
                 extraction, source=source, chunk_ordinal=chunk_ordinal
+            )
+            record_draft_trace(
+                "primary_extraction", extraction,
+                source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
             )
             record_token_admission(
                 "primary_extraction",
@@ -894,6 +948,11 @@ class CharacterConsistencyStage:
                 targeted = CharacterSignalExtractor(
                     self.provider, settings=targeted_settings
                 ).extract_targeted(targeted_chunk, (target,))
+                record_draft_trace(
+                    "targeted_recall", targeted,
+                    source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
+                    target_ordinal=target_index + 1,
+                )
                 record_token_admission(
                     "targeted_recall",
                     targeted,
@@ -1036,6 +1095,11 @@ class CharacterConsistencyStage:
                     targeted_chunk,
                     (target,),
                     candidate_evidence_ranges=candidate_ranges,
+                )
+                record_draft_trace(
+                    "targeted_verification", verification,
+                    source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
+                    target_ordinal=target_index + 1,
                 )
                 record_token_admission(
                     "targeted_verification",
@@ -1594,6 +1658,9 @@ class CharacterConsistencyStage:
             support_trace_enabled=settings.character_signal_support_trace_v1,
             support_trace_chunks=support_trace_chunks,
             support_trace_chunks_omitted_count=support_trace_chunks_omitted,
+            draft_trace_enabled=settings.character_signal_draft_trace_v1,
+            draft_trace_chunks=draft_trace_chunks,
+            draft_trace_chunks_omitted_count=draft_trace_chunks_omitted,
         )
         return CharacterConsistencyStageResult(
             issues=tuple(issues),
@@ -3693,6 +3760,19 @@ def _validated_support_trace_payload(trace: object) -> dict[str, Any] | None:
         return None
 
 
+def _validated_draft_trace_payload(trace: object) -> dict[str, Any] | None:
+    """Export only the fixed anonymous schema; never inspect model text."""
+
+    if not isinstance(trace, DraftSignalTraceV1):
+        return None
+    try:
+        return DraftSignalTraceV1.model_validate(trace.model_dump()).model_dump(
+            mode="json"
+        )
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def _diagnostics(
     *,
     outcome: str,
@@ -3716,6 +3796,9 @@ def _diagnostics(
     support_trace_enabled: bool = False,
     support_trace_chunks: list[dict[str, Any]] | None = None,
     support_trace_chunks_omitted_count: int = 0,
+    draft_trace_enabled: bool = False,
+    draft_trace_chunks: list[dict[str, Any]] | None = None,
+    draft_trace_chunks_omitted_count: int = 0,
     **counts: Any,
 ) -> dict[str, Any]:
     diagnostics = {
@@ -3769,11 +3852,17 @@ def _diagnostics(
         diagnostics["support_trace_chunks_omitted_count"] = (
             support_trace_chunks_omitted_count
         )
+    if draft_trace_enabled:
+        diagnostics["draft_trace_chunks"] = list(draft_trace_chunks or ())
+        diagnostics["draft_trace_chunks_omitted_count"] = (
+            draft_trace_chunks_omitted_count
+        )
     return diagnostics
 
 
 def _empty_stage_result(
-    outcome: str, reason_code: str, *, support_trace_enabled: bool = False
+    outcome: str, reason_code: str, *, support_trace_enabled: bool = False,
+    draft_trace_enabled: bool = False,
 ) -> CharacterConsistencyStageResult:
     enabled = outcome != "disabled"
     diagnostics = {
@@ -3811,6 +3900,9 @@ def _empty_stage_result(
     if support_trace_enabled:
         diagnostics["support_trace_chunks"] = []
         diagnostics["support_trace_chunks_omitted_count"] = 0
+    if draft_trace_enabled:
+        diagnostics["draft_trace_chunks"] = []
+        diagnostics["draft_trace_chunks_omitted_count"] = 0
     return CharacterConsistencyStageResult(
         diagnostics=diagnostics
     )

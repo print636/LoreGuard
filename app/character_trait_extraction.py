@@ -81,12 +81,14 @@ MAX_TARGETED_CHARACTER_SIGNAL_TARGET_PAYLOAD_BYTES = 40_960
 MAX_TARGETED_CHARACTER_SIGNAL_CANDIDATE_LINES = 64
 _MAX_TARGETED_SAME_SUBJECT_TEMPLATE_BYTES = 4_096
 _MAX_SIGNAL_RESPONSE_RECORDS = 64
+_MAX_DRAFT_TRACE_LINE_ORDINAL = 12_000
 # Retry metadata is derived from validated records, but up to 64 bounded
 # records can still produce a large second prompt.  Never omit an anchor to
 # squeeze under the budget: an incomplete list would weaken coverage checks.
 _MAX_SIGNAL_REGENERATION_METADATA_CHARS = 8_192
 ASSERTION_INDEX_V1 = "assertion-index-v1"
 SUPPORT_TRACE_V1 = "support-trace-v1"
+DRAFT_SIGNAL_TRACE_V1 = "draft-signal-trace-v1"
 _MAX_SUPPORT_CLAUSES_PER_CHUNK = 256
 _MAX_SUPPORT_CLAUSES_PER_LINE = 64
 _MAX_SUPPORT_PROMPT_CHARS = 20_000
@@ -768,6 +770,114 @@ class SupportTraceV1(BaseModel):
         return self
 
 
+class DraftSignalTraceEventV1(BaseModel):
+    """One anonymous, parsed model record and its local disposition."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record_ordinal: int = Field(ge=1, le=_MAX_SIGNAL_RESPONSE_RECORDS, strict=True)
+    # A model-claimed span within the frozen chunk, not verified evidence.
+    # Invalid or absent model coordinates become null, never raw numbers.
+    claimed_line_start_ordinal: int | None = Field(
+        default=None, ge=1, le=_MAX_DRAFT_TRACE_LINE_ORDINAL, strict=True
+    )
+    claimed_line_end_ordinal: int | None = Field(
+        default=None, ge=1, le=_MAX_DRAFT_TRACE_LINE_ORDINAL, strict=True
+    )
+    outcome: Literal["accepted", "rejected", "ignored_duplicate"]
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _fixed_reason(self) -> DraftSignalTraceEventV1:
+        if (self.claimed_line_start_ordinal is None) != (
+            self.claimed_line_end_ordinal is None
+        ) or (
+            self.claimed_line_start_ordinal is not None
+            and self.claimed_line_end_ordinal is not None
+            and self.claimed_line_start_ordinal > self.claimed_line_end_ordinal
+        ):
+            raise ValueError("draft trace line range is inconsistent")
+        if self.outcome == "rejected":
+            if self.reason not in (
+                _SIGNAL_PACKAGE_VALIDATION_REASONS | _V5_REJECTION_REASONS
+            ):
+                raise ValueError("unsafe draft trace reason")
+        elif self.reason is not None:
+            raise ValueError("draft trace reason belongs to rejection only")
+        return self
+
+
+class DraftSignalTraceAttemptV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt: int = Field(ge=1, le=2, strict=True)
+    observability: Literal["parsed", "unparseable", "unavailable", "no_response"]
+    submitted_record_count: int | None = Field(
+        default=None, ge=0, le=_MAX_SIGNAL_RESPONSE_RECORDS, strict=True
+    )
+    package_reason: Literal["invalid_json", "response_too_large"] | None = None
+    events: tuple[DraftSignalTraceEventV1, ...] = Field(
+        default=(), max_length=_MAX_SIGNAL_RESPONSE_RECORDS
+    )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> DraftSignalTraceAttemptV1:
+        if self.observability == "parsed":
+            if (
+                self.submitted_record_count is None
+                or self.package_reason is not None
+                or tuple(event.record_ordinal for event in self.events)
+                != tuple(range(1, self.submitted_record_count + 1))
+            ):
+                raise ValueError("parsed draft trace must account for every record")
+        elif self.submitted_record_count is not None or self.events or (
+            (self.observability == "unparseable") != (self.package_reason is not None)
+        ):
+            raise ValueError("unparsed draft trace cannot claim record submission")
+        return self
+
+
+class DraftSignalTraceV1(BaseModel):
+    """Content-free draft package trace; source-line/Dxx linkage is unavailable."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["draft-signal-trace-v1"] = DRAFT_SIGNAL_TRACE_V1
+    attempts: tuple[DraftSignalTraceAttemptV1, ...] = Field(max_length=2)
+    final_state: Literal["clean", "no_clean_package", "no_call"]
+    final_accepted_record_ordinals: tuple[StrictInt, ...] = Field(
+        max_length=_MAX_SIGNAL_RESPONSE_RECORDS
+    )
+    source_candidate_linkage: Literal["unavailable"] = "unavailable"
+
+    @model_validator(mode="after")
+    def _consistent(self) -> DraftSignalTraceV1:
+        if tuple(attempt.attempt for attempt in self.attempts) != tuple(
+            range(1, len(self.attempts) + 1)
+        ):
+            raise ValueError("draft trace attempts are not ordered")
+        if (self.final_state == "no_call") != (not self.attempts):
+            raise ValueError("draft trace call state is inconsistent")
+        if tuple(sorted(set(self.final_accepted_record_ordinals))) != (
+            self.final_accepted_record_ordinals
+        ):
+            raise ValueError("draft trace final ordinals are invalid")
+        if self.final_state == "clean":
+            if (
+                self.attempts[-1].observability != "parsed"
+                or self.final_accepted_record_ordinals
+                != tuple(
+                    event.record_ordinal
+                    for event in self.attempts[-1].events
+                    if event.outcome == "accepted"
+                )
+            ):
+                raise ValueError("draft trace final records do not match last package")
+        elif self.final_accepted_record_ordinals:
+            raise ValueError("unclean draft trace cannot claim final records")
+        return self
+
+
 class CharacterSignalDiagnostics(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -798,6 +908,7 @@ class CharacterSignalDiagnostics(BaseModel):
     # Internal-only field: OFF must preserve the legacy serialized response.
     # The stage exports a separately bounded and validated trace when enabled.
     support_trace: SupportTraceV1 | None = Field(default=None, exclude=True)
+    draft_trace: DraftSignalTraceV1 | None = Field(default=None, exclude=True)
     # Controlled, source-ID-only results retained in memory for Phase B. They
     # never enter the ordinary pending-candidate or baseline protocol.
     scope_review_decisions: tuple[ScopeReviewDecision, ...] = Field(
@@ -846,6 +957,7 @@ class _ValidatedSignalPackage:
     core_label_scope_counts: dict[CoreLabelScopeKind, int] | None = None
     failures: tuple[_SignalValidationFailure, ...] = ()
     support_trace_attempt: SupportTraceAttemptV1 | None = None
+    draft_trace_attempt: DraftSignalTraceAttemptV1 | None = None
 
     @property
     def complete(self) -> bool:
@@ -945,11 +1057,12 @@ def _validate_signal_prompt_variant_settings(settings: Settings) -> None:
     semantic_scope = settings.character_signal_semantic_scope_v5
     scope_review = settings.character_signal_scope_review_v1
     support_trace = settings.character_signal_support_trace_v1
+    draft_trace = settings.character_signal_draft_trace_v1
     if any(
         type(flag) is not bool
         for flag in (
             full_line, core_scope, support_id, semantic_scope, scope_review,
-            support_trace,
+            support_trace, draft_trace,
         )
     ):
         raise RuntimeError("character signal prompt variant flags must be bool")
@@ -1106,19 +1219,24 @@ class CharacterSignalExtractor:
     ) -> CharacterSignalExtractionResult:
         """Run at most one caller-controlled, content-free targeted draft pass."""
 
+        _validate_signal_prompt_variant_settings(self.settings)
+
+        def skipped(reason: str, count: int = 1) -> CharacterSignalExtractionResult:
+            return _empty_result(
+                "skipped", reason_counts={reason: count},
+                draft_trace=(
+                    _draft_trace_for_result([], 0)
+                    if self.settings.character_signal_draft_trace_v1
+                    and chunk.source_kind == "draft" else None
+                ),
+            )
+
         if chunk.source_kind != "draft":
-            return _empty_result(
-                "skipped", reason_counts={"targeted_non_draft": 1}
-            )
+            return skipped("targeted_non_draft")
         if not targets:
-            return _empty_result(
-                "skipped", reason_counts={"targeted_no_targets": 1}
-            )
+            return skipped("targeted_no_targets")
         if len(targets) > self.settings.character_signal_targeted_max_targets_per_chunk:
-            return _empty_result(
-                "skipped",
-                reason_counts={"targeted_target_limit": len(targets)},
-            )
+            return skipped("targeted_target_limit", len(targets))
         if candidate_evidence_ranges:
             lines = chunk.content.splitlines()
             if (
@@ -1170,10 +1288,7 @@ class CharacterSignalExtractor:
                     for start, end in candidate_evidence_ranges
                 )
             ):
-                return _empty_result(
-                    "skipped",
-                    reason_counts={"targeted_invalid_candidate_ranges": 1},
-                )
+                return skipped("targeted_invalid_candidate_ranges")
         identities: set[tuple[str, str, str]] = set()
         for target in targets:
             identity = (
@@ -1187,9 +1302,7 @@ class CharacterSignalExtractor:
             ):
                 # Targets are server-owned policy, so malformed/ambiguous
                 # targets must never be repaired or interpreted by the model.
-                return _empty_result(
-                    "skipped", reason_counts={"targeted_invalid_targets": 1}
-                )
+                return skipped("targeted_invalid_targets")
             identities.add(identity)
         try:
             targeted_prompt = _targeted_chunk_prompt(
@@ -1201,9 +1314,7 @@ class CharacterSignalExtractor:
             # Prompt-size and encoding checks are security boundaries, not
             # request-crashing assertions.  Never expose the rejected content
             # or exception text through diagnostics.
-            return _empty_result(
-                "skipped", reason_counts={"targeted_invalid_targets": 1}
-            )
+            return skipped("targeted_invalid_targets")
         return self._extract_with_prompt(
             chunk,
             system_prompt=TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
@@ -1232,17 +1343,22 @@ class CharacterSignalExtractor:
             if settings.character_signal_support_trace_v1 and support_index is not None
             else None
         )
+        draft_trace_enabled = (
+            settings.character_signal_draft_trace_v1 and chunk.source_kind == "draft"
+        )
         if not settings.enable_character_consistency:
             return _empty_result(
                 "disabled",
                 reason_counts={"feature_disabled": 1},
                 support_trace=_support_trace_for_result(trace_index, [], 0),
+                draft_trace=_draft_trace_for_result([], 0) if draft_trace_enabled else None,
             )
         if len(chunk.content) > settings.character_signal_max_chunk_chars:
             return _empty_result(
                 "skipped",
                 reason_counts={"chunk_too_large": 1},
                 support_trace=_support_trace_for_result(trace_index, [], 0),
+                draft_trace=_draft_trace_for_result([], 0) if draft_trace_enabled else None,
             )
         if scope_review_v1 and not _scope_review_source_matches_chunk(
             source_identity, frozen_content, chunk
@@ -1296,6 +1412,7 @@ class CharacterSignalExtractor:
                         charged_tokens=total_charged_tokens,
                         extra_reason="regeneration_metadata_limit",
                         support_index=trace_index,
+                        draft_trace_enabled=draft_trace_enabled,
                     )
             estimate = estimate_issue_evidence_review_tokens(
                 system_prompt,
@@ -1317,6 +1434,10 @@ class CharacterSignalExtractor:
                         reason_counts={"token_budget": 1},
                         token_admission=admission,
                         support_trace=_support_trace_for_result(trace_index, [], 0),
+                        draft_trace=(
+                            _draft_trace_for_result([], 0)
+                            if draft_trace_enabled else None
+                        ),
                     )
                 return _failed_package_result(
                     validation_attempts,
@@ -1327,6 +1448,7 @@ class CharacterSignalExtractor:
                     extra_reason="regeneration_token_budget",
                     token_admission=admission,
                     support_index=trace_index,
+                    draft_trace_enabled=draft_trace_enabled,
                 )
 
             remaining_deadline = total_deadline - (self._monotonic() - started)
@@ -1339,6 +1461,7 @@ class CharacterSignalExtractor:
                     charged_tokens=total_charged_tokens,
                     extra_reason="regeneration_deadline",
                     support_index=trace_index,
+                    draft_trace_enabled=draft_trace_enabled,
                 )
 
             call_provider = self.provider
@@ -1369,6 +1492,7 @@ class CharacterSignalExtractor:
                     charged_tokens=total_charged_tokens,
                     extra_reason=reason,
                     support_index=trace_index,
+                    draft_trace_enabled=draft_trace_enabled,
                 )
             except Exception:
                 total_charged_tokens += estimate
@@ -1380,6 +1504,7 @@ class CharacterSignalExtractor:
                     charged_tokens=total_charged_tokens,
                     extra_reason="provider_error",
                     support_index=trace_index,
+                    draft_trace_enabled=draft_trace_enabled,
                 )
 
             prompt_tokens = _safe_tokens(getattr(response, "prompt_tokens", 0))
@@ -1406,6 +1531,7 @@ class CharacterSignalExtractor:
                 ),
                 scope_review_v1=scope_review_v1,
                 support_trace_enabled=trace_index is not None,
+                draft_trace_enabled=draft_trace_enabled,
             )
             if validation.complete and verified_before_clean:
                 missing = _regeneration_coverage_regressions(
@@ -1433,6 +1559,7 @@ class CharacterSignalExtractor:
                             ),
                         ),
                         support_trace_attempt=validation.support_trace_attempt,
+                        draft_trace_attempt=validation.draft_trace_attempt,
                     )
             validation_attempts.append(validation)
             if validation.complete:
@@ -1534,6 +1661,12 @@ class CharacterSignalExtractor:
                             attempted_calls,
                             final_signals=clean,
                         ),
+                        draft_trace=(
+                            _draft_trace_for_result(
+                                validation_attempts, attempted_calls, final_clean=True
+                            )
+                            if draft_trace_enabled else None
+                        ),
                         scope_review_decisions=(
                             review_outcome.decisions if review_outcome else ()
                         ),
@@ -1551,6 +1684,7 @@ class CharacterSignalExtractor:
             completion_tokens=total_completion_tokens,
             charged_tokens=total_charged_tokens,
             support_index=trace_index,
+            draft_trace_enabled=draft_trace_enabled,
         )
 
 
@@ -1565,6 +1699,7 @@ def _validate_signal_package(
     semantic_scope_v5: bool = False,
     scope_review_v1: bool = False,
     support_trace_enabled: bool = False,
+    draft_trace_enabled: bool = False,
 ) -> _ValidatedSignalPackage:
     try:
         response_bytes = len(text.encode("utf-8")) if isinstance(text, str) else None
@@ -1577,6 +1712,13 @@ def _validate_signal_package(
             failures=(
                 _SignalValidationFailure(None, "response_too_large"),
             ),
+            draft_trace_attempt=(
+                DraftSignalTraceAttemptV1(
+                    attempt=1, observability="unparseable",
+                    package_reason="response_too_large",
+                )
+                if draft_trace_enabled else None
+            ),
         )
     try:
         envelope = _ENVELOPE_ADAPTER.validate_json(text)
@@ -1585,6 +1727,13 @@ def _validate_signal_package(
             rejected_records=1,
             reason_counts={"invalid_json": 1},
             failures=(_SignalValidationFailure(None, "invalid_json"),),
+            draft_trace_attempt=(
+                DraftSignalTraceAttemptV1(
+                    attempt=1, observability="unparseable",
+                    package_reason="invalid_json",
+                )
+                if draft_trace_enabled else None
+            ),
         )
     if len(envelope.records) > settings.character_signal_max_records:
         return _ValidatedSignalPackage(
@@ -1592,6 +1741,19 @@ def _validate_signal_package(
             rejected_records=len(envelope.records),
             reason_counts={"record_limit": len(envelope.records)},
             failures=(_SignalValidationFailure(None, "record_limit"),),
+            draft_trace_attempt=(
+                _try_draft_trace_attempt(
+                    len(envelope.records),
+                    claimed_line_ranges=_claimed_draft_line_ranges(
+                        envelope.records, chunk
+                    ),
+                    rejected_record_reasons={
+                        index: "record_limit"
+                        for index in range(len(envelope.records))
+                    },
+                )
+                if draft_trace_enabled else None
+            ),
         )
 
     reasons: Counter[str] = Counter()
@@ -1754,7 +1916,153 @@ def _validate_signal_package(
             if support_trace_enabled and support_index is not None
             else None
         ),
+        draft_trace_attempt=(
+            _try_draft_trace_attempt(
+                len(envelope.records),
+                claimed_line_ranges=_claimed_draft_line_ranges(
+                    envelope.records, chunk
+                ),
+                accepted_record_indices=accepted_record_indices,
+                duplicate_record_indices=duplicate_record_indices,
+                rejected_record_reasons={
+                    failure.record_index: failure.reason
+                    for failure in failures
+                    if failure.record_index is not None
+                },
+            )
+            if draft_trace_enabled else None
+        ),
     )
+
+
+def _claimed_draft_line_ranges(
+    raw_records: list[Any], chunk: CharacterSignalChunk
+) -> tuple[tuple[int, int] | None, ...]:
+    """Retain only in-range, chunk-relative spans from parsed records."""
+
+    ranges: list[tuple[int, int] | None] = []
+    for raw in raw_records:
+        start = raw.get("source_line_start") if isinstance(raw, dict) else None
+        end = raw.get("source_line_end") if isinstance(raw, dict) else None
+        if (
+            type(start) is int and type(end) is int
+            and chunk.global_line_start <= start <= end <= chunk.global_line_end
+        ):
+            start_ordinal = start - chunk.global_line_start + 1
+            end_ordinal = end - chunk.global_line_start + 1
+            ranges.append(
+                (start_ordinal, end_ordinal)
+                if end_ordinal <= _MAX_DRAFT_TRACE_LINE_ORDINAL else None
+            )
+        else:
+            ranges.append(None)
+    return tuple(ranges)
+
+
+def _try_draft_trace_attempt(
+    raw_record_count: int,
+    *,
+    claimed_line_ranges: tuple[tuple[int, int] | None, ...] = (),
+    accepted_record_indices: list[int] | None = None,
+    duplicate_record_indices: list[int] | None = None,
+    rejected_record_reasons: dict[int, str] | None = None,
+) -> DraftSignalTraceAttemptV1 | None:
+    """Project record indices only; never copy response fields or source text."""
+
+    try:
+        if claimed_line_ranges and len(claimed_line_ranges) != raw_record_count:
+            return None
+        accepted = set(accepted_record_indices or ())
+        duplicates = set(duplicate_record_indices or ())
+        rejected = rejected_record_reasons or {}
+        events: list[DraftSignalTraceEventV1] = []
+        for index in range(raw_record_count):
+            line_range = (
+                claimed_line_ranges[index] if claimed_line_ranges else None
+            )
+            line_fields = {
+                "claimed_line_start_ordinal": (
+                    line_range[0] if line_range is not None else None
+                ),
+                "claimed_line_end_ordinal": (
+                    line_range[1] if line_range is not None else None
+                ),
+            }
+            if index in accepted:
+                events.append(DraftSignalTraceEventV1(
+                    record_ordinal=index + 1, outcome="accepted",
+                    **line_fields,
+                ))
+            elif index in duplicates:
+                events.append(DraftSignalTraceEventV1(
+                    record_ordinal=index + 1, outcome="ignored_duplicate",
+                    **line_fields,
+                ))
+            elif index in rejected:
+                events.append(DraftSignalTraceEventV1(
+                    record_ordinal=index + 1, outcome="rejected",
+                    reason=rejected[index], **line_fields,
+                ))
+            else:
+                return None
+        return DraftSignalTraceAttemptV1(
+            attempt=1, observability="parsed",
+            submitted_record_count=raw_record_count, events=tuple(events),
+        )
+    except Exception:
+        # A trace defect cannot alter extraction, retry, or record admission.
+        return None
+
+
+def _draft_trace_for_result(
+    validations: list[_ValidatedSignalPackage],
+    attempted_calls: int,
+    *,
+    final_clean: bool = False,
+) -> DraftSignalTraceV1 | None:
+    try:
+        if not 0 <= attempted_calls <= 2 or len(validations) > attempted_calls:
+            return None
+        attempts = tuple(
+            DraftSignalTraceAttemptV1(
+                **(
+                    validations[index].draft_trace_attempt.model_dump(
+                        exclude={"attempt"}
+                    )
+                    if index < len(validations)
+                    and validations[index].draft_trace_attempt is not None
+                    else {
+                        "observability": (
+                            "unavailable" if index < len(validations)
+                            else "no_response"
+                        )
+                    }
+                ),
+                attempt=index + 1,
+            )
+            for index in range(attempted_calls)
+        )
+        if final_clean and attempts[-1].observability != "parsed":
+            # A clean package whose projection failed cannot claim accepted
+            # record ordinals. The stage exports availability=unavailable.
+            return None
+        return DraftSignalTraceV1(
+            attempts=attempts,
+            final_state=(
+                "clean" if final_clean else
+                "no_clean_package" if attempted_calls else "no_call"
+            ),
+            final_accepted_record_ordinals=(
+                tuple(
+                    event.record_ordinal
+                    for event in attempts[-1].events
+                    if event.outcome == "accepted"
+                )
+                if final_clean and attempts else ()
+            ),
+        )
+    except Exception:
+        return None
 
 
 def _support_trace_attempt(
@@ -2134,6 +2442,7 @@ def _failed_package_result(
     extra_reason: str | None = None,
     token_admission: CharacterSignalTokenAdmission | None = None,
     support_index: AssertionIndexV1 | None = None,
+    draft_trace_enabled: bool = False,
 ) -> CharacterSignalExtractionResult:
     reasons: Counter[str] = Counter()
     mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
@@ -2161,6 +2470,10 @@ def _failed_package_result(
         token_admission=token_admission,
         support_trace=_support_trace_for_result(
             support_index, attempts, attempted_calls
+        ),
+        draft_trace=(
+            _draft_trace_for_result(attempts, attempted_calls)
+            if draft_trace_enabled else None
         ),
     )
 
@@ -5540,6 +5853,7 @@ def _empty_result(
     core_label_scope_counts: dict[CoreLabelScopeKind, int] | None = None,
     token_admission: CharacterSignalTokenAdmission | None = None,
     support_trace: SupportTraceV1 | None = None,
+    draft_trace: DraftSignalTraceV1 | None = None,
 ) -> CharacterSignalExtractionResult:
     return CharacterSignalExtractionResult(
         diagnostics=CharacterSignalDiagnostics(
@@ -5557,6 +5871,7 @@ def _empty_result(
             charged_tokens=charged_tokens,
             token_admission=token_admission,
             support_trace=support_trace,
+            draft_trace=draft_trace,
         )
     )
 

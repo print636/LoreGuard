@@ -301,6 +301,9 @@ class Settings(BaseSettings):
     # Content-free observation of V4 support-slot submission/validation only.
     # It neither changes prompts nor accepts otherwise rejected records.
     character_signal_support_trace_v1: bool = False
+    # Anonymous draft record dispositions across logical package attempts.
+    # Opt-in diagnostics only; it does not change admission or retry policy.
+    character_signal_draft_trace_v1: bool = False
     # A draft chunk can receive bounded, one-trait-at-a-time recall calls for
     # undercovered confirmed traits. Keep the selected set no larger than the
     # content-free context boundary; the shared stage budget remains final.
