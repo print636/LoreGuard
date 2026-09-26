@@ -24,6 +24,7 @@ _FEEDBACK_NAMES = {
 }
 _ROLE_NAMES = {
     "canon": "权威设定",
+    "character_profile": "角色设定",
     "reference": "参考资料",
     "chapter": "故事正文",
 }
@@ -66,6 +67,36 @@ def _model_note(diagnostics: Mapping[str, Any] | None) -> str:
     if model.get("used") is True:
         return "模型已参与；本报告不保证发现全部问题。"
     return "模型未参与；本次只完成有限预检。"
+
+
+def _character_review_note(diagnostics: Mapping[str, Any] | None) -> str:
+    stage = (
+        diagnostics.get("character_consistency")
+        if isinstance(diagnostics, Mapping) else None
+    )
+    if not isinstance(stage, Mapping):
+        return "缺少可核对的角色一致性阶段记录；无法判断本次是否完成角色 OOC 审查。"
+
+    outcome = stage.get("outcome")
+    if outcome == "partial":
+        return "角色一致性阶段记录为部分完成；未覆盖内容不能视为没有角色 OOC 问题。"
+    if outcome == "degraded":
+        return "角色一致性阶段记录为降级；不能据此宣称角色 OOC 审查已经完成。"
+    if outcome == "skipped":
+        return "角色一致性阶段记录为跳过；本次角色 OOC 未评估。"
+    if outcome == "disabled":
+        return "角色一致性阶段记录为未启用；本次角色 OOC 未评估。"
+    if outcome == "completed":
+        if stage.get("material_coverage") == "partial":
+            return "角色一致性阶段记录为完成，但材料覆盖标记为部分；未覆盖内容不能视为没有角色 OOC 问题。"
+        if (
+            stage.get("snapshot_bound") is not True
+            or stage.get("material_coverage") != "complete"
+            or stage.get("enabled") is False
+        ):
+            return "角色一致性阶段记录为完成，但冻结材料覆盖无法核对；不能将本次视为完整的角色 OOC 审查。"
+        return "角色一致性阶段诊断记录为已完成；这不保证本次有可评估的新稿，也不保证判断准确或没有遗漏。"
+    return "角色一致性阶段状态无法核对；不能据此判断角色 OOC 是否存在。"
 
 
 def render_markdown_report(
@@ -111,6 +142,7 @@ def render_markdown_report(
         "## 结果边界",
         "",
         _model_note(diagnostics),
+        _character_review_note(diagnostics),
         "报告只列出本次运行发现且带原文证据的结果；0 条问题不代表故事绝对无误。",
         "",
         "## 一致性问题",

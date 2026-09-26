@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from app.report_export import render_markdown_report
 
 
@@ -75,4 +77,64 @@ def test_markdown_export_zero_issues_does_not_claim_story_is_correct():
 
     assert "0 条问题不代表故事绝对无误" in content
     assert "模型执行状态未知" in content
+    assert "缺少可核对的角色一致性阶段记录" in content
     assert "冻结输入清单" in content
+
+
+def _character_export(stage):
+    return render_markdown_report(
+        project_name="角色审查",
+        run_id="character-run",
+        completed_at=None,
+        input_documents=[{
+            "document_name": "profile.md",
+            "document_version": 1,
+            "document_role": "character_profile",
+            "batch_role": "background",
+        }],
+        issues=[],
+        latest_feedback={},
+        clarifications=[],
+        diagnostics={
+            "model": {"used": True, "partial_fallback": False},
+            "character_consistency": stage,
+        },
+    )
+
+
+def test_markdown_export_names_character_profile_and_partial_character_coverage():
+    content = _character_export({
+        "outcome": "partial",
+        "material_coverage": "partial",
+        "reason_code": "run_token_budget",
+    })
+
+    assert "profile\\.md（版本 1；角色设定；背景资料）" in content
+    assert "角色一致性阶段记录为部分完成" in content
+    assert "未覆盖内容不能视为没有角色 OOC 问题" in content
+    assert "模型已参与" in content
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected"),
+    [
+        ({"outcome": "degraded"}, "角色一致性阶段记录为降级"),
+        ({"outcome": "skipped"}, "本次角色 OOC 未评估"),
+        ({"outcome": "disabled"}, "本次角色 OOC 未评估"),
+        ({"outcome": "completed", "material_coverage": "partial"},
+         "材料覆盖标记为部分"),
+        ({"outcome": "completed", "material_coverage": "unknown"},
+         "冻结材料覆盖无法核对"),
+        ({"outcome": "completed", "material_coverage": "complete",
+          "snapshot_bound": True}, "诊断记录为已完成"),
+        ({"outcome": "unexpected", "reason_code": "SHOULD_NOT_EXPORT"},
+         "角色一致性阶段状态无法核对"),
+        (None, "缺少可核对的角色一致性阶段记录"),
+    ],
+)
+def test_markdown_export_reports_only_persisted_character_stage_state(stage, expected):
+    content = _character_export(stage)
+
+    assert expected in content
+    assert "SHOULD_NOT_EXPORT" not in content
+    assert "0 条问题不代表故事绝对无误" in content
