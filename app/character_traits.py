@@ -390,45 +390,128 @@ def _reused_candidate_context_identities(
     return _frozen_context_identities(db, row.source_run_id, row.evidence)
 
 
-def _verify_reused_review_chain(db, row: CharacterTraitCandidateRow) -> None:
-    """A mutable state label alone is not evidence of an author decision."""
+def axis_polarity_for_alignment(raw_polarity: str, alignment: str) -> str:
+    """Convert a raw model-label direction to an author's positive proposition."""
+
+    if raw_polarity not in {"positive", "negative"} or alignment not in {
+        "same", "opposite"
+    }:
+        raise ValueError("axis alignment requires directed raw polarity")
+    if alignment == "same":
+        return raw_polarity
+    return "negative" if raw_polarity == "positive" else "positive"
+
+
+def verified_character_trait_review_chain(
+    db, row: CharacterTraitCandidateRow
+) -> list[CharacterTraitReviewRow]:
+    """Validate the append-only author sequence, including later alignments.
+
+    The original confirmation is never rewritten by a later mapping. A
+    supersession or withdrawal must follow the latest mapping, not the first.
+    Raises ValueError on a missing, reordered, conflicting or forged step.
+    """
 
     reviews = list(db.scalars(
         select(CharacterTraitReviewRow)
         .where(CharacterTraitReviewRow.candidate_id == row.id)
         .order_by(CharacterTraitReviewRow.expected_lock_version, CharacterTraitReviewRow.id)
-        .limit(4)
     ).all())
     if row.review_state == "pending":
         if row.lock_version == 0 and not reviews:
-            return
+            return reviews
         raise ValueError("reused candidate review state is invalid")
-    expected = {
-        "confirmed": ("confirm",),
-        "rejected": ("reject",),
-        "superseded": ("confirm", "supersede"),
-        "withdrawn": ("confirm", "withdraw"),
-    }.get(row.review_state)
     if (
-        expected is None
-        or row.lock_version != len(expected)
-        or len(reviews) != len(expected)
+        row.review_state not in {"confirmed", "rejected", "superseded", "withdrawn"}
+        or not reviews
+        or row.lock_version != len(reviews)
         or row.reviewed_at is None
-        or any(
-            review.project_id != row.project_id
-            or review.decision != decision
-            or review.expected_lock_version != index
-            or review.approved_axis_id != row.approved_axis_id
-            or review.approved_axis_version != row.approved_axis_version
-            for index, (review, decision) in enumerate(zip(reviews, expected, strict=True))
-        )
     ):
         raise ValueError("reused candidate review state is invalid")
+    first = reviews[0]
+    if first.decision not in {"confirm", "reject"}:
+        raise ValueError("reused candidate review state is invalid")
+    if first.decision == "reject" and (
+        len(reviews) != 1 or row.review_state != "rejected"
+    ):
+        raise ValueError("reused candidate review state is invalid")
+    if first.approved_axis_id != row.approved_axis_id or (
+        first.approved_axis_version != row.approved_axis_version
+    ):
+        raise ValueError("reused candidate axis identity is invalid")
+    if first.approved_axis_id is None and any(
+        getattr(first, name) is not None
+        for name in (
+            "axis_alignment", "axis_polarity", "axis_positive_proposition_sha256"
+        )
+    ):
+        raise ValueError("reused candidate unbound axis mapping is invalid")
+    active = first
+    terminal = {"withdraw": "withdrawn", "supersede": "superseded"}
+    for index, review in enumerate(reviews):
+        if (
+            review.project_id != row.project_id
+            or review.candidate_id != row.id
+            or review.expected_lock_version != index
+            or review.approved_axis_id != first.approved_axis_id
+            or review.approved_axis_version != first.approved_axis_version
+        ):
+            raise ValueError("reused candidate review sequence is invalid")
+        if index == 0:
+            pass
+        elif review.decision == "align":
+            if (
+                first.decision != "confirm"
+                or first.approved_axis_id is None
+                or review.axis_alignment not in {"same", "opposite"}
+                or review.axis_positive_proposition_sha256 is None
+            ):
+                raise ValueError("reused candidate alignment review is invalid")
+            active = review
+        elif review.decision in terminal and index == len(reviews) - 1:
+            if first.decision != "confirm" or (
+                review.axis_alignment != active.axis_alignment
+                or review.axis_polarity != active.axis_polarity
+                or review.axis_positive_proposition_sha256
+                != active.axis_positive_proposition_sha256
+            ):
+                raise ValueError("reused candidate terminal review is invalid")
+        else:
+            raise ValueError("reused candidate review sequence is invalid")
+        if review.axis_alignment is None:
+            if review.axis_polarity is not None or (
+                review.axis_positive_proposition_sha256 is not None
+            ):
+                raise ValueError("reused candidate alignment pair is invalid")
+        elif (
+            review.axis_positive_proposition_sha256 is None
+            or review.axis_polarity != axis_polarity_for_alignment(
+                row.polarity, review.axis_alignment
+            )
+        ):
+            raise ValueError("reused candidate alignment direction is invalid")
+    last = reviews[-1]
+    if row.review_state == "confirmed":
+        if first.decision != "confirm" or last.decision not in {"confirm", "align"}:
+            raise ValueError("reused candidate review state is invalid")
+    elif row.review_state == "rejected":
+        if first.decision != "reject" or last.decision != "reject":
+            raise ValueError("reused candidate review state is invalid")
+    elif last.decision != ("withdraw" if row.review_state == "withdrawn" else "supersede"):
+        raise ValueError("reused candidate review state is invalid")
+    if any(
+        getattr(last, name) != getattr(row, name)
+        for name in (
+            "axis_alignment", "axis_polarity", "axis_positive_proposition_sha256"
+        )
+    ):
+        raise ValueError("reused candidate current alignment is invalid")
     if row.review_state == "superseded":
-        successor_id = reviews[1].comment.removeprefix("由候选 ").removesuffix(" 替代")
+        successor_review = reviews[-1]
+        successor_id = successor_review.comment.removeprefix("由候选 ").removesuffix(" 替代")
         successor = db.get(CharacterTraitCandidateRow, successor_id)
         if (
-            reviews[1].comment != f"由候选 {successor_id} 替代"
+            successor_review.comment != f"由候选 {successor_id} 替代"
             or successor is None
             or successor.project_id != row.project_id
             or successor.character_key != row.character_key
@@ -452,6 +535,13 @@ def _verify_reused_review_chain(db, row: CharacterTraitCandidateRow) -> None:
             != successor.approved_axis_version
         ):
             raise ValueError("reused candidate supersession is invalid")
+    return reviews
+
+
+def _verify_reused_review_chain(db, row: CharacterTraitCandidateRow) -> None:
+    """Backwards-compatible gate used before reusing a candidate."""
+
+    verified_character_trait_review_chain(db, row)
 
 
 def _verify_reused_nonformal_fingerprint(

@@ -608,6 +608,15 @@ class CharacterTraitAxisRow(Base):
             "length(definition_sha256) = 64",
             name="ck_character_trait_axis_definition_hash",
         ),
+        CheckConstraint(
+            "(positive_proposition IS NULL AND positive_proposition_sha256 IS NULL "
+            "AND positive_proposition_authored_at IS NULL "
+            "AND positive_proposition_authored_by_user_id IS NULL) OR "
+            "(positive_proposition IS NOT NULL AND positive_proposition_sha256 IS NOT NULL "
+            "AND positive_proposition_authored_at IS NOT NULL "
+            "AND length(positive_proposition_sha256) = 64)",
+            name="ck_character_trait_axis_proposition_pair",
+        ),
         Index("ix_character_trait_axes_project_created", "project_id", "created_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -619,6 +628,17 @@ class CharacterTraitAxisRow(Base):
     display_name: Mapped[str] = mapped_column(String(80))
     definition: Mapped[str] = mapped_column(String(200))
     definition_sha256: Mapped[str] = mapped_column(String(64))
+    # Explicit author proposition; historical axes stay unset until authored.
+    positive_proposition: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    positive_proposition_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    positive_proposition_authored_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    positive_proposition_authored_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
     created_by_user_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -682,6 +702,24 @@ class CharacterTraitCandidateRow(Base):
             name="ck_character_trait_candidate_axis_pair",
         ),
         CheckConstraint(
+            "(axis_alignment IS NULL AND axis_polarity IS NULL "
+            "AND axis_positive_proposition_sha256 IS NULL) OR "
+            "(approved_axis_id IS NOT NULL AND axis_alignment IS NOT NULL "
+            "AND axis_polarity IS NOT NULL AND axis_positive_proposition_sha256 IS NOT NULL "
+            "AND axis_alignment IN ('same', 'opposite') "
+            "AND axis_polarity IN ('positive', 'negative') "
+            "AND length(axis_positive_proposition_sha256) = 64)",
+            name="ck_character_trait_candidate_alignment_pair",
+        ),
+        CheckConstraint(
+            "axis_alignment IS NULL OR ("
+            "(polarity = 'positive' AND axis_alignment = 'same' AND axis_polarity = 'positive') OR "
+            "(polarity = 'positive' AND axis_alignment = 'opposite' AND axis_polarity = 'negative') OR "
+            "(polarity = 'negative' AND axis_alignment = 'same' AND axis_polarity = 'negative') OR "
+            "(polarity = 'negative' AND axis_alignment = 'opposite' AND axis_polarity = 'positive'))",
+            name="ck_character_trait_candidate_alignment_direction",
+        ),
+        CheckConstraint(
             "valid_from_release_ordinal IS NULL OR valid_from_release_ordinal >= 0",
             name="ck_character_trait_candidate_valid_from",
         ),
@@ -728,6 +766,11 @@ class CharacterTraitCandidateRow(Base):
         ForeignKey("character_trait_axes.id", ondelete="RESTRICT"), nullable=True
     )
     approved_axis_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    axis_alignment: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    axis_polarity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    axis_positive_proposition_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     # Pre-migration candidates have no recoverable object anchor.
     comparison_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     value: Mapped[str] = mapped_column(Text)
@@ -788,7 +831,7 @@ class CharacterTraitReviewRow(Base):
             name="uq_character_trait_review_idempotency",
         ),
         CheckConstraint(
-            "decision IN ('confirm', 'reject', 'supersede', 'withdraw')",
+            "decision IN ('confirm', 'reject', 'supersede', 'withdraw', 'align')",
             name="ck_character_trait_review_decision",
         ),
         CheckConstraint(
@@ -799,6 +842,16 @@ class CharacterTraitReviewRow(Base):
             "(approved_axis_id IS NULL AND approved_axis_version IS NULL) OR "
             "(approved_axis_id IS NOT NULL AND approved_axis_version = 1)",
             name="ck_character_trait_review_axis_pair",
+        ),
+        CheckConstraint(
+            "(axis_alignment IS NULL AND axis_polarity IS NULL "
+            "AND axis_positive_proposition_sha256 IS NULL) OR "
+            "(approved_axis_id IS NOT NULL AND axis_alignment IS NOT NULL "
+            "AND axis_polarity IS NOT NULL AND axis_positive_proposition_sha256 IS NOT NULL "
+            "AND axis_alignment IN ('same', 'opposite') "
+            "AND axis_polarity IN ('positive', 'negative') "
+            "AND length(axis_positive_proposition_sha256) = 64)",
+            name="ck_character_trait_review_alignment_pair",
         ),
         Index(
             "ix_character_trait_reviews_project_candidate_created",
@@ -819,6 +872,11 @@ class CharacterTraitReviewRow(Base):
         ForeignKey("character_trait_axes.id", ondelete="RESTRICT"), nullable=True
     )
     approved_axis_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    axis_alignment: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    axis_polarity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    axis_positive_proposition_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     expected_lock_version: Mapped[int] = mapped_column(Integer)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     comment: Mapped[str] = mapped_column(Text, default="")

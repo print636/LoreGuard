@@ -18,6 +18,7 @@ import {
   fetchProfileCandidates,
   fetchWithdrawnProfileCandidates,
   fetchSourceNeighbors,
+  setAxisPositiveProposition,
   submitCandidateDecision,
 } from "./api";
 import CandidateReview from "./CandidateReview";
@@ -79,6 +80,10 @@ function requestError(error: unknown): string {
     if (code === "character_trait_axis_version_conflict") return "作者轴版本已变化，请刷新轴列表后重新选择。";
     if (code === "character_trait_axis_not_found") return "所选作者轴不存在或不属于当前项目，请刷新轴列表。";
     if (code === "character_trait_axis_dimension_mismatch") return "所选作者轴不适用于这条核心性格候选，请重新选择。";
+    if (code === "character_trait_axis_proposition_required") return "所选旧作者轴还没有正向命题，请先由作者补写并核对。";
+    if (code === "character_trait_axis_proposition_conflict") return "作者轴正向命题已变化；原选择保留，请刷新轴列表并重新核对。";
+    if (code === "character_trait_axis_alignment_required") return "当前候选还没有可核对的同向/反向映射；不确定时请保留待审。";
+    if (code === "character_trait_axis_alignment_unverified") return "同轴旧特征的方向尚未补认；请先在角色档案逐条核对。";
     if (code === "character_trait_candidate_stale") return "来源文档或叙事上下文已变化；请重新分析后审核。";
     if (code === "character_trait_support_binding_invalid") return "精确证据定位无法与冻结原文核对；请重新分析后审核。";
     if (code === "character_trait_confirmation_conflict") return "同一作用域已有冲突的已确认特征；请核对角色档案与轴定义。";
@@ -590,7 +595,7 @@ export default function CharacterWorkspace({
     }
   }
 
-  async function createAxis(input: { display_name: string; definition: string }): Promise<CharacterTraitAxis> {
+  async function createAxis(input: { display_name: string; definition: string; positive_proposition: string }): Promise<CharacterTraitAxis> {
     if (
       !route.characterId || !route.candidateId ||
       candidate?.id !== route.candidateId ||
@@ -622,6 +627,24 @@ export default function CharacterWorkspace({
     }
   }
 
+  async function defineAxisProposition(axis: CharacterTraitAxis, positiveProposition: string): Promise<CharacterTraitAxis> {
+    if (!route.characterId || !route.candidateId || candidate?.id !== route.candidateId || axis.positive_proposition) {
+      throw new Error("请重新核对作者轴与当前候选。");
+    }
+    const startedScope = reviewScopeRef.current;
+    const updated = await setAxisPositiveProposition(projectId, axis.id, {
+      positive_proposition: positiveProposition,
+      expected_axis_version: axis.version,
+    });
+    if (updated.id !== axis.id || !updated.positive_proposition_sha256) {
+      throw new TypeError("作者轴命题保存结果不一致");
+    }
+    if (isCurrentReviewScope(reviewScopeRef.current, startedScope)) {
+      setAxisItems((current) => current.map((item) => item.id === updated.id ? updated : item));
+    }
+    return updated;
+  }
+
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     navigate({
@@ -636,6 +659,7 @@ export default function CharacterWorkspace({
     decision: CandidateDecision,
     comment: string,
     selectedAxis: CharacterTraitAxis | null,
+    alignment: "same" | "opposite" | null,
   ) {
     if (
       !candidate || !route.characterId || !route.candidateId ||
@@ -645,6 +669,11 @@ export default function CharacterWorkspace({
     ) return;
     if (decision === "confirm" && candidate.dimension === "core_personality" && !selectedAxis) {
       setActionError("请先为核心性格候选选择或创建作者轴。");
+      return;
+    }
+    if (decision === "confirm" && candidate.dimension === "core_personality" &&
+      (!selectedAxis?.positive_proposition_sha256 || !alignment)) {
+      setActionError("请先核对作者轴正向命题，再明确选择同向或反向；不确定时保留待审。");
       return;
     }
     const startedScope = reviewScopeRef.current;
@@ -668,6 +697,8 @@ export default function CharacterWorkspace({
             ? {
                 approved_axis_id: selectedAxis.id,
                 expected_axis_version: selectedAxis.version,
+                axis_alignment: alignment || undefined,
+                expected_axis_positive_proposition_sha256: selectedAxis.positive_proposition_sha256 || undefined,
               }
             : {}),
         },
@@ -699,7 +730,11 @@ export default function CharacterWorkspace({
           "detail" in error.detail &&
           error.detail.detail && typeof error.detail.detail === "object" &&
           "code" in error.detail.detail &&
-          error.detail.detail.code === "character_trait_axis_version_conflict"
+          [
+            "character_trait_axis_version_conflict",
+            "character_trait_axis_proposition_conflict",
+            "character_trait_axis_proposition_required",
+          ].includes(String(error.detail.detail.code))
         ) setAxisReload((value) => value + 1);
       }
     } finally {
@@ -932,6 +967,8 @@ export default function CharacterWorkspace({
                   <div className="characterSectionBody">
                     {route.section === "profile" && (
                       <CharacterProfile
+                        projectId={projectId}
+                        characterId={route.characterId}
                         items={characterDetail.profile_items}
                         withdrawnPage={withdrawnPage}
                         withdrawnPageNumber={withdrawnPageNumber}
@@ -942,6 +979,11 @@ export default function CharacterWorkspace({
                         onWithdraw={(item) => void withdrawConfirmedTrait(item)}
                         onWithdrawnPage={setWithdrawnPageNumber}
                         onRetryWithdrawn={() => setWithdrawnReload((value) => value + 1)}
+                        onAligned={() => {
+                          setAnnouncement("作者轴方向已补认，仅影响之后新建的分析；历史报告保持不变。");
+                          setDetailReload((value) => value + 1);
+                          setListReload((value) => value + 1);
+                        }}
                       />
                     )}
                     {route.section === "candidates" && (
@@ -988,7 +1030,8 @@ export default function CharacterWorkspace({
                         onRetryAxes={() => setAxisReload((value) => value + 1)}
                         onLoadMoreAxes={() => void loadMoreAxes()}
                         onCreateAxis={createAxis}
-                        onDecision={(decision, comment, axis) => void decide(decision, comment, axis)}
+                        onSetAxisProposition={defineAxisProposition}
+                        onDecision={(decision, comment, axis, alignment) => void decide(decision, comment, axis, alignment)}
                       />
                     )}
                     {route.section === "drift" && (

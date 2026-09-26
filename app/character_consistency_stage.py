@@ -373,7 +373,26 @@ class CharacterConsistencyStage:
             project_id=project_id,
             reasons=reason_counts,
         )
-        baselines, shadowed_baselines = _select_authoritative_baselines(baselines)
+        # A pre-alignment confirmed axis is valid historical data, not a
+        # corrupt snapshot.  It cannot be used for a new directional verdict.
+        unaligned_axes = sum(
+            baseline.approved_axis_identity is not None
+            and not baseline.axis_direction_verified
+            for _, baseline, _, _ in baselines
+        )
+        if unaligned_axes:
+            reason_counts["author_alignment_required"] += unaligned_axes
+        # Resolve authority while old bound axes are still present. Although
+        # they cannot supply a directional verdict, an applicable one can
+        # still shadow a lower-authority aligned peer on the same axis.
+        authority_baselines, shadowed_baselines = _select_authoritative_baselines(
+            baselines
+        )
+        baselines = [
+            entry for entry in authority_baselines
+            if entry[1].approved_axis_identity is None
+            or entry[1].axis_direction_verified
+        ]
         if shadowed_baselines:
             reason_counts["lower_authority_baseline_shadowed"] += shadowed_baselines
 
@@ -402,6 +421,7 @@ class CharacterConsistencyStage:
         partial = (
             len(planned_chunks) > settings.character_consistency_max_chunks_per_run
             or bool(reason_counts["invalid_confirmed_trait_snapshot"])
+            or bool(unaligned_axes)
         )
         chunk_cap = settings.character_consistency_max_chunks_per_run
         if partial and any(source.source_kind == "draft" for source, _ in planned_chunks):
@@ -442,7 +462,11 @@ class CharacterConsistencyStage:
         for source, _ in selected_chunks:
             if source.document.id in server_contexts:
                 continue
-            context = _safe_server_context(source, baselines=baselines)
+            context = _safe_server_context(
+                source,
+                baselines=baselines,
+                authority_baselines=authority_baselines,
+            )
             server_contexts[source.document.id] = context
             context_eligible_traits += context.eligible_traits
             context_included_traits += context.included_traits
@@ -466,13 +490,43 @@ class CharacterConsistencyStage:
         axis_bindings_by_line: dict[
             tuple[str, str, int], set[tuple[str, int, str]]
         ] = defaultdict(set)
+        axis_polarities_by_signal: dict[
+            tuple[str, tuple[str, int, str]], set[str]
+        ] = defaultdict(set)
 
         def bind_approved_axis(
-            signal: CharacterSignal, target: CharacterSignalTarget
+            signal: CharacterSignal, target: CharacterSignalTarget,
+            source: _FrozenDocument,
         ) -> None:
+            nonlocal partial
             axis_key = target.approved_axis_identity
             if axis_key is None:
                 return
+            if (
+                signal.source_kind != "draft"
+                or signal.evidence.document_id != source.document.id
+                or signal.polarity != target.requested_polarity
+                or not _signal_matches_target(signal, target)
+            ):
+                partial = True
+                reason_counts["approved_axis_target_signal_mismatch"] += 1
+                return
+            target_axis_polarity = _verified_target_axis_polarity(
+                target, source=source, baselines=authority_baselines
+            )
+            if target_axis_polarity is None:
+                partial = True
+                reason_counts["approved_axis_target_direction_ambiguous"] += 1
+                return
+            # The targeted extractor's polarity is relative to this target's
+            # raw label.  Translate only for this bound axis; never change the
+            # shared CharacterSignal, which can bind other targets as well.
+            observed_axis_polarity = (
+                "negative" if target_axis_polarity == "positive" else "positive"
+            )
+            axis_polarities_by_signal[(signal.id, axis_key)].add(
+                observed_axis_polarity
+            )
             axis_bindings_by_signal[signal.id].add(axis_key)
             actor = _key(signal.character)
             for line in range(
@@ -855,7 +909,7 @@ class CharacterConsistencyStage:
                     partial = True
                 for signal in targeted.signals:
                     if targeted.diagnostics.outcome == "completed":
-                        bind_approved_axis(signal, target)
+                        bind_approved_axis(signal, target, source)
                     if all(existing.id != signal.id for existing in chunk_observations):
                         chunk_observations.append(signal)
                     if signal.id not in all_signals:
@@ -1003,7 +1057,7 @@ class CharacterConsistencyStage:
                     partial = True
                 for signal in verification.signals:
                     if verification.diagnostics.outcome == "completed":
-                        bind_approved_axis(signal, target)
+                        bind_approved_axis(signal, target, source)
                     if all(existing.id != signal.id for existing in chunk_observations):
                         chunk_observations.append(signal)
                     if signal.id not in all_signals:
@@ -1175,6 +1229,7 @@ class CharacterConsistencyStage:
                 baseline_row, baseline, baseline_scope, character_key
             )
             matches: list[CharacterSignal] = []
+            axis_observation_polarities: list[tuple[str, str]] = []
             draft_scopes: list[NarrativeScopeV1] = []
             draft_ordinals: list[int] = []
             draft_document_ids: list[str] = []
@@ -1194,6 +1249,14 @@ class CharacterConsistencyStage:
                     continue
                 if not axis_match:
                     continue
+                if baseline.approved_axis_identity is not None:
+                    axis_directions = axis_polarities_by_signal.get(
+                        (observation.id, baseline.approved_axis_identity), set()
+                    )
+                    if len(axis_directions) != 1:
+                        partial = True
+                        reason_counts["approved_axis_observation_direction_ambiguous"] += 1
+                        continue
                 source = frozen_by_document.get(observation.evidence.document_id)
                 if source is None or source.scope is None:
                     drift_scope_skipped += 1
@@ -1201,7 +1264,7 @@ class CharacterConsistencyStage:
                     continue
                 if _baseline_shadowed_at_scope(
                     baseline_entry,
-                    baselines,
+                    authority_baselines,
                     source.scope,
                     observation_context=observation.context,
                 ):
@@ -1240,6 +1303,10 @@ class CharacterConsistencyStage:
                         }
                     )
                 )
+                if baseline.approved_axis_identity is not None:
+                    axis_observation_polarities.append(
+                        (observation.id, next(iter(axis_directions)))
+                    )
                 draft_scopes.append(source.scope)
                 draft_ordinals.append(source.ordinal)
                 draft_document_ids.append(source.document.id)
@@ -1262,6 +1329,7 @@ class CharacterConsistencyStage:
             if len(matches) > 24:
                 reason_counts["observation_limit"] += len(matches) - 24
                 matches = matches[:24]
+                axis_observation_polarities = axis_observation_polarities[:24]
                 draft_scopes = draft_scopes[:24]
                 draft_ordinals = draft_ordinals[:24]
                 draft_document_ids = draft_document_ids[:24]
@@ -1291,6 +1359,10 @@ class CharacterConsistencyStage:
                 material_coverage="partial" if partial else "complete",
                 approved_axis_bound_observation_ids=(
                     tuple(row.id for row in matches)
+                    if baseline.approved_axis_identity is not None else ()
+                ),
+                approved_axis_observation_polarities=(
+                    tuple(axis_observation_polarities)
                     if baseline.approved_axis_identity is not None else ()
                 ),
             )
@@ -1647,6 +1719,14 @@ class CharacterConsistencyStage:
                     approved_axis_definition_sha256=payload.get(
                         "approved_axis_definition_sha256"
                     ),
+                    axis_positive_proposition=payload.get(
+                        "axis_positive_proposition"
+                    ),
+                    axis_positive_proposition_sha256=payload.get(
+                        "axis_positive_proposition_sha256"
+                    ),
+                    axis_alignment=payload.get("axis_alignment"),
+                    axis_polarity=payload.get("axis_polarity"),
                 )
             except Exception:
                 reasons["invalid_confirmed_trait_snapshot"] += 1
@@ -1745,6 +1825,42 @@ def _signal_matches_target(
             observation_object=signal.key_object,
         )
     )
+
+
+def _verified_target_axis_polarity(
+    target: CharacterSignalTarget,
+    *,
+    source: _FrozenDocument,
+    baselines: list[BaselineEntry],
+) -> str | None:
+    """Resolve a targeted pass to one frozen author direction, never a label guess."""
+
+    if target.approved_axis_identity is None or source.scope is None:
+        return None
+    directions: set[str] = set()
+    for entry in baselines:
+        _, baseline, baseline_scope, _ = entry
+        if (
+            baseline.approved_axis_identity != target.approved_axis_identity
+            or not baseline.axis_direction_verified
+            or baseline.dimension != target.dimension
+            or baseline.trait_key != target.trait_key
+            or baseline.polarity != target.baseline_polarity
+            or _key(baseline.character) != _key(target.character)
+            or stable_trait_identity(baseline.dimension, baseline.trait_key)
+            != target.comparison_key
+            or _trait_applies_to_release(baseline, source.scope) is not True
+            or _baseline_shadowed_at_scope(entry, baselines, source.scope)
+            or scope_relation(
+                baseline_scope,
+                source.scope,
+                first_resolution="confirmed",
+                second_resolution=source.resolution_state,
+            ) != "compatible"
+        ):
+            continue
+        directions.add(baseline.axis_polarity)
+    return next(iter(directions)) if len(directions) == 1 else None
 
 
 def _trusted_axis_binding(
@@ -2068,6 +2184,7 @@ def _safe_server_context(
     source: _FrozenDocument,
     *,
     baselines: list[BaselineEntry] | tuple[BaselineEntry, ...] = (),
+    authority_baselines: list[BaselineEntry] | tuple[BaselineEntry, ...] | None = None,
 ) -> _SafeServerContext:
     """Build a bounded, content-free alignment hint for draft extraction.
 
@@ -2075,7 +2192,8 @@ def _safe_server_context(
     model boundary. An object-bearing comparison key may disclose its short
     object anchor; baseline statements, contexts, evidence, source names,
     URLs and provider configuration are never serialized. Scope and release
-    validity are enforced server-side; the scope payload is not sent.
+    validity are enforced server-side; the scope payload is not sent. Older
+    unaligned axes can participate in authority checks without becoming hints.
     """
 
     base_payload: dict[str, Any] = {
@@ -2084,6 +2202,9 @@ def _safe_server_context(
     if source.source_kind != "draft" or source.scope is None:
         return _SafeServerContext(payload=_compact_context_json(base_payload))
 
+    shadow_entries = (
+        authority_baselines if authority_baselines is not None else baselines
+    )
     eligible_entries: list[BaselineEntry] = []
     for entry in sorted(
         baselines,
@@ -2097,7 +2218,7 @@ def _safe_server_context(
         _, baseline, baseline_scope, character_key = entry
         if _trait_applies_to_release(baseline, source.scope) is not True:
             continue
-        if _baseline_shadowed_at_scope(entry, baselines, source.scope):
+        if _baseline_shadowed_at_scope(entry, shadow_entries, source.scope):
             continue
         if scope_relation(
             baseline_scope,
@@ -2129,7 +2250,11 @@ def _safe_server_context(
             and not _frozen_comparison_identity(entry)
         ):
             unverified_object_keys.add(identity)
-        hint_variants[identity].add((contexts, baseline.polarity))
+        hint_variants[identity].add((
+            contexts,
+            baseline.axis_polarity
+            if baseline.axis_direction_verified else baseline.polarity,
+        ))
     ambiguous_hint_keys = {
         identity for identity, variants in hint_variants.items() if len(variants) > 1
     } | unverified_object_keys
@@ -3228,6 +3353,11 @@ def _to_issue(
                     "approved_axis_definition_sha256": (
                         prepared.case.baseline.approved_axis_definition_sha256
                     ),
+                    "axis_positive_proposition_sha256": (
+                        prepared.case.baseline.axis_positive_proposition_sha256
+                    ),
+                    "axis_alignment": prepared.case.baseline.axis_alignment,
+                    "axis_baseline_polarity": prepared.case.baseline.axis_polarity,
                     "observation_axis_binding": "server_targeted_evidence",
                 }
                 if prepared.case.baseline.approved_axis_identity is not None
@@ -3276,6 +3406,8 @@ def _safe_trace_document_name(value: str) -> str:
 
 def _safe_observation_refs(
     observations: tuple[CharacterSignal, ...],
+    *,
+    axis_polarities: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Only source coordinates and validated signal labels leave the stage."""
 
@@ -3286,6 +3418,11 @@ def _safe_observation_refs(
             "line_end": row.evidence.line_end,
             "observation_kind": row.observation_kind,
             "polarity": row.polarity,
+            **(
+                {"axis_polarity": axis_polarities[row.id]}
+                if axis_polarities is not None and row.id in axis_polarities
+                else {}
+            ),
             "key_object_sha256": (
                 hashlib.sha256(_key(row.key_object).encode("utf-8")).hexdigest()
                 if _key(row.key_object)
@@ -3479,13 +3616,25 @@ def _safe_case_trace(
                 "approved_axis_definition_sha256": (
                     baseline.approved_axis_definition_sha256
                 ),
+                "axis_positive_proposition_sha256": (
+                    baseline.axis_positive_proposition_sha256
+                ),
+                "axis_alignment": baseline.axis_alignment,
+                "axis_baseline_polarity": baseline.axis_polarity,
                 "observation_axis_binding": "server_targeted_evidence",
             }
             if baseline.approved_axis_identity is not None else {}
         ),
         "confirmed_candidate_id_sha256": candidate_id_sha256,
         "matched_observation_count": max(0, min(matched_observation_count, 24)),
-        "matched_observation_refs": _safe_observation_refs(matched_observations),
+        "matched_observation_refs": _safe_observation_refs(
+            matched_observations,
+            axis_polarities=(
+                dict(prepared.case.approved_axis_observation_polarities)
+                if prepared is not None and baseline.axis_direction_verified
+                else None
+            ),
+        ),
         "matched_observation_refs_truncated": (
             len(matched_observations) > _MAX_CASE_TRACE_OBSERVATION_REFS
         ),

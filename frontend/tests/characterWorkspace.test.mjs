@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   characterApiPaths,
+  characterTraitAxisPath,
   characterTraitAxesPath,
   createCharacterTraitAxis,
+  fetchCharacterTraitAxis,
   fetchCharacter,
   fetchCharacterTraitAxes,
   fetchCharacters,
@@ -15,13 +17,17 @@ import {
   fetchSourceNeighbors,
   normalizeCharacterDimension,
   normalizeProfileCandidate,
+  setAxisPositiveProposition,
+  submitAxisAlignment,
   submitCandidateDecision,
 } from "../src/features/characters/api.ts";
 import {
   appendAxisPage,
   canCreateNewAxis,
+  previewAxisPolarity,
   selectedProjectAxis,
   validateAxisDraft,
+  validateAxisPositiveProposition,
 } from "../src/features/characters/axisReview.ts";
 import {
   advanceReviewScope,
@@ -511,6 +517,8 @@ test("character API and report paths encode opaque identifiers", () => {
       "/api/v1/projects/project%20a/characters/%E8%A7%92%E8%89%B2%2Fid/profile-candidates/candidate%20%3F",
     decisions:
       "/api/v1/projects/project%20a/characters/%E8%A7%92%E8%89%B2%2Fid/profile-candidates/candidate%20%3F/decisions",
+    alignment:
+      "/api/v1/projects/project%20a/characters/%E8%A7%92%E8%89%B2%2Fid/profile-candidates/candidate%20%3F/alignment",
     sourceNeighbors:
       "/api/v1/projects/project%20a/characters/%E8%A7%92%E8%89%B2%2Fid/profile-candidates/candidate%20%3F/source-neighbors",
     driftIssues: "/api/v1/projects/project%20a/drift-issues",
@@ -650,6 +658,7 @@ test("author axis list is project scoped and rejects malformed or cross-project 
     created_at: "2026-09-24T00:00:00",
   };
   assert.equal(characterTraitAxesPath("project a"), "/api/v1/projects/project%20a/character-trait-axes");
+  assert.equal(characterTraitAxisPath("project a", "axis/1"), "/api/v1/projects/project%20a/character-trait-axes/axis%2F1");
   globalThis.fetch = async (url) => {
     assert.equal(String(url), "/api/v1/projects/project-1/character-trait-axes?limit=100&offset=0");
     return new Response(JSON.stringify({ items: [axis], total: 2, limit: 100, offset: 0 }), { status: 200 });
@@ -680,27 +689,105 @@ test("author axis creation sends CSRF once and does not replay uncertain POST", 
       trait_type: "core_personality",
       display_name: "路线协作",
       definition: "危急决策是否征询同伴",
+      positive_proposition: "危急决策前征询当值同伴",
     });
     throw new TypeError("connection lost");
   };
   await assert.rejects(createCharacterTraitAxis("project-1", {
     display_name: "路线协作", definition: "危急决策是否征询同伴",
+    positive_proposition: "危急决策前征询当值同伴",
   }), /connection lost/);
   assert.equal(calls, 1);
 });
 
 test("axis draft validates on meaningful normalized content", () => {
-  const empty = validateAxisDraft(" \n ", "\t");
+  const empty = validateAxisDraft(" \n ", "\t", "  ");
   assert.match(empty.errors.display_name, /请输入/);
   assert.match(empty.errors.definition, /请说明/);
-  const valid = validateAxisDraft("  路线   协作  ", " 决策\n是否征询同伴 ");
+  assert.match(empty.errors.positive_proposition, /正向/);
+  const valid = validateAxisDraft("  路线   协作  ", " 决策\n是否征询同伴 ", " 决策前\n征询当值同伴 ");
   assert.deepEqual(valid.value, {
     display_name: "路线 协作",
     definition: "决策 是否征询同伴",
+    positive_proposition: "决策前 征询当值同伴",
   });
-  assert.deepEqual(valid.errors, { display_name: "", definition: "" });
-  assert.match(validateAxisDraft("轴".repeat(81), "定义").errors.display_name, /80/);
-  assert.match(validateAxisDraft("轴", "定".repeat(201)).errors.definition, /200/);
+  assert.deepEqual(valid.errors, { display_name: "", definition: "", positive_proposition: "" });
+  assert.match(validateAxisDraft("轴".repeat(81), "定义", "正向").errors.display_name, /80/);
+  assert.match(validateAxisDraft("轴", "定".repeat(201), "正向").errors.definition, /200/);
+  assert.match(validateAxisPositiveProposition("正".repeat(201)).error, /200/);
+});
+
+test("author-axis mapping keeps raw model direction distinct and refuses contradictory payloads", () => {
+  assert.equal(previewAxisPolarity("positive", "same"), "positive");
+  assert.equal(previewAxisPolarity("positive", "opposite"), "negative");
+  assert.equal(previewAxisPolarity("negative", "opposite"), "positive");
+  assert.equal(previewAxisPolarity("unclear", "same"), null);
+  assert.equal(previewAxisPolarity("positive", "uncertain"), null);
+  const base = verifiedSupportCandidate({
+    polarity: "positive",
+    approved_axis_id: "axis-1",
+    approved_axis_version: 1,
+  });
+  const legacy = normalizeProfileCandidate(base);
+  assert.equal(legacy.axis_alignment, null);
+  assert.equal(legacy.axis_polarity, null);
+  const mapped = normalizeProfileCandidate({
+    ...base,
+    axis_alignment: "opposite",
+    axis_polarity: "negative",
+    axis_positive_proposition_sha256: "b".repeat(64),
+  });
+  assert.equal(mapped.polarity, "positive");
+  assert.equal(mapped.axis_polarity, "negative");
+  for (const invalid of [
+    { axis_alignment: "opposite", axis_polarity: "positive", axis_positive_proposition_sha256: "b".repeat(64) },
+    { axis_alignment: "same", axis_polarity: null, axis_positive_proposition_sha256: "b".repeat(64) },
+    { axis_alignment: "same", axis_polarity: "positive", axis_positive_proposition_sha256: "invalid" },
+  ]) assert.throws(() => normalizeProfileCandidate({ ...base, ...invalid }), /方向映射/);
+});
+
+test("one-time axis proposition and legacy alignment use scoped API, CSRF, and review revision", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  context.after(() => { globalThis.fetch = originalFetch; globalThis.document = originalDocument; });
+  globalThis.document = { cookie: "loreguard_csrf=axis-review-token" };
+  const axis = {
+    id: "axis-1", project_id: "project-1", trait_type: "core_personality",
+    version: 1, display_name: "签名自主", definition: "是否冒用他人签名",
+    definition_sha256: "a".repeat(64), positive_proposition: "角色冒用他人签名",
+    positive_proposition_sha256: "b".repeat(64), created_at: null,
+  };
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), init });
+    if (String(url).endsWith("/positive-proposition")) return new Response(JSON.stringify(axis));
+    if (String(url).endsWith("/alignment")) {
+      return new Response(JSON.stringify({ candidate: verifiedSupportCandidate({
+        review_state: "confirmed", polarity: "positive", approved_axis_id: axis.id,
+        approved_axis_version: 1, axis_alignment: "opposite", axis_polarity: "negative",
+        axis_positive_proposition_sha256: axis.positive_proposition_sha256,
+      }) }));
+    }
+    return new Response(JSON.stringify(axis));
+  };
+  assert.equal((await fetchCharacterTraitAxis("project-1", "axis-1")).positive_proposition, axis.positive_proposition);
+  const updated = await setAxisPositiveProposition("project-1", "axis-1", {
+    positive_proposition: axis.positive_proposition, expected_axis_version: 1,
+  });
+  assert.equal(updated.positive_proposition_sha256, axis.positive_proposition_sha256);
+  const result = await submitAxisAlignment("project-1", "林澈", "candidate-bound", {
+    expected_revision: 1, expected_axis_version: 1,
+    expected_axis_positive_proposition_sha256: axis.positive_proposition_sha256,
+    axis_alignment: "opposite", comment: "与冒签命题相反",
+  });
+  assert.equal(result.candidate.axis_polarity, "negative");
+  assert.equal(requests.length, 3);
+  for (const request of requests.slice(1)) {
+    assert.equal(new Headers(request.init.headers).get("X-CSRF-Token"), "axis-review-token");
+    assert.ok(new Headers(request.init.headers).get("Idempotency-Key"));
+  }
+  assert.equal(JSON.parse(requests[2].init.body).expected_revision, 1);
+  assert.equal(JSON.parse(requests[2].init.body).axis_alignment, "opposite");
 });
 
 test("author-axis pagination fails closed on shifted duplicate pages or unreviewed local creation", () => {

@@ -17,7 +17,7 @@
 - 本地 keyword + 稳定 SHA-256 字符 n-gram + canonical entity graph 三路候选排序并留下分数轨迹；当前 `consumed` 只表示候选类型与检查器兼容，最终仍由规则引擎检查全量记录，不能证明候选排序影响了裁决
 - 可选 Evidence RAG 已真实运行固定 BGE embedding、PostgreSQL/pgvector 精确余弦检索与 keyword+dense RRF，并按项目、文档、版本、内容哈希、chunker 和 profile 隔离
 - 可选 `IssueEvidenceReviewer` 将获授权的 RAG 证据交给模型复核，并把结论作为独立注释附在规则问题上；它不会删除、改写或替代规则结果，默认关闭
-- 角色工作台支持为新确认的核心性格候选选择或创建项目内不可变作者轴；后续分析冻结轴定义，草稿定向抽取可在原始模型标签不同时依证据匹配同轴
+- 角色工作台支持为核心性格候选选择或创建项目内不可变作者轴；作者还须定义轴的正向命题，并明确审核原标签与命题的同向/反向关系。后续分析冻结该映射，草稿定向抽取可在原始模型标签不同时依证据匹配同轴
 - 检查事实冲突、同时间多地点、知识越权、非持有者使用物品、世界规则冲突
 - 每个问题返回两处证据、行号、严重度、置信度和修订建议
 - 本地线程/Celery 两种后台执行方式、受状态约束的取消/重试与可断线续传的持久化 SSE 进度流
@@ -157,7 +157,7 @@ Evidence RAG 已实现独立显式配置的 OpenAI-compatible embedding client�
 
 1. 在“本地项目工作台”新建或选择项目，一次选择多个 `.md`、`.txt`、`.json`、`.docx` 文件上传。同一项目内再次上传同名文件会自动生成下一版本，并把旧的同名活动版本标记为历史版本；明确选择“替换”时，上传文件名必须与目标一致，否则返回 `409`。
 2. 为每份活动文档核对资料身份、发布状态和故事范围。可以显式请求 AI 给出带原文证据的上下文建议，但建议固定为 `inferred/unresolved`，不能自动确认或提升为权威资料；用户必须人工核对并保存为 `confirmed`。单文档超过 30,000 字符或 2,000 行时请手动设置，当前不会为身份推断自动分块。
-3. 启动 `baseline_build`。服务端只冻结已确认的世界观/正式设定、角色资料与已发布历史作为 `background`，排除草稿、未确认和已退役资料。若显式启用角色一致性阶段，运行可能产生角色资料候选；只有人工确认的候选才进入正式角色基线。新核心性格候选在角色工作台的“待确认归纳”中先核对原句、模型原始标签、方向和作用域，再选择已有作者轴或先创建新轴，最后单独确认候选；驳回无需轴。
+3. 启动 `baseline_build`。服务端只冻结已确认的世界观/正式设定、角色资料与已发布历史作为 `background`，排除草稿、未确认和已退役资料。若显式启用角色一致性阶段，运行可能产生角色资料候选；只有人工确认的候选才进入正式角色基线。新核心性格候选在角色工作台的“待确认归纳”中先核对原句、模型原始标签、方向和作用域，再选择已有作者轴或先创建新轴，核对轴的正向命题并明确选择同向/反向，最后单独确认候选；不确定时保留待审，驳回无需轴。
 4. 选择一份或多份已确认的 `draft/in_review` 章节，启动 `draft_review`。所选新稿冻结为 `target`，服务端自动加入已确认且范围兼容的正式背景；客户端不能自行把资料声明成权威背景。状态页的 `review_batch` 和 `input_documents[].batch_role` 可核对实际覆盖范围与排除原因。
 5. 运行中可以请求取消；只有 `failed` 或 `cancelled` 任务允许重试，终态任务不能取消。`retry` 复用原冻结输入和批次角色；`recheck` 只替换原逻辑 target 的当前活动版本并重新派生背景。运行 URL 同时包含 `projectId` 与 `runId`，刷新、浏览器前进后退或重新登录后仍恢复同一次运行，完成后自动进入该运行的精确报告。
 
@@ -170,7 +170,7 @@ exactly-once 边界见 [分析运行创建可靠性](docs/run-creation-reliabili
 
 完整选择规则、冻结语义、API 示例与限制见 [`docs/guided-review-batch-v1.md`](docs/guided-review-batch-v1.md)。不传分析请求 body 或传 `{}` 仍按旧客户端语义执行 `full_review`，但它不是推荐的“正式资料对新稿”工作流。
 
-作者轴 v1 仅支持 `core_personality`，项目内名称与定义固定为版本 `1`，目前没有编辑、升级或给已确认旧候选补绑的入口。创建轴不会自动确认候选，也不会改变既有报告；只有后续分析会冻结作者确认的轴。模型原始标签保留，只有通过单目标定向抽取且证据与角色校验通过的草稿观察才能由服务端绑定到轴；同一角色、文档和来源行被两个轴复用时会弃权。旧的无轴候选和快照继续按旧逻辑处理，缺证据或覆盖不全仍显示待确认/部分覆盖。该流程的操作、API 与评测边界见[作者批准轴 v1 文档](docs/character-approved-axis-rfc.md)。
+作者轴 v1 仅支持 `core_personality`，项目内名称与定义固定为版本 `1`，目前没有编辑或升级入口；旧轴的正向命题可由作者一次性补写，已确认旧候选的方向可在角色档案逐条补认，但不提供事后补绑原本无轴的旧候选。创建轴不会自动确认候选，也不会改变既有报告；只有后续分析会冻结作者确认的轴命题和方向映射。模型原始标签与原方向保留，不能由模型猜测映射；只有通过单目标定向抽取且证据与角色校验通过的草稿观察才能由服务端绑定到轴；同一角色、文档和来源行被两个轴复用时会弃权。旧的无轴候选和快照继续按旧逻辑处理；已绑轴但未补认方向的旧特征仍作为正式特征生效，不过新运行对该轴的方向性判断会弃权，并标记部分覆盖，而非沿用原始模型方向。该流程、API 与评测边界见[作者批准轴 v1 文档](docs/character-approved-axis-rfc.md)和[方向对齐 RFC](docs/character-axis-direction-alignment-rfc.md)。
 
 SSE 客户端可用 `Last-Event-ID` 请求头或 `last_event_id` 查询参数从指定事件之后恢复。终态事件固定返回 `status` 和 `error`；失败任务不会被当成成功结果加载。
 
@@ -323,8 +323,10 @@ python scripts/run_long_text_smoke.py
 | POST | `/api/v1/analysis-runs/{id}/retry` | 以冻结输入重试任务；可带 `Idempotency-Key` |
 | GET | `/api/v1/projects/{id}/characters/{character_key}/profile-candidates` | 分页读取待人工确认的角色资料候选 |
 | GET | `/api/v1/projects/{id}/character-trait-axes?limit=100&offset=0` | 分页读取项目内核心性格作者轴 |
-| POST | `/api/v1/projects/{id}/character-trait-axes` | 创建项目内不可变作者轴，提交 `display_name` 与 `definition` |
-| POST | `/api/v1/projects/{id}/characters/{character_key}/profile-candidates/{candidate_id}/decisions` | 确认或驳回角色资料候选；需提供候选修订号，核心性格确认可同时提交 `approved_axis_id` 与 `expected_axis_version=1` |
+| POST | `/api/v1/projects/{id}/character-trait-axes` | 创建项目内不可变作者轴，前端同时提交名称、定义和作者写的 `positive_proposition`；旧客户端可暂不提交命题，但该轴无法用于新的有方向确认 |
+| GET / POST | `/api/v1/projects/{id}/character-trait-axes/{axis_id}` / `.../{axis_id}/positive-proposition` | 精确读取轴；旧轴可一次性补写不可变正向命题 |
+| POST | `/api/v1/projects/{id}/characters/{character_key}/profile-candidates/{candidate_id}/decisions` | 确认或驳回角色资料候选；核心性格绑定轴确认需提供候选修订号、轴版本、正向命题哈希和作者选定的 `axis_alignment=same|opposite` |
+| POST | `/api/v1/projects/{id}/characters/{character_key}/profile-candidates/{candidate_id}/alignment` | 对已确认但方向未核对的旧轴特征逐条补认，追加审核记录，仅影响新运行 |
 | GET | `/api/v1/evaluations/latest` | 获取内置显式指令规则回归（非自然文本准确率） |
 
 ## 项目边界

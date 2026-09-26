@@ -605,5 +605,5 @@ def test_context_inference_migration_is_additive_from_review_batch_head():
             revision = connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
             ).scalar_one()
-            assert revision == "0017_character_trait_withdraw"
+            assert revision == "0018_character_axis_direction"
         engine.dispose()

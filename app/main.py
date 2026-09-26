@@ -70,6 +70,7 @@ from .character_traits import (
     _OBJECT_BEARING_TRAIT_DIMENSIONS,
     _verify_reused_review_chain,
     _validated_comparison_key,
+    axis_polarity_for_alignment,
     formal_target_fingerprint_matches,
     normalize_character_key,
     upsert_character_trait_candidate,
@@ -275,6 +276,10 @@ class CharacterTraitDecisionIn(BaseModel):
     comment: str = Field(default="", max_length=2_000)
     approved_axis_id: str | None = Field(default=None, min_length=1, max_length=36)
     expected_axis_version: int | None = Field(default=None, ge=1)
+    axis_alignment: Literal["same", "opposite", "uncertain"] | None = None
+    expected_axis_positive_proposition_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
 
 
 class CharacterTraitAxisCreateIn(BaseModel):
@@ -283,6 +288,26 @@ class CharacterTraitAxisCreateIn(BaseModel):
     trait_type: Literal["core_personality"] = "core_personality"
     display_name: str = Field(min_length=1, max_length=80)
     definition: str = Field(min_length=1, max_length=200)
+    positive_proposition: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class CharacterTraitAxisPropositionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    positive_proposition: str = Field(min_length=1, max_length=200)
+    expected_axis_version: int = Field(ge=1)
+
+
+class CharacterTraitAxisAlignmentIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    expected_axis_version: int = Field(ge=1)
+    expected_axis_positive_proposition_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$"
+    )
+    axis_alignment: Literal["same", "opposite", "uncertain"]
+    comment: str = Field(default="", max_length=2_000)
 
 
 class CharacterTraitSupersessionLinkIn(BaseModel):
@@ -935,6 +960,12 @@ def serialize_character_trait_axis(row: CharacterTraitAxisRow) -> dict:
         "display_name": row.display_name,
         "definition": row.definition,
         "definition_sha256": row.definition_sha256,
+        "positive_proposition": row.positive_proposition,
+        "positive_proposition_sha256": row.positive_proposition_sha256,
+        "positive_proposition_authored_by_user_id": (
+            row.positive_proposition_authored_by_user_id
+        ),
+        "positive_proposition_authored_at": row.positive_proposition_authored_at,
         "created_at": row.created_at,
     }
 
@@ -950,6 +981,9 @@ def serialize_character_trait_candidate(row: CharacterTraitCandidateRow) -> dict
         "trait_key": row.trait_key,
         "approved_axis_id": row.approved_axis_id,
         "approved_axis_version": row.approved_axis_version,
+        "axis_alignment": row.axis_alignment,
+        "axis_polarity": row.axis_polarity,
+        "axis_positive_proposition_sha256": row.axis_positive_proposition_sha256,
         "comparison_key": row.comparison_key,
         "value": row.value,
         "polarity": row.polarity,
@@ -2783,6 +2817,122 @@ def list_character_trait_axes(
         }
 
 
+@app.get("/api/v1/projects/{project_id}/character-trait-axes/{axis_id}")
+def get_character_trait_axis(
+    project_id: str,
+    axis_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    with SessionLocal() as db:
+        axis = db.scalar(
+            select(CharacterTraitAxisRow)
+            .join(ProjectRow, ProjectRow.id == CharacterTraitAxisRow.project_id)
+            .where(
+                CharacterTraitAxisRow.id == axis_id,
+                CharacterTraitAxisRow.project_id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+        )
+        if axis is None:
+            raise HTTPException(404, "比较轴不存在")
+        return serialize_character_trait_axis(axis)
+
+
+def _normalized_axis_proposition(value: str) -> tuple[str, str]:
+    text = " ".join(value.split())
+    if not 1 <= len(text) <= 200 or not _safe_axis_author_text(text):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "character_trait_axis_text_unsafe",
+                "message": "比较轴正向命题为空、过长、含敏感格式或不适合模型上下文",
+            },
+        )
+    return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/character-trait-axes/{axis_id}/positive-proposition"
+)
+def set_character_trait_axis_positive_proposition(
+    project_id: str,
+    axis_id: str,
+    payload: CharacterTraitAxisPropositionIn,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    proposition, digest = _normalized_axis_proposition(payload.positive_proposition)
+    with SessionLocal() as db:
+        axis = db.scalar(
+            select(CharacterTraitAxisRow)
+            .join(ProjectRow, ProjectRow.id == CharacterTraitAxisRow.project_id)
+            .where(
+                CharacterTraitAxisRow.id == axis_id,
+                CharacterTraitAxisRow.project_id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if axis is None:
+            raise HTTPException(404, "比较轴不存在")
+        if axis.version != payload.expected_axis_version:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_axis_version_conflict",
+                    "message": "比较轴版本已变化，请刷新后重试",
+                },
+            )
+        if axis.positive_proposition is not None or (
+            axis.positive_proposition_sha256 is not None
+        ):
+            if (
+                axis.positive_proposition == proposition
+                and axis.positive_proposition_sha256 == digest
+                and axis.positive_proposition_authored_at is not None
+            ):
+                return serialize_character_trait_axis(axis)
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_axis_proposition_conflict",
+                    "message": "比较轴正向命题已确定且不可修改，请刷新后核对",
+                },
+            )
+        changed = db.execute(
+            update(CharacterTraitAxisRow)
+            .where(
+                CharacterTraitAxisRow.id == axis_id,
+                CharacterTraitAxisRow.project_id == project_id,
+                CharacterTraitAxisRow.positive_proposition.is_(None),
+                CharacterTraitAxisRow.positive_proposition_sha256.is_(None),
+                CharacterTraitAxisRow.positive_proposition_authored_at.is_(None),
+                CharacterTraitAxisRow.positive_proposition_authored_by_user_id.is_(None),
+            )
+            .values(
+                positive_proposition=proposition,
+                positive_proposition_sha256=digest,
+                positive_proposition_authored_by_user_id=context.user_id,
+                positive_proposition_authored_at=utc_now_naive(),
+            )
+        ).rowcount
+        if changed != 1:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_axis_proposition_conflict",
+                    "message": "比较轴正向命题已发生变化，请刷新后核对",
+                },
+            )
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "比较轴正向命题已发生变化") from None
+        db.refresh(axis)
+        return serialize_character_trait_axis(axis)
+
+
 @app.post("/api/v1/projects/{project_id}/character-trait-axes", status_code=201)
 def create_character_trait_axis(
     project_id: str,
@@ -2791,6 +2941,10 @@ def create_character_trait_axis(
 ) -> dict:
     display_name = " ".join(payload.display_name.split())
     definition = " ".join(payload.definition.split())
+    positive_proposition, positive_hash = (
+        _normalized_axis_proposition(payload.positive_proposition)
+        if payload.positive_proposition is not None else (None, None)
+    )
     if not _safe_axis_author_text(display_name) or not _safe_axis_author_text(
         definition
     ):
@@ -2836,6 +2990,14 @@ def create_character_trait_axis(
             display_name=display_name,
             definition=definition,
             definition_sha256=definition_sha256,
+            positive_proposition=positive_proposition,
+            positive_proposition_sha256=positive_hash,
+            positive_proposition_authored_by_user_id=(
+                context.user_id if positive_proposition is not None else None
+            ),
+            positive_proposition_authored_at=(
+                utc_now_naive() if positive_proposition is not None else None
+            ),
             created_by_user_id=context.user_id,
         )
         db.add(axis)
@@ -2934,6 +3096,32 @@ def _confirmation_trait_identity_matches(
         baseline_key=second.trait_key,
         observation_key=first.trait_key,
     )
+
+
+def _verify_confirmed_axis_peer(db, peer: CharacterTraitCandidateRow, axis: CharacterTraitAxisRow) -> None:
+    """Do not let a damaged same-axis row bypass author conflict checks."""
+
+    try:
+        _verify_reused_review_chain(db, peer)
+        if (
+            peer.review_state != "confirmed"
+            or peer.approved_axis_id != axis.id
+            or peer.approved_axis_version != axis.version
+            or (
+                peer.axis_alignment in {"same", "opposite"}
+                and peer.axis_positive_proposition_sha256
+                != axis.positive_proposition_sha256
+            )
+        ):
+            raise ValueError("same-axis peer identity is invalid")
+    except ValueError:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "character_trait_review_integrity_invalid",
+                "message": "同轴既有角色特征审核记录无法核对，不能继续确认方向",
+            },
+        ) from None
 
 
 def _requires_legacy_preference_supersession(
@@ -3291,6 +3479,11 @@ def get_character_profile_candidate(
                     "id": review.id,
                     "decision": review.decision,
                     "expected_revision": review.expected_lock_version,
+                    "axis_alignment": review.axis_alignment,
+                    "axis_polarity": review.axis_polarity,
+                    "axis_positive_proposition_sha256": (
+                        review.axis_positive_proposition_sha256
+                    ),
                     "comment": review.comment,
                     "created_at": review.created_at,
                 }
@@ -3641,6 +3834,267 @@ def link_legacy_preference_candidate(
 
 
 @app.post(
+    "/api/v1/projects/{project_id}/characters/{character_key}/profile-candidates/"
+    "{candidate_id}/alignment",
+    status_code=201,
+)
+def align_confirmed_character_trait_axis(
+    project_id: str,
+    character_key: str,
+    candidate_id: str,
+    payload: CharacterTraitAxisAlignmentIn,
+    idempotency_key_header: Annotated[
+        str | None, Header(alias="Idempotency-Key", max_length=128)
+    ] = None,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    """Author-only correction of a confirmed axis; source retirement is irrelevant."""
+
+    if payload.axis_alignment == "uncertain":
+        raise HTTPException(
+            422,
+            detail={
+                "code": "character_trait_axis_alignment_required",
+                "message": "方向不确定时不建立可用于方向性审查的映射",
+            },
+        )
+    idempotency_key = _normalize_idempotency_key(idempotency_key_header)
+    try:
+        normalized = normalize_character_key(character_key)
+    except ValueError:
+        raise HTTPException(404, "角色候选不存在") from None
+    with SessionLocal() as db:
+        project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if project is None:
+            raise HTTPException(404, "项目不存在")
+        row = _candidate_in_workspace(
+            db, project_id=project_id, candidate_id=candidate_id,
+            character_key=normalized, workspace_id=context.workspace_id,
+            for_update=True,
+        )
+        if row is None:
+            raise HTTPException(404, "角色候选不存在")
+        try:
+            _verify_reused_review_chain(db, row)
+        except ValueError:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_review_integrity_invalid",
+                    "message": "角色特征审核记录不完整，无法补认方向",
+                },
+            ) from None
+        existing = (
+            db.scalar(
+                select(CharacterTraitReviewRow).where(
+                    CharacterTraitReviewRow.candidate_id == candidate_id,
+                    CharacterTraitReviewRow.idempotency_key == idempotency_key,
+                )
+            )
+            if idempotency_key is not None else None
+        )
+        if existing is not None:
+            if (
+                existing.decision != "align"
+                or existing.expected_lock_version != payload.expected_revision
+                or existing.approved_axis_id != row.approved_axis_id
+                or existing.approved_axis_version != payload.expected_axis_version
+                or existing.axis_alignment != payload.axis_alignment
+                or existing.axis_positive_proposition_sha256
+                != payload.expected_axis_positive_proposition_sha256
+                or existing.comment != payload.comment
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "idempotency_key_conflict",
+                        "message": "同一幂等键不能用于不同的方向补认请求",
+                    },
+                )
+            return {
+                "candidate": serialize_character_trait_candidate(row),
+                "profile_revision": row.lock_version,
+                "decision_id": existing.id,
+                "deduplicated": True,
+            }
+        if (
+            row.review_state != "confirmed"
+            or row.lock_version != payload.expected_revision
+            or row.trait_type != "core_personality"
+            or row.approved_axis_id is None
+        ):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_revision_conflict",
+                    "message": "仅可补认当前已确认且已绑定轴的角色特征，请刷新后重试",
+                    "actual_revision": row.lock_version,
+                    "review_state": row.review_state,
+                },
+            )
+        axis = db.get(CharacterTraitAxisRow, row.approved_axis_id)
+        if (
+            axis is None or axis.project_id != project_id
+            or axis.trait_type != row.trait_type
+            or axis.version != payload.expected_axis_version
+            or row.approved_axis_version != payload.expected_axis_version
+        ):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_axis_version_conflict",
+                    "message": "绑定的比较轴身份或版本不匹配，请刷新后重试",
+                },
+            )
+        if (
+            axis.positive_proposition is None
+            or axis.positive_proposition_sha256 is None
+            or hashlib.sha256(axis.positive_proposition.encode("utf-8")).hexdigest()
+            != axis.positive_proposition_sha256
+        ):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_axis_proposition_required",
+                    "message": "该比较轴尚无可核对的正向命题，请先由作者补充",
+                },
+            )
+        if (
+            axis.positive_proposition_sha256
+            != payload.expected_axis_positive_proposition_sha256
+        ):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_axis_proposition_conflict",
+                    "message": "比较轴正向命题与当前版本不一致，请刷新后重试",
+                },
+            )
+        try:
+            axis_polarity = axis_polarity_for_alignment(
+                row.polarity, payload.axis_alignment
+            )
+        except ValueError:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "character_trait_axis_alignment_required",
+                    "message": "候选原方向不明确，无法补认方向",
+                },
+            ) from None
+        frozen_by_id, reason = _verified_candidate_frozen_inputs(db, row)
+        if frozen_by_id is None:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_evidence_invalid",
+                    "message": reason or "候选冻结证据无法核对",
+                },
+            )
+        support_status, _ = _verified_candidate_support_payload(
+            row, frozen_by_id, db=db
+        )
+        if support_status == "invalid":
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_support_binding_invalid",
+                    "message": "候选精确证据定位无法核对，不能补认方向",
+                },
+            )
+        peers = list(db.scalars(
+            select(CharacterTraitCandidateRow).where(
+                CharacterTraitCandidateRow.project_id == project_id,
+                CharacterTraitCandidateRow.character_key == row.character_key,
+                CharacterTraitCandidateRow.trait_type == row.trait_type,
+                CharacterTraitCandidateRow.approved_axis_id == row.approved_axis_id,
+                CharacterTraitCandidateRow.review_state == "confirmed",
+                CharacterTraitCandidateRow.id != row.id,
+            )
+        ).all())
+        for peer in peers:
+            _verify_confirmed_axis_peer(db, peer, axis)
+            if (
+                peer.axis_alignment in {"same", "opposite"}
+                and peer.axis_polarity != axis_polarity
+                and _release_ranges_overlap(row, peer)
+                and scope_relation(
+                    row.scope_payload, peer.scope_payload,
+                    first_resolution="confirmed", second_resolution="confirmed",
+                ) != "incompatible"
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_confirmation_conflict",
+                        "message": "同一作用域内已有方向相反的已确认同轴特征",
+                    },
+                )
+        changed = db.execute(
+            update(CharacterTraitCandidateRow)
+            .where(
+                CharacterTraitCandidateRow.id == row.id,
+                CharacterTraitCandidateRow.project_id == project_id,
+                CharacterTraitCandidateRow.review_state == "confirmed",
+                CharacterTraitCandidateRow.lock_version == payload.expected_revision,
+            )
+            .values(
+                axis_alignment=payload.axis_alignment,
+                axis_polarity=axis_polarity,
+                axis_positive_proposition_sha256=axis.positive_proposition_sha256,
+                lock_version=payload.expected_revision + 1,
+                reviewed_at=utc_now_naive(),
+                reviewed_by_user_id=context.user_id,
+            )
+        ).rowcount
+        if changed != 1:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_revision_conflict",
+                    "message": "角色特征已发生变化，请刷新后重试",
+                },
+            )
+        review = CharacterTraitReviewRow(
+            project_id=project_id, candidate_id=row.id,
+            decision="align", approved_axis_id=row.approved_axis_id,
+            approved_axis_version=row.approved_axis_version,
+            axis_alignment=payload.axis_alignment, axis_polarity=axis_polarity,
+            axis_positive_proposition_sha256=axis.positive_proposition_sha256,
+            expected_lock_version=payload.expected_revision,
+            idempotency_key=idempotency_key, comment=payload.comment,
+            created_by_user_id=context.user_id,
+        )
+        db.add(review)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "character_trait_revision_conflict",
+                    "message": "角色特征方向补认发生冲突，请刷新后重试",
+                },
+            ) from None
+        db.refresh(row)
+        return {
+            "candidate": serialize_character_trait_candidate(row),
+            "profile_revision": row.lock_version,
+            "decision_id": review.id,
+            "deduplicated": False,
+        }
+
+
+@app.post(
     "/api/v1/projects/{project_id}/characters/{character_key}/profile-candidates/{candidate_id}/decisions",
     status_code=201,
 )
@@ -3669,6 +4123,28 @@ def decide_character_profile_candidate(
             detail={
                 "code": "character_trait_axis_not_applicable",
                 "message": "只有确认角色特征时才能绑定比较轴",
+            },
+        )
+    if payload.approved_axis_id is None and (
+        payload.axis_alignment is not None
+        or payload.expected_axis_positive_proposition_sha256 is not None
+    ):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "character_trait_axis_not_applicable",
+                "message": "未绑定作者轴时不能提交轴方向对应",
+            },
+        )
+    if payload.approved_axis_id is not None and (
+        payload.axis_alignment not in {"same", "opposite"}
+        or payload.expected_axis_positive_proposition_sha256 is None
+    ):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "character_trait_axis_alignment_required",
+                "message": "确认前须核对轴正向命题并明确选择同向或反向；不确定时请暂缓确认",
             },
         )
     try:
@@ -3730,6 +4206,10 @@ def decide_character_profile_candidate(
                     or existing_withdrawal.approved_axis_id != row.approved_axis_id
                     or existing_withdrawal.approved_axis_version
                     != row.approved_axis_version
+                    or existing_withdrawal.axis_alignment != row.axis_alignment
+                    or existing_withdrawal.axis_polarity != row.axis_polarity
+                    or existing_withdrawal.axis_positive_proposition_sha256
+                    != row.axis_positive_proposition_sha256
                 ):
                     raise HTTPException(
                         409,
@@ -3786,6 +4266,11 @@ def decide_character_profile_candidate(
                 decision="withdraw",
                 approved_axis_id=row.approved_axis_id,
                 approved_axis_version=row.approved_axis_version,
+                axis_alignment=row.axis_alignment,
+                axis_polarity=row.axis_polarity,
+                axis_positive_proposition_sha256=(
+                    row.axis_positive_proposition_sha256
+                ),
                 expected_lock_version=payload.expected_revision,
                 idempotency_key=idempotency_key,
                 comment=payload.comment,
@@ -3842,6 +4327,9 @@ def decide_character_profile_candidate(
                 or existing_review.approved_axis_id != payload.approved_axis_id
                 or existing_review.approved_axis_version
                 != payload.expected_axis_version
+                or existing_review.axis_alignment != payload.axis_alignment
+                or existing_review.axis_positive_proposition_sha256
+                != payload.expected_axis_positive_proposition_sha256
             ):
                 raise HTTPException(
                     409,
@@ -3886,6 +4374,7 @@ def decide_character_profile_candidate(
                 },
             )
         approved_axis = None
+        approved_axis_polarity = None
         if payload.approved_axis_id is not None:
             if row.trait_type != "core_personality":
                 raise HTTPException(
@@ -3925,6 +4414,43 @@ def decide_character_profile_candidate(
                         "message": "比较轴版本已变化，请刷新后重试",
                     },
                 )
+            if (
+                approved_axis.positive_proposition is None
+                or approved_axis.positive_proposition_sha256 is None
+                or hashlib.sha256(
+                    approved_axis.positive_proposition.encode("utf-8")
+                ).hexdigest() != approved_axis.positive_proposition_sha256
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_axis_proposition_required",
+                        "message": "该比较轴尚无可核对的正向命题，请先由作者补充",
+                    },
+                )
+            if (
+                approved_axis.positive_proposition_sha256
+                != payload.expected_axis_positive_proposition_sha256
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_axis_proposition_conflict",
+                        "message": "比较轴正向命题与当前版本不一致，请刷新后重试",
+                    },
+                )
+            try:
+                approved_axis_polarity = axis_polarity_for_alignment(
+                    row.polarity, payload.axis_alignment
+                )
+            except ValueError:
+                raise HTTPException(
+                    422,
+                    detail={
+                        "code": "character_trait_axis_alignment_required",
+                        "message": "候选原方向不明确，不能建立同向或反向映射",
+                    },
+                ) from None
         if payload.decision == "confirm":
             confirmed = list(
                 db.scalars(
@@ -3937,6 +4463,30 @@ def decide_character_profile_candidate(
                     )
                 ).all()
             )
+            if approved_axis is not None:
+                for other in confirmed:
+                    if other.approved_axis_id == approved_axis.id:
+                        _verify_confirmed_axis_peer(db, other, approved_axis)
+            unverified_axis_peers = [
+                other for other in confirmed
+                if approved_axis is not None
+                and other.approved_axis_id == approved_axis.id
+                and other.id != row.supersedes_candidate_id
+                and other.axis_alignment not in {"same", "opposite"}
+                and _release_ranges_overlap(row, other)
+                and scope_relation(
+                    row.scope_payload, other.scope_payload,
+                    first_resolution="confirmed", second_resolution="confirmed",
+                ) != "incompatible"
+            ]
+            if unverified_axis_peers:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_axis_alignment_unverified",
+                        "message": "同轴已有旧特征未核对方向，请先补认旧特征",
+                    },
+                )
             conflicts = [
                 other
                 for other in confirmed
@@ -3945,9 +4495,13 @@ def decide_character_profile_candidate(
                 )
                 if other.id != row.supersedes_candidate_id
                 and (
-                    other.value != row.value
-                    or other.polarity != row.polarity
-                    or _requires_legacy_preference_supersession(row, other)
+                    (other.axis_polarity != approved_axis_polarity)
+                    if approved_axis is not None
+                    else (
+                        other.value != row.value
+                        or other.polarity != row.polarity
+                        or _requires_legacy_preference_supersession(row, other)
+                    )
                 )
                 and _release_ranges_overlap(row, other)
                 and scope_relation(
@@ -3979,6 +4533,7 @@ def decide_character_profile_candidate(
                 try:
                     if replaced is None:
                         raise ValueError("superseded candidate is missing")
+                    _verify_reused_review_chain(db, replaced)
                     if row.trait_type == "core_personality" and (
                         payload.approved_axis_id is not None
                         or replaced.approved_axis_id is not None
@@ -4029,6 +4584,11 @@ def decide_character_profile_candidate(
                         decision="supersede",
                         approved_axis_id=replaced.approved_axis_id,
                         approved_axis_version=replaced.approved_axis_version,
+                        axis_alignment=replaced.axis_alignment,
+                        axis_polarity=replaced.axis_polarity,
+                        axis_positive_proposition_sha256=(
+                            replaced.axis_positive_proposition_sha256
+                        ),
                         expected_lock_version=replaced.lock_version,
                         idempotency_key=None,
                         comment=f"由候选 {row.id} 替代",
@@ -4054,6 +4614,11 @@ def decide_character_profile_candidate(
                 lock_version=payload.expected_revision + 1,
                 approved_axis_id=(approved_axis.id if approved_axis else None),
                 approved_axis_version=(approved_axis.version if approved_axis else None),
+                axis_alignment=payload.axis_alignment,
+                axis_polarity=approved_axis_polarity,
+                axis_positive_proposition_sha256=(
+                    approved_axis.positive_proposition_sha256 if approved_axis else None
+                ),
                 reviewed_at=utc_now_naive(),
                 reviewed_by_user_id=context.user_id,
             )
@@ -4073,6 +4638,11 @@ def decide_character_profile_candidate(
             decision=payload.decision,
             approved_axis_id=(approved_axis.id if approved_axis else None),
             approved_axis_version=(approved_axis.version if approved_axis else None),
+            axis_alignment=payload.axis_alignment,
+            axis_polarity=approved_axis_polarity,
+            axis_positive_proposition_sha256=(
+                approved_axis.positive_proposition_sha256 if approved_axis else None
+            ),
             expected_lock_version=payload.expected_revision,
             idempotency_key=idempotency_key,
             comment=payload.comment,

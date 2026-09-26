@@ -54,6 +54,10 @@ export type CharacterProfileItem = {
   statement: string;
   origin: "explicit_profile" | "confirmed_inference";
   approved_axis_id: string | null;
+  approved_axis_version: number | null;
+  axis_alignment: "same" | "opposite" | null;
+  axis_polarity: "positive" | "negative" | null;
+  axis_positive_proposition_sha256: string | null;
   scopes: NarrativeScopeRef[];
   evidence_count: number;
   confirmed_at: string | null;
@@ -123,6 +127,9 @@ export type ProfileCandidate = {
   valid_until_release_ordinal: number | null;
   approved_axis_id: string | null;
   approved_axis_version: number | null;
+  axis_alignment: "same" | "opposite" | null;
+  axis_polarity: "positive" | "negative" | null;
+  axis_positive_proposition_sha256: string | null;
   confidence: number;
   rationale: string;
   limitations: string[];
@@ -212,6 +219,8 @@ export type CandidateDecisionIn = {
   expected_revision: number;
   approved_axis_id?: string;
   expected_axis_version?: number;
+  axis_alignment?: "same" | "opposite";
+  expected_axis_positive_proposition_sha256?: string;
 };
 
 export type CharacterTraitAxis = {
@@ -222,6 +231,8 @@ export type CharacterTraitAxis = {
   display_name: string;
   definition: string;
   definition_sha256: string;
+  positive_proposition: string | null;
+  positive_proposition_sha256: string | null;
   created_at: string | null;
 };
 

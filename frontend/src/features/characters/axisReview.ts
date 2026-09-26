@@ -3,6 +3,7 @@ import type { CharacterTraitAxis, CharacterTraitAxisPage } from "./types";
 export type AxisDraftErrors = {
   display_name: string;
   definition: string;
+  positive_proposition: string;
 };
 
 function normalizedText(value: string): string {
@@ -12,13 +13,16 @@ function normalizedText(value: string): string {
 export function validateAxisDraft(
   displayName: string,
   definition: string,
-): { value: { display_name: string; definition: string }; errors: AxisDraftErrors } {
+  positiveProposition: string,
+): { value: { display_name: string; definition: string; positive_proposition: string }; errors: AxisDraftErrors } {
   const name = normalizedText(displayName);
   const meaning = normalizedText(definition);
+  const proposition = normalizedText(positiveProposition);
   const nameLength = Array.from(name).length;
   const meaningLength = Array.from(meaning).length;
+  const propositionLength = Array.from(proposition).length;
   return {
-    value: { display_name: name, definition: meaning },
+    value: { display_name: name, definition: meaning, positive_proposition: proposition },
     errors: {
       display_name: !name
         ? "请输入轴名称。"
@@ -30,8 +34,38 @@ export function validateAxisDraft(
         : meaningLength > 200
           ? "轴定义不能超过 200 字。"
           : "",
+      positive_proposition: !proposition
+        ? "请写出用于判定正向的明确命题。"
+        : propositionLength > 200
+          ? "正向命题不能超过 200 字。"
+          : "",
     },
   };
+}
+
+export function validateAxisPositiveProposition(value: string): {
+  value: string;
+  error: string;
+} {
+  const proposition = normalizedText(value);
+  const length = Array.from(proposition).length;
+  return {
+    value: proposition,
+    error: !proposition
+      ? "请写出用于判定正向的明确命题。"
+      : length > 200
+        ? "正向命题不能超过 200 字。"
+        : "",
+  };
+}
+
+export function previewAxisPolarity(
+  rawPolarity: "positive" | "negative" | "neutral" | "unclear" | null,
+  alignment: "same" | "opposite" | "uncertain",
+): "positive" | "negative" | null {
+  if ((rawPolarity !== "positive" && rawPolarity !== "negative") || alignment === "uncertain") return null;
+  if (alignment === "same") return rawPolarity;
+  return rawPolarity === "positive" ? "negative" : "positive";
 }
 
 export function selectedProjectAxis(

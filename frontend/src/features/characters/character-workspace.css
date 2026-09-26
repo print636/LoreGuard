@@ -484,6 +484,7 @@
 .candidateAxisDefinition { padding: 10px 12px; border-left: 3px solid var(--lavender); background: rgba(183, 162, 255, .06); }
 .candidateAxisDefinition b { color: var(--text); }
 .candidateAxisDefinition p { margin: 4px 0 0; color: var(--text-2); line-height: 1.6; }
+.candidateAxisDefinition, .characterAxisAlignmentPanel > p, .candidateAxisAlignment > p { overflow-wrap: anywhere; }
 .candidateFieldError { margin: 0; color: var(--danger); font-size: 13px; line-height: 1.5; }
 .candidateAxisCreate > button { justify-self: start; min-height: 44px; margin-top: 5px; }
 .candidateAxisError,
@@ -498,6 +499,20 @@
 .candidateAxisPagination p { flex: 1 1 240px; margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.55; }
 .candidateAxisPagination button { min-height: 44px; }
 .candidateAxisCreated { margin: 12px 0 0 !important; color: var(--success) !important; }
+.candidateAxisAlignment { min-width: 0; margin: 13px 0 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: 9px; }
+.candidateAxisAlignment legend { padding: 0 5px; color: var(--text); font-size: 14px; font-weight: 700; }
+.candidateAxisAlignment > p { margin: 4px 0 9px; color: var(--text-2); font-size: 13px; line-height: 1.65; }
+.candidateAxisAlignment label { display: flex; align-items: center; gap: 10px; min-height: 44px; margin: 0; padding: 8px 6px; color: var(--text); font-size: 14px; line-height: 1.5; cursor: pointer; }
+.candidateAxisAlignment label + label { border-top: 1px solid var(--line); }
+.candidateAxisAlignment input[type="radio"],
+.candidateAxisCreate .candidateAxisAlignment input[type="radio"] { flex: none; width: 18px; min-width: 18px; height: 18px; min-height: 18px; margin: 0; accent-color: var(--lavender); }
+.characterProfileGroups li > .characterAxisAlignOpen { min-height: 44px; margin: 10px 0 0; padding: 8px 12px; color: var(--cyan); border: 1px solid rgba(139, 233, 240, .38); border-radius: 8px; background: rgba(139, 233, 240, .07); }
+.characterProfileGroups li > .characterAxisAlignOpen:hover { border-color: var(--cyan); background: rgba(139, 233, 240, .12); }
+.characterAxisAlignmentPanel { display: grid; gap: 12px; min-width: 0; margin-top: 12px; padding: 15px; border: 1px solid var(--line-strong); border-radius: 10px; background: rgba(16, 13, 36, .58); }
+.characterAxisAlignmentPanel h4 { margin: 0; color: var(--text); font-size: 16px; }
+.characterAxisAlignmentPanel > p { margin: 0; color: var(--text-2); line-height: 1.65; }
+.characterAxisAlignmentPanel > button { justify-self: start; min-height: 44px; }
+.characterAxisAlignmentPanel .candidateAxisCreate { margin-top: 2px; }
 
 .characterDriftList { display: grid; gap: 16px; }
 .characterDriftList > li > article { display: block; padding: 18px; border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 12px; background: rgba(16, 13, 36, .48); }

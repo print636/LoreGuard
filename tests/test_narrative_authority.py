@@ -1303,9 +1303,15 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
                     "approved_axis_id", "approved_axis_version",
                     "support_binding_mode", "support_bindings_v1",
                     "support_bindings_sha256",
+                    "axis_alignment", "axis_polarity",
+                    "axis_positive_proposition_sha256",
                 }
             if table_name == "character_trait_reviews":
-                expected_columns -= {"approved_axis_id", "approved_axis_version"}
+                expected_columns -= {
+                    "approved_axis_id", "approved_axis_version",
+                    "axis_alignment", "axis_polarity",
+                    "axis_positive_proposition_sha256",
+                }
             if table_name == "document_narrative_context_revisions":
                 expected_columns -= {
                     "inference_reasoning",
@@ -1330,6 +1336,8 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
             "comparison_key", "approved_axis_id", "approved_axis_version",
             "support_binding_mode", "support_bindings_v1",
             "support_bindings_sha256",
+            "axis_alignment", "axis_polarity",
+            "axis_positive_proposition_sha256",
         }
         engine.dispose()
 

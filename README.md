@@ -21,11 +21,17 @@ The recommended path is `baseline_build` -> human confirmation of character-prof
 
 For new `core_personality` candidates, the character workbench now lets the author
 choose or create a project-scoped, immutable v1 comparison axis before confirming
-the candidate. Axis creation and candidate confirmation are separate actions;
+the candidate. Each axis has an author-written positive proposition; the author
+must explicitly map the candidate's raw direction as `same` or `opposite` to
+that proposition. Uncertain mappings remain pending. Axis creation and
+candidate confirmation are separate actions;
 the binding affects future runs only. The model's raw `trait_key` and source
 evidence remain visible. A clean, single-target draft extraction can match a
 different raw label to the approved axis, while reuse of one source line for two
-axes is treated as ambiguous. Legacy unbound candidates retain their old path.
+axes is treated as ambiguous. Older confirmed axes without an author-approved
+direction stay active as character facts, but new runs mark their same-axis
+directional coverage partial until the author reviews each mapping. Ordinary
+analysis and legacy unbound candidates retain their old path.
 See the [approved-axis v1 contract](docs/character-approved-axis-rfc.md) for
 the exact API and limits. This has not passed a separate cross-story real-model
 quality gate.
@@ -52,7 +58,8 @@ Relevant API entry points are:
 - `POST /api/v1/projects/{project_id}/analysis-runs` with `mode=baseline_build|draft_review|full_review`, optional draft targets and a sensitivity level;
 - `GET /api/v1/analysis-runs/{run_id}` to inspect `review_batch` coverage and frozen `input_documents[].batch_role`.
 - `GET /api/v1/analysis-runs/{run_id}/export.md` to download a completed run's evidence-first Markdown report with current feedback labels. The export uses all issues, regardless of the browser's current filters, and is workspace-scoped.
-- `GET` / `POST /api/v1/projects/{project_id}/character-trait-axes` to list or create immutable project axes; candidate confirmation accepts `approved_axis_id` and `expected_axis_version` together for `core_personality`.
+- `GET` / `POST /api/v1/projects/{project_id}/character-trait-axes` to list or create immutable project axes with a positive proposition; `GET /{axis_id}` reads one exact axis and `POST /{axis_id}/positive-proposition` authors the one-time definition for a legacy axis.
+- Core-personality confirmation with an axis additionally requires `axis_alignment=same|opposite` and the expected positive-proposition hash. A legacy confirmed candidate uses `POST /api/v1/projects/{project_id}/characters/{character_key}/profile-candidates/{candidate_id}/alignment` for a separately audited mapping; neither action changes an old run.
 
 An omitted analysis body or `{}` retains the legacy `full_review` behavior for existing clients. Retry preserves the frozen batch; recheck advances only the logical draft targets to their current active versions and re-derives the background.
 

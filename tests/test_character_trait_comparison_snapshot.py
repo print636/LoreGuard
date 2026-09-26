@@ -49,7 +49,11 @@ def _candidate(*, comparison_key: str | None = None) -> SimpleNamespace:
     )
 
 
-def test_approved_axis_snapshot_freezes_definition_and_checks_review_provenance():
+def test_approved_axis_snapshot_freezes_definition_and_checks_review_provenance(monkeypatch):
+    monkeypatch.setattr(
+        "app.service.verified_character_trait_review_chain",
+        lambda db, row: [],
+    )
     candidate = _candidate()
     candidate.trait_type = "core_personality"
     candidate.trait_key = "companion_consultation"
@@ -78,6 +82,8 @@ def test_approved_axis_snapshot_freezes_definition_and_checks_review_provenance(
     assert payload["approved_axis_display_name"] == "同伴协商"
     assert payload["approved_axis_definition"] == definition
     assert payload["approved_axis_definition_sha256"] == axis.definition_sha256
+    assert payload["axis_alignment"] == "legacy_unverified"
+    assert payload["axis_polarity"] is None
     assert payload_sha256(payload) != payload_sha256(candidate_snapshot_payload(candidate, review))
 
     review.approved_axis_id = "22222222-2222-4222-8222-222222222222"
@@ -93,6 +99,51 @@ def test_approved_axis_snapshot_freezes_definition_and_checks_review_provenance(
     historical = _historical_trait_snapshot_payload(candidate, review, db=database)
     assert historical["approved_axis_id"] == axis.id
     assert historical["approved_axis_definition_sha256"] == axis.definition_sha256
+    assert historical["axis_alignment"] == "legacy_unverified"
+
+
+def test_verified_axis_snapshot_keeps_raw_and_author_directions_separate(monkeypatch):
+    candidate = _candidate()
+    candidate.trait_type = "core_personality"
+    candidate.trait_key = "signature_integrity"
+    candidate.approved_axis_id = "11111111-1111-4111-8111-111111111111"
+    candidate.approved_axis_version = 1
+    candidate.axis_alignment = "opposite"
+    candidate.axis_polarity = "negative"
+    proposition = "角色未经授权冒用搭档签名确认换班"
+    proposition_hash = hashlib.sha256(proposition.encode("utf-8")).hexdigest()
+    candidate.axis_positive_proposition_sha256 = proposition_hash
+    definition = "是否冒用搭档签名"
+    axis = SimpleNamespace(
+        id=candidate.approved_axis_id,
+        project_id=candidate.project_id,
+        trait_type="core_personality",
+        version=1,
+        display_name="冒用签名",
+        definition=definition,
+        definition_sha256=hashlib.sha256(definition.encode("utf-8")).hexdigest(),
+        positive_proposition=proposition,
+        positive_proposition_sha256=proposition_hash,
+    )
+    review = SimpleNamespace(
+        id="review-1", decision="confirm",
+        approved_axis_id=axis.id, approved_axis_version=1,
+    )
+    database = SimpleNamespace(get=lambda model, identifier: axis)
+    checked = []
+    monkeypatch.setattr(
+        "app.service.verified_character_trait_review_chain",
+        lambda db, row: checked.append(row.id),
+    )
+    payload = _confirmed_trait_snapshot_payload(database, candidate, review)
+    assert checked == [candidate.id]
+    assert payload["polarity"] == "positive"
+    assert payload["axis_alignment"] == "opposite"
+    assert payload["axis_polarity"] == "negative"
+    assert payload["axis_positive_proposition_sha256"] == proposition_hash
+    candidate.axis_positive_proposition_sha256 = "0" * 64
+    with pytest.raises(ValueError, match="alignment is invalid"):
+        _confirmed_trait_snapshot_payload(database, candidate, review)
 
 
 def test_legacy_snapshot_wrapper_does_not_add_axis_keys_or_change_hash():

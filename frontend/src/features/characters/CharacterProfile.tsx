@@ -8,10 +8,13 @@ import type {
   CharacterDimension,
   CharacterProfileItem,
 } from "./types";
+import AxisAlignmentPanel from "./AxisAlignmentPanel";
 
 const dimensions = Object.keys(characterDimensionNames) as CharacterDimension[];
 
 export default function CharacterProfile({
+  projectId,
+  characterId,
   items,
   withdrawnPage,
   withdrawnPageNumber,
@@ -22,7 +25,10 @@ export default function CharacterProfile({
   onWithdraw,
   onWithdrawnPage,
   onRetryWithdrawn,
+  onAligned,
 }: {
+  projectId: string;
+  characterId: string;
   items: CharacterProfileItem[];
   withdrawnPage: CandidatePage | null;
   withdrawnPageNumber: number;
@@ -33,13 +39,22 @@ export default function CharacterProfile({
   onWithdraw: (item: CharacterProfileItem) => void;
   onWithdrawnPage: (page: number) => void;
   onRetryWithdrawn: () => void;
+  onAligned: () => void;
 }) {
   const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [alignId, setAlignId] = useState<string | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const alignTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
+
+  function closeAlignment(itemId: string) {
+    setAlignId(null);
+    requestAnimationFrame(() => alignTriggerRefs.current.get(itemId)?.focus());
+  }
 
   useEffect(() => {
     if (confirmId && !items.some((item) => item.id === confirmId)) setConfirmId(null);
-  }, [confirmId, items]);
+    if (alignId && !items.some((item) => item.id === alignId)) setAlignId(null);
+  }, [confirmId, alignId, items]);
 
   useEffect(() => {
     if (confirmId) requestAnimationFrame(() => cancelRef.current?.focus());
@@ -81,10 +96,39 @@ export default function CharacterProfile({
                         {item.dimension === "core_personality" && (
                           <span>{item.approved_axis_id ? "已绑定作者轴" : "未绑定作者轴"}</span>
                         )}
+                        {item.dimension === "core_personality" && item.approved_axis_id && (
+                          <span>{item.axis_alignment
+                            ? `方向已补认：${item.axis_alignment === "same" ? "同向" : "反向"}`
+                            : "方向待作者补认，暂不作同轴方向判定"}</span>
+                        )}
                         {item.scopes.slice(0, 2).map((scope) => (
                           <span key={scope.scope_id}>{scope.label}</span>
                         ))}
                       </div>
+                      {item.dimension === "core_personality" && item.approved_axis_id && (
+                        <>
+                          <button
+                            type="button"
+                            ref={(node) => {
+                              if (node) alignTriggerRefs.current.set(item.id, node);
+                              else alignTriggerRefs.current.delete(item.id);
+                            }}
+                            className="characterAxisAlignOpen"
+                            disabled={withdrawBusyId !== null || item.revision === null}
+                            aria-expanded={alignId === item.id}
+                            onClick={() => { setConfirmId(null); if (alignId === item.id) closeAlignment(item.id); else setAlignId(item.id); }}
+                          >{item.axis_alignment ? "查看作者轴方向与证据" : "核对并补认作者轴方向"}</button>
+                          {alignId === item.id && (
+                            <AxisAlignmentPanel
+                              projectId={projectId}
+                              characterId={characterId}
+                              item={item}
+                              onAligned={() => { closeAlignment(item.id); onAligned(); }}
+                              onClose={() => closeAlignment(item.id)}
+                            />
+                          )}
+                        </>
+                      )}
                       {confirmId === item.id ? (
                         <div className="characterWithdrawConfirm" role="group" aria-label={`撤销“${item.statement}”`}>
                           <strong>确定撤销这条正式特征？</strong>
@@ -115,7 +159,7 @@ export default function CharacterProfile({
                           className="characterWithdrawOpen"
                           disabled={withdrawBusyId !== null || item.revision === null}
                           aria-expanded={false}
-                          onClick={() => setConfirmId(item.id)}
+                          onClick={() => { setAlignId(null); setConfirmId(item.id); }}
                         >撤销这条特征</button>
                       )}
                       {item.revision === null && (

@@ -37,6 +37,7 @@ from .character_traits import (
     candidate_snapshot_comparison_key,
     candidate_snapshot_payload,
     latest_confirm_reviews,
+    verified_character_trait_review_chain,
 )
 from .character_consistency_stage import (
     CharacterConsistencyStage,
@@ -844,6 +845,10 @@ def _approved_axis_snapshot_fields(db, candidate, review) -> dict[str, Any]:
         return {}
     if not axis_id or type(axis_version) is not int or axis_version < 1:
         raise ValueError("incomplete approved character axis binding")
+    # A null mapping on the candidate is genuine legacy only if the complete
+    # append-only review chain also says so. Never downgrade a corrupt or
+    # forged mapping to legacy_unverified merely because one field is absent.
+    verified_character_trait_review_chain(db, candidate)
     axis = db.get(CharacterTraitAxisRow, axis_id)
     if (
         axis is None
@@ -860,12 +865,51 @@ def _approved_axis_snapshot_fields(db, candidate, review) -> dict[str, Any]:
         != axis.definition_sha256
     ):
         raise ValueError("approved character axis binding is invalid")
+    proposition = getattr(axis, "positive_proposition", None)
+    proposition_hash = getattr(axis, "positive_proposition_sha256", None)
+    if (proposition is None) != (proposition_hash is None):
+        raise ValueError("approved character axis proposition is incomplete")
+    if proposition is not None and (
+        not isinstance(proposition, str)
+        or not 1 <= len(proposition) <= 200
+        or proposition != " ".join(proposition.split())
+        or sha256(proposition.encode("utf-8")).hexdigest() != proposition_hash
+    ):
+        raise ValueError("approved character axis proposition is invalid")
+    alignment = getattr(candidate, "axis_alignment", None)
+    axis_polarity = getattr(candidate, "axis_polarity", None)
+    approved_proposition_hash = getattr(
+        candidate, "axis_positive_proposition_sha256", None
+    )
+    if alignment is None:
+        if axis_polarity is not None or approved_proposition_hash is not None:
+            raise ValueError("approved character axis alignment is incomplete")
+        alignment = "legacy_unverified"
+    else:
+        if (
+            alignment not in {"same", "opposite"}
+            or candidate.polarity not in {"positive", "negative"}
+            or proposition is None
+            or approved_proposition_hash != proposition_hash
+            or axis_polarity != (
+                candidate.polarity
+                if alignment == "same"
+                else "negative" if candidate.polarity == "positive" else "positive"
+            )
+        ):
+            raise ValueError("approved character axis alignment is invalid")
+        # Confirmed legacy rows can be aligned later without rewriting the
+        # original confirmation; the chain check above validates this path.
     return {
         "approved_axis_id": axis.id,
         "approved_axis_version": axis.version,
         "approved_axis_display_name": axis.display_name,
         "approved_axis_definition": axis.definition,
         "approved_axis_definition_sha256": axis.definition_sha256,
+        "axis_positive_proposition": proposition,
+        "axis_positive_proposition_sha256": proposition_hash,
+        "axis_alignment": alignment,
+        "axis_polarity": axis_polarity,
     }
 
 

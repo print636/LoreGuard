@@ -106,6 +106,40 @@ function positiveInteger(value: unknown): number | null {
     : null;
 }
 
+function axisMapping(source: JsonRecord, approvedAxisId: string | null, rawPolarity?: unknown) {
+  const alignment = source.axis_alignment;
+  const axisPolarity = source.axis_polarity;
+  const digest = source.axis_positive_proposition_sha256;
+  const absent = [alignment, axisPolarity, digest].every((value) =>
+    value === undefined || value === null);
+  if (absent) {
+    return {
+      axis_alignment: null,
+      axis_polarity: null,
+      axis_positive_proposition_sha256: null,
+    } as const;
+  }
+  if (
+    !approvedAxisId ||
+    (alignment !== "same" && alignment !== "opposite") ||
+    (axisPolarity !== "positive" && axisPolarity !== "negative") ||
+    typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)
+  ) throw new TypeError("作者轴方向映射格式无效");
+  if (rawPolarity !== undefined && rawPolarity !== "positive" && rawPolarity !== "negative") {
+    throw new TypeError("作者轴方向映射缺少明确的原始方向");
+  }
+  if (rawPolarity === "positive" || rawPolarity === "negative") {
+    const expected = alignment === "same" ? rawPolarity
+      : rawPolarity === "positive" ? "negative" : "positive";
+    if (axisPolarity !== expected) throw new TypeError("作者轴方向映射与原始方向不一致");
+  }
+  return {
+    axis_alignment: alignment,
+    axis_polarity: axisPolarity,
+    axis_positive_proposition_sha256: digest,
+  } as const;
+}
+
 function fraction(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.min(1, Math.max(0, value))
@@ -352,6 +386,7 @@ export function normalizeProfileCandidate(
   ) {
     throw new TypeError("角色归纳候选的作者轴绑定无效");
   }
+  const mappedAxis = axisMapping(source, approvedAxisId, source.polarity);
   const reviewable = Boolean(
     explicitlyReviewable &&
       source.source_verified === true &&
@@ -410,6 +445,7 @@ export function normalizeProfileCandidate(
     valid_until_release_ordinal: nullableInteger(source.valid_until_release_ordinal),
     approved_axis_id: approvedAxisId,
     approved_axis_version: approvedAxisVersion,
+    ...mappedAxis,
     confidence: fraction(source.confidence),
     rationale: text(
       source.rationale,
@@ -452,6 +488,11 @@ function normalizeProfileItem(value: unknown): CharacterProfileItem | null {
       ? [normalizeScope(source.scope, `profile:${id}`, source.scope_sha256)]
       : [];
   const evidence = normalizeEvidenceList(source.evidence, source.scope);
+  const approvedAxisId = optionalText(source.approved_axis_id);
+  const approvedAxisVersion = positiveInteger(source.approved_axis_version);
+  if (Boolean(approvedAxisId) !== Boolean(approvedAxisVersion)) {
+    throw new TypeError("正式角色特征的作者轴绑定无效");
+  }
   return {
     id,
     revision: nullableInteger(source.revision),
@@ -459,7 +500,9 @@ function normalizeProfileItem(value: unknown): CharacterProfileItem | null {
       source.dimension ?? source.trait_type,
     ),
     statement,
-    approved_axis_id: optionalText(source.approved_axis_id),
+    approved_axis_id: approvedAxisId,
+    approved_axis_version: approvedAxisVersion,
+    ...axisMapping(source, approvedAxisId, source.polarity),
     origin:
       source.origin === "explicit_profile" || source.origin === "explicit_setting"
         ? "explicit_profile"
@@ -484,6 +527,10 @@ export function normalizeCharacterTraitAxis(
   const definition = text(source.definition);
   const version = positiveInteger(source.version);
   const digest = text(source.definition_sha256);
+  const rawProposition = source.positive_proposition;
+  const rawPropositionDigest = source.positive_proposition_sha256;
+  const positiveProposition = optionalText(rawProposition);
+  const positivePropositionDigest = optionalText(rawPropositionDigest);
   if (
     !id ||
     source.project_id !== projectId ||
@@ -491,7 +538,9 @@ export function normalizeCharacterTraitAxis(
     !version ||
     !name ||
     !definition ||
-    !/^[a-f0-9]{64}$/.test(digest)
+    !/^[a-f0-9]{64}$/.test(digest) ||
+    Boolean(positiveProposition) !== Boolean(positivePropositionDigest) ||
+    (positivePropositionDigest !== null && !/^[a-f0-9]{64}$/.test(positivePropositionDigest))
   ) {
     throw new TypeError("作者轴格式无效或不属于当前项目");
   }
@@ -503,6 +552,8 @@ export function normalizeCharacterTraitAxis(
     display_name: name,
     definition,
     definition_sha256: digest,
+    positive_proposition: positiveProposition,
+    positive_proposition_sha256: positivePropositionDigest,
     created_at: optionalText(source.created_at),
   };
 }
@@ -541,7 +592,7 @@ export async function fetchCharacterTraitAxes(
 
 export async function createCharacterTraitAxis(
   projectId: string,
-  input: { display_name: string; definition: string },
+  input: { display_name: string; definition: string; positive_proposition: string },
 ): Promise<CharacterTraitAxis> {
   // The creation endpoint does not yet offer server-side idempotency. Never
   // replay an uncertain request automatically or a transport loss could create
@@ -551,6 +602,33 @@ export async function createCharacterTraitAxis(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ trait_type: "core_personality", ...input }),
   });
+  return normalizeCharacterTraitAxis(payload, projectId);
+}
+
+export function characterTraitAxisPath(projectId: string, axisId: string): string {
+  return `${characterTraitAxesPath(projectId)}/${segment(axisId)}`;
+}
+
+export async function fetchCharacterTraitAxis(
+  projectId: string,
+  axisId: string,
+  signal?: AbortSignal,
+): Promise<CharacterTraitAxis> {
+  return normalizeCharacterTraitAxis(
+    await apiJson<unknown>(characterTraitAxisPath(projectId, axisId), { signal }),
+    projectId,
+  );
+}
+
+export async function setAxisPositiveProposition(
+  projectId: string,
+  axisId: string,
+  input: { positive_proposition: string; expected_axis_version: number },
+): Promise<CharacterTraitAxis> {
+  const payload = await apiJsonIdempotent<unknown>(
+    `${characterTraitAxisPath(projectId, axisId)}/positive-proposition`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) },
+  );
   return normalizeCharacterTraitAxis(payload, projectId);
 }
 
@@ -820,6 +898,7 @@ export function characterApiPaths(
     candidates,
     candidate,
     decisions: `${candidate}/decisions`,
+    alignment: `${candidate}/alignment`,
     sourceNeighbors: `${candidate}/source-neighbors`,
     driftIssues: `${projectRoot(projectId)}/drift-issues`,
   };
@@ -1058,6 +1137,35 @@ export async function submitCandidateDecision(
       typeof source.deduplicated === "boolean"
         ? source.deduplicated
         : undefined,
+  };
+}
+
+export async function submitAxisAlignment(
+  projectId: string,
+  characterId: string,
+  candidateId: string,
+  input: {
+    expected_revision: number;
+    expected_axis_version: number;
+    expected_axis_positive_proposition_sha256: string;
+    axis_alignment: "same" | "opposite";
+    comment: string;
+  },
+): Promise<CandidateDecisionOut> {
+  const payload = await apiJsonIdempotent<unknown>(
+    characterApiPaths(projectId, characterId, candidateId).alignment,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) },
+  );
+  const source = requiredRecord(payload, "作者轴方向补认结果");
+  const candidate = normalizeProfileCandidate(source.candidate, { characterId });
+  if (candidate.id !== candidateId || candidate.status !== "confirmed" || !candidate.axis_alignment) {
+    throw new TypeError("作者轴方向补认结果与所选特征不一致");
+  }
+  return {
+    candidate,
+    profile_revision: nullableInteger(source.profile_revision) ?? undefined,
+    decision_id: optionalText(source.decision_id) ?? undefined,
+    deduplicated: typeof source.deduplicated === "boolean" ? source.deduplicated : undefined,
   };
 }
 

@@ -13,7 +13,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import IntegrityError
 
-from app.character_traits import upsert_character_trait_candidate
+from app.character_traits import (
+    upsert_character_trait_candidate,
+    verified_character_trait_review_chain,
+)
 from app.character_support_bindings import support_bindings_sha256
 from app.db import (
     AnalysisDiagnosticRow,
@@ -210,6 +213,7 @@ def _create_axis(
             "trait_type": "core_personality",
             "display_name": "社交主动性",
             "definition": definition,
+            "positive_proposition": "角色主动开启交谈",
         },
         headers=headers,
     )
@@ -1342,6 +1346,9 @@ def test_author_axis_creation_is_project_scoped_immutable_and_exact_duplicates_c
         assert axis["version"] == 1
         assert axis["definition"] == "是否主动 向陌生人搭话"
         assert len(axis["definition_sha256"]) == 64
+        assert axis["positive_proposition"] == "角色主动开启交谈"
+        assert axis["positive_proposition_authored_at"] is not None
+        assert axis["positive_proposition_authored_by_user_id"] is not None
         listed = client.get(f"/api/v1/projects/{first['id']}/character-trait-axes")
         assert listed.status_code == 200, listed.text
         assert listed.json()["items"] == [axis]
@@ -1371,6 +1378,12 @@ def test_author_axis_creation_is_project_scoped_immutable_and_exact_duplicates_c
         with SessionLocal() as db:
             stored = db.get(CharacterTraitAxisRow, axis["id"])
             assert stored.definition == axis["definition"]
+            with pytest.raises(IntegrityError):
+                db.execute(update(CharacterTraitAxisRow).where(
+                    CharacterTraitAxisRow.id == axis["id"]
+                ).values(positive_proposition="后改的方向"))
+                db.commit()
+            db.rollback()
 
 
 def test_author_axis_confirmation_binds_atomically_and_same_axis_blocks_different_raw_labels():
@@ -1397,6 +1410,8 @@ def test_author_axis_confirmation_binds_atomically_and_same_axis_blocks_differen
         request = {
             "decision": "confirm", "expected_revision": 0,
             "approved_axis_id": axis["id"], "expected_axis_version": 1,
+            "axis_alignment": "same",
+            "expected_axis_positive_proposition_sha256": axis["positive_proposition_sha256"],
         }
         headers = {"Idempotency-Key": f"approved-axis-{uuid4().hex}"}
         accepted = client.post(
@@ -1411,7 +1426,11 @@ def test_author_axis_confirmation_binds_atomically_and_same_axis_blocks_differen
         assert replay.status_code == 201 and replay.json()["deduplicated"] is True
         changed_payload = client.post(
             _decision_path(project["id"], first),
-            json={**request, "approved_axis_id": None, "expected_axis_version": None},
+            json={
+                **request, "approved_axis_id": None, "expected_axis_version": None,
+                "axis_alignment": None,
+                "expected_axis_positive_proposition_sha256": None,
+            },
             headers=headers,
         )
         assert changed_payload.status_code == 409, changed_payload.text
@@ -1435,6 +1454,216 @@ def test_author_axis_confirmation_binds_atomically_and_same_axis_blocks_differen
             assert review.approved_axis_version == 1
 
 
+def test_axis_direction_is_explicit_and_opposite_raw_labels_can_share_one_axis_direction():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        axis = _create_axis(client, project["id"])
+        first = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="avoids_social_initiative", value="避免主动交谈",
+            polarity="positive",
+        )
+        second = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="social_initiative", value="不主动交谈",
+            polarity="negative",
+        )
+        path = _decision_path(project["id"], first)
+        base = {
+            "decision": "confirm", "expected_revision": 0,
+            "approved_axis_id": axis["id"], "expected_axis_version": 1,
+            "expected_axis_positive_proposition_sha256": (
+                axis["positive_proposition_sha256"]
+            ),
+        }
+        assert client.post(path, json=base).json()["detail"]["code"] == (
+            "character_trait_axis_alignment_required"
+        )
+        uncertain = client.post(path, json={**base, "axis_alignment": "uncertain"})
+        assert uncertain.status_code == 422
+        stale = client.post(path, json={
+            **base, "axis_alignment": "opposite",
+            "expected_axis_positive_proposition_sha256": "0" * 64,
+        })
+        assert stale.status_code == 409
+        accepted = client.post(path, json={**base, "axis_alignment": "opposite"})
+        assert accepted.status_code == 201, accepted.text
+        assert accepted.json()["candidate"]["polarity"] == "positive"
+        assert accepted.json()["candidate"]["axis_polarity"] == "negative"
+        similarly_directed = client.post(
+            _decision_path(project["id"], second),
+            json={**base, "axis_alignment": "same"},
+        )
+        assert similarly_directed.status_code == 201, similarly_directed.text
+        assert similarly_directed.json()["candidate"]["polarity"] == "negative"
+        assert similarly_directed.json()["candidate"]["axis_polarity"] == "negative"
+
+
+def test_legacy_axis_can_be_authored_once_then_aligned_after_source_retirement():
+    with TestClient(app) as client:
+        project, document = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        draft_axis = client.post(
+            f"/api/v1/projects/{project['id']}/character-trait-axes",
+            json={
+                "display_name": "旧轴", "definition": "是否主动交谈",
+                "trait_type": "core_personality",
+            },
+        )
+        assert draft_axis.status_code == 201, draft_axis.text
+        axis = draft_axis.json()
+        candidate_id = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="social_initiative", value="主动交谈", polarity="positive",
+        )
+        missing_mapping = client.post(
+            _decision_path(project["id"], candidate_id),
+            json={
+                "decision": "confirm", "expected_revision": 0,
+                "approved_axis_id": axis["id"], "expected_axis_version": 1,
+                "axis_alignment": "same",
+                "expected_axis_positive_proposition_sha256": "0" * 64,
+            },
+        )
+        assert missing_mapping.status_code == 409
+        assert missing_mapping.json()["detail"]["code"] == (
+            "character_trait_axis_proposition_required"
+        )
+        proposition_url = (
+            f"/api/v1/projects/{project['id']}/character-trait-axes/{axis['id']}"
+            "/positive-proposition"
+        )
+        authored = client.post(proposition_url, json={
+            "positive_proposition": "  角色主动\n开启交谈  ",
+            "expected_axis_version": 1,
+        })
+        assert authored.status_code == 200, authored.text
+        assert authored.json()["positive_proposition"] == "角色主动 开启交谈"
+        assert authored.json()["positive_proposition_authored_at"] is not None
+        assert authored.json()["positive_proposition_authored_by_user_id"] is not None
+        assert client.post(proposition_url, json={
+            "positive_proposition": "  角色主动\n开启交谈  ",
+            "expected_axis_version": 1,
+        }).status_code == 200
+        changed = client.post(proposition_url, json={
+            "positive_proposition": "角色不会交谈", "expected_axis_version": 1,
+        })
+        assert changed.status_code == 409
+        exact = client.get(
+            f"/api/v1/projects/{project['id']}/character-trait-axes/{axis['id']}"
+        )
+        assert exact.status_code == 200
+        assert exact.json()["positive_proposition_sha256"] == (
+            authored.json()["positive_proposition_sha256"]
+        )
+        # Construct a genuine pre-0018 shape: the original confirmation has
+        # an axis binding but no direction mapping; never rewrite its review.
+        assert _confirm(client, project["id"], candidate_id).status_code == 201
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            review = db.scalar(select(CharacterTraitReviewRow).where(
+                CharacterTraitReviewRow.candidate_id == candidate_id
+            ))
+            row.approved_axis_id = axis["id"]
+            row.approved_axis_version = 1
+            review.approved_axis_id = axis["id"]
+            review.approved_axis_version = 1
+            db.commit()
+            assert len(verified_character_trait_review_chain(db, row)) == 1
+        retirement = client.post(
+            f"/api/v1/projects/{project['id']}/documents/{document['id']}"
+            "/narrative-context/revisions",
+            json={
+                "expected_revision": 1,
+                "resolution_state": "confirmed",
+                "publication_status": "retired",
+            },
+        )
+        assert retirement.status_code == 201, retirement.text
+        alignment_url = _candidate_path(project["id"], candidate_id) + "/alignment"
+        request = {
+            "expected_revision": 1, "expected_axis_version": 1,
+            "expected_axis_positive_proposition_sha256": (
+                authored.json()["positive_proposition_sha256"]
+            ),
+            "axis_alignment": "opposite", "comment": "作者核对旧轴",
+        }
+        headers = {"Idempotency-Key": f"align-{uuid4().hex}"}
+        aligned = client.post(alignment_url, json=request, headers=headers)
+        assert aligned.status_code == 201, aligned.text
+        assert aligned.json()["candidate"]["polarity"] == "positive"
+        assert aligned.json()["candidate"]["axis_polarity"] == "negative"
+        assert aligned.json()["profile_revision"] == 2
+        replay = client.post(alignment_url, json=request, headers=headers)
+        assert replay.status_code == 201 and replay.json()["deduplicated"] is True
+        stale = client.post(alignment_url, json=request)
+        assert stale.status_code == 409
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            reviews = verified_character_trait_review_chain(db, row)
+            assert [item.decision for item in reviews] == ["confirm", "align"]
+            assert reviews[0].axis_alignment is None
+            assert reviews[1].axis_alignment == "opposite"
+        withdrawn = _withdraw(client, project["id"], candidate_id,
+                              expected_revision=2)
+        assert withdrawn.status_code == 201, withdrawn.text
+        with SessionLocal() as db:
+            row = db.get(CharacterTraitCandidateRow, candidate_id)
+            assert [item.decision for item in verified_character_trait_review_chain(db, row)] == [
+                "confirm", "align", "withdraw"
+            ]
+
+
+def test_explicit_replacement_can_retire_legacy_unverified_axis_without_forced_alignment():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        axis = _create_axis(client, project["id"])
+        original_id = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="social_initiative", value="主动交谈", polarity="positive",
+        )
+        assert _confirm(client, project["id"], original_id).status_code == 201
+        with SessionLocal() as db:
+            old = db.get(CharacterTraitCandidateRow, original_id)
+            confirmation = db.scalar(select(CharacterTraitReviewRow).where(
+                CharacterTraitReviewRow.candidate_id == original_id
+            ))
+            old.approved_axis_id = axis["id"]
+            old.approved_axis_version = 1
+            confirmation.approved_axis_id = axis["id"]
+            confirmation.approved_axis_version = 1
+            db.commit()
+        replacement_id = _candidate(
+            project["id"], run["id"], trait_type="core_personality",
+            trait_key="social_initiative", value="避免交谈", polarity="negative",
+            supersedes_candidate_id=original_id,
+        )
+        accepted = client.post(
+            _decision_path(project["id"], replacement_id),
+            json={
+                "decision": "confirm", "expected_revision": 0,
+                "approved_axis_id": axis["id"], "expected_axis_version": 1,
+                "axis_alignment": "same",
+                "expected_axis_positive_proposition_sha256": (
+                    axis["positive_proposition_sha256"]
+                ),
+            },
+        )
+        assert accepted.status_code == 201, accepted.text
+        with SessionLocal() as db:
+            old = db.get(CharacterTraitCandidateRow, original_id)
+            new = db.get(CharacterTraitCandidateRow, replacement_id)
+            assert old.review_state == "superseded"
+            assert old.axis_alignment is None
+            assert [item.decision for item in verified_character_trait_review_chain(db, old)] == [
+                "confirm", "supersede"
+            ]
+            assert new.review_state == "confirmed"
+            assert new.axis_alignment == "same"
+
+
 def test_author_axis_rejects_cross_project_wrong_type_version_and_stale_source():
     with TestClient(app) as client:
         first, document = _project_and_document(client)
@@ -1448,6 +1677,10 @@ def test_author_axis_rejects_cross_project_wrong_type_version_and_stale_source()
         request = {
             "decision": "confirm", "expected_revision": 0,
             "approved_axis_id": other_axis["id"], "expected_axis_version": 1,
+            "axis_alignment": "same",
+            "expected_axis_positive_proposition_sha256": (
+                other_axis["positive_proposition_sha256"]
+            ),
         }
         foreign = client.post(_decision_path(first["id"], candidate_id), json=request)
         assert foreign.status_code == 404, foreign.text
@@ -1467,7 +1700,13 @@ def test_author_axis_rejects_cross_project_wrong_type_version_and_stale_source()
         local_axis = _create_axis(client, first["id"])
         wrong_version = client.post(
             _decision_path(first["id"], candidate_id),
-            json={**request, "approved_axis_id": local_axis["id"], "expected_axis_version": 2},
+            json={
+                **request, "approved_axis_id": local_axis["id"],
+                "expected_axis_version": 2,
+                "expected_axis_positive_proposition_sha256": (
+                    local_axis["positive_proposition_sha256"]
+                ),
+            },
         )
         assert wrong_version.status_code == 409, wrong_version.text
         assert wrong_version.json()["detail"]["code"] == "character_trait_axis_version_conflict"
@@ -1477,7 +1716,12 @@ def test_author_axis_rejects_cross_project_wrong_type_version_and_stale_source()
         )
         wrong_type = client.post(
             _decision_path(first["id"], preference),
-            json={**request, "approved_axis_id": local_axis["id"]},
+            json={
+                **request, "approved_axis_id": local_axis["id"],
+                "expected_axis_positive_proposition_sha256": (
+                    local_axis["positive_proposition_sha256"]
+                ),
+            },
         )
         assert wrong_type.status_code == 422, wrong_type.text
         assert wrong_type.json()["detail"]["code"] == "character_trait_axis_dimension_mismatch"
@@ -1496,7 +1740,12 @@ def test_author_axis_rejects_cross_project_wrong_type_version_and_stale_source()
         assert replaced.status_code == 201, replaced.text
         stale = client.post(
             _decision_path(first["id"], candidate_id),
-            json={**request, "approved_axis_id": local_axis["id"]},
+            json={
+                **request, "approved_axis_id": local_axis["id"],
+                "expected_axis_positive_proposition_sha256": (
+                    local_axis["positive_proposition_sha256"]
+                ),
+            },
         )
         assert stale.status_code == 409, stale.text
         assert stale.json()["detail"]["code"] == "character_trait_candidate_stale"
@@ -1552,6 +1801,8 @@ def test_author_axis_workspace_and_csrf_are_required_in_account_mode():
         decision = {
             "decision": "confirm", "expected_revision": 0,
             "approved_axis_id": axis["id"], "expected_axis_version": 1,
+            "axis_alignment": "same",
+            "expected_axis_positive_proposition_sha256": axis["positive_proposition_sha256"],
         }
         no_csrf_decision = owner.post(
             _decision_path(project["id"], candidate_id), json=decision,
@@ -1581,6 +1832,8 @@ def test_concurrent_author_axis_confirmation_commits_one_binding():
         body = {
             "decision": "confirm", "expected_revision": 0,
             "approved_axis_id": axis["id"], "expected_axis_version": 1,
+            "axis_alignment": "same",
+            "expected_axis_positive_proposition_sha256": axis["positive_proposition_sha256"],
         }
         ready = Barrier(2)
 
@@ -2349,6 +2602,10 @@ def test_author_axis_supersession_requires_same_explicit_axis_and_preserves_old_
         original_decision = {
             "decision": "confirm", "expected_revision": 0,
             "approved_axis_id": first_axis["id"], "expected_axis_version": 1,
+            "axis_alignment": "same",
+            "expected_axis_positive_proposition_sha256": (
+                first_axis["positive_proposition_sha256"]
+            ),
         }
         assert client.post(
             _decision_path(project["id"], original_id), json=original_decision,
@@ -2361,7 +2618,12 @@ def test_author_axis_supersession_requires_same_explicit_axis_and_preserves_old_
         )
         wrong_axis = client.post(
             _decision_path(project["id"], replacement_id),
-            json={**original_decision, "approved_axis_id": second_axis["id"]},
+            json={
+                **original_decision, "approved_axis_id": second_axis["id"],
+                "expected_axis_positive_proposition_sha256": (
+                    second_axis["positive_proposition_sha256"]
+                ),
+            },
         )
         assert wrong_axis.status_code == 409, wrong_axis.text
         assert wrong_axis.json()["detail"]["code"] == (

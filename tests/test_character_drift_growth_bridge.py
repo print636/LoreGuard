@@ -75,6 +75,12 @@ def _case(
         approved_axis_definition_sha256=hashlib.sha256(
             AXIS.encode("utf-8")
         ).hexdigest(),
+        axis_positive_proposition="温弦当众反对可能伤害居民的师父命令",
+        axis_positive_proposition_sha256=hashlib.sha256(
+            "温弦当众反对可能伤害居民的师父命令".encode("utf-8")
+        ).hexdigest(),
+        axis_alignment="same",
+        axis_polarity="negative",
     )
     if baseline_overrides:
         baseline = baseline.model_copy(update=baseline_overrides)
@@ -115,6 +121,9 @@ def _case(
         scope_compatibility="compatible",
         material_coverage=coverage,
         approved_axis_bound_observation_ids=(observation.id,) if bound else (),
+        approved_axis_observation_polarities=(
+            ((observation.id, observation.polarity),) if bound else ()
+        ),
     )
 
 
@@ -205,6 +214,10 @@ def test_approved_axis_is_required_not_model_trait_key() -> None:
                 "approved_axis_display_name": None,
                 "approved_axis_definition": None,
                 "approved_axis_definition_sha256": None,
+                "axis_positive_proposition": None,
+                "axis_positive_proposition_sha256": None,
+                "axis_alignment": None,
+                "axis_polarity": None,
             },
             bound=False,
         )
@@ -222,6 +235,10 @@ def test_approved_axis_is_required_not_model_trait_key() -> None:
                 "approved_axis_display_name": None,
                 "approved_axis_definition": None,
                 "approved_axis_definition_sha256": None,
+                "axis_positive_proposition": None,
+                "axis_positive_proposition_sha256": None,
+                "axis_alignment": None,
+                "axis_polarity": None,
             },
             observation_overrides={"trait_key": "public_mentor_challenge"},
             bound=False,
@@ -237,6 +254,78 @@ def test_same_direction_is_not_a_growth_review_candidate() -> None:
     )
     assert prepared.reason == "no_opposition"
     assert not prepared.reviewer_eligible
+
+
+def test_opposite_author_axis_mapping_judges_per_case_not_raw_signal() -> None:
+    case = _case()
+    baseline = ConfirmedTraitSnapshot.model_validate({
+        **case.baseline.model_dump(),
+        "polarity": "positive",
+        "axis_alignment": "opposite",
+        "axis_polarity": "negative",
+    })
+    observation = case.observations[0].model_copy(
+        update={"polarity": "negative"}
+    )
+    mapped = CharacterDriftCase.model_validate({
+        **case.model_dump(),
+        "baseline": baseline.model_dump(),
+        "observations": [observation.model_dump()],
+        "approved_axis_observation_polarities": [
+            (observation.id, "positive")
+        ],
+    })
+    prepared = prepare_character_drift(mapped)
+    assert baseline.polarity == "positive"
+    assert observation.polarity == "negative"
+    assert prepared.matching_observations == (observation,)
+    assert prepared.reviewer_eligible
+    assert prepared.reason == "single_published_growth_review_only"
+    # A second target may reuse this signal under another author axis. Its
+    # direction is scoped to that case; the signal's raw polarity never flips.
+    other = mapped.model_copy(update={
+        "approved_axis_observation_polarities": ((observation.id, "negative"),)
+    })
+    assert prepare_character_drift(other).reason == "no_opposition"
+    assert observation.polarity == "negative"
+
+
+def test_legacy_bound_axis_abstains_even_with_model_opposition() -> None:
+    case = _case()
+    baseline = ConfirmedTraitSnapshot.model_validate({
+        **case.baseline.model_dump(),
+        "axis_positive_proposition": None,
+        "axis_positive_proposition_sha256": None,
+        "axis_alignment": "legacy_unverified",
+        "axis_polarity": None,
+    })
+    legacy = case.model_copy(update={
+        "baseline": baseline,
+        "approved_axis_observation_polarities": (),
+    })
+    prepared = prepare_character_drift(legacy)
+    assert prepared.reason == "author_alignment_required"
+    assert not prepared.reviewer_eligible
+    assert not promote_character_drift(prepared, _review("contradicts", ("B01", "C01"))).visible
+
+
+def test_malformed_axis_snapshot_is_not_misclassified_as_legacy() -> None:
+    baseline = _case().baseline.model_dump()
+    with pytest.raises(ValueError, match="alignment is inconsistent"):
+        ConfirmedTraitSnapshot.model_validate({
+            **baseline, "axis_alignment": "opposite", "axis_polarity": "negative"
+        })
+    with pytest.raises(ValueError, match="legacy axis has a directional polarity"):
+        ConfirmedTraitSnapshot.model_validate({
+            **baseline, "axis_alignment": "legacy_unverified",
+            "axis_polarity": "positive",
+        })
+    with pytest.raises(ValueError, match="proposition is incomplete"):
+        ConfirmedTraitSnapshot.model_validate({
+            **baseline, "axis_alignment": "legacy_unverified",
+            "axis_polarity": None,
+            "axis_positive_proposition_sha256": None,
+        })
 
 
 def test_unrelated_g_citation_cannot_replace_matching_g() -> None:

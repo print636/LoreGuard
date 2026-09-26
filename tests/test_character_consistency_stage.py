@@ -33,6 +33,7 @@ from app.character_consistency_stage import (
     _targeted_completion_reserve,
     _draft_preference_coverage_gaps,
     _trusted_axis_binding,
+    _verified_target_axis_polarity,
     _trait_applies_to_release,
 )
 from app.character_drift import (
@@ -62,7 +63,9 @@ from app.config import Settings
 from app.db import (
     AnalysisRunCharacterTraitInputRow,
     AnalysisRunRow,
+    CharacterTraitAxisRow,
     CharacterTraitCandidateRow,
+    CharacterTraitReviewRow,
     SessionLocal,
 )
 from app.main import app, settings as app_settings, write_limiter
@@ -4180,6 +4183,7 @@ def _approved_core_baseline(
     authority: str = "formal_record",
 ) -> ConfirmedTraitSnapshot:
     definition = "涉及同伴安全的路线决策是否征询当值伙伴"
+    proposition = "林澈在涉及同伴安全的路线决策中征询当值伙伴"
     base = _confirmed_trait(
         character="林澈",
         dimension="core_personality",
@@ -4197,6 +4201,12 @@ def _approved_core_baseline(
             "approved_axis_definition_sha256": hashlib.sha256(
                 definition.encode("utf-8")
             ).hexdigest(),
+            "axis_positive_proposition": proposition,
+            "axis_positive_proposition_sha256": hashlib.sha256(
+                proposition.encode("utf-8")
+            ).hexdigest(),
+            "axis_alignment": "same",
+            "axis_polarity": base.polarity,
         }
     )
 
@@ -4240,6 +4250,216 @@ def test_approved_axis_deduplicates_different_raw_labels_without_exposing_id():
     assert first.approved_axis_definition in prompt
     assert first.approved_axis_id not in prompt
     assert '"approved_axis_id"' not in prompt
+
+
+def test_target_author_direction_is_resolved_from_frozen_mapping_not_raw_label():
+    scope = NarrativeScopeV1()
+    first = _approved_core_baseline(trait_key="signature_integrity")
+    opposite = ConfirmedTraitSnapshot.model_validate({
+        **first.model_dump(),
+        "axis_alignment": "opposite",
+        "axis_polarity": "negative",
+    })
+    source = _FrozenDocument(
+        input_id="draft-input",
+        document=DocumentInput(
+            id="draft-axis", name="draft.md", content="林澈冒用签名。", role="chapter"
+        ),
+        document_version=1, content_sha256="0" * 64, ordinal=0,
+        source_kind="draft", source_reason="draft", scope=scope,
+        resolution_state="confirmed", publication_status="draft",
+        authority_tier="draft",
+    )
+    entry = (_snapshot_stub("first"), opposite, scope, "林澈")
+    target = _safe_server_context(source, baselines=[entry]).targets[0]
+    assert target.baseline_polarity == "positive"
+    assert target.requested_polarity == "negative"
+    assert _verified_target_axis_polarity(target, source=source, baselines=[entry]) == "negative"
+    conflicting = (_snapshot_stub("other"), first, scope, "林澈")
+    assert _verified_target_axis_polarity(
+        target, source=source, baselines=[entry, conflicting]
+    ) is None
+
+
+def test_old_bound_axis_snapshot_marks_partial_not_corrupt_or_conflict():
+    with TestClient(app) as client:
+        project = _confirmed_directness_project(client)
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content="祁雾用奉承话术迂回交流。",
+            narrative_context=_context(publication="draft"),
+        )
+        run_id = _new_run(client, project["id"])
+        definition = "是否在交流中直接表达真实意见"
+        with SessionLocal() as db:
+            row = db.scalar(select(AnalysisRunCharacterTraitInputRow).where(
+                AnalysisRunCharacterTraitInputRow.run_id == run_id
+            ))
+            assert row is not None
+            row.payload = {
+                **row.payload,
+                "approved_axis_id": "11111111-1111-4111-8111-111111111111",
+                "approved_axis_version": 1,
+                "approved_axis_display_name": "直接表达",
+                "approved_axis_definition": definition,
+                "approved_axis_definition_sha256": hashlib.sha256(
+                    definition.encode("utf-8")
+                ).hexdigest(),
+                "axis_alignment": "legacy_unverified",
+                "axis_polarity": None,
+            }
+            row.payload_sha256 = payload_sha256(row.payload)
+            db.commit()
+        result = _run_stage(run_id, QueueProvider(_response(), _response()))
+        assert not result.issues
+        assert result.diagnostics["outcome"] == "partial"
+        assert result.diagnostics["reason_counts"]["author_alignment_required"] == 1
+        assert result.diagnostics["reason_counts"].get("invalid_confirmed_trait_snapshot", 0) == 0
+
+
+def test_unaligned_canon_axis_blocks_aligned_formal_drift_review():
+    aligned = _approved_core_baseline(trait_key="partner_consultation")
+    unaligned = ConfirmedTraitSnapshot.model_validate({
+        **aligned.model_dump(),
+        "id": "ct_unaligned_canon",
+        "authority_tier": "core_canon",
+        "axis_positive_proposition": None,
+        "axis_positive_proposition_sha256": None,
+        "axis_alignment": "legacy_unverified",
+        "axis_polarity": None,
+    })
+    scope = NarrativeScopeV1.model_validate({"timeline_key": "main"})
+    entries = [
+        (_snapshot_stub("aligned"), aligned, scope, "林澈"),
+        (_snapshot_stub("unaligned"), unaligned, scope, "林澈"),
+    ]
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"未对齐权威遮蔽-{uuid4().hex}"}
+        ).json()
+        draft_line = "林澈独自决定撤离路线。"
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content=draft_line, narrative_context=_context(publication="draft"),
+        )
+        run_id = _new_run(client, project["id"])
+        provider = QueueProvider(_response(_record(
+            character="林澈", evidence=draft_line, polarity="negative",
+            kind="decision", dimension="core_personality",
+            trait_key="partner_consultation",
+        )))
+        with patch.object(
+            CharacterConsistencyStage, "_load_confirmed_traits", return_value=entries
+        ):
+            result = _run_stage(run_id, provider)
+
+    assert result.issues == ()
+    assert result.diagnostics["outcome"] == "partial"
+    assert result.diagnostics["reason_counts"]["author_alignment_required"] == 1
+    assert result.diagnostics["reason_counts"]["lower_authority_baseline_shadowed"] == 1
+    assert result.diagnostics["counts"]["targeted_pass_scheduled_count"] == 0
+    assert result.diagnostics["counts"]["drift_reviewed"] == 0
+    assert len(provider.calls) == 1
+
+
+def test_unaligned_axis_shadows_aligned_peer_only_in_covered_draft_scope():
+    aligned = _approved_core_baseline(trait_key="partner_consultation")
+    unaligned = ConfirmedTraitSnapshot.model_validate({
+        **aligned.model_dump(),
+        "id": "ct_unaligned_canon",
+        "authority_tier": "core_canon",
+        "axis_positive_proposition": None,
+        "axis_positive_proposition_sha256": None,
+        "axis_alignment": "legacy_unverified",
+        "axis_polarity": None,
+    })
+    global_scope = NarrativeScopeV1.model_validate({"timeline_key": "main"})
+    east_scope = NarrativeScopeV1.model_validate({
+        "timeline_key": "main",
+        "branch": {"path": ["main", "east"], "exclusive_group": "routes"},
+    })
+    west_scope = NarrativeScopeV1.model_validate({
+        "timeline_key": "main",
+        "branch": {"path": ["main", "west"], "exclusive_group": "routes"},
+    })
+    aligned_entry = (_snapshot_stub("aligned"), aligned, global_scope, "林澈")
+    unaligned_entry = (_snapshot_stub("unaligned"), unaligned, east_scope, "林澈")
+    authority_baselines, shadowed = _select_authoritative_baselines(
+        [aligned_entry, unaligned_entry]
+    )
+    assert shadowed == 0
+    assert authority_baselines == [aligned_entry, unaligned_entry]
+
+    def draft(scope: NarrativeScopeV1) -> _FrozenDocument:
+        return _FrozenDocument(
+            input_id="draft-input",
+            document=DocumentInput(
+                id="draft-axis", name="draft.md",
+                content="林澈独自决定撤离路线。", role="chapter",
+            ),
+            document_version=1, content_sha256="0" * 64, ordinal=0,
+            source_kind="draft", source_reason="draft", scope=scope,
+            resolution_state="confirmed", publication_status="draft",
+            authority_tier="draft",
+        )
+
+    east = _safe_server_context(
+        draft(east_scope), baselines=[aligned_entry],
+        authority_baselines=authority_baselines,
+    )
+    west = _safe_server_context(
+        draft(west_scope), baselines=[aligned_entry],
+        authority_baselines=authority_baselines,
+    )
+    assert east.targets == ()
+    assert west.targets[0].approved_axis_identity == aligned.approved_axis_identity
+    assert _verified_target_axis_polarity(
+        west.targets[0], source=draft(east_scope), baselines=authority_baselines
+    ) is None
+    assert _verified_target_axis_polarity(
+        west.targets[0], source=draft(west_scope), baselines=authority_baselines
+    ) == aligned.axis_polarity
+
+
+def test_old_bound_axis_creates_new_run_without_character_stage_dependency():
+    with TestClient(app) as client:
+        project = _confirmed_directness_project(client)
+        axis_id = str(uuid4())
+        definition = "是否在交流中直接表达真实意见"
+        with SessionLocal() as db:
+            candidate = db.scalar(select(CharacterTraitCandidateRow).where(
+                CharacterTraitCandidateRow.project_id == project["id"],
+                CharacterTraitCandidateRow.review_state == "confirmed",
+            ))
+            assert candidate is not None
+            review = db.scalar(select(CharacterTraitReviewRow).where(
+                CharacterTraitReviewRow.candidate_id == candidate.id,
+                CharacterTraitReviewRow.decision == "confirm",
+            ))
+            assert review is not None
+            db.add(CharacterTraitAxisRow(
+                id=axis_id, project_id=project["id"],
+                trait_type="core_personality", version=1,
+                display_name="直接表达", definition=definition,
+                definition_sha256=hashlib.sha256(
+                    definition.encode("utf-8")
+                ).hexdigest(),
+            ))
+            db.flush()
+            candidate.approved_axis_id = axis_id
+            candidate.approved_axis_version = 1
+            review.approved_axis_id = axis_id
+            review.approved_axis_version = 1
+            db.commit()
+        run_id = _new_run(client, project["id"])
+        with SessionLocal() as db:
+            snapshot = db.scalar(select(AnalysisRunCharacterTraitInputRow).where(
+                AnalysisRunCharacterTraitInputRow.run_id == run_id
+            ))
+            assert snapshot is not None
+            assert snapshot.payload["axis_alignment"] == "legacy_unverified"
+            assert snapshot.payload["axis_polarity"] is None
+            assert snapshot.payload_sha256 == payload_sha256(snapshot.payload)
 
 
 def test_approved_axis_requires_server_binding_and_preserves_observation_label():
@@ -4287,7 +4507,10 @@ def test_approved_axis_requires_server_binding_and_preserves_observation_label()
     )
     assert prepare_character_drift(unbound).matching_observations == ()
     bound = unbound.model_copy(
-        update={"approved_axis_bound_observation_ids": (observation.id,)}
+        update={
+            "approved_axis_bound_observation_ids": (observation.id,),
+            "approved_axis_observation_polarities": ((observation.id, "negative"),),
+        }
     )
     assert prepare_character_drift(bound).matching_observations == (observation,)
     assert prepare_character_drift(bound).matching_observations[0].trait_key == (
@@ -4401,6 +4624,7 @@ def test_approved_axis_primary_key_match_still_requires_clean_targeted_binding()
         )
         run_id = _new_run(client, project["id"])
         definition = "是否在交流中直接表达真实意见"
+        proposition = "祁雾在交流中直接表达真实意见"
         axis_id = "11111111-1111-4111-8111-111111111111"
         with SessionLocal() as db:
             row = db.scalar(
@@ -4418,6 +4642,12 @@ def test_approved_axis_primary_key_match_still_requires_clean_targeted_binding()
                 "approved_axis_definition_sha256": hashlib.sha256(
                     definition.encode("utf-8")
                 ).hexdigest(),
+                "axis_positive_proposition": proposition,
+                "axis_positive_proposition_sha256": hashlib.sha256(
+                    proposition.encode("utf-8")
+                ).hexdigest(),
+                "axis_alignment": "same",
+                "axis_polarity": row.payload["polarity"],
             }
             row.payload = payload
             row.payload_sha256 = payload_sha256(payload)

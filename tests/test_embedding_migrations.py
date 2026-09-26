@@ -21,10 +21,136 @@ from app.narrative_context import payload_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0017_character_trait_withdraw"
+HEAD_REVISION = "0018_character_axis_direction"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
+    def test_axis_direction_migration_keeps_old_confirmations_unverified_and_guards_new_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            url = f"sqlite:///{(Path(directory) / 'axis-direction.db').as_posix()}"
+            self.upgrade_to(url, "0017_character_trait_withdraw")
+            engine = create_engine(url)
+            axis = Table("character_trait_axes", MetaData(), autoload_with=engine)
+            candidate = Table("character_trait_candidates", MetaData(), autoload_with=engine)
+            review = Table("character_trait_reviews", MetaData(), autoload_with=engine)
+            scope = {"schema_version": 1, "timeline_key": "main"}
+            evidence = [{"document_id": "doc-old", "text": "角色拒绝冒用签名。"}]
+            with engine.begin() as connection:
+                connection.execute(axis.insert().values(
+                    id="axis-old", project_id="project-old",
+                    trait_type="core_personality", version=1,
+                    display_name="签名行为", definition="是否冒用签名",
+                    definition_sha256="a" * 64,
+                    created_at=datetime(2026, 9, 1),
+                ))
+                connection.execute(candidate.insert().values(
+                    id="candidate-old", project_id="project-old",
+                    source_run_id="run-old", character_key="角色",
+                    character_display_name="角色", trait_type="core_personality",
+                    trait_key="signature_integrity", value="拒绝冒用签名",
+                    polarity="positive", stability="stable", contexts=[],
+                    origin="explicit_setting", authority_tier="formal_record",
+                    confidence=0.9, scope_payload=scope,
+                    scope_sha256=payload_sha256(scope), evidence=evidence,
+                    evidence_sha256=payload_sha256(evidence),
+                    support_binding_mode="legacy_v1",
+                    candidate_fingerprint="f" * 64,
+                    generator_version="test-v1", provenance={},
+                    review_state="confirmed", lock_version=1,
+                    approved_axis_id="axis-old", approved_axis_version=1,
+                    reviewed_at=datetime(2026, 9, 1),
+                    created_at=datetime(2026, 9, 1),
+                ))
+                connection.execute(review.insert().values(
+                    id="confirm-old", project_id="project-old",
+                    candidate_id="candidate-old", decision="confirm",
+                    approved_axis_id="axis-old", approved_axis_version=1,
+                    expected_lock_version=0, comment="",
+                    created_at=datetime(2026, 9, 1),
+                ))
+                before_review_triggers = {
+                    name for (name,) in connection.exec_driver_sql(
+                        "SELECT name FROM sqlite_master WHERE type='trigger' "
+                        "AND tbl_name='character_trait_reviews'"
+                    ).all()
+                }
+            engine.dispose()
+            self.upgrade(url)
+            engine = create_engine(url)
+            with engine.begin() as connection:
+                after_review_triggers = {
+                    name for (name,) in connection.exec_driver_sql(
+                        "SELECT name FROM sqlite_master WHERE type='trigger' "
+                        "AND tbl_name='character_trait_reviews'"
+                    ).all()
+                }
+                self.assertTrue(before_review_triggers <= after_review_triggers)
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT approved_axis_id, axis_alignment, axis_polarity, "
+                    "axis_positive_proposition_sha256 FROM character_trait_candidates "
+                    "WHERE id='candidate-old'"
+                ).one(), ("axis-old", None, None, None))
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT decision, axis_alignment FROM character_trait_reviews "
+                    "WHERE id='confirm-old'"
+                ).one(), ("confirm", None))
+                with self.assertRaises(IntegrityError):
+                    connection.exec_driver_sql(
+                        "UPDATE character_trait_candidates SET axis_alignment='opposite' "
+                        "WHERE id='candidate-old'"
+                    )
+                self.assertEqual(
+                    connection.exec_driver_sql("PRAGMA quick_check").scalar_one(),
+                    "ok",
+                )
+            engine.dispose()
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            config.attributes["database_url"] = url
+            command.downgrade(config, "0017_character_trait_withdraw")
+            engine = create_engine(url)
+            self.assertNotIn(
+                "axis_alignment",
+                {item["name"] for item in inspect(engine).get_columns(
+                    "character_trait_candidates"
+                )},
+            )
+            engine.dispose()
+            self.upgrade(url)
+            engine = create_engine(url)
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "UPDATE character_trait_axes SET positive_proposition='角色冒用签名', "
+                    "positive_proposition_sha256=?, "
+                    "positive_proposition_authored_at='2026-09-26 00:00:00' "
+                    "WHERE id='axis-old'",
+                    ("b" * 64,),
+                )
+            engine.dispose()
+            with self.assertRaisesRegex(RuntimeError, "direction decisions"):
+                command.downgrade(config, "0017_character_trait_withdraw")
+
+    def test_axis_direction_unmodified_create_all_schema_can_downgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            url = f"sqlite:///{(Path(directory) / 'created-current.db').as_posix()}"
+            engine = create_engine(url)
+            Base.metadata.create_all(engine)
+            engine.dispose()
+            self.upgrade(url)
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            config.attributes["database_url"] = url
+            command.downgrade(config, "0017_character_trait_withdraw")
+            engine = create_engine(url)
+            with engine.connect() as connection:
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT version_num FROM alembic_version"
+                ).scalar_one(), "0017_character_trait_withdraw")
+                self.assertEqual(connection.exec_driver_sql(
+                    "PRAGMA quick_check"
+                ).scalar_one(), "ok")
+            engine.dispose()
+
     def test_character_withdrawal_migration_preserves_schema_and_is_reversible_only_without_history(self):
         with tempfile.TemporaryDirectory() as directory:
             url = f"sqlite:///{(Path(directory) / 'withdrawal.db').as_posix()}"
@@ -84,7 +210,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
                 ))
             engine.dispose()
 
-            self.upgrade(url)
+            self.upgrade_to(url, "0017_character_trait_withdraw")
             engine = create_engine(url)
             self.assertEqual({table: protections(table) for table in tables}, before)
             with engine.connect() as connection:
@@ -117,7 +243,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
                     )
             engine.dispose()
 
-            self.upgrade(url)
+            self.upgrade_to(url, "0017_character_trait_withdraw")
             engine = create_engine(url)
             with engine.begin() as connection:
                 connection.exec_driver_sql(
@@ -138,7 +264,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
             with engine.connect() as connection:
                 self.assertEqual(connection.exec_driver_sql(
                     "SELECT version_num FROM alembic_version"
-                ).scalar_one(), HEAD_REVISION)
+                ).scalar_one(), "0017_character_trait_withdraw")
                 self.assertEqual(connection.exec_driver_sql(
                     "SELECT review_state FROM character_trait_candidates "
                     "WHERE id='withdraw-candidate'"
