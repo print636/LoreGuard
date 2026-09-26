@@ -8,6 +8,15 @@ from .domain import ConsistencyIssue, IssueCategory, ParsedDirective, Severity
 from .semantic_quality import eligible_for_deterministic_rules
 
 
+_CHINESE_ABSOLUTE_TIME = re.compile(
+    r"(?P<year>[0-9]{4})[ \t]*年[ \t]*"
+    r"(?P<month>[0-9]{1,2})[ \t]*月[ \t]*"
+    r"(?P<day>[0-9]{1,2})[ \t]*日[ \t]*"
+    r"(?P<hour>[0-9]{2}):(?P<minute>[0-9]{2})"
+    r"(?::(?P<second>[0-9]{2}))?"
+)
+
+
 def _issue(category, title, explanation, evidence, suggestion, severity=Severity.high, **metadata):
     return ConsistencyIssue(
         category=category,
@@ -42,6 +51,61 @@ def _precise_timestamp(value: str) -> bool:
             value.strip(),
         )
     )
+
+
+def _event_precise_timestamp(value: str) -> datetime | None:
+    """Validate event-only absolute time without widening knowledge ordering."""
+    candidate = value.strip()
+    if _precise_timestamp(candidate):
+        normalized = candidate.replace("T", " ")
+        time_format = (
+            "%Y-%m-%d %H:%M:%S" if len(normalized) == 19 else "%Y-%m-%d %H:%M"
+        )
+        try:
+            return datetime.strptime(normalized, time_format)
+        except ValueError:
+            return None
+    match = _CHINESE_ABSOLUTE_TIME.fullmatch(candidate)
+    if match is None:
+        return None
+    parts = {key: int(value) for key, value in match.groupdict(default="0").items()}
+    try:
+        return datetime(
+            parts["year"], parts["month"], parts["day"],
+            parts["hour"], parts["minute"], parts["second"],
+        )
+    except ValueError:
+        return None
+
+
+def _chinese_event_time_visible(value: str, evidence: str) -> bool:
+    """Require the whole Chinese timestamp and reject nearby uncertainty."""
+    candidate = value.strip()
+    if _CHINESE_ABSOLUTE_TIME.fullmatch(candidate) is None:
+        return True
+    compact_time = re.sub(r"[ \t]+", "", candidate)
+    compact_evidence = re.sub(r"[ \t]+", "", evidence)
+    match = re.search(
+        rf"(?<![0-9]){re.escape(compact_time)}(?![:0-9])",
+        compact_evidence,
+    )
+    if match is None:
+        return False
+    before = compact_evidence[max(0, match.start() - 6) : match.start()]
+    after = compact_evidence[match.end() : match.end() + 8]
+    if re.search(r"(?:约|大约|大概|可能|也许|估计|不早于|不晚于)(?:在)?$", before):
+        return False
+    if re.match(r"(?:左右|前后|附近|或者|或|[/／~～—-]|(?:到|至)[0-9])", after):
+        return False
+    return True
+
+
+def _event_permission_timestamp(value: str, parsed: datetime) -> str:
+    """Keep display evidence original while comparing Chinese events to ISO bounds."""
+    if _CHINESE_ABSOLUTE_TIME.fullmatch(value.strip()) is None:
+        return value
+    time_format = "%Y-%m-%d %H:%M:%S" if value.count(":") == 2 else "%Y-%m-%d %H:%M"
+    return parsed.strftime(time_format)
 
 
 def _ordered_knowledge_time(value: str) -> datetime | None:
@@ -101,22 +165,55 @@ def _location_within(location: str, permitted_endpoint: str) -> bool:
     )
 
 
-def _place_tokens(text: str) -> set[str]:
-    """Extract short explicit Chinese place spans for hierarchy checks."""
-    suffixes = set("港塔室城岛站厅楼舱院宫门仓库")
-    compact = re.sub(r"[^\u4e00-\u9fff]", " ", text)
-    tokens: set[str] = set()
-    for segment in compact.split():
-        for end, char in enumerate(segment, start=1):
-            if char not in suffixes:
-                continue
-            for length in range(2, min(6, end) + 1):
-                tokens.add(segment[end - length:end])
-    return tokens
+_EXTERIOR_PLACE_CUE = re.compile(
+    r"门外|门前|附近|旁边|对面|前方|后方|外港|外城|城外|港外|"
+    r"塔外|楼外|院外|站外|室外|馆外|外围|外侧|外面|外部"
+)
+_INTERIOR_PLACE_SUFFIX = re.compile(
+    r"(?:房间|书房|[\u4e00-\u9fffA-Za-z0-9·_-]{1,12}"
+    r"(?:厅|室|馆|楼|院|库|站|舱|层))"
+)
 
 
 def _evidence_shares_place(first: ParsedDirective, second: ParsedDirective) -> bool:
-    return bool(_place_tokens(first.evidence.text) & _place_tokens(second.evidence.text))
+    """Suppress only an explicit parent/inner-place relation in source text.
+
+    Shared short tokens such as ``灯塔`` do not establish that two full place
+    names are the same location. Mere cross-mentions do not establish nesting
+    either: a character may be at one place while discussing another.
+    """
+    first_location = re.sub(r"\s+", "", first.attrs.get("location", ""))
+    second_location = re.sub(r"\s+", "", second.attrs.get("location", ""))
+    if not first_location or not second_location:
+        return False
+    evidence = tuple(
+        re.sub(r"\s+", "", row.evidence.text) for row in (first, second)
+    )
+    for outer, inner in (
+        (first_location, second_location),
+        (second_location, first_location),
+    ):
+        # "X 的门外", "X 外港的档案厅" and similar nearby places are not inside X.
+        if _EXTERIOR_PLACE_CUE.search(inner):
+            continue
+        # A full extracted name can itself encode an inner facility. Do not
+        # silently trim an action tail from a malformed location here; that
+        # belongs to extraction, not to the collision rule.
+        if inner.startswith(outer):
+            suffix = inner[len(outer):]
+            if _INTERIOR_PLACE_SUFFIX.fullmatch(suffix) and any(
+                inner in text for text in evidence
+            ):
+                return True
+        possessive = re.compile(
+            rf"{re.escape(outer)}(?:的|内的|里的|中的){re.escape(inner)}"
+        )
+        located_inside = re.compile(
+            rf"{re.escape(inner)}(?:位于|坐落于|设于){re.escape(outer)}(?:内|里|中)"
+        )
+        if any(possessive.search(text) or located_inside.search(text) for text in evidence):
+            return True
+    return False
 
 
 def _same_evidence(first: ParsedDirective, second: ParsedDirective) -> bool:
@@ -258,9 +355,22 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
             ):
                 denied_authorizations.append(d)
         elif d.kind == "event":
+            timestamp = a.get("time", "")
+            parsed_time = _event_precise_timestamp(timestamp)
+            if parsed_time is None or not _chinese_event_time_visible(
+                timestamp, d.evidence.text
+            ):
+                continue
+            # Normalize Chinese spelling/spacing only. Existing ISO grouping
+            # remains exact to avoid an unrelated change in rule scope.
+            event_key = (
+                f"chinese:{parsed_time.isoformat()}"
+                if _CHINESE_ABSOLUTE_TIME.fullmatch(timestamp.strip())
+                else timestamp
+            )
             for participant in a.get("participants", "").split(","):
                 if participant.strip():
-                    events[(participant.strip(), a.get("time", ""))].append(d)
+                    events[(participant.strip(), event_key)].append(d)
         elif d.kind == "knows":
             knows[(a.get("character", ""), a.get("fact", ""))].append(d)
         elif d.kind == "claims_knows":
@@ -317,9 +427,12 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
                 predicate=predicate,
             ))
 
-    for (participant, timestamp), rows in events.items():
-        if not _precise_timestamp(timestamp):
+    for (participant, _event_key), rows in events.items():
+        timestamp = rows[0].attrs.get("time", "")
+        parsed_time = _event_precise_timestamp(timestamp)
+        if parsed_time is None:
             continue
+        permission_timestamp = _event_permission_timestamp(timestamp, parsed_time)
         conflict_pair: tuple[ParsedDirective, ParsedDirective] | None = None
         for index, first in enumerate(rows):
             for second in rows[index + 1:]:
@@ -349,7 +462,7 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
                     and _mobility_permission_applies(
                         permission,
                         participant,
-                        timestamp,
+                        permission_timestamp,
                         first_location,
                         second_location,
                     )

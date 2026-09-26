@@ -185,6 +185,8 @@ type RunInfo = RunUsageInfo & {
     mode: "baseline_build" | "draft_review" | string;
     sensitivity: "conservative" | "balanced" | "exploratory" | string;
     target_document_ids?: string[];
+    background_document_ids?: string[];
+    no_formal_context_expected?: boolean;
   } | null;
   model_execution?: unknown;
 };
@@ -2307,7 +2309,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   <b>{records.length}</b>
                 </div>
                 <div>
-                  <small>确认问题</small>
+                  <small>问题线索</small>
                   <b>{issues.length}</b>
                 </div>
                 <div>
@@ -2585,6 +2587,21 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           )}
           {!routeProblem && activeView === "report" && (
             <>
+              {runInfo?.review_batch?.mode === "draft_review" && (
+                <section
+                  className={`reviewCoverage ${runInfo.review_batch.no_formal_context_expected ? "limited" : ""}`}
+                  aria-label="本次审查范围"
+                >
+                  <strong>{runInfo.review_batch.no_formal_context_expected ? "仅新稿自检" : "新稿审查"}</strong>
+                  <span>
+                    本次运行冻结 {runInfo.review_batch.target_document_ids?.length ?? 0} 份目标章节、
+                    {runInfo.review_batch.background_document_ids?.length ?? 0} 份正式背景。
+                    {runInfo.review_batch.no_formal_context_expected
+                      ? " 没有正式背景时不能据零问题断言角色 OOC 已通过；请结合角色覆盖诊断阅读结果。"
+                      : " 报告以冻结版本为准，不会用当前项目文档替换历史输入。"}
+                  </span>
+                </section>
+              )}
               <section className="clarifications workspaceView">
                 <div className="sectionHead">
                   <div>
@@ -2640,7 +2657,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   <div>
                     <p className="eyebrow">EVIDENCE REPORT</p>
                     <h2>
-                      已确认的一致性问题 <em>{visibleIssues.length}</em>
+                      一致性问题线索 <em>{visibleIssues.length}</em>
                     </h2>
                   </div>
                   <div className="reportFilters" aria-label="报告筛选">
@@ -2907,7 +2924,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </section>
           <section className="railSummary" aria-label="运行摘要">
             <div>
-              <small>确认问题</small>
+              <small>问题线索</small>
               <b>{issues.length}</b>
             </div>
             <div>

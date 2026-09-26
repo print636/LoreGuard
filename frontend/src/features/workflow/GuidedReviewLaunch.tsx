@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ApiError, apiJson } from "../../api/client";
 import type { WorkspaceView } from "../../routing";
 import {
   fetchCharacterBaselineStatus,
@@ -7,9 +8,11 @@ import {
 } from "./baselineStatus";
 import {
   analysisRunRequest,
+  blocksDraftOnlyReview,
   findCurrentBaselineRun,
   guidedDocumentState,
   hasCompletedBaselineRun,
+  selectedDraftsStillCurrent,
   type AnalysisRunRequest,
   type BaselineRunSummary,
   type GuidedDocument,
@@ -181,6 +184,12 @@ export default function GuidedReviewLaunch({
   );
   const pendingCandidates = status?.pending_candidate_count ?? 0;
   const confirmedItems = status?.confirmed_trait_count ?? 0;
+  const draftOnlyAvailable = !projectLoading &&
+    documentState.active.length > 0 &&
+    !documentState.active.some(blocksDraftOnlyReview);
+  const excludedDraftOnlyDocuments = documentState.active.filter((document) =>
+    !documentState.confirmedDrafts.some((draft) => draft.id === document.id),
+  );
   const contextsReady =
     documentState.baseline.length > 0 &&
     documentState.unresolvedBaseline.length === 0;
@@ -189,7 +198,7 @@ export default function GuidedReviewLaunch({
     !profilesLoading &&
     !profiles.error &&
     hasReadyCharacterBaseline(currentBaselineRun, status);
-  const draftsReady = profilesReady && documentState.confirmedDrafts.length > 0;
+  const draftsReady = (profilesReady || draftOnlyAvailable) && documentState.confirmedDrafts.length > 0;
 
   async function startBaseline() {
     if (!contextsReady || busy || action) return;
@@ -205,36 +214,69 @@ export default function GuidedReviewLaunch({
   }
 
   async function startDraftReview() {
-    if (!draftsReady || busy || action || preflightControllerRef.current || !currentBaselineRun || !selectedDraftIds.length) return;
+    if (!draftsReady || busy || action || preflightControllerRef.current || !selectedDraftIds.length ||
+      (!draftOnlyAvailable && !currentBaselineRun)) return;
     const controller = new AbortController();
     preflightControllerRef.current = controller;
     try {
       setAction("review");
       setReviewError("");
-      let freshStatus: CharacterBaselineStatus;
-      try {
-        freshStatus = await fetchCharacterBaselineStatus(projectId, currentBaselineRun.id, controller.signal);
-      } catch {
+      if (draftOnlyAvailable) {
+        let freshDocuments: GuidedDocument[];
+        try {
+          freshDocuments = await apiJson<GuidedDocument[]>(
+            `/api/v1/projects/${encodeURIComponent(projectId)}/documents?include_history=true`,
+            { signal: controller.signal },
+          );
+        } catch {
+          if (controller.signal.aborted) return;
+          setReviewError("提交前无法复核项目资料，本次没有启动任务。请检查连接后重试。");
+          return;
+        }
         if (controller.signal.aborted) return;
-        setProfiles({
-          loading: false,
-          error: "提交前无法复核角色基线。请重试读取状态；未知状态不会解锁审查。",
-          projectId,
-          requestedRunId: currentBaselineRun.id,
-          status: null,
-        });
-        setReviewError("提交前复核失败，本次没有启动任务。请重试读取角色基线后再校验。");
-        return;
+        if (freshDocuments.some(blocksDraftOnlyReview)) {
+          setReviewError("项目已有正式资料或待确认的正式资料，本次没有启动自检。请刷新项目并先确认资料、建立角色基线。");
+          return;
+        }
+        if (!selectedDraftsStillCurrent(documents, freshDocuments, selectedDraftIds)) {
+          setReviewError("所选新稿的版本或资料状态已变化，本次没有启动任务。请刷新项目后重新选择。");
+          return;
+        }
+        await onStart(analysisRunRequest("draft_review", sensitivity, selectedDraftIds, true));
+      } else if (currentBaselineRun) {
+        let freshStatus: CharacterBaselineStatus;
+        try {
+          freshStatus = await fetchCharacterBaselineStatus(projectId, currentBaselineRun.id, controller.signal);
+        } catch {
+          if (controller.signal.aborted) return;
+          setProfiles({
+            loading: false,
+            error: "提交前无法复核角色基线。请重试读取状态；未知状态不会解锁审查。",
+            projectId,
+            requestedRunId: currentBaselineRun.id,
+            status: null,
+          });
+          setReviewError("提交前复核失败，本次没有启动任务。请重试读取角色基线后再校验。");
+          return;
+        }
+        if (controller.signal.aborted) return;
+        setProfiles({ loading: false, error: "", projectId, requestedRunId: currentBaselineRun.id, status: freshStatus });
+        if (!hasReadyCharacterBaseline(currentBaselineRun, freshStatus)) {
+          setReviewError("角色基线状态已变化，本次没有启动任务。请核对上方角色档案状态后再校验。");
+          return;
+        }
+        await onStart(analysisRunRequest("draft_review", sensitivity, selectedDraftIds));
       }
-      if (controller.signal.aborted) return;
-      setProfiles({ loading: false, error: "", projectId, requestedRunId: currentBaselineRun.id, status: freshStatus });
-      if (!hasReadyCharacterBaseline(currentBaselineRun, freshStatus)) {
-        setReviewError("角色基线状态已变化，本次没有启动任务。请核对上方角色档案状态后再校验。");
-        return;
-      }
-      await onStart(analysisRunRequest("draft_review", sensitivity, selectedDraftIds));
     } catch (error) {
-      setReviewError(error instanceof Error ? error.message : "新稿审查没有启动，请重试。");
+      const payload = error instanceof ApiError && error.detail && typeof error.detail === "object"
+        ? error.detail as { detail?: unknown }
+        : null;
+      const detail = payload?.detail && typeof payload.detail === "object"
+        ? payload.detail as { code?: unknown }
+        : null;
+      setReviewError(detail?.code === "formal_context_present"
+        ? "项目新增了正式资料，本次没有启动自检。请刷新项目、确认正式资料后再审查。"
+        : error instanceof Error ? error.message : "新稿审查没有启动，请重试。");
     } finally {
       if (preflightControllerRef.current === controller) {
         preflightControllerRef.current = null;
@@ -261,8 +303,10 @@ export default function GuidedReviewLaunch({
     <div className="guidedReviewLaunch">
       <header className="guidedReviewHead">
         <div>
-          <h2>从正式资料到新稿审查</h2>
-          <p>先建立可核对的角色基线，再只选择这次需要审查的新稿。每次运行都会冻结输入。</p>
+          <h2>{draftOnlyAvailable ? "从新稿开始故事自检" : "从正式资料到新稿审查"}</h2>
+          <p>{draftOnlyAvailable
+            ? "目前没有生效的正式世界观或历史正文。选择本次要检查的草稿；之后仍可补充正式资料并建立角色基线。"
+            : "先建立可核对的角色基线，再只选择这次需要审查的新稿。每次运行都会冻结输入。"}</p>
         </div>
         <fieldset className="sensitivityControl">
           <legend>角色变化敏感度</legend>
@@ -284,7 +328,8 @@ export default function GuidedReviewLaunch({
 
       {actionError && <div className="guidedActionError" role="alert">{actionError}</div>}
 
-      <ol className="guidedStages" aria-label="故事审查三阶段">
+      <ol className="guidedStages" aria-label={draftOnlyAvailable ? "新稿自检" : "故事审查三阶段"}>
+        {!draftOnlyAvailable && <>
         <li className={contextsReady ? "complete" : "current"}>
           <span className="stageNumber" aria-hidden="true">1</span>
           <div className="stageBody">
@@ -369,16 +414,25 @@ export default function GuidedReviewLaunch({
             )}
           </div>
         </li>
+        </>}
 
         <li className={draftsReady ? "current" : "locked"}>
-          <span className="stageNumber" aria-hidden="true">3</span>
+          <span className="stageNumber" aria-hidden="true">{draftOnlyAvailable ? "1" : "3"}</span>
           <div className="stageBody">
             <header>
-              <div><h3>选择新稿开始审查</h3><p>一次可检查单章，也可勾选同一批次的多个章节。</p></div>
-              <b>{draftsReady ? "可开始" : "未解锁"}</b>
+              <div><h3>{draftOnlyAvailable ? "选择新稿开始自检" : "选择新稿开始审查"}</h3><p>一次可检查单章，也可勾选同一批次的多个章节。</p></div>
+              <b>{draftsReady ? "可开始" : draftOnlyAvailable ? "待确认新稿" : "未解锁"}</b>
             </header>
             {reviewError && <p className="stageReviewError" role="alert">{reviewError}</p>}
-            {!profilesReady ? (
+            {draftOnlyAvailable && (
+              <div className="stageBaselineSummary">
+                <p className="stageNotice warning">本次没有正式世界观或已发布剧情背景，草稿不会升格为设定。已有的已确认角色特征仍可能用于 OOC；若当前没有已确认特征，角色 OOC 将弃权。实际覆盖以运行诊断为准。</p>
+                {excludedDraftOnlyDocuments.length > 0 && (
+                  <p className="stageNotice">另有 {excludedDraftOnlyDocuments.length} 份资料不作正式依据（如参考、退役或未确认文档）；如需纳入，请先核对用途。</p>
+                )}
+              </div>
+            )}
+            {!profilesReady && !draftOnlyAvailable ? (
               <p className="stageNotice">完成角色基线确认后，才能用它审查新稿中的性格、偏好与行为漂移。</p>
             ) : documentState.confirmedDrafts.length === 0 ? (
               <>
@@ -387,7 +441,9 @@ export default function GuidedReviewLaunch({
               </>
             ) : (
               <div className="draftReviewSelection">
-                <p className="stageNotice draftReviewScopeNote">上方为项目级汇总，不保证所选章节中的每个角色都有已确认特征；未覆盖角色不会获得角色 OOC 判断，其他一致性检查仍可运行。</p>
+                <p className="stageNotice draftReviewScopeNote">{draftOnlyAvailable
+                  ? "仅分析勾选的新稿；其他草稿不会悄悄成为背景。其他一致性检查仍可运行。"
+                  : "上方为项目级汇总，不保证所选章节中的每个角色都有已确认特征；未覆盖角色不会获得角色 OOC 判断，其他一致性检查仍可运行。"}</p>
                 <fieldset>
                   <legend>本次待审新稿</legend>
                   {documentState.confirmedDrafts.map((document) => (
@@ -408,7 +464,9 @@ export default function GuidedReviewLaunch({
                   disabled={busy || Boolean(action) || selectedDraftIds.length === 0}
                   onClick={() => void startDraftReview()}
                 >
-                  {busy ? "正在校验…" : action === "review" ? "正在复核角色基线…" : `开始校验${selectedDraftIds.length ? `（${selectedDraftIds.length} 份）` : ""}`}
+                  {busy ? "正在校验…" : action === "review"
+                    ? draftOnlyAvailable ? "正在复核项目资料…" : "正在复核角色基线…"
+                    : `开始校验${selectedDraftIds.length ? `（${selectedDraftIds.length} 份）` : ""}`}
                 </button>
               </div>
             )}

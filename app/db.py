@@ -1121,7 +1121,13 @@ def enable_sqlite_foreign_keys(target_engine: Engine) -> None:
 
 
 settings = get_settings()
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+# BEGIN IMMEDIATE protects the local review/input snapshot against concurrent
+# source writes. Give a short burst of local writers time to finish instead of
+# failing at sqlite3's five-second default busy timeout.
+connect_args = (
+    {"check_same_thread": False, "timeout": 30.0}
+    if settings.database_url.startswith("sqlite") else {}
+)
 engine = create_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args)
 if settings.database_url.startswith("sqlite"):
     enable_sqlite_foreign_keys(engine)

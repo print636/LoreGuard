@@ -345,6 +345,7 @@ class AnalysisRunIn(BaseModel):
     target_document_ids: list[str] | None = Field(
         default=None, max_length=256
     )
+    no_formal_context_expected: bool = Field(default=False, strict=True)
     sensitivity: Literal[
         "conservative", "balanced", "exploratory"
     ] = "balanced"
@@ -388,6 +389,17 @@ def _project_in_workspace(db, project_id: str, workspace_id: str) -> ProjectRow 
     )
 
 
+def _begin_project_write_transaction(db) -> None:
+    """Serialize local SQLite source writes with run input selection.
+
+    PostgreSQL endpoints below lock ProjectRow with SELECT FOR UPDATE. SQLite
+    ignores that clause, so its write lock must be acquired before the first
+    read of the project or its documents. Do not apply this to read-only GETs.
+    """
+    if db.get_bind().dialect.name == "sqlite":
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+
+
 def _run_in_workspace(db, run_id: str, workspace_id: str) -> AnalysisRunRow | None:
     return db.scalar(
         select(AnalysisRunRow)
@@ -416,10 +428,18 @@ def _review_batch_intent(payload: AnalysisRunIn) -> dict:
         raise HTTPException(
             422, "draft_review 的显式 target_document_ids 不能为空"
         )
+    if payload.no_formal_context_expected and (
+        payload.mode != "draft_review" or requested is None
+    ):
+        raise HTTPException(
+            422,
+            "no_formal_context_expected 仅适用于显式指定目标的 draft_review",
+        )
     return {
         "mode": payload.mode,
         "sensitivity": payload.sensitivity,
         "requested_target_document_ids": requested,
+        "no_formal_context_expected": payload.no_formal_context_expected,
     }
 
 
@@ -577,6 +597,42 @@ def _review_batch_selection(
                     ],
                 },
             )
+        if payload.no_formal_context_expected:
+            # This is an opt-in promise from a "chapter only" launch, not a
+            # reason to silently drop formal inputs. Check all active project
+            # documents, including unconfirmed metadata and incompatible
+            # branches, before freezing the run's target/background snapshot.
+            blocking_context: list[dict[str, str]] = []
+            for document in documents:
+                role, narrative = metadata[document.id]
+                publication = narrative.get("publication_status")
+                resolution = narrative.get("resolution_state")
+                if role in {"canon", "character_profile"}:
+                    # An unconfirmed "retired" label is not enough to prove
+                    # that a formal source has stopped being authoritative.
+                    if publication == "retired" and resolution == "confirmed":
+                        continue
+                    reason = "formal_source_present"
+                elif role == "chapter" and publication == "published":
+                    reason = "published_history_present"
+                else:
+                    continue
+                blocking_context.append(
+                    {
+                        "document_id": document.id,
+                        "document_name": document.name,
+                        "reason": reason,
+                    }
+                )
+            if blocking_context:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "formal_context_present",
+                        "message": "项目已有正式设定或已发布剧情，请刷新并选择带背景的审查方式",
+                        "blocking_documents": blocking_context,
+                    },
+                )
 
     target_ids = {row.id for row in targets}
     backgrounds: list[DocumentRow] = []
@@ -812,6 +868,9 @@ def serialize_run(row: AnalysisRunRow, db=None) -> dict:
     payload["review_batch"] = {
         "mode": row.batch_mode or "full_review",
         "sensitivity": row.sensitivity or "balanced",
+        "no_formal_context_expected": bool(
+            coverage.get("no_formal_context_expected", False)
+        ),
         "target_document_ids": list(coverage.get("target_document_ids", [])),
         "background_document_ids": list(
             coverage.get("background_document_ids", [])
@@ -1548,6 +1607,9 @@ def _accepted_run_payload(db, run: AnalysisRunRow, *, created: bool) -> dict:
         "review_batch": {
             "mode": run.batch_mode or "full_review",
             "sensitivity": run.sensitivity or "balanced",
+            "no_formal_context_expected": bool(
+                coverage.get("no_formal_context_expected", False)
+            ),
             "target_document_ids": target_ids,
             "background_document_ids": background_ids,
             "excluded_documents": list(
@@ -1583,6 +1645,9 @@ def _require_idempotency_operation(
         "sensitivity": run.sensitivity or "balanced",
         "requested_target_document_ids": coverage.get(
             "requested_target_document_ids"
+        ),
+        "no_formal_context_expected": bool(
+            coverage.get("no_formal_context_expected", False)
         ),
     }
     if (
@@ -2572,6 +2637,7 @@ def infer_document_narrative_context(
     # Phase 3 obtains locks only after the provider call and revalidates every
     # frozen identity before one atomic role/context write.
     with SessionLocal() as db:
+        _begin_project_write_transaction(db)
         project = db.scalar(
             select(ProjectRow)
             .where(
@@ -2699,6 +2765,7 @@ def create_document_narrative_context_revision(
     context: AuthContext = Depends(require_csrf),
 ) -> dict:
     with SessionLocal() as db:
+        _begin_project_write_transaction(db)
         project = db.scalar(
             select(ProjectRow)
             .where(
@@ -2781,7 +2848,18 @@ def create_text_document(
     if len(payload.content.encode("utf-8")) > settings.max_upload_bytes:
         raise HTTPException(413, "文本超过上传限制")
     with SessionLocal() as db:
-        if not _project_in_workspace(db, project_id, context.workspace_id):
+        _begin_project_write_transaction(db)
+        # Share the project lock with analysis-run selection so an upload
+        # cannot introduce formal context between its guard and snapshot.
+        project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if project is None:
             raise HTTPException(404, "项目不存在")
         version, superseded, document_role, story_scope = prepare_document_version(
             db,
@@ -2943,7 +3021,16 @@ async def upload_document(
         except UnicodeDecodeError:
             raise HTTPException(400, "Markdown、TXT 与 JSON 文件必须为 UTF-8 编码") from None
     with SessionLocal() as db:
-        if not _project_in_workspace(db, project_id, context.workspace_id):
+        _begin_project_write_transaction(db)
+        project = db.scalar(
+            select(ProjectRow)
+            .where(
+                ProjectRow.id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+        )
+        if project is None:
             raise HTTPException(404, "项目不存在")
         version, superseded, resolved_role, resolved_scope = prepare_document_version(
             db,
@@ -5128,6 +5215,7 @@ def start_analysis(
     intent = _review_batch_intent(request)
     idempotency_key = _normalize_idempotency_key(idempotency_key_header)
     with SessionLocal() as db:
+        _begin_project_write_transaction(db)
         project = db.scalar(
             select(ProjectRow)
             .where(
@@ -5367,6 +5455,7 @@ def start_recheck(
     """Analyze the project's current revision against one frozen baseline."""
     idempotency_key = _normalize_idempotency_key(idempotency_key_header)
     with SessionLocal() as db:
+        _begin_project_write_transaction(db)
         baseline = _run_in_workspace(db, baseline_run_id, context.workspace_id)
         if baseline is None:
             raise HTTPException(404, "基准分析任务不存在")
@@ -5453,6 +5542,11 @@ def start_recheck(
             mode=batch_mode,
             sensitivity=sensitivity,
             target_document_ids=target_document_ids,
+            no_formal_context_expected=bool(
+                (baseline.batch_coverage or {}).get(
+                    "no_formal_context_expected", False
+                )
+            ),
         )
         documents, batch_roles, coverage = _review_batch_selection(
             db,

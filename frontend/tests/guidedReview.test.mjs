@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createImportFilePlan } from "../src/app/importPlan.ts";
 import {
   analysisRunRequest,
+  blocksDraftOnlyReview,
   contextNavigationLocked,
   contextDraft,
   contextStatus,
@@ -13,6 +14,7 @@ import {
   narrativeContextPayload,
   normalizeNarrativeContextInference,
   responseBelongsToSelectedDocument,
+  selectedDraftsStillCurrent,
 } from "../src/features/workflow/guidedReview.ts";
 
 function document(overrides = {}) {
@@ -332,6 +334,63 @@ test("analysis requests keep baseline targets server-derived and draft targets e
     () => analysisRunRequest("draft_review", "conservative"),
     /至少选择一份/,
   );
+  assert.deepEqual(
+    analysisRunRequest("draft_review", "balanced", ["doc-a"], true),
+    {
+      mode: "draft_review",
+      sensitivity: "balanced",
+      target_document_ids: ["doc-a"],
+      no_formal_context_expected: true,
+    },
+  );
+});
+
+test("draft-only entry fails closed for potential formal context but permits confirmed retirement", () => {
+  const source = document().narrative_context;
+  const role = (documentRole, resolutionState, publicationStatus, active = true) => document({
+    active,
+    document_role: documentRole,
+    narrative_context: {
+      ...source,
+      resolution_state: resolutionState,
+      publication_status: publicationStatus,
+    },
+  });
+  assert.equal(blocksDraftOnlyReview(role("canon", "unresolved", "unknown")), true);
+  assert.equal(blocksDraftOnlyReview(role("character_profile", "unresolved", "retired")), true);
+  assert.equal(blocksDraftOnlyReview(role("character_profile", "confirmed", "retired")), false);
+  assert.equal(blocksDraftOnlyReview(role("chapter", "unresolved", "published")), true);
+  assert.equal(blocksDraftOnlyReview(role("chapter", "confirmed", "draft")), false);
+  assert.equal(blocksDraftOnlyReview(role("reference", "confirmed", "published")), false);
+  assert.equal(blocksDraftOnlyReview(role("canon", "unresolved", "published", false)), false);
+  assert.equal(blocksDraftOnlyReview(document({ document_role: "canon", narrative_context: undefined })), true);
+});
+
+test("draft-only preflight rejects a changed selected draft before creating a run", () => {
+  const confirmedDraft = document({
+    id: "draft-a",
+    version: 2,
+    document_role: "chapter",
+    narrative_context: {
+      revision: 3,
+      resolution_state: "confirmed",
+      publication_status: "draft",
+      scope_sha256: "scope-3",
+      scope: { schema_version: 1, timeline_key: "main" },
+    },
+  });
+  assert.equal(selectedDraftsStillCurrent([confirmedDraft], [confirmedDraft], ["draft-a"]), true);
+  assert.equal(selectedDraftsStillCurrent([confirmedDraft], [{ ...confirmedDraft, version: 3 }], ["draft-a"]), false);
+  assert.equal(selectedDraftsStillCurrent([confirmedDraft], [{
+    ...confirmedDraft,
+    narrative_context: { ...confirmedDraft.narrative_context, revision: 4 },
+  }], ["draft-a"]), false);
+  assert.equal(selectedDraftsStillCurrent([confirmedDraft], [{
+    ...confirmedDraft,
+    narrative_context: { ...confirmedDraft.narrative_context, resolution_state: "unresolved" },
+  }], ["draft-a"]), false);
+  assert.equal(selectedDraftsStillCurrent([confirmedDraft], [], ["draft-a"]), false);
+  assert.equal(selectedDraftsStillCurrent([confirmedDraft], [confirmedDraft], []), false);
 });
 
 test("completed baseline recovery uses the nested durable review batch contract", () => {

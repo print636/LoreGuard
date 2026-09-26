@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from threading import Event
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -18,7 +20,14 @@ from app.db import (
     SessionLocal,
 )
 from app.domain import ConsistencyIssue, EvidenceSpan, IssueCategory, Severity
-from app.main import app, settings, write_limiter
+from app.main import (
+    _begin_project_write_transaction,
+    _review_batch_selection,
+    app,
+    prepare_document_version,
+    settings,
+    write_limiter,
+)
 from app.pipeline import DocumentInput, PipelineResult
 from app.service import (
     _character_stage_settings_for_run,
@@ -278,6 +287,288 @@ def test_explicit_invalid_and_cross_project_targets_fail_closed():
     assert hidden.status_code == 404
 
 
+def test_chapter_only_review_freezes_explicit_draft_without_formal_documents():
+    with TestClient(app) as client, patch("app.main.dispatch_analysis"):
+        project = _project(client)
+        draft = _document(
+            client, project["id"], name="new.md", role="chapter", publication="draft"
+        )
+        retired = _document(
+            client, project["id"], name="old-world.md", role="canon",
+            publication="retired",
+        )
+        retired_profile = _document(
+            client, project["id"], name="old-profile.md", role="character_profile",
+            publication="retired",
+        )
+        reference = _document(
+            client, project["id"], name="notes.md", role="reference",
+            publication="published",
+        )
+        response = client.post(
+            f"/api/v1/projects/{project['id']}/analysis-runs",
+            json={
+                "mode": "draft_review",
+                "target_document_ids": [draft["id"]],
+                "no_formal_context_expected": True,
+            },
+        )
+        assert response.status_code == 202, response.text
+        status = client.get(f"/api/v1/analysis-runs/{response.json()['id']}").json()
+    assert status["review_batch"]["no_formal_context_expected"] is True
+    assert status["review_batch"]["target_document_ids"] == [draft["id"]]
+    assert status["review_batch"]["background_document_ids"] == []
+    assert [row["document_id"] for row in status["input_documents"]] == [draft["id"]]
+    assert {row["document_id"] for row in status["review_batch"]["excluded_documents"]} == {
+        retired["id"], retired_profile["id"], reference["id"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("role", "publication", "confirmed"),
+    [
+        ("canon", "published", True),
+        ("canon", "unknown", False),
+        ("canon", "retired", False),
+        ("character_profile", "draft", True),
+        ("character_profile", "retired", False),
+        ("chapter", "published", True),
+        ("chapter", "published", False),
+    ],
+)
+def test_chapter_only_review_rejects_active_formal_context(
+    role: str, publication: str, confirmed: bool,
+):
+    with TestClient(app) as client, patch("app.main.dispatch_analysis"):
+        project = _project(client)
+        draft = _document(
+            client, project["id"], name="new.md", role="chapter", publication="draft"
+        )
+        formal = _document(
+            client, project["id"], name="other.md", role=role,
+            publication=publication, confirmed=confirmed,
+            branch="route-b",  # Even incompatible formal context must be visible.
+        )
+        path = f"/api/v1/projects/{project['id']}/analysis-runs"
+        guarded = client.post(
+            path,
+            json={
+                "mode": "draft_review",
+                "target_document_ids": [draft["id"]],
+                "no_formal_context_expected": True,
+            },
+        )
+        legacy = client.post(
+            path,
+            json={
+                "mode": "draft_review",
+                "target_document_ids": [draft["id"]],
+            },
+        )
+    assert guarded.status_code == 409, guarded.text
+    detail = guarded.json()["detail"]
+    assert detail["code"] == "formal_context_present"
+    assert [row["document_id"] for row in detail["blocking_documents"]] == [formal["id"]]
+    assert legacy.status_code == 202, legacy.text
+    assert legacy.json()["review_batch"]["no_formal_context_expected"] is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"mode": "full_review", "no_formal_context_expected": True},
+        {"mode": "baseline_build", "no_formal_context_expected": True},
+        {"mode": "draft_review", "no_formal_context_expected": True},
+        {
+            "mode": "draft_review",
+            "target_document_ids": [],
+            "no_formal_context_expected": True,
+        },
+    ],
+)
+def test_chapter_only_opt_in_requires_explicit_draft_targets(body: dict):
+    with TestClient(app) as client, patch("app.main.dispatch_analysis"):
+        project = _project(client)
+        _document(
+            client, project["id"], name="new.md", role="chapter", publication="draft"
+        )
+        response = client.post(
+            f"/api/v1/projects/{project['id']}/analysis-runs", json=body
+        )
+    assert response.status_code == 422, response.text
+
+
+def test_chapter_only_recheck_rejects_new_formal_context():
+    with TestClient(app) as client, patch("app.main.dispatch_analysis"):
+        project = _project(client)
+        draft = _document(
+            client, project["id"], name="new.md", role="chapter",
+            publication="draft", content="第一版",
+        )
+        baseline = client.post(
+            f"/api/v1/projects/{project['id']}/analysis-runs",
+            json={
+                "mode": "draft_review",
+                "target_document_ids": [draft["id"]],
+                "no_formal_context_expected": True,
+            },
+        )
+        assert baseline.status_code == 202, baseline.text
+        with SessionLocal() as db:
+            db.get(AnalysisRunRow, baseline.json()["id"]).status = "completed"
+            db.commit()
+        _document(
+            client, project["id"], name="new.md", role="chapter",
+            publication="draft", content="第二版", replace_document_id=draft["id"],
+        )
+        _document(
+            client, project["id"], name="new-world.md", role="canon",
+            publication="published", confirmed=False,
+        )
+        response = client.post(
+            f"/api/v1/analysis-runs/{baseline.json()['id']}/rechecks"
+        )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "formal_context_present"
+
+
+def test_sqlite_formal_upload_commits_before_chapter_only_guard_reads():
+    """A concurrent upload must not slip between the guard and run snapshot."""
+    upload_locked = Event()
+    release_upload = Event()
+    analysis_trying = Event()
+
+    def paused_prepare(*args, **kwargs):
+        result = prepare_document_version(*args, **kwargs)
+        upload_locked.set()
+        if not release_upload.wait(5):
+            raise AssertionError("timed out while holding the upload transaction")
+        return result
+
+    def observed_begin(db):
+        if upload_locked.is_set():
+            analysis_trying.set()
+        return _begin_project_write_transaction(db)
+
+    with (
+        TestClient(app) as upload_client,
+        TestClient(app) as analysis_client,
+        patch("app.main.dispatch_analysis"),
+    ):
+        project = _project(upload_client)
+        draft = _document(
+            upload_client, project["id"], name="draft.md", role="chapter",
+            publication="draft",
+        )
+        upload_path = f"/api/v1/projects/{project['id']}/documents/text"
+        run_path = f"/api/v1/projects/{project['id']}/analysis-runs"
+        with (
+            patch("app.main.prepare_document_version", side_effect=paused_prepare),
+            patch("app.main._begin_project_write_transaction", side_effect=observed_begin),
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            upload = pool.submit(
+                upload_client.post,
+                upload_path,
+                json={
+                    "name": "new-world.md", "content": "世界规则",
+                    "document_role": "canon",
+                    "narrative_context": {
+                        "resolution_state": "confirmed",
+                        "publication_status": "published",
+                    },
+                },
+            )
+            try:
+                assert upload_locked.wait(5)
+                analysis = pool.submit(
+                    analysis_client.post,
+                    run_path,
+                    json={
+                        "mode": "draft_review",
+                        "target_document_ids": [draft["id"]],
+                        "no_formal_context_expected": True,
+                    },
+                )
+                assert analysis_trying.wait(5)
+                assert not analysis.done()
+            finally:
+                release_upload.set()
+            upload_response = upload.result(timeout=5)
+            analysis_response = analysis.result(timeout=5)
+    assert upload_response.status_code == 201, upload_response.text
+    assert analysis_response.status_code == 409, analysis_response.text
+    assert analysis_response.json()["detail"]["code"] == "formal_context_present"
+
+
+def test_sqlite_chapter_only_snapshot_finishes_before_later_formal_upload():
+    selected = Event()
+    release_analysis = Event()
+    upload_trying = Event()
+
+    def paused_selection(*args, **kwargs):
+        result = _review_batch_selection(*args, **kwargs)
+        selected.set()
+        if not release_analysis.wait(5):
+            raise AssertionError("timed out while holding the analysis transaction")
+        return result
+
+    def observed_begin(db):
+        if selected.is_set():
+            upload_trying.set()
+        return _begin_project_write_transaction(db)
+
+    with (
+        TestClient(app) as analysis_client,
+        TestClient(app) as upload_client,
+        patch("app.main.dispatch_analysis"),
+    ):
+        project = _project(analysis_client)
+        draft = _document(
+            analysis_client, project["id"], name="draft.md", role="chapter",
+            publication="draft",
+        )
+        run_path = f"/api/v1/projects/{project['id']}/analysis-runs"
+        upload_path = f"/api/v1/projects/{project['id']}/documents/text"
+        with (
+            patch("app.main._review_batch_selection", side_effect=paused_selection),
+            patch("app.main._begin_project_write_transaction", side_effect=observed_begin),
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            analysis = pool.submit(
+                analysis_client.post,
+                run_path,
+                json={
+                    "mode": "draft_review",
+                    "target_document_ids": [draft["id"]],
+                    "no_formal_context_expected": True,
+                },
+            )
+            try:
+                assert selected.wait(5)
+                upload = pool.submit(
+                    upload_client.post,
+                    upload_path,
+                    json={
+                        "name": "later-world.md", "content": "世界规则",
+                        "document_role": "canon",
+                        "narrative_context": {
+                            "resolution_state": "confirmed",
+                            "publication_status": "published",
+                        },
+                    },
+                )
+                assert upload_trying.wait(5)
+                assert not upload.done()
+            finally:
+                release_analysis.set()
+            analysis_response = analysis.result(timeout=5)
+            upload_response = upload.result(timeout=5)
+    assert analysis_response.status_code == 202, analysis_response.text
+    assert analysis_response.json()["review_batch"]["background_document_ids"] == []
+    assert upload_response.status_code == 201, upload_response.text
+
+
 def test_baseline_build_has_only_background_and_excludes_draft():
     with TestClient(app) as client, patch("app.main.dispatch_analysis"):
         project = _project(client)
@@ -443,6 +734,33 @@ def test_idempotency_binds_normalized_batch_intent():
             path,
             headers=headers,
             json={**body, "sensitivity": "exploratory"},
+        )
+    assert first.status_code == replay.status_code == 202
+    assert first.json()["id"] == replay.json()["id"]
+    assert replay.json()["deduplicated"] is True
+    assert changed.status_code == 409
+    assert changed.json()["detail"]["code"] == "idempotency_key_conflict"
+
+
+def test_chapter_only_flag_is_bound_to_idempotency_key():
+    with TestClient(app) as client, patch("app.main.dispatch_analysis"):
+        project = _project(client)
+        draft = _document(
+            client, project["id"], name="draft.md", role="chapter", publication="draft"
+        )
+        path = f"/api/v1/projects/{project['id']}/analysis-runs"
+        headers = {"Idempotency-Key": f"chapter-only-{uuid4().hex}"}
+        body = {
+            "mode": "draft_review",
+            "target_document_ids": [draft["id"]],
+            "no_formal_context_expected": True,
+        }
+        first = client.post(path, headers=headers, json=body)
+        replay = client.post(path, headers=headers, json=body)
+        changed = client.post(
+            path,
+            headers=headers,
+            json={**body, "no_formal_context_expected": False},
         )
     assert first.status_code == replay.status_code == 202
     assert first.json()["id"] == replay.json()["id"]

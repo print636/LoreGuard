@@ -87,6 +87,7 @@ export type AnalysisRunRequest = {
   mode: ReviewMode;
   sensitivity: ReviewSensitivity;
   target_document_ids?: string[];
+  no_formal_context_expected?: boolean;
 };
 
 const keyPattern = /^[A-Za-z0-9_.:\-\u4e00-\u9fff]{1,80}$/u;
@@ -406,6 +407,43 @@ export function isBaselineDocument(document: GuidedDocument): boolean {
   return false;
 }
 
+/**
+ * A draft-only review must not silently omit material that could be formal
+ * context. This mirrors the server's atomic guard, including unconfirmed
+ * canon/profiles and published chapters. Explicitly confirmed retired
+ * canon/profiles and reference documents are deliberately excluded.
+ */
+export function blocksDraftOnlyReview(document: GuidedDocument): boolean {
+  if (!document.active) return false;
+  const status = document.narrative_context?.publication_status;
+  if (document.document_role === "canon" || document.document_role === "character_profile") {
+    return !(isConfirmed(document) && status === "retired");
+  }
+  return document.document_role === "chapter" && status === "published";
+}
+
+export function selectedDraftsStillCurrent(
+  documents: GuidedDocument[],
+  freshDocuments: GuidedDocument[],
+  selectedIds: string[],
+): boolean {
+  if (!selectedIds.length) return false;
+  const oldById = new Map(documents.map((document) => [document.id, document]));
+  const freshById = new Map(freshDocuments.map((document) => [document.id, document]));
+  return selectedIds.every((id) => {
+    const original = oldById.get(id);
+    const fresh = freshById.get(id);
+    return Boolean(
+      original && fresh &&
+      isDraftDocument(original) && isConfirmed(original) &&
+      isDraftDocument(fresh) && isConfirmed(fresh) &&
+      original.version === fresh.version &&
+      contextRevision(original.narrative_context) === contextRevision(fresh.narrative_context) &&
+      original.narrative_context?.scope_sha256 === fresh.narrative_context?.scope_sha256,
+    );
+  });
+}
+
 export function guidedDocumentState(documents: GuidedDocument[]) {
   const active = documents.filter((document) => document.active);
   const baseline = active.filter(isBaselineDocument);
@@ -427,13 +465,19 @@ export function analysisRunRequest(
   mode: ReviewMode,
   sensitivity: ReviewSensitivity,
   targetDocumentIds: string[] = [],
+  noFormalContextExpected = false,
 ): AnalysisRunRequest {
   if (mode === "baseline_build") return { mode, sensitivity };
   const uniqueTargets = Array.from(
     new Set(targetDocumentIds.map(clean).filter(Boolean)),
   );
   if (!uniqueTargets.length) throw new Error("请至少选择一份待审新稿。");
-  return { mode, sensitivity, target_document_ids: uniqueTargets };
+  return {
+    mode,
+    sensitivity,
+    target_document_ids: uniqueTargets,
+    ...(noFormalContextExpected ? { no_formal_context_expected: true } : {}),
+  };
 }
 
 export function hasCompletedBaselineRun(

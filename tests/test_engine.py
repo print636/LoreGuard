@@ -7,6 +7,34 @@ from app.rules import detect_issues
 from app.domain import EvidenceSpan, ParsedDirective
 
 
+def _dated_model_event(
+    time: str,
+    location: str,
+    line: int,
+    *,
+    text: str | None = None,
+) -> ParsedDirective:
+    return ParsedDirective(
+        kind="event",
+        attrs={
+            "time": time,
+            "location": location,
+            "participants": "林澈",
+            "modality": "asserted",
+            "source_scope": "narrator",
+            "certainty": "certain",
+        },
+        evidence=EvidenceSpan(
+            document_id="dated-model-events",
+            document_name="chapter.md",
+            line_start=line,
+            line_end=line,
+            text=text or f"{time}，林澈在{location}。",
+        ),
+        provenance_sources=frozenset({"model"}),
+    )
+
+
 class ParserAndRuleTests(unittest.TestCase):
     def test_unmatched_narrative_lines_are_summarized_once(self):
         text = "\n".join(f"这是第 {index} 行普通背景叙述，没有明确状态变化。" for index in range(1, 9))
@@ -97,6 +125,202 @@ class ParserAndRuleTests(unittest.TestCase):
             '@event time="1026-01-01 10:00" location="密室" participants="林澈" | 林澈在北港议会的密室见到苏弦。',
         )
         self.assertFalse(any(issue.category.value == "location_collision" for issue in detect_issues(nested.directives)))
+
+    def test_shared_generic_place_word_does_not_hide_distinct_sites(self):
+        time = "2094-06-09 06:00"
+        first = _dated_model_event(time, "东灯塔", 1)
+        second = _dated_model_event(time, "西灯塔", 2)
+        issues = [
+            issue for issue in detect_issues([first, second])
+            if issue.category.value == "location_collision"
+        ]
+        self.assertEqual(1, len(issues))
+        self.assertEqual([first.evidence, second.evidence], issues[0].evidence)
+
+    def test_cross_mentioned_places_are_not_an_explicit_hierarchy(self):
+        time = "2094-06-09 06:00"
+        first = _dated_model_event(
+            time, "东灯塔", 1,
+            text=f"{time}，林澈在东灯塔看到去西灯塔的地图。",
+        )
+        second = _dated_model_event(
+            time, "西灯塔", 2,
+            text=f"{time}，林澈在西灯塔谈起东灯塔。",
+        )
+        self.assertEqual(1, len([
+            issue for issue in detect_issues([first, second])
+            if issue.category.value == "location_collision"
+        ]))
+
+    def test_nearby_exterior_is_not_nested_in_the_building(self):
+        time = "2094-06-09 06:00"
+        first = _dated_model_event(time, "北港议会", 1)
+        for location in ("门外", "北港议会门外", "北港议会附近", "北港议会对面"):
+            with self.subTest(location=location):
+                second_text = (
+                    f"{time}，林澈在北港议会的门外。"
+                    if location == "门外"
+                    else f"{time}，林澈在{location}。"
+                )
+                second = _dated_model_event(
+                    time, location, 2, text=second_text,
+                )
+                self.assertEqual(1, len([
+                    issue for issue in detect_issues([first, second])
+                    if issue.category.value == "location_collision"
+                ]))
+
+    def test_full_place_name_with_interior_suffix_is_nested(self):
+        time = "2094-06-09 06:00"
+        outer = _dated_model_event(time, "北港议会", 1)
+        inner = _dated_model_event(time, "北港议会密室", 2)
+        self.assertFalse(any(
+            issue.category.value == "location_collision"
+            for issue in detect_issues([outer, inner])
+        ))
+
+    def test_frozen_city_archive_source_is_parsed_and_remains_nested(self):
+        setting = parse_document(
+            "setting", "setting.md",
+            "雾港是月沫城的外港，中央档案厅位于月沫城内城区。",
+        )
+        map_doc = parse_document(
+            "map", "map.md",
+            "中央档案厅位于月沫城内城区，属于同一连续地点。",
+        )
+        first = parse_document(
+            "chapter-01", "chapter-01.md",
+            "1044-06-18 14:00，祁霁正在月沫城调查失窃案。",
+        )
+        second = parse_document(
+            "chapter-02", "chapter-02.md",
+            "1044-06-18 14:00，记录显示祁霁仍在月沫城中央档案厅查阅卷宗。",
+        )
+        events = [
+            row for source in (first, second) for row in source.directives
+            if row.kind == "event"
+        ]
+        self.assertEqual(2, len(events))
+        self.assertEqual("月沫城", events[0].attrs["location"])
+        self.assertEqual("月沫城中央档案厅", events[1].attrs["location"])
+        self.assertFalse(any(
+            issue.category.value == "location_collision"
+            for issue in detect_issues([
+                *setting.directives, *map_doc.directives,
+                *first.directives, *second.directives,
+            ])
+        ))
+
+    def test_external_facility_after_city_prefix_is_not_nested(self):
+        time = "2094-06-09 06:00"
+        city = _dated_model_event(time, "月沫城", 1)
+        for location in ("月沫城外港档案厅", "月沫城对面档案厅"):
+            with self.subTest(location=location):
+                facility = _dated_model_event(time, location, 2)
+                self.assertEqual(1, len([
+                    issue for issue in detect_issues([city, facility])
+                    if issue.category.value == "location_collision"
+                ]))
+
+    def test_full_chinese_absolute_time_detects_event_collision_without_changing_evidence(self):
+        first = _dated_model_event("2094 年 6 月 9 日 06:00", "东港", 1)
+        second = _dated_model_event("2094年06月09日06:00:00", "西塔", 2)
+        issues = [
+            row for row in detect_issues([first, second])
+            if row.category.value == "location_collision"
+        ]
+        self.assertEqual(1, len(issues))
+        self.assertEqual("2094 年 6 月 9 日 06:00", issues[0].metadata["timestamp"])
+        self.assertEqual([first.evidence, second.evidence], issues[0].evidence)
+
+    def test_chinese_event_time_rejects_invalid_imprecise_and_relative_values(self):
+        not_precise = (
+            "2094年2月29日06:00",  # Non-leap day.
+            "2094年13月9日06:00",
+            "2094年6月9日24:00",
+            "2094年6月9日06:60",
+            "2094年6月9日",
+            "2094年6月9日早晨",
+            "2094年6月9日06点",
+            "2094年6月9日06:00左右",
+            "次日06:00",
+            "昨天06:00",
+            "2094-02-29 06:00",  # ISO must also be a real date.
+        )
+        for time in not_precise:
+            with self.subTest(time=time):
+                rows = [
+                    _dated_model_event(time, "东港", 1),
+                    _dated_model_event(time, "西塔", 2),
+                ]
+                self.assertFalse(any(
+                    row.category.value == "location_collision"
+                    for row in detect_issues(rows)
+                ))
+
+    def test_chinese_event_time_must_match_evidence_and_not_be_ambiguous(self):
+        time = "2094 年 6 月 9 日 06:00"
+        safe = _dated_model_event(time, "西塔", 2)
+        misleading_sources = (
+            "2094 年 6 月 10 日 06:00，林澈在东港。",
+            "大约在 2094 年 6 月 9 日 06:00，林澈在东港。",
+            "2094 年 6 月 9 日 06:00 左右，林澈在东港。",
+            "2094 年 6 月 9 日 06:00 或 07:00，林澈在东港。",
+            "2094 年 6 月 9 日 06:00:15，林澈在东港。",
+        )
+        for source in misleading_sources:
+            with self.subTest(source=source):
+                misleading = _dated_model_event(time, "东港", 1, text=source)
+                self.assertFalse(any(
+                    row.category.value == "location_collision"
+                    for row in detect_issues([misleading, safe])
+                ))
+
+    def test_chinese_event_time_does_not_hide_cross_mentioned_places(self):
+        time = "2094 年 6 月 9 日 06:00"
+        first = _dated_model_event(
+            time, "东港", 1,
+            text=f"{time}，林澈从东港遥望西塔。",
+        )
+        second = _dated_model_event(time, "西塔", 2)
+        self.assertTrue(any(
+            row.category.value == "location_collision"
+            for row in detect_issues([first, second])
+        ))
+
+    def test_chinese_event_time_does_not_expand_knowledge_timing(self):
+        claim = ParsedDirective(
+            kind="claims_knows",
+            attrs={
+                "character": "林澈", "fact": "星门口令",
+                "time": "2094 年 6 月 9 日 06:00",
+                "modality": "reported", "source_scope": "character_dialogue",
+                "certainty": "certain",
+            },
+            evidence=EvidenceSpan(
+                document_id="knowledge", document_name="chapter.md",
+                line_start=1, line_end=1,
+                text="2094 年 6 月 9 日 06:00，林澈说出了星门口令。",
+            ),
+        )
+        acquisition = ParsedDirective(
+            kind="knows",
+            attrs={
+                "character": "林澈", "fact": "星门口令",
+                "time": "2094 年 6 月 9 日 07:00",
+                "modality": "asserted", "source_scope": "narrator",
+                "certainty": "certain",
+            },
+            evidence=EvidenceSpan(
+                document_id="knowledge", document_name="chapter.md",
+                line_start=2, line_end=2,
+                text="2094 年 6 月 9 日 07:00，林澈得知星门口令。",
+            ),
+        )
+        self.assertFalse(any(
+            row.category.value == "knowledge_without_acquisition"
+            for row in detect_issues([claim, acquisition])
+        ))
 
     def test_fact_records_from_the_same_evidence_cannot_conflict_with_themselves(self):
         evidence = EvidenceSpan(
