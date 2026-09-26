@@ -101,6 +101,10 @@ SAFE_REASON_KEYS = frozenset({
     "lower_authority_baseline_shadowed", "invalid_confirmed_trait_snapshot",
     "chunk_limit", "confirmed_trait_hint_ambiguous",
     "confirmed_trait_context_truncated", "stage_token_budget",
+    "token_budget", "regeneration_token_budget",
+    "targeted_pass_token_budget", "targeted_pass_regeneration_token_budget",
+    "targeted_verification_token_budget",
+    "targeted_verification_regeneration_token_budget",
     "targeted_target_limit", "targeted_reviewer_budget_reserve",
     "targeted_verification_candidate_line_limit",
     "targeted_verification_reviewer_budget_reserve",
@@ -167,6 +171,10 @@ PUBLIC_RUN_COUNTER_LIMITS = {
     "completion_tokens": 100_000_000,
     "planned_chunks": 1_000_000,
     "processed_chunks": 1_000_000,
+    "model_called_chunks": 1_000_000,
+    "model_completed_chunks": 1_000_000,
+    "model_uncalled_chunks": 1_000_000,
+    "model_incomplete_chunks": 1_000_000,
     "draft_observations": 1_000_000,
     "targeted_record_rejection_events": 1_000_000,
 }
@@ -1107,6 +1115,10 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
         "material_coverage": stage.get("material_coverage"),
         "planned_chunks": counts.get("planned_chunks"),
         "processed_chunks": counts.get("processed_chunks"),
+        "model_called_chunks": counts.get("model_called_chunks"),
+        "model_completed_chunks": counts.get("model_completed_chunks"),
+        "model_uncalled_chunks": counts.get("model_uncalled_chunks"),
+        "model_incomplete_chunks": counts.get("model_incomplete_chunks"),
         "draft_observations": counts.get("draft_observation_count"),
         "accepted_draft_observation_total": (
             stage.get("accepted_draft_observation_total")
@@ -2211,7 +2223,9 @@ def _public_run(summary: dict[str, Any] | None) -> dict[str, Any] | None:
         for key in (
             "status", "runtime_provenance_sha256", "elapsed_seconds", "prompt_tokens", "completion_tokens",
             "stage_outcome", "stage_reason", "material_coverage", "planned_chunks",
-            "processed_chunks", "draft_observations", "accepted_draft_observation_total",
+            "processed_chunks", "model_called_chunks", "model_completed_chunks",
+            "model_uncalled_chunks", "model_incomplete_chunks",
+            "draft_observations", "accepted_draft_observation_total",
             "accepted_draft_observation_refs_complete", "targeted_record_rejection_events",
             "accepted_signal_histogram", "candidate_eligibility",
             "evidence_mismatch_counts", "evidence_mismatch_chunks",

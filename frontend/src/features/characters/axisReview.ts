@@ -1,4 +1,4 @@
-import type { CharacterTraitAxis, CharacterTraitAxisPage } from "./types";
+import type { CharacterTraitAxis, CharacterTraitAxisPage, ProfileCandidate } from "./types";
 
 export type AxisDraftErrors = {
   display_name: string;
@@ -66,6 +66,30 @@ export function previewAxisPolarity(
   if ((rawPolarity !== "positive" && rawPolarity !== "negative") || alignment === "uncertain") return null;
   if (alignment === "same") return rawPolarity;
   return rawPolarity === "positive" ? "negative" : "positive";
+}
+
+export function hasVerifiableFrozenEvidence(candidate: ProfileCandidate): boolean {
+  return candidate.source_verified && candidate.support_bindings_status !== "invalid" &&
+    (candidate.support_bindings_status !== "verified" || Boolean(candidate.support_bindings_v1?.bindings.length)) &&
+    candidate.supporting_evidence.length > 0 &&
+    candidate.supporting_evidence.every((evidence) => evidence.source_verified);
+}
+
+/** Never infer a confirmed axis meaning from an unverified/currently different proposition. */
+export function confirmedAxisPolarity(
+  candidate: ProfileCandidate,
+  axis: CharacterTraitAxis | null,
+): "positive" | "negative" | null {
+  if (
+    candidate.status !== "confirmed" || !axis ||
+    candidate.approved_axis_id !== axis.id ||
+    candidate.approved_axis_version !== axis.version ||
+    !axis.positive_proposition || !axis.positive_proposition_sha256 ||
+    candidate.axis_positive_proposition_sha256 !== axis.positive_proposition_sha256 ||
+    !candidate.axis_alignment || !hasVerifiableFrozenEvidence(candidate)
+  ) return null;
+  const mapped = previewAxisPolarity(candidate.polarity, candidate.axis_alignment);
+  return mapped && mapped === candidate.axis_polarity ? mapped : null;
 }
 
 export function selectedProjectAxis(

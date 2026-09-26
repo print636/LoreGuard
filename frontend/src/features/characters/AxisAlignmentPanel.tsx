@@ -6,8 +6,10 @@ import {
   setAxisPositiveProposition,
   submitAxisAlignment,
 } from "./api";
-import { previewAxisPolarity, validateAxisPositiveProposition } from "./axisReview";
+import { confirmedAxisPolarity, hasVerifiableFrozenEvidence, previewAxisPolarity, validateAxisPositiveProposition } from "./axisReview";
 import EvidenceList from "./EvidenceList";
+import TargetEvidencePreview from "./TargetEvidencePreview";
+import { candidateDisplayStatement } from "./presentation";
 import type { CharacterProfileItem, CharacterTraitAxis, ProfileCandidate } from "./types";
 
 type Props = {
@@ -157,11 +159,13 @@ export default function AxisAlignmentPanel({
   }
 
   const propositionValidation = validateAxisPositiveProposition(proposition);
+  const hasFrozenEvidence = candidate ? hasVerifiableFrozenEvidence(candidate) : false;
+  const confirmedMappedPolarity = candidate ? confirmedAxisPolarity(candidate, axis) : null;
   const canAlign = candidate?.status === "confirmed" &&
     !candidate.axis_alignment &&
     candidate.polarity !== "neutral" && candidate.polarity !== "unclear" &&
     (candidate.polarity === "positive" || candidate.polarity === "negative") &&
-    candidate.source_verified && candidate.support_bindings_status !== "invalid" &&
+    hasFrozenEvidence &&
     Boolean(axis?.positive_proposition_sha256);
 
   return (
@@ -182,9 +186,11 @@ export default function AxisAlignmentPanel({
           <div className="candidateAxisDefinition">
             <b>{axis.display_name} · v{axis.version}</b>
             <p>{axis.definition}</p>
-            <p><strong>正向命题：</strong>{axis.positive_proposition || "待作者补写"}</p>
+            <p><strong>作者比较句（轴正向）：</strong>{axis.positive_proposition || "待作者补写"}</p>
+            <p>“正向”只是作者定义的比较坐标，不是好坏评价；它也不表示原文判断已被再次验证。</p>
           </div>
-          <p>原候选：{candidate.statement}；模型原标签：{candidate.model_trait_key || "未提供"}；原方向：{candidate.polarity === "positive" ? "正向" : candidate.polarity === "negative" ? "反向" : "不明确"}。</p>
+          <p>已确认的角色归纳：{candidateDisplayStatement(candidate)}；模型内部标签：{candidate.model_trait_key || "未提供"}；模型方向码：{candidate.polarity === "positive" ? "positive（相对模型标签的正向）" : candidate.polarity === "negative" ? "negative（相对模型标签的反向）" : "不明确"}。方向码不是行为好坏，也不能按“不会”等字眼自动反转。</p>
+          <TargetEvidencePreview candidate={candidate} />
           <EvidenceList
             title="原确认所依据的冻结证据"
             items={candidate.supporting_evidence}
@@ -194,7 +200,11 @@ export default function AxisAlignmentPanel({
             supportBindings={candidate.support_bindings_v1?.bindings || []}
           />
           {candidate.axis_alignment ? (
-            <p role="status">这条特征已补认：{candidate.axis_alignment === "same" ? "同向" : "反向"}。刷新档案即可查看最新状态。</p>
+            confirmedMappedPolarity ? (
+              <p role="status">作者已标注比较方向：{candidate.axis_alignment === "same" ? "同向" : "反向"}。按已确认映射，作者比较句{confirmedMappedPolarity === "positive" ? "成立" : "不成立"}。这只是角色档案的方向记录，不代表后续新稿已完成事实复核或一致性判断。</p>
+            ) : (
+              <p className="candidateFieldError" role="status">作者方向记录暂不能与当前轴命题和冻结证据一起核对，因此不展示成立/不成立的换算。请刷新档案后核对。</p>
+            )
           ) : !axis.positive_proposition ? (
             <form className="candidateAxisCreate" onSubmit={(event) => void saveProposition(event)} noValidate>
               <label htmlFor={`profile-axis-proposition-${item.id}`}>为旧作者轴补写正向命题</label>
@@ -214,16 +224,17 @@ export default function AxisAlignmentPanel({
               <button type="submit" disabled={busy}>{busy ? "正在保存…" : "先保存正向命题"}</button>
             </form>
           ) : !canAlign ? (
-            <p className="candidateFieldError" role="status">原方向或冻结证据不足，不能补认成确定方向；请保留待补认并检查资料。</p>
+            <p className="candidateFieldError" role="status">模型方向码或可核对的冻结证据不足，不能补认成确定方向；请保留待补认并检查资料。</p>
           ) : (
             <form className="candidateAxisCreate" onSubmit={(event) => void saveAlignment(event)} noValidate>
               <fieldset ref={alignmentRef} tabIndex={-1} className="candidateAxisAlignment" aria-describedby={alignmentError ? `profile-axis-alignment-error-${item.id}` : undefined}>
-                <legend>原标签的正向含义与作者轴正向命题</legend>
+                <legend>模型标签的正向状态与作者比较句</legend>
+                <p>请根据上方冻结原文选择两种比较坐标的关系；暂不确定时不保存映射。</p>
                 <label><input type="radio" name={`profile-axis-alignment-${item.id}`} checked={alignment === "same"} onChange={() => { setAlignment("same"); setAlignmentError(""); }} />同向</label>
                 <label><input type="radio" name={`profile-axis-alignment-${item.id}`} checked={alignment === "opposite"} onChange={() => { setAlignment("opposite"); setAlignmentError(""); }} />反向</label>
                 <label><input type="radio" name={`profile-axis-alignment-${item.id}`} checked={alignment === "uncertain"} onChange={() => { setAlignment("uncertain"); setAlignmentError(""); }} />暂不确定，保留待补认</label>
                 {previewAxisPolarity(candidate.polarity, alignment) && (
-                  <p role="status">方向预览：当前特征相对轴正向命题表示“{previewAxisPolarity(candidate.polarity, alignment) === "positive" ? "命题成立" : "命题不成立"}”。这仅根据你的方向选择换算，不替代证据审核。</p>
+                  <p role="status">映射预览（未经事实复核）：若采用你的选择，当前特征表示“作者比较句{previewAxisPolarity(candidate.polarity, alignment) === "positive" ? "成立" : "不成立"}”。这里只做方向换算，不替代证据审核。</p>
                 )}
                 {alignmentError && <p className="candidateFieldError" id={`profile-axis-alignment-error-${item.id}`} role="alert">{alignmentError}</p>}
               </fieldset>

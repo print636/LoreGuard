@@ -410,6 +410,26 @@
 .candidateStatement p { margin: 0; color: var(--text-2); line-height: 1.7; }
 .characterScopeList { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
 
+.candidateTargetPreview { min-width: 0; margin-top: 18px; padding: 15px; border: 1px solid var(--line-strong); border-left: 3px solid var(--cyan); border-radius: 10px; background: rgba(139, 233, 240, .045); }
+.candidateTargetPreview h4,
+.candidateReviewConditions h4 { margin: 0 0 10px; color: var(--text); font-size: 16px; }
+.candidateTargetPreview ol { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.candidateTargetPreview li { min-width: 0; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.candidateTargetPreview li:last-child { padding-bottom: 0; border-bottom: 0; }
+.candidateTargetPreview small { display: block; margin-bottom: 5px; color: var(--cyan); overflow-wrap: anywhere; }
+.candidateTargetPreview blockquote { margin: 0; color: var(--text); font-size: 16px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+.candidateTargetPreview dl { display: grid; gap: 5px; margin: 9px 0 0; }
+.candidateTargetPreview dl > div { display: grid; grid-template-columns: minmax(75px, 95px) minmax(0, 1fr); gap: 8px; }
+.candidateTargetPreview dt { color: var(--lavender); font-size: 13px; }
+.candidateTargetPreview dd { min-width: 0; margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.candidateTargetPreview > p { margin: 10px 0 0; color: var(--text-2); font-size: 13px; line-height: 1.55; }
+.candidateTargetPreview .candidateTargetUnavailable { color: var(--warning); }
+.candidateReviewConditions { min-width: 0; margin-top: 15px; padding: 14px 15px; border-left: 3px solid var(--warning); background: rgba(255, 189, 130, .06); }
+.candidateReviewConditions ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.candidateReviewConditions li { display: grid; grid-template-columns: minmax(78px, 105px) minmax(0, 1fr); gap: 8px; min-width: 0; color: var(--text-2); line-height: 1.65; overflow-wrap: anywhere; }
+.candidateReviewConditions li b { color: var(--warning); font-size: 13px; }
+.candidateReviewConditions p { margin: 10px 0 0; color: var(--text-2); font-size: 13px; line-height: 1.65; }
+
 .candidateTraitMetadata { margin-top: 15px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: rgba(9, 7, 22, .2); }
 .candidateTraitMetadata dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 18px; margin: 0; }
 .candidateTraitMetadata dl > div { min-width: 0; }
@@ -589,6 +609,8 @@
   .candidateMobileBack { display: inline-flex; min-height: 44px; align-items: center; margin-bottom: 14px; }
   .candidateDecision > div { display: grid; grid-template-columns: 1fr 1fr; }
   .candidateTraitMetadata dl { grid-template-columns: 1fr; }
+  .candidateTargetPreview dl > div,
+  .candidateReviewConditions li { grid-template-columns: 1fr; gap: 1px; }
   .candidateAxisMode button { flex: 1 1 130px; }
   .candidateDecision button,
   .characterReportLink { min-height: 44px; justify-content: center; }

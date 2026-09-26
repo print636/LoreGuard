@@ -8,6 +8,10 @@ const proposition = "林澈未经授权冒用同伴签名";
 const propositionHash = "b".repeat(64);
 const axisDefinitionHash = "a".repeat(64);
 const sourceLine = "林澈在需要签字时先征询同伴，从不擅自代签。";
+const sourceContext = "林澈在需要签字时先征询同伴，";
+const sourceTarget = "从不擅自代签。";
+const sourceContextEnd = Array.from(sourceContext).length;
+const sourceTargetEnd = sourceContextEnd + Array.from(sourceTarget).length;
 const root = `/api/v1/projects/${projectId}`;
 const characterRoot = `${root}/characters/${characterId}`;
 const candidateRoot = `${characterRoot}/profile-candidates/${candidateId}`;
@@ -20,6 +24,8 @@ type MockState = {
   propositionPostCount: number;
   decisionPostCount: number;
   unexpected: string[];
+  preciseEvidence?: boolean;
+  mappingHashMismatch?: boolean;
 };
 
 function axis(state: MockState) {
@@ -40,19 +46,34 @@ function candidate(state: MockState) {
     source_run_id: "run-axis", scope_sha256: "frozen-axis-snapshot", revision: 1,
     review_state: state.confirmed ? "confirmed" : "pending",
     reviewable: !state.confirmed, model_coverage: "full", source_verified: true,
-    contexts: [],
+    contexts: ["需要签字时"],
+    limitations: ["未披露的紧急代签情境需要另行核对"],
     approved_axis_id: state.confirmed ? axisId : null,
     approved_axis_version: state.confirmed ? 1 : null,
     axis_alignment: state.mapped ? "opposite" : null,
     axis_polarity: state.mapped ? "negative" : null,
-    axis_positive_proposition_sha256: state.mapped ? propositionHash : null,
+    axis_positive_proposition_sha256: state.mapped
+      ? state.mappingHashMismatch ? "c".repeat(64) : propositionHash
+      : null,
     evidence: [{
       input_id: "input-axis", document_id: "doc-axis", document_name: "人物设定.md",
       document_version: 1, document_role: "character_profile", publication_status: "published",
       authority_level: "canon", line_start: 1, line_end: 1, text: sourceLine,
       source_verified: true, source_text_exact: true, context_verified: false,
     }],
-    support_bindings_status: "legacy", support_bindings_v1: null,
+    support_bindings_status: state.preciseEvidence ? "verified" : "legacy",
+    support_bindings_v1: state.preciseEvidence ? {
+      schema_version: "character-support-bindings-v1", index_version: "assertion-index-v1",
+      bindings: [{
+        evidence_index: 0, support_id: "L1:A2",
+        target: { support_id: "L1:A2", start_offset: sourceContextEnd,
+          end_offset: sourceTargetEnd, role: "target" },
+        actor_anchor_id: "L1:A1", label_anchor_id: null,
+        scope_relation: "same_actor_continuation",
+        context: [{ support_id: "L1:A1", start_offset: 0,
+          end_offset: sourceContextEnd, role: "actor_anchor" }],
+      }],
+    } : null,
   };
 }
 
@@ -185,13 +206,57 @@ test("legacy axis 409 offers in-page recovery without discarding the author's ch
   await expect(axisSelect).toHaveValue(axisId);
   await page.getByRole("button", { name: "我已核对刷新后的轴定义与命题" }).click();
   await page.getByRole("button", { name: "保存正向命题" }).click();
-  await expect(page.getByText(`正向命题：${proposition}`, { exact: true })).toBeVisible();
-  await page.getByLabel(/反向：原标签的正向含义与轴正向命题相反/).check();
-  await expect(page.getByText(/方向预览：这条候选相对轴正向命题表示“命题不成立”/)).toBeVisible();
+  await expect(page.getByText(`作者比较句（轴正向）：${proposition}`, { exact: true })).toBeVisible();
+  await page.getByLabel(/反向：模型标签的正向状态与作者比较句相反/).check();
+  await expect(page.getByText(/映射预览（未经事实复核）：若采用你的方向选择，这条候选表示“作者比较句不成立”/)).toBeVisible();
   await page.getByRole("button", { name: "确认归纳" }).click();
   await expect(page.getByText(/归纳已确认并写入角色档案/)).toBeVisible();
   expect(state.propositionPostCount).toBe(2);
   expect(state.decisionPostCount).toBe(1);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("candidate review leads with exact source and conditions without treating positive as a virtue", async ({ page }, testInfo) => {
+  const state: MockState = {
+    confirmed: false, mapped: false, proposition, preciseEvidence: true,
+    propositionPostCount: 0, decisionPostCount: 0, unexpected: [],
+  };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
+  const detail = page.getByRole("region", { name: "归纳证据详情" });
+  const preview = detail.getByRole("region", { name: "冻结原文目标句" });
+  await expect(preview.locator("blockquote")).toHaveText(sourceTarget);
+  await expect(preview.getByText(sourceContext)).toBeVisible();
+  const conditions = detail.getByRole("region", { name: "适用条件与例外" });
+  await expect(conditions.getByText("需要签字时")).toBeVisible();
+  await expect(conditions.getByText("未披露的紧急代签情境需要另行核对")).toBeVisible();
+  await expect(detail.getByText(/positive（相对模型标签的正向）/).first()).toBeVisible();
+  await expect(detail.getByText(/不能按“不会”等字眼自动反转/)).toBeVisible();
+  if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
+    await preview.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("candidate-review-desktop.png") });
+  }
+  const axisSelect = detail.getByLabel("项目内已有轴");
+  await axisSelect.focus();
+  await axisSelect.press("ArrowDown");
+  await expect(axisSelect).toHaveValue(axisId);
+  const opposite = detail.getByRole("radio", { name: /反向：模型标签的正向状态与作者比较句相反/ });
+  await opposite.focus();
+  await opposite.press("Space");
+  await expect(opposite).toBeChecked();
+  await expect(detail.getByText(/作者比较句不成立/)).toBeVisible();
+  expect(state.decisionPostCount).toBe(0);
+  await page.setViewportSize({ width: 375, height: 1200 });
+  await expect(detail).toBeVisible();
+  const widths = await page.evaluate(() => ({
+    viewport: window.innerWidth, scroll: document.documentElement.scrollWidth,
+  }));
+  expect(widths.scroll).toBeLessThanOrEqual(widths.viewport + 1);
+  await expect(preview.locator("blockquote")).toHaveText(sourceTarget);
+  if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
+    await preview.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("candidate-review-375.png") });
+  }
   expect(state.unexpected).toEqual([]);
 });
 
@@ -206,9 +271,10 @@ test("an already mapped profile keeps its proposition and frozen evidence inspec
   await expect(open).toBeVisible();
   await open.click();
   const panel = page.getByRole("region", { name: "补认作者轴方向" });
-  await expect(panel.getByText(`正向命题：${proposition}`)).toBeVisible();
+  await expect(panel.getByText(`作者比较句（轴正向）：${proposition}`)).toBeVisible();
   await expect(panel.getByRole("blockquote")).toHaveText(sourceLine);
-  await expect(panel.getByText(/这条特征已补认：反向/)).toBeVisible();
+  await expect(panel.getByText(/作者已标注比较方向：反向/)).toBeVisible();
+  await expect(panel.getByText(/按已确认映射，作者比较句不成立/)).toBeVisible();
   if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
     await panel.screenshot({
       path: testInfo.outputPath("axis-alignment-desktop.png"),
@@ -233,7 +299,27 @@ test("an already mapped profile keeps its proposition and frozen evidence inspec
   await panel.getByRole("button", { name: "关闭补认" }).click();
   await expect(open).toBeVisible();
   await expect(open).toBeFocused();
+  await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
+  await expect(page.getByRole("region", { name: "归纳证据详情" }).getByText(/按已确认映射，作者比较句不成立/)).toBeVisible();
   expect(state.propositionPostCount).toBe(0);
   expect(state.decisionPostCount).toBe(0);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("a confirmed direction with a changed axis proposition does not guess its mapped meaning", async ({ page }) => {
+  const state: MockState = {
+    confirmed: true, mapped: true, proposition, mappingHashMismatch: true,
+    propositionPostCount: 0, decisionPostCount: 0, unexpected: [],
+  };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/characters?section=profile&page=1&character=${encodeURIComponent(characterId)}`);
+  await page.getByRole("button", { name: "查看作者轴方向与证据" }).click();
+  const panel = page.getByRole("region", { name: "补认作者轴方向" });
+  await expect(panel.getByText(/不展示成立\/不成立的换算/)).toBeVisible();
+  await expect(panel.getByText(/按已确认映射，作者比较句/)).toHaveCount(0);
+  await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
+  const detail = page.getByRole("region", { name: "归纳证据详情" });
+  await expect(detail.getByText(/当前轴命题或冻结证据不可核对，暂不换算成立\/不成立/)).toBeVisible();
+  await expect(detail.getByText(/按已确认映射，作者比较句/)).toHaveCount(0);
   expect(state.unexpected).toEqual([]);
 });

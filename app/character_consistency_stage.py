@@ -555,6 +555,11 @@ class CharacterConsistencyStage:
             source.source_kind == "draft" for source, _ in selected_chunks
         )
         processed_chunks = 0
+        # `processed_chunks` is a legacy traversal count: a token-admission
+        # skip still enters the extractor. Keep it for compatibility and
+        # publish separate primary-call coverage counters below.
+        model_called_chunks = 0
+        model_completed_chunks = 0
         successful_model_calls = 0
         signal_ignored_duplicates = 0
         targeted_eligible_targets = 0
@@ -746,6 +751,11 @@ class CharacterConsistencyStage:
                 frozen_content=source.document.content if scope_review_v1 else None,
             )
             processed_chunks += 1
+            primary_called = extraction.diagnostics.attempted_calls > 0
+            if primary_called:
+                model_called_chunks += 1
+            if primary_called and extraction.diagnostics.outcome == "completed":
+                model_completed_chunks += 1
             record_support_trace(
                 extraction, source=source, chunk_ordinal=chunk_ordinal
             )
@@ -1465,6 +1475,10 @@ class CharacterConsistencyStage:
             source_eligible=len(eligible),
             planned_chunks=len(planned_chunks),
             processed_chunks=processed_chunks,
+            model_called_chunks=model_called_chunks,
+            model_completed_chunks=model_completed_chunks,
+            model_uncalled_chunks=len(planned_chunks) - model_called_chunks,
+            model_incomplete_chunks=len(planned_chunks) - model_completed_chunks,
             chunk_limit=settings.character_consistency_max_chunks_per_run,
             signal_count=len(signals),
             signal_ignored_duplicate_count=signal_ignored_duplicates,

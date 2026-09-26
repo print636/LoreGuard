@@ -3171,6 +3171,46 @@ def _requires_legacy_preference_supersession(
         return False
 
 
+def _character_primary_chunk_coverage(stage: dict) -> str:
+    """Validate additive primary-extraction counters before claiming full coverage."""
+
+    if "counts" not in stage:
+        return "legacy"
+    counts = stage["counts"]
+    if not isinstance(counts, dict):
+        return "unknown"
+    new_keys = (
+        "model_called_chunks", "model_completed_chunks",
+        "model_uncalled_chunks", "model_incomplete_chunks",
+    )
+    has_new_counts = any(key in counts for key in new_keys)
+    old_keys = ("planned_chunks", "processed_chunks")
+    if not has_new_counts and not any(key in counts for key in old_keys):
+        return "legacy"
+    required = (*old_keys, *new_keys) if has_new_counts else old_keys
+    if any(type(counts.get(key)) is not int for key in required):
+        return "unknown"
+    if any(not 0 <= counts[key] <= 1_000_000 for key in required):
+        return "unknown"
+    planned = counts["planned_chunks"]
+    processed = counts["processed_chunks"]
+    if planned == 0:
+        return "unknown"
+    if processed > planned:
+        return "unknown"
+    if not has_new_counts:
+        return "partial" if processed < planned else "legacy"
+    called = counts["model_called_chunks"]
+    completed = counts["model_completed_chunks"]
+    if not (
+        completed <= called <= processed
+        and counts["model_uncalled_chunks"] == planned - called
+        and counts["model_incomplete_chunks"] == planned - completed
+    ):
+        return "unknown"
+    return "partial" if completed < planned else "complete"
+
+
 def _character_coverage_for_run(
     db, run: AnalysisRunRow | None
 ) -> tuple[str, str | None]:
@@ -3183,7 +3223,19 @@ def _character_coverage_for_run(
         return "unknown", "该次分析没有可核对的角色一致性执行记录"
     outcome = stage.get("outcome")
     if outcome == "completed":
-        return "full", "角色一致性阶段已完整执行"
+        if stage.get("material_coverage") == "partial":
+            return "partial", "仅完成部分材料审查；未覆盖内容不能视为没有问题"
+        primary_coverage = _character_primary_chunk_coverage(stage)
+        if primary_coverage == "partial":
+            return "partial", "角色主抽取未覆盖全部分节；未覆盖内容不能视为没有问题"
+        if primary_coverage == "unknown":
+            return "unknown", "角色审查分节计数缺失或互相矛盾，无法确认覆盖"
+        if (
+            stage.get("snapshot_bound") is True
+            and stage.get("material_coverage") == "complete"
+        ):
+            return "full", "角色一致性阶段已完整执行"
+        return "unknown", "角色一致性材料覆盖或快照绑定无法确认"
     if outcome == "partial":
         return "partial", "仅完成部分材料审查；未覆盖内容不能视为没有问题"
     if outcome == "degraded":

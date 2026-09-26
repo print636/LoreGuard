@@ -2611,6 +2611,110 @@ def test_focused_target_budget_exhaustion_leaves_remaining_target_partial():
         assert len(provider.calls) == 3
 
 
+def test_explicit_legacy_stage_cap_remains_fail_closed_for_seven_chunks():
+    """A larger product default must not silently override a user-set cap."""
+
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"角色预算覆盖-{uuid4().hex}"}
+        ).json()
+        for ordinal in range(7):
+            _create_document(
+                client,
+                project["id"],
+                name=f"chapter-{ordinal}.md",
+                role="chapter",
+                content=f"第 {ordinal} 章的原创剧情。",
+                narrative_context=_context(publication="published"),
+            )
+
+        # Each completed mock extraction consumes a conservative 14K estimate.
+        # At 60K, 4 calls consume 56K; the remaining chunks still enter the
+        # extractor but cannot receive a model call. This reproduces the
+        # misleading legacy 7/7 `processed_chunks` display.
+        with patch(
+            "app.character_trait_extraction.estimate_issue_evidence_review_tokens",
+            return_value=14_000,
+        ):
+            low_provider = QueueProvider(*([_response()] * 7))
+            low = _run_stage(
+                _new_run(client, project["id"]),
+                low_provider,
+                remaining_run_tokens=200_000,
+                character_consistency_stage_token_budget=60_000,
+            )
+            default_provider = QueueProvider(*([_response()] * 7))
+            covered = _run_stage(
+                _new_run(client, project["id"]),
+                default_provider,
+                remaining_run_tokens=200_000,
+                character_consistency_stage_token_budget=(
+                    Settings(_env_file=None).character_consistency_stage_token_budget
+                ),
+            )
+
+    assert low.diagnostics["outcome"] == "partial"
+    assert low.diagnostics["material_coverage"] == "partial"
+    assert low.diagnostics["reason_counts"]["token_budget"] == 3
+    assert low.diagnostics["counts"]["processed_chunks"] == 7
+    assert low.diagnostics["counts"]["model_called_chunks"] == 4
+    assert low.diagnostics["counts"]["model_completed_chunks"] == 4
+    assert low.diagnostics["counts"]["model_uncalled_chunks"] == 3
+    assert low.diagnostics["counts"]["model_incomplete_chunks"] == 3
+    assert len(low_provider.calls) == 4
+    assert covered.diagnostics["outcome"] == "completed"
+    assert covered.diagnostics["material_coverage"] == "complete"
+    assert covered.diagnostics["counts"]["processed_chunks"] == 7
+    assert covered.diagnostics["counts"]["model_called_chunks"] == 7
+    assert covered.diagnostics["counts"]["model_completed_chunks"] == 7
+    assert covered.diagnostics["counts"]["model_uncalled_chunks"] == 0
+    assert covered.diagnostics["counts"]["model_incomplete_chunks"] == 0
+    assert len(default_provider.calls) == 7
+
+
+@pytest.mark.parametrize("failure", (None, RuntimeError("provider failed")))
+def test_primary_chunk_counters_distinguish_admission_skip_from_failed_call(failure):
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"主抽取调用诊断-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="chapter.md", role="chapter",
+            content="原创角色走过长廊。",
+            narrative_context=_context(publication="published"),
+        )
+        provider = QueueProvider(*([failure] if failure else [_response()]))
+        with patch(
+            "app.character_trait_extraction.estimate_issue_evidence_review_tokens",
+            return_value=15_000,
+        ):
+            result = _run_stage(
+                _new_run(client, project["id"]), provider,
+                remaining_run_tokens=200_000,
+                character_consistency_stage_token_budget=(
+                    20_000 if failure else 1_000
+                ),
+                character_signal_max_completion_tokens=64,
+            )
+
+    counts = result.diagnostics["counts"]
+    assert counts["planned_chunks"] == 1
+    assert counts["processed_chunks"] == 1
+    assert counts["model_completed_chunks"] == 0
+    assert counts["model_incomplete_chunks"] == 1
+    assert result.diagnostics["material_coverage"] == "partial"
+    if failure:
+        assert len(provider.calls) == 1
+        assert counts["model_called_chunks"] == 1
+        assert counts["model_uncalled_chunks"] == 0
+        assert result.diagnostics["reason_counts"]["provider_error"] == 1
+    else:
+        assert provider.calls == []
+        assert counts["model_called_chunks"] == 0
+        assert counts["model_uncalled_chunks"] == 1
+        assert result.diagnostics["reason_counts"]["token_budget"] == 1
+
+
 def test_empty_verification_budget_exhaustion_is_explicitly_partial():
     with TestClient(app) as client:
         project = _confirmed_directness_project(client)

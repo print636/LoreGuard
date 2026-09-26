@@ -24,6 +24,7 @@ import {
 import {
   appendAxisPage,
   canCreateNewAxis,
+  confirmedAxisPolarity,
   previewAxisPolarity,
   selectedProjectAxis,
   validateAxisDraft,
@@ -36,13 +37,14 @@ import {
 } from "../src/features/characters/reviewScope.ts";
 import {
   candidateDecisionLabel,
+  candidateDisplayStatement,
   candidateReviewState,
   candidateStatusNames,
   characterDriftReportPath,
   describeCoverage,
   describeReadiness,
 } from "../src/features/characters/presentation.ts";
-import { splitEvidenceBySupport } from "../src/features/characters/supportBindings.ts";
+import { splitEvidenceBySupport, verifiedTargetExcerpts } from "../src/features/characters/supportBindings.ts";
 import {
   characterRouteStateFromSearch,
   characterSearch,
@@ -59,7 +61,12 @@ function candidate(overrides = {}) {
     rationale: "多段历史台词保持相同表现。",
     limitations: [],
     scopes: [],
-    supporting_evidence: [],
+    supporting_evidence: [{
+      input_id: "input-1", document_id: "doc-1", document_name: "角色.md",
+      document_version: 1, line_start: 1, line_end: 1,
+      text: "角色在陌生人面前倾向寡言。", source_verified: true,
+      source_text_exact: true,
+    }],
     contrary_evidence: [],
     status: "pending",
     reviewable: true,
@@ -67,6 +74,7 @@ function candidate(overrides = {}) {
     source_run_id: "run-1",
     source_snapshot_revision: "snapshot-1",
     model_coverage: "full",
+    source_verified: true,
     support_bindings_status: "legacy",
     support_bindings_v1: null,
     revision: 3,
@@ -124,6 +132,13 @@ test("verified support renders the exact indented Unicode line with distinct con
       { text: "  ", kind: "plain" },
     ],
   );
+  assert.deepEqual(verifiedTargetExcerpts(parsed), [{
+    location: "角色.md · 第 1 行",
+    target: "随后她退到门边。",
+    context: [{ label: "指代对象", text: "🌙林澈按住剑。" }],
+  }]);
+  assert.deepEqual(verifiedTargetExcerpts({ ...parsed, source_verified: false }), []);
+  assert.deepEqual(verifiedTargetExcerpts({ ...parsed, support_bindings_status: "legacy" }), []);
 });
 
 test("Unicode combining characters use codepoint offsets rather than UTF-16 indices", () => {
@@ -443,6 +458,8 @@ test("character collection adapters reject malformed success payloads instead of
 
 test("stale and rules-only candidates fail closed while current candidates remain reviewable", () => {
   assert.equal(candidateReviewState(candidate()).allowed, true);
+  assert.equal(candidateReviewState(candidate({ supporting_evidence: [] })).allowed, false);
+  assert.equal(candidateReviewState(candidate({ source_verified: false })).allowed, false);
   assert.equal(
     candidateReviewState(candidate({ status: "stale" })).allowed,
     false,
@@ -465,6 +482,41 @@ test("stale and rules-only candidates fail closed while current candidates remai
     candidateReviewState(candidate({ origin: "unknown" })).allowed,
     false,
   );
+});
+
+test("candidate heading hides only an exact duplicate internal trait key", () => {
+  assert.equal(candidateDisplayStatement({
+    statement: "signature_integrity：不会擅自代同伴签名",
+    model_trait_key: "signature_integrity",
+  }), "不会擅自代同伴签名");
+  assert.equal(candidateDisplayStatement({
+    statement: "关于 signature_integrity 的明确设定",
+    model_trait_key: "signature_integrity",
+  }), "关于 signature_integrity 的明确设定");
+});
+
+test("confirmed axis meaning requires the same proposition, version, and frozen evidence", () => {
+  const digest = "b".repeat(64);
+  const axis = {
+    id: "axis-1", version: 2, positive_proposition: "角色冒用同伴签名",
+    positive_proposition_sha256: digest,
+  };
+  const confirmed = candidate({
+    status: "confirmed", polarity: "positive", approved_axis_id: "axis-1",
+    approved_axis_version: 2, axis_alignment: "opposite", axis_polarity: "negative",
+    axis_positive_proposition_sha256: digest,
+  });
+  assert.equal(confirmedAxisPolarity(confirmed, axis), "negative");
+  assert.equal(confirmedAxisPolarity(confirmed, { ...axis, version: 3 }), null);
+  assert.equal(confirmedAxisPolarity(confirmed, {
+    ...axis, positive_proposition_sha256: "c".repeat(64),
+  }), null);
+  assert.equal(confirmedAxisPolarity(candidate({
+    ...confirmed, supporting_evidence: [],
+  }), axis), null);
+  assert.equal(confirmedAxisPolarity(candidate({
+    ...confirmed, axis_polarity: "positive",
+  }), axis), null);
 });
 
 test("frozen character dimensions include current state and fail unknown values closed", () => {

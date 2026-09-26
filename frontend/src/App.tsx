@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
+  describeCharacterReviewStage,
   describeCombinedReviewStatus,
   describeRepairStatus,
   describeReviewAgentStatus,
@@ -468,6 +469,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       diagnostics.character_consistency,
     ),
     [diagnostics.model, diagnostics.character_consistency],
+  );
+  const characterStageStatus = useMemo(
+    () => describeCharacterReviewStage(diagnostics.character_consistency),
+    [diagnostics.character_consistency],
   );
   const repairStatus = useMemo(
     () => describeRepairStatus(diagnostics.model),
@@ -2217,7 +2222,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                 <summary>分析诊断摘要</summary>
                 <div className="recordGrid diagnosticGrid">
                   <div>
-                    <span>模型语义覆盖</span>
+                    <span>整体审查覆盖</span>
                     <code>{modelStatus.label}</code>
                     <small>
                       {modelStatus.counts}
@@ -2225,6 +2230,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       {modelStatus.detail}
                       <br />
                       逻辑分块调用计数，不含内部 HTTP 重试次数。
+                    </small>
+                  </div>
+                  <div>
+                    <span>角色审查主抽取</span>
+                    <code>{characterStageStatus.label}</code>
+                    <small>
+                      {characterStageStatus.counts}
+                      <br />
+                      {characterStageStatus.detail}
                     </small>
                   </div>
                   <RepairDiagnostic status={repairStatus} />
@@ -2678,7 +2692,9 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             <span>{modelStatus.label}</span>
             <small>
               {runInfo?.status === "completed"
-                ? "结果可追溯"
+                ? modelStatus.coverage === "full"
+                  ? "结果可追溯 · 覆盖已核对"
+                  : "结果可追溯 · 覆盖仍有限"
                 : "等待完成一次分析"}
             </small>
           </p>

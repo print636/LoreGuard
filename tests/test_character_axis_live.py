@@ -2723,6 +2723,10 @@ def test_public_run_drops_untrusted_scalar_values_from_http_summary(monkeypatch)
                 "counts": {
                     "planned_chunks": marker,
                     "processed_chunks": private_url,
+                    "model_called_chunks": marker,
+                    "model_completed_chunks": private_url,
+                    "model_uncalled_chunks": {"api_key": marker},
+                    "model_incomplete_chunks": marker,
                     "draft_observation_count": {"source_text": marker},
                     "targeted_record_rejected_count": marker,
                 },
@@ -2750,7 +2754,9 @@ def test_public_run_drops_untrusted_scalar_values_from_http_summary(monkeypatch)
     for key in (
         "status", "elapsed_seconds", "prompt_tokens", "completion_tokens",
         "stage_outcome", "stage_reason", "material_coverage",
-        "planned_chunks", "processed_chunks", "draft_observations",
+        "planned_chunks", "processed_chunks", "model_called_chunks",
+        "model_completed_chunks", "model_uncalled_chunks",
+        "model_incomplete_chunks", "draft_observations",
         "targeted_record_rejection_events", "stage_usage",
     ):
         assert public[key] is None
@@ -2767,7 +2773,9 @@ def test_public_run_preserves_normal_server_enums_and_bounded_usage():
         "prompt_tokens": 1200, "completion_tokens": 300,
         "stage_outcome": "partial", "stage_reason": "bounded_partial",
         "material_coverage": "partial", "planned_chunks": 7,
-        "processed_chunks": 7, "draft_observations": 3,
+        "processed_chunks": 7, "model_called_chunks": 6,
+        "model_completed_chunks": 6, "model_uncalled_chunks": 1,
+        "model_incomplete_chunks": 1, "draft_observations": 3,
         "targeted_record_rejection_events": 2,
         "stage_usage": {
             "attempted_calls": 9, "input_tokens": 1100,
@@ -2781,6 +2789,9 @@ def test_public_run_preserves_normal_server_enums_and_bounded_usage():
     assert axis_live._public_run({**summary, "planned_chunks": True})[
         "planned_chunks"
     ] is None
+    assert axis_live._public_run({**summary, "model_uncalled_chunks": True})[
+        "model_uncalled_chunks"
+    ] is None
     assert axis_live._public_run({**summary, "elapsed_seconds": float("nan")})[
         "elapsed_seconds"
     ] is None
@@ -2790,6 +2801,41 @@ def test_public_run_preserves_normal_server_enums_and_bounded_usage():
     assert axis_live._public_run({**summary, "stage_usage": {
         **summary["stage_usage"], "input_tokens": -1,
     }})["stage_usage"] is None
+
+
+def test_run_summary_exposes_static_budget_reason_without_leaking_unknown_keys(monkeypatch):
+    def fake_request(_client, _method, _path, route, **_kwargs):
+        if route == "diagnostics":
+            return {"character_consistency": {
+                "outcome": "partial", "reason_code": "bounded_partial",
+                "material_coverage": "partial",
+                "counts": {
+                    "planned_chunks": 7, "processed_chunks": 7,
+                    "model_called_chunks": 6, "model_completed_chunks": 6,
+                    "model_uncalled_chunks": 1, "model_incomplete_chunks": 1,
+                },
+                "reason_counts": {
+                    "token_budget": 1,
+                    "untrusted_credential_sk-example": 1,
+                },
+                "usage": {"attempted_calls": 6, "charged_tokens": 60_000},
+            }}
+        assert route == "issues"
+        return []
+
+    monkeypatch.setattr(axis_live, "_request", fake_request)
+    summary = axis_live._run_summary(
+        object(), {"id": "synthetic-run", "status": "completed"},
+        known_documents=set(),
+    )
+    public = axis_live._public_run(summary)
+    assert public is not None
+    assert public["processed_chunks"] == 7
+    assert public["model_uncalled_chunks"] == 1
+    assert public["model_incomplete_chunks"] == 1
+    assert public["reason_counts"] == {"token_budget": 1}
+    assert public["unreported_reason_entries"] == 1
+    assert "untrusted_credential" not in json.dumps(public)
 
 
 def test_core_label_scope_projection_is_bounded_and_old_data_unavailable():

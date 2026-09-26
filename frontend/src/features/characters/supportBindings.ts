@@ -3,6 +3,7 @@ import type {
   ProfileSupportBinding,
   ProfileSupportBindingsV1,
   ProfileSupportSpan,
+  ProfileCandidate,
   SupportBindingStatus,
 } from "./types.ts";
 
@@ -10,6 +11,18 @@ type JsonRecord = Record<string, unknown>;
 type SegmentKind = "plain" | "context" | "target";
 
 export type EvidenceSegment = { text: string; kind: SegmentKind };
+
+export type VerifiedTargetExcerpt = {
+  location: string;
+  target: string;
+  context: Array<{ label: string; text: string }>;
+};
+
+const contextRoleNames: Record<"actor_anchor" | "label_anchor" | "bridge", string> = {
+  actor_anchor: "指代对象",
+  label_anchor: "特征线索",
+  bridge: "承接上下文",
+};
 
 const supportId = /^L([1-9][0-9]{0,7}):A[1-9][0-9]{0,2}$/;
 const spanRoles = new Set(["target", "actor_anchor", "label_anchor", "bridge"]);
@@ -187,4 +200,39 @@ export function splitEvidenceBySupport(
     else segments.push({ text: part, kind });
   }
   return segments;
+}
+
+/** Show only server-verified coordinates from an exact frozen source line. */
+export function verifiedTargetExcerpts(candidate: Pick<ProfileCandidate,
+  "source_verified" | "support_bindings_status" | "support_bindings_v1" | "supporting_evidence"
+>): VerifiedTargetExcerpt[] {
+  const bindings = candidate.support_bindings_v1?.bindings;
+  if (
+    !candidate.source_verified || candidate.support_bindings_status !== "verified" ||
+    !bindings?.length
+  ) return [];
+  const excerpts: VerifiedTargetExcerpt[] = [];
+  for (const binding of bindings) {
+    const evidence = candidate.supporting_evidence[binding.evidence_index];
+    if (!evidence?.source_verified || !evidence.source_text_exact) return [];
+    const points = Array.from(evidence.text);
+    const excerpt = (start: number, end: number): string | null =>
+      Number.isSafeInteger(start) && Number.isSafeInteger(end) &&
+      start >= 0 && end > start && end <= points.length
+        ? points.slice(start, end).join("") : null;
+    const target = excerpt(binding.target.start_offset, binding.target.end_offset);
+    if (!target?.trim()) return [];
+    const context: VerifiedTargetExcerpt["context"] = [];
+    for (const span of binding.context) {
+      const value = excerpt(span.start_offset, span.end_offset);
+      if (!value?.trim() || span.role === "target") return [];
+      context.push({ label: contextRoleNames[span.role], text: value });
+    }
+    excerpts.push({
+      location: `${evidence.document_name} · 第 ${evidence.line_start} 行`,
+      target,
+      context,
+    });
+  }
+  return excerpts;
 }

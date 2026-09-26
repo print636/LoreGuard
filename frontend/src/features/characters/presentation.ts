@@ -43,6 +43,15 @@ export const feedbackStatusNames = {
   resolved: "已处理",
 } as const;
 
+/** Hide only a duplicated internal key prefix; do not rewrite the assertion. */
+export function candidateDisplayStatement(candidate: Pick<ProfileCandidate, "statement" | "model_trait_key">): string {
+  const prefix = candidate.model_trait_key ? `${candidate.model_trait_key}：` : "";
+  if (prefix && candidate.statement.startsWith(prefix)) {
+    return candidate.statement.slice(prefix.length).trim() || candidate.statement;
+  }
+  return candidate.statement;
+}
+
 export function describeCoverage(coverage: ModelCoverage, detail?: string | null) {
   if (coverage === "full") {
     return {
@@ -145,6 +154,16 @@ export function candidateReviewState(candidate: ProfileCandidate) {
     return {
       allowed: false,
       label: candidate.unreviewable_reason || "这条归纳目前不能确认。",
+    };
+  }
+  if (
+    !candidate.source_verified || !candidate.supporting_evidence.length ||
+    candidate.supporting_evidence.some((evidence) => !evidence.source_verified) ||
+    (candidate.support_bindings_status === "verified" && !candidate.support_bindings_v1?.bindings.length)
+  ) {
+    return {
+      allowed: false,
+      label: "缺少可核对的冻结原文证据，不能确认这条归纳。请重新读取或分析。",
     };
   }
   return { allowed: true, label: "核对证据后确认或驳回这条归纳。" };

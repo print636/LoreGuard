@@ -260,7 +260,7 @@ class Settings(BaseSettings):
     # call in the optional stage.  The per-call budgets below can only tighten
     # this ceiling; they are not additive entitlements.
     character_consistency_stage_token_budget: int = Field(
-        default=60_000, ge=256, le=150_000
+        default=150_000, ge=256, le=150_000
     )
     character_consistency_max_chunks_per_run: int = Field(
         default=24, ge=1, le=128
@@ -399,10 +399,10 @@ class Settings(BaseSettings):
     # permits a clearly diagnosed lexical fallback only after a transient
     # index/query-vector failure; it is not a no-embedding operating mode.
     evidence_investigator_require_hybrid: bool = True
-    # Must leave enough headroom for the 60K optional character stage after
-    # deterministic/model extraction has already consumed part of the run.
-    per_run_token_budget: int = 100_000
-    daily_token_budget: int = 100_000
+    # Leave headroom for the optional character stage after earlier model
+    # extraction. These remain finite admission ceilings, not usage targets.
+    per_run_token_budget: int = 200_000
+    daily_token_budget: int = 600_000
     model_input_price_per_million: float | None = None
     model_output_price_per_million: float | None = None
     max_upload_bytes: int = 10 * 1024 * 1024

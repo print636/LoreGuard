@@ -76,6 +76,14 @@ export type CharacterConsistencyDiagnostics = {
   reason_code?: string;
   snapshot_bound?: boolean;
   material_coverage?: string;
+  counts?: {
+    planned_chunks?: number;
+    model_called_chunks?: number;
+    model_completed_chunks?: number;
+    model_uncalled_chunks?: number;
+    model_incomplete_chunks?: number;
+  };
+  reason_counts?: Record<string, number>;
 };
 
 export type ModelStatusView = {
@@ -616,68 +624,173 @@ export function describeModelStatus(model?: ModelDiagnostics): ModelStatusView {
   };
 }
 
+type CharacterChunkSummary = {
+  text: string;
+  valid: boolean;
+  known: boolean;
+  incomplete: number;
+};
+
+function characterChunkSummary(diagnostics: CharacterConsistencyDiagnostics): CharacterChunkSummary {
+  const counts = diagnostics.counts;
+  const unknown = '角色主抽取分节覆盖数未提供，不能从“已处理”计数推断模型已完成。';
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) {
+    return {text: unknown, valid: true, known: false, incomplete: 0};
+  }
+  const keys = [
+    'planned_chunks', 'model_called_chunks', 'model_completed_chunks',
+    'model_uncalled_chunks', 'model_incomplete_chunks',
+  ] as const;
+  if (keys.every(key => !hasOwn(counts, key))) {
+    return {text: unknown, valid: true, known: false, incomplete: 0};
+  }
+  if (keys.some(key => !Number.isSafeInteger(counts[key]) || (counts[key] ?? -1) < 0)) {
+    return {text: '角色主抽取分节计数不完整，无法核对覆盖范围。', valid: false, known: false, incomplete: 0};
+  }
+  const planned = counts.planned_chunks!;
+  const called = counts.model_called_chunks!;
+  const completed = counts.model_completed_chunks!;
+  const uncalled = counts.model_uncalled_chunks!;
+  const incomplete = counts.model_incomplete_chunks!;
+  if (called > planned || completed > called || called + uncalled !== planned ||
+      completed + incomplete !== planned) {
+    return {text: '角色主抽取分节计数相互矛盾，无法核对覆盖范围。', valid: false, known: false, incomplete: 0};
+  }
+  return {
+    text: `角色主抽取分节：计划 ${planned} · 调用模型 ${called} · 完成 ${completed} · 未完成 ${incomplete}（其中未调用 ${uncalled}）`,
+    valid: true,
+    known: true,
+    incomplete,
+  };
+}
+
+const characterStageReasons: Record<string, string> = {
+  bounded_partial: '部分冻结材料尚未完成角色审查',
+  run_token_budget: '本次运行剩余 Token 预算不足，角色审查未启动',
+  feature_disabled: '当前部署未启用角色审查',
+  no_eligible_frozen_documents: '本次没有符合角色审查条件的冻结资料',
+  model_stage_unavailable: '模型角色审查没有成功完成',
+  invalid_remaining_budget: '本次运行的剩余预算记录异常',
+  internal_failure: '角色审查阶段发生内部错误',
+};
+
+function characterBudgetRejected(diagnostics: CharacterConsistencyDiagnostics): boolean {
+  const reasons = diagnostics.reason_counts;
+  if (!reasons || typeof reasons !== 'object' || Array.isArray(reasons)) return false;
+  return ['token_budget', 'stage_token_budget'].some(key =>
+    Number.isSafeInteger(reasons[key]) && reasons[key] > 0);
+}
+
+export function describeCharacterReviewStage(
+  diagnostics?: CharacterConsistencyDiagnostics,
+): ModelStatusView {
+  const unknownCaveat = '角色审查执行状态未知，当前结果不能证明没有角色设定或行为漂移问题。';
+  if (!diagnostics || typeof diagnostics.outcome !== 'string') {
+    return {
+      coverage: 'unknown', label: '角色审查覆盖未知',
+      detail: '缺少角色一致性阶段的结构化执行记录；不能把通用语义抽取当作角色审查。',
+      counts: '', emptyCaveat: unknownCaveat,
+    };
+  }
+  const chunks = characterChunkSummary(diagnostics);
+  const reason = characterStageReasons[diagnostics.reason_code ?? ''];
+  const frozen = diagnostics.snapshot_bound === true;
+  const budgetsRejected = characterBudgetRejected(diagnostics);
+  if (!chunks.valid) {
+    return {
+      coverage: 'unknown', label: '角色审查覆盖无法核对',
+      detail: '分节计数不完整或相互矛盾，不能据此显示完整覆盖。请核对本次运行诊断。',
+      counts: chunks.text, emptyCaveat: unknownCaveat,
+    };
+  }
+  if (diagnostics.outcome === 'completed') {
+    if (!frozen || diagnostics.enabled === false ||
+        diagnostics.material_coverage !== 'complete' ||
+        (chunks.known && (diagnostics.counts!.planned_chunks === 0 || chunks.incomplete !== 0))) {
+      return {
+        coverage: 'unknown', label: '角色审查覆盖无法核对',
+        detail: '“阶段完成”与冻结输入、材料覆盖或分节计数不一致，不能据此显示完整覆盖。请核对本次运行诊断。',
+        counts: chunks.text, emptyCaveat: unknownCaveat,
+      };
+    }
+    return {
+      coverage: 'full', label: '角色审查完整',
+      detail: '角色一致性阶段已基于冻结输入完整执行；这不保证每条结论都正确。',
+      counts: chunks.text,
+      emptyCaveat: '已完成角色审查，但没有发现问题仍不等于故事绝无矛盾。',
+    };
+  }
+  if (diagnostics.outcome === 'partial') {
+    if (!frozen || diagnostics.material_coverage !== 'partial' || diagnostics.enabled === false) {
+      return {
+        coverage: 'unknown', label: '角色审查覆盖无法核对',
+        detail: '阶段状态与冻结输入或材料覆盖记录不一致，不能确定实际审查范围。请核对本次运行诊断。',
+        counts: chunks.text, emptyCaveat: unknownCaveat,
+      };
+    }
+    const explanation = budgetsRejected
+      ? '审查中发生 Token 预算门控；部分内容可能未调用模型。请核对预算后重新发起校验。'
+      : `${reason || '部分角色审查未完成'}；请检查本次运行诊断，处理原因后重新发起校验。`;
+    return {
+      coverage: 'partial', label: '角色审查覆盖不完整',
+      detail: `${explanation} 未覆盖内容不能视为没有问题。`,
+      counts: chunks.text,
+      emptyCaveat: '角色审查仅部分完成，当前结果不能证明没有角色设定或行为漂移问题。',
+    };
+  }
+  if (['disabled', 'skipped', 'degraded'].includes(diagnostics.outcome)) {
+    const label = diagnostics.outcome === 'disabled' ? '角色审查未启用'
+      : diagnostics.outcome === 'skipped' ? '角色审查未执行' : '角色审查未完成';
+    return {
+      coverage: 'partial', label,
+      detail: `${reason || label}；通用规则或语义抽取不能替代角色一致性审查。${diagnostics.reason_code === 'run_token_budget' ? '请核对预算后重新发起校验。' : ''}`,
+      counts: chunks.text,
+      emptyCaveat: `${label}，当前结果不能证明没有角色设定或行为漂移问题。`,
+    };
+  }
+  return {
+    coverage: 'unknown', label: '角色审查执行状态未知',
+    detail: '无法识别角色一致性阶段状态；不会据此显示完整覆盖。',
+    counts: chunks.text, emptyCaveat: unknownCaveat,
+  };
+}
+
 export function describeCombinedReviewStatus(
   model?: ModelDiagnostics,
   characterConsistency?: CharacterConsistencyDiagnostics,
 ): ModelStatusView {
   const base = describeModelStatus(model);
-  if (!characterConsistency || typeof characterConsistency.outcome !== 'string') {
-    return {
-      coverage: 'unknown',
-      label: 'AI 与角色审查覆盖未知',
-      detail: '缺少角色一致性阶段的结构化执行记录；即使通用语义抽取完成，也不能声称角色审查已完成。',
-      counts: base.counts,
-      emptyCaveat: '角色审查执行状态未知，当前结果不能证明没有角色设定或行为漂移问题。',
-    };
-  }
-  if (
-    characterConsistency.outcome === 'completed' &&
-    characterConsistency.snapshot_bound === true
-  ) {
+  const character = describeCharacterReviewStage(characterConsistency);
+  const counts = [base.counts, character.counts].filter(Boolean).join('；');
+  if (character.coverage === 'full') {
     if (base.coverage === 'full') {
       return {
         ...base,
         label: 'AI 语义与角色审查完整',
-        detail: `${base.detail} 角色一致性阶段也已基于冻结输入完整执行。`,
+        detail: `${base.detail} ${character.detail}`,
+        counts,
       };
     }
     return {
       ...base,
-      detail: `${base.detail} 角色一致性阶段已完成，但不会提升通用语义抽取的覆盖等级。`,
+      detail: `${base.detail} ${character.detail} 角色审查完成不会提升通用语义抽取的覆盖等级。`,
+      counts,
     };
   }
-
-  const reason = characterConsistency.reason_code
-    ? `（${characterConsistency.reason_code}）`
-    : '';
-  if (characterConsistency.outcome === 'partial') {
+  if (character.coverage === 'partial') {
     return {
       coverage: base.coverage === 'unknown' ? 'unknown' : 'partial',
-      label: '角色审查覆盖不完整',
-      detail: `角色一致性阶段只处理了部分冻结材料${reason}；未覆盖内容不能视为没有问题。`,
-      counts: base.counts,
-      emptyCaveat: '角色审查仅部分完成，当前结果不能证明没有角色设定或行为漂移问题。',
-    };
-  }
-  if (['disabled', 'skipped', 'degraded'].includes(characterConsistency.outcome)) {
-    const label = characterConsistency.outcome === 'disabled'
-      ? '角色审查未启用'
-      : characterConsistency.outcome === 'skipped'
-        ? '角色审查未执行'
-        : '角色审查未完成';
-    return {
-      coverage: base.coverage === 'unknown' ? 'unknown' : 'partial',
-      label,
-      detail: `${label}${reason}；通用规则或语义结果不能替代角色一致性覆盖。`,
-      counts: base.counts,
-      emptyCaveat: `${label}，当前结果不能证明没有角色设定或行为漂移问题。`,
+      label: character.label,
+      detail: character.detail,
+      counts,
+      emptyCaveat: character.emptyCaveat,
     };
   }
   return {
     coverage: 'unknown',
-    label: '角色审查执行状态未知',
-    detail: `无法识别角色一致性阶段状态${reason}；不会据此显示干净通过。`,
-    counts: base.counts,
-    emptyCaveat: '角色审查执行状态未知，当前结果不能证明没有角色设定或行为漂移问题。',
+    label: character.label,
+    detail: character.detail,
+    counts,
+    emptyCaveat: character.emptyCaveat,
   };
 }

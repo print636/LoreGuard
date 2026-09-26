@@ -99,16 +99,18 @@ class TokenBudgetTests(unittest.TestCase):
             (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         )
         expected = {
-            "PER_RUN_TOKEN_BUDGET": "${PER_RUN_TOKEN_BUDGET:-100000}",
-            "DAILY_TOKEN_BUDGET": "${DAILY_TOKEN_BUDGET:-100000}",
+            "CHARACTER_CONSISTENCY_STAGE_TOKEN_BUDGET": "${CHARACTER_CONSISTENCY_STAGE_TOKEN_BUDGET:-150000}",
+            "PER_RUN_TOKEN_BUDGET": "${PER_RUN_TOKEN_BUDGET:-200000}",
+            "DAILY_TOKEN_BUDGET": "${DAILY_TOKEN_BUDGET:-600000}",
         }
         for service_name in ("api", "worker"):
             environment = compose["services"][service_name]["environment"]
             self.assertEqual(expected, {key: environment.get(key) for key in expected})
 
         example = (ROOT / ".env.example").read_text(encoding="utf-8")
-        self.assertIn("DAILY_TOKEN_BUDGET=100000", example)
-        self.assertIn("PER_RUN_TOKEN_BUDGET=100000", example)
+        self.assertIn("CHARACTER_CONSISTENCY_STAGE_TOKEN_BUDGET=150000", example)
+        self.assertIn("DAILY_TOKEN_BUDGET=600000", example)
+        self.assertIn("PER_RUN_TOKEN_BUDGET=200000", example)
 
     def test_compose_passes_authentication_boundary_to_api_and_worker(self):
         compose = yaml.safe_load(

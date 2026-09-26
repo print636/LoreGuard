@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  describeCombinedReviewStatus, describeModelStatus, describeRepairStatus,
+  describeCharacterReviewStage, describeCombinedReviewStatus, describeModelStatus, describeRepairStatus,
   describeReviewAgentStatus,
 } from '../src/modelStatus.ts';
 
@@ -56,7 +56,9 @@ function withAgent(overrides={}) {
 test('combined review coverage requires the character stage to complete on frozen input', () => {
   const completeCharacter = {
     enabled:true, outcome:'completed', reason_code:'completed',
-    snapshot_bound:true, material_coverage:'full',
+    snapshot_bound:true, material_coverage:'complete',
+    counts:{planned_chunks:2, model_called_chunks:2, model_completed_chunks:2,
+      model_uncalled_chunks:0, model_incomplete_chunks:0},
   };
   assert.equal(
     describeCombinedReviewStatus(complete, completeCharacter).coverage,
@@ -66,9 +68,14 @@ test('combined review coverage requires the character stage to complete on froze
     describeCombinedReviewStatus(complete, completeCharacter).label,
     /角色审查完整/,
   );
+  assert.match(
+    describeCombinedReviewStatus(complete, completeCharacter).counts,
+    /角色主抽取分节：计划 2.*完成 2.*未调用 0/,
+  );
 
   for (const character of [
-    {enabled:true, outcome:'partial', reason_code:'bounded_partial', snapshot_bound:true},
+    {enabled:true, outcome:'partial', reason_code:'bounded_partial', snapshot_bound:true,
+      material_coverage:'partial'},
     {enabled:true, outcome:'degraded', reason_code:'model_stage_unavailable', snapshot_bound:true},
     {enabled:true, outcome:'skipped', reason_code:'run_token_budget', snapshot_bound:true},
     {enabled:false, outcome:'disabled', reason_code:'feature_disabled', snapshot_bound:true},
@@ -78,6 +85,78 @@ test('combined review coverage requires the character stage to complete on froze
     assert.match(result.label, /角色审查/);
     assert.match(result.emptyCaveat, /不能证明没有角色/);
   }
+});
+
+test('character coverage fails closed on contradictory or missing completion proof', () => {
+  const base = {enabled:true, outcome:'completed', reason_code:'completed',
+    snapshot_bound:true, material_coverage:'complete'};
+  const completeCounts = {planned_chunks:2, model_called_chunks:2,
+    model_completed_chunks:2, model_uncalled_chunks:0, model_incomplete_chunks:0};
+  for (const character of [
+    {...base, material_coverage:'partial'},
+    {...base, material_coverage:undefined},
+    {...base, material_coverage:'full'},
+    {...base, snapshot_bound:false},
+    {...base, enabled:false},
+    {...base, counts:{...completeCounts, model_completed_chunks:1,
+      model_incomplete_chunks:1}},
+    {...base, counts:{...completeCounts, model_uncalled_chunks:1}},
+    {...base, counts:{...completeCounts, model_called_chunks:undefined}},
+    {...base, counts:{planned_chunks:0, model_called_chunks:0,
+      model_completed_chunks:0, model_uncalled_chunks:0, model_incomplete_chunks:0}},
+  ]) {
+    const stage = describeCharacterReviewStage(character);
+    const combined = describeCombinedReviewStatus(complete, character);
+    assert.equal(stage.coverage, 'unknown');
+    assert.equal(combined.coverage, 'unknown');
+    assert.doesNotMatch(combined.label, /完整/);
+    assert.match(combined.emptyCaveat, /不能证明没有角色/);
+  }
+});
+
+test('older complete diagnostics keep the coverage claim but do not invent chunk numbers', () => {
+  const stage = describeCharacterReviewStage({enabled:true, outcome:'completed',
+    snapshot_bound:true, material_coverage:'complete'});
+  assert.equal(stage.coverage, 'full');
+  assert.match(stage.counts, /覆盖数未提供/);
+  assert.doesNotMatch(stage.counts, /完成 \d+\/\d+/);
+});
+
+test('partial character stage reports model-call coverage and only names budget when evidenced', () => {
+  const partial = {enabled:true, outcome:'partial', reason_code:'bounded_partial',
+    snapshot_bound:true, material_coverage:'partial',
+    counts:{planned_chunks:7, model_called_chunks:6, model_completed_chunks:6,
+      model_uncalled_chunks:1, model_incomplete_chunks:1}};
+  const budget = describeCombinedReviewStatus(complete, {
+    ...partial, reason_counts:{token_budget:1, source_formal:2},
+  });
+  assert.equal(budget.coverage, 'partial');
+  assert.match(budget.counts, /计划 7.*调用模型 6.*完成 6.*未完成 1.*未调用 1/);
+  assert.match(budget.detail, /Token 预算门控.*核对预算后重新发起校验/);
+  assert.doesNotMatch(budget.detail, /bounded_partial/);
+
+  const generic = describeCombinedReviewStatus(complete, partial);
+  assert.equal(generic.coverage, 'partial');
+  assert.match(generic.detail, /部分冻结材料尚未完成/);
+  assert.doesNotMatch(generic.detail, /Token 预算|bounded_partial/);
+
+  const legacy = describeCharacterReviewStage({...partial, counts:undefined});
+  assert.equal(legacy.coverage, 'partial');
+  assert.match(legacy.counts, /覆盖数未提供/);
+  const invalidBudget = describeCharacterReviewStage({...partial,
+    reason_counts:{token_budget:'1'}});
+  assert.doesNotMatch(invalidBudget.detail, /Token 预算门控/);
+});
+
+test('completed task status does not erase a partial character outcome', () => {
+  const partial = describeCharacterReviewStage({enabled:true, outcome:'partial',
+    reason_code:'bounded_partial', snapshot_bound:true, material_coverage:'partial',
+    counts:{planned_chunks:7, model_called_chunks:6, model_completed_chunks:6,
+      model_uncalled_chunks:1, model_incomplete_chunks:1},
+    reason_counts:{token_budget:1},
+  });
+  assert.equal(partial.coverage, 'partial');
+  assert.match(partial.emptyCaveat, /不能证明没有角色/);
 });
 
 test('missing character diagnostics cannot produce a clean zero-result message', () => {

@@ -5561,8 +5561,9 @@ def test_sensitivity_visibility_is_monotonic_without_upgrading_certainty():
 def test_default_flag_is_off_and_limits_are_internally_bounded():
     defaults = Settings(_env_file=None)
     assert defaults.enable_character_consistency is False
-    assert defaults.per_run_token_budget == 100_000
-    assert defaults.character_consistency_stage_token_budget == 60_000
+    assert defaults.per_run_token_budget == 200_000
+    assert defaults.daily_token_budget == 600_000
+    assert defaults.character_consistency_stage_token_budget == 150_000
     assert (
         defaults.per_run_token_budget
         > defaults.character_consistency_stage_token_budget

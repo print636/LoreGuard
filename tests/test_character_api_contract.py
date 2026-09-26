@@ -446,6 +446,97 @@ def test_character_roster_baseline_cutover_keeps_historical_confirmed_trait():
     ]
 
 
+_COMPLETE_PRIMARY_CHUNK_COUNTS = {
+    "planned_chunks": 3,
+    "processed_chunks": 3,
+    "model_called_chunks": 3,
+    "model_completed_chunks": 3,
+    "model_uncalled_chunks": 0,
+    "model_incomplete_chunks": 0,
+}
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected"),
+    [
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete"}, "full"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": _COMPLETE_PRIMARY_CHUNK_COUNTS}, "full"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete", "counts": {}}, "full"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": {key: 0 for key in _COMPLETE_PRIMARY_CHUNK_COUNTS}}, "unknown"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": {"planned_chunks": 0, "processed_chunks": 0}}, "unknown"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": {"planned_chunks": 3, "processed_chunks": 3}}, "full"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": {**_COMPLETE_PRIMARY_CHUNK_COUNTS,
+                     "model_called_chunks": 2, "model_completed_chunks": 2,
+                     "model_uncalled_chunks": 1,
+                     "model_incomplete_chunks": 1}}, "partial"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": {**_COMPLETE_PRIMARY_CHUNK_COUNTS,
+                     "model_completed_chunks": 2,
+                     "model_incomplete_chunks": 1}}, "partial"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": {**_COMPLETE_PRIMARY_CHUNK_COUNTS,
+                     "model_uncalled_chunks": 1}}, "unknown"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": {key: value for key, value in _COMPLETE_PRIMARY_CHUNK_COUNTS.items()
+                     if key != "model_incomplete_chunks"}}, "unknown"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": {**_COMPLETE_PRIMARY_CHUNK_COUNTS,
+                     "model_called_chunks": True}}, "unknown"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete", "counts": []}, "unknown"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": {"planned_chunks": 3, "processed_chunks": 2}}, "partial"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "complete",
+          "counts": {"planned_chunks": 3, "processed_chunks": 4}}, "unknown"),
+        ({"outcome": "completed", "snapshot_bound": True,
+          "material_coverage": "partial"}, "partial"),
+        ({"outcome": "completed", "snapshot_bound": False,
+          "material_coverage": "complete"}, "unknown"),
+        ({"outcome": "completed", "material_coverage": "complete"}, "unknown"),
+        ({"outcome": "completed", "snapshot_bound": True}, "unknown"),
+        ({"outcome": "partial"}, "partial"),
+    ],
+)
+def test_character_roster_full_coverage_requires_bound_complete_snapshot(stage, expected):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            db.add(
+                AnalysisDiagnosticRow(
+                    run_id=run["id"],
+                    payload={"character_consistency": stage},
+                )
+            )
+            db.commit()
+        response = client.get(f"/api/v1/projects/{project['id']}/characters")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["source_run_id"] == run["id"]
+    assert body["model_coverage"] == expected
+    if expected != "full":
+        assert "完整" not in body["coverage_detail"]
+
+
 def test_replaced_source_marks_pending_candidate_stale_and_blocks_confirmation():
     with TestClient(app) as client:
         project, document = _project_and_document(client)

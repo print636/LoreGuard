@@ -1,11 +1,13 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError } from "../../api/client";
 import EvidenceList from "./EvidenceList";
-import { canCreateNewAxis, previewAxisPolarity, selectedProjectAxis, validateAxisDraft, validateAxisPositiveProposition } from "./axisReview";
+import TargetEvidencePreview from "./TargetEvidencePreview";
+import { canCreateNewAxis, confirmedAxisPolarity, previewAxisPolarity, selectedProjectAxis, validateAxisDraft, validateAxisPositiveProposition } from "./axisReview";
 import { advanceReviewScope, isCurrentReviewRequest } from "./reviewScope";
 import {
   candidateOriginNames,
   candidateDecisionLabel,
+  candidateDisplayStatement,
   candidateReviewState,
   candidateStatusNames,
   characterDimensionNames,
@@ -62,10 +64,10 @@ type CandidateReviewProps = {
 };
 
 const polarityNames: Record<NonNullable<ProfileCandidate["polarity"]>, string> = {
-  positive: "正向",
-  negative: "反向",
-  neutral: "中性",
-  unclear: "方向不明",
+  positive: "positive（相对模型标签的正向）",
+  negative: "negative（相对模型标签的反向）",
+  neutral: "neutral（无方向）",
+  unclear: "unclear（未判定）",
 };
 
 function axisCreateError(error: unknown): string {
@@ -229,6 +231,7 @@ export default function CandidateReview({
   const confirmedAxis = selected?.approved_axis_id
     ? selectedProjectAxis(axes, selected.approved_axis_id)
     : null;
+  const confirmedMappedPolarity = selected ? confirmedAxisPolarity(selected, confirmedAxis) : null;
   const axisDraft = validateAxisDraft(axisName, axisDefinition, axisPositiveProposition);
   const canCreateAxis = canCreateNewAxis({
     loaded: axisLoaded,
@@ -414,7 +417,7 @@ export default function CandidateReview({
                       {characterDimensionNames[candidate.dimension]} ·{" "}
                       {candidateStatusNames[candidate.status]}
                     </span>
-                    <b>{candidate.statement}</b>
+                    <b>{candidateDisplayStatement(candidate)}</b>
                     <small>{Math.round(candidate.confidence * 100)}% 置信度</small>
                   </a>
                 </li>
@@ -463,62 +466,27 @@ export default function CandidateReview({
                   <span>{candidateOriginNames[selected.origin]}</span>
                   <strong>{candidateStatusNames[selected.status]}</strong>
                 </div>
-                <h3 ref={detailTitleRef} tabIndex={-1}>{selected.statement}</h3>
-                <p>{selected.rationale}</p>
-                <ul className="characterScopeList" aria-label="适用作用域与情境">
-                  {selected.contexts.map((context) => (
-                    <li key={`context:${context}`}>情境：{context}</li>
-                  ))}
-                  {selected.scopes.map((scope) => (
-                    <li key={scope.scope_id}>{scope.label}</li>
-                  ))}
-                </ul>
+                <h3 ref={detailTitleRef} tabIndex={-1}>{candidateDisplayStatement(selected)}</h3>
+                <p>这是模型给出的待核对归纳，不是已成立的角色设定。</p>
               </header>
 
-              <section className="candidateTraitMetadata" aria-label="原始特征与权威范围">
-                <dl>
-                  <div><dt>模型原始标签</dt><dd>{selected.model_trait_key || "未提供"}</dd></div>
-                  <div><dt>相对方向</dt><dd>{selected.polarity ? polarityNames[selected.polarity] : "未提供"}</dd></div>
-                  <div><dt>对象限定</dt><dd>{selected.comparison_key || "无对象限定"}</dd></div>
-                  <div><dt>资料权威</dt><dd>{selected.authority_tier === "core_canon" ? "核心设定" : selected.authority_tier === "formal_record" ? "正式资料" : "未提供"}</dd></div>
-                  <div>
-                    <dt>发布范围</dt>
-                    <dd>{selected.valid_from_release_ordinal === null && selected.valid_until_release_ordinal === null
-                      ? "未限定发布序号"
-                      : `${selected.valid_from_release_ordinal ?? "起点不限"} 至 ${selected.valid_until_release_ordinal ?? "后续不限"}`}</dd>
-                  </div>
-                  {selected.dimension === "core_personality" && (
-                    <div>
-                      <dt>作者批准轴</dt>
-                      <dd>{selected.approved_axis_id
-                        ? confirmedAxis
-                          ? `${confirmedAxis.display_name} · v${selected.approved_axis_version}`
-                          : `已绑定 · v${selected.approved_axis_version}`
-                        : selected.status === "confirmed"
-                          ? "未绑定作者轴"
-                          : "尚未绑定"}</dd>
-                    </div>
-                  )}
-                  {selected.dimension === "core_personality" && selected.approved_axis_id && (
-                    <div>
-                      <dt>方向审核</dt>
-                      <dd>{selected.axis_alignment
-                        ? `${selected.axis_alignment === "same" ? "同向" : "反向"} · 轴方向${selected.axis_polarity === "positive" ? "正向" : "反向"}`
-                        : "待作者补认，暂不作同轴方向判定"}</dd>
-                    </div>
-                  )}
-                </dl>
-                <p>模型标签只是归纳线索；正式比较轴需要作者根据原文证据确认。</p>
-              </section>
+              <TargetEvidencePreview candidate={selected} />
 
-              {selected.limitations.length > 0 && (
-                <section className="candidateLimitations">
-                  <h4>判断边界</h4>
+              <section className="candidateReviewConditions" aria-label="适用条件与例外">
+                <h4>适用条件与例外</h4>
+                {selected.contexts.length || selected.scopes.length || selected.limitations.length ||
+                  selected.valid_from_release_ordinal !== null || selected.valid_until_release_ordinal !== null ? (
                   <ul>
-                    {selected.limitations.map((item, index) => <li key={index}>{item}</li>)}
+                    {selected.contexts.map((context) => <li key={`context:${context}`}><b>情境</b>{context}</li>)}
+                    {selected.scopes.map((scope) => <li key={`scope:${scope.scope_id}`}><b>故事范围</b>{scope.label}</li>)}
+                    {selected.valid_from_release_ordinal !== null || selected.valid_until_release_ordinal !== null ? (
+                      <li><b>版本序号</b>{selected.valid_from_release_ordinal ?? "起点未标注"} 至 {selected.valid_until_release_ordinal ?? "终点未标注"}</li>
+                    ) : null}
+                    {selected.limitations.map((item, index) => <li key={`limit:${index}`}><b>模型提示的边界</b>{item}</li>)}
                   </ul>
-                </section>
-              )}
+                ) : <p>模型未给出明确适用条件；这不表示该行为在所有版本和情境下都成立。</p>}
+                <p>请以原文核对成长阶段、保密任务、疾病等例外，不要把上下文省略后确认成永久性格。</p>
+              </section>
 
               <EvidenceList
                 title="支持这条归纳的证据"
@@ -535,6 +503,45 @@ export default function CandidateReview({
                 tone="contrary"
                 candidateEvidence
               />
+
+              <section className="candidateTraitMetadata" aria-label="原始特征与权威范围">
+                <dl>
+                  <div><dt>模型原始标签</dt><dd>{selected.model_trait_key || "未提供"}</dd></div>
+                  <div><dt>模型内部方向码</dt><dd>{selected.polarity ? polarityNames[selected.polarity] : "未提供"}</dd></div>
+                  <div><dt>对象限定</dt><dd>{selected.comparison_key || "无对象限定"}</dd></div>
+                  <div><dt>资料权威</dt><dd>{selected.authority_tier === "core_canon" ? "核心设定" : selected.authority_tier === "formal_record" ? "正式资料" : "未提供"}</dd></div>
+                  <div>
+                    <dt>发布范围</dt>
+                    <dd>{selected.valid_from_release_ordinal === null && selected.valid_until_release_ordinal === null
+                      ? "未标注版本边界（不等于永久有效）"
+                      : `${selected.valid_from_release_ordinal ?? "起点不限"} 至 ${selected.valid_until_release_ordinal ?? "后续不限"}`}</dd>
+                  </div>
+                  {selected.dimension === "core_personality" && (
+                    <div>
+                      <dt>作者批准轴</dt>
+                      <dd>{selected.approved_axis_id
+                        ? confirmedAxis?.version === selected.approved_axis_version
+                          ? `${confirmedAxis.display_name} · v${selected.approved_axis_version}`
+                          : `已绑定 · v${selected.approved_axis_version}（当前轴版本未核对）`
+                        : selected.status === "confirmed"
+                          ? "未绑定作者轴"
+                          : "尚未绑定"}</dd>
+                    </div>
+                  )}
+                  {selected.dimension === "core_personality" && selected.approved_axis_id && (
+                    <div>
+                      <dt>作者方向映射</dt>
+                      <dd>{selected.axis_alignment
+                        ? confirmedMappedPolarity
+                          ? `${selected.axis_alignment === "same" ? "同向" : "反向"}；按已确认映射，作者比较句${confirmedMappedPolarity === "positive" ? "成立" : "不成立"}（非新稿事实复核）`
+                          : "已记录方向；当前轴命题或冻结证据不可核对，暂不换算成立/不成立"
+                        : "待作者补认，暂不作同轴方向判定"}</dd>
+                    </div>
+                  )}
+                </dl>
+                <p>模型解释：{selected.rationale}</p>
+                <p>positive / negative 仅相对模型原始标签，不表示行为好坏，也不能按“不会”等字眼自动反转。正式比较轴须由作者核对证据后定义。</p>
+              </section>
 
               <section className="candidateSourceNeighbors" aria-labelledby={`candidate-source-neighbors-${selected.id}`}>
                 <div className="characterSubhead">
@@ -674,7 +681,8 @@ export default function CandidateReview({
                         {selectedAxis && (
                           <div className="candidateAxisDefinition">
                             <b>{selectedAxis.display_name}</b><p>{selectedAxis.definition}</p>
-                            <p><strong>正向命题：</strong>{selectedAxis.positive_proposition || "尚未由作者定义"}</p>
+                            <p><strong>作者比较句（轴正向）：</strong>{selectedAxis.positive_proposition || "尚未由作者定义"}</p>
+                            <p>“正向”只是作者定义的比较坐标，不是好坏评价，也不代表这句话已在剧情中发生。</p>
                           </div>
                         )}
                         {selectedAxis && axisNeedsRecheck && (
@@ -778,13 +786,13 @@ export default function CandidateReview({
                         className="candidateAxisAlignment"
                         aria-describedby={alignmentError ? `candidate-axis-alignment-error-${selected.id}` : undefined}
                       >
-                        <legend>这条候选与作者轴正向命题的方向关系</legend>
-                        <p>候选原标签：{selected.model_trait_key || "未提供"}；原方向：{selected.polarity ? polarityNames[selected.polarity] : "未提供"}。轴正向命题：{selectedAxis.positive_proposition}。请核对上方原文证据后选择；模型不能替作者决定。</p>
-                        <label><input type="radio" name={`candidate-alignment-${selected.id}`} checked={alignmentChoice === "same"} onChange={() => { setAlignmentChoice("same"); setAlignmentError(""); }} />同向：原标签的正向含义与轴正向命题一致</label>
-                        <label><input type="radio" name={`candidate-alignment-${selected.id}`} checked={alignmentChoice === "opposite"} onChange={() => { setAlignmentChoice("opposite"); setAlignmentError(""); }} />反向：原标签的正向含义与轴正向命题相反</label>
+                        <legend>核对模型标签与作者比较句的方向</legend>
+                        <p>模型内部标签：{selected.model_trait_key || "未提供"}；模型方向码：{selected.polarity ? polarityNames[selected.polarity] : "未提供"}。作者比较句：{selectedAxis.positive_proposition}。请按原文判断两种比较坐标是否同向，不要根据否定词自动选择。</p>
+                        <label><input type="radio" name={`candidate-alignment-${selected.id}`} checked={alignmentChoice === "same"} onChange={() => { setAlignmentChoice("same"); setAlignmentError(""); }} />同向：模型标签的正向状态与作者比较句同向</label>
+                        <label><input type="radio" name={`candidate-alignment-${selected.id}`} checked={alignmentChoice === "opposite"} onChange={() => { setAlignmentChoice("opposite"); setAlignmentError(""); }} />反向：模型标签的正向状态与作者比较句相反</label>
                         <label><input type="radio" name={`candidate-alignment-${selected.id}`} checked={alignmentChoice === "uncertain"} onChange={() => { setAlignmentChoice("uncertain"); setAlignmentError(""); }} />暂不确定，保留待审</label>
                         {previewAxisPolarity(selected.polarity, alignmentChoice) && (
-                          <p role="status">方向预览：这条候选相对轴正向命题表示“{previewAxisPolarity(selected.polarity, alignmentChoice) === "positive" ? "命题成立" : "命题不成立"}”。这只是按你的选择换算方向，不是系统再次验证原文。</p>
+                          <p role="status">映射预览（未经事实复核）：若采用你的方向选择，这条候选表示“作者比较句{previewAxisPolarity(selected.polarity, alignmentChoice) === "positive" ? "成立" : "不成立"}”。这里只做方向换算，不代表模型或系统验证了原文判断。</p>
                         )}
                         {alignmentError && <p id={`candidate-axis-alignment-error-${selected.id}`} className="candidateFieldError" role="alert">{alignmentError}</p>}
                       </fieldset>
