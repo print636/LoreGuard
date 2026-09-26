@@ -386,6 +386,23 @@ export function isConfirmed(document: GuidedDocument): boolean {
   return document.narrative_context?.resolution_state === "confirmed";
 }
 
+/**
+ * Changing a live chapter from draft/review to published is an author release
+ * decision, even if its current context is only inferred or unresolved.
+ * Imported historical material can still be classified independently.
+ */
+export function requiresDedicatedChapterPublish(
+  documentRole: DocumentRole,
+  currentContext: NarrativeContext | null | undefined,
+  requestedRole: DocumentRole,
+  requestedStatus: PublicationStatus,
+): boolean {
+  return documentRole === "chapter" &&
+    (currentContext?.publication_status === "draft" || currentContext?.publication_status === "in_review") &&
+    requestedRole === "chapter" &&
+    requestedStatus === "published";
+}
+
 export function isDraftDocument(document: GuidedDocument): boolean {
   const status = document.narrative_context?.publication_status;
   return (

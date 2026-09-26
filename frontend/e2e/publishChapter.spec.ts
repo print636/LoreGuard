@@ -162,6 +162,7 @@ test("待确认章节不能发布，导入既有历史仍可独立标注已发�
   await page.goto(`/app/projects/${projectId}/documents`);
   await expect(page.getByRole("button", { name: "作者定稿并发布…" })).toBeDisabled();
   await expect(page.locator(".contextPublishAction")).toContainText("请先确认这份章节");
+  await expect(page.locator(".contextWorkbench").getByLabel("发布状态").getByRole("option", { name: "已发布" })).toHaveCount(0);
   state.role = "reference";
   state.context = { ...state.context, resolution_state: "confirmed", publication_status: "published" };
   await page.reload();

@@ -10,6 +10,7 @@ import {
   narrativeContextPayload,
   normalizeNarrativeContextInference,
   publicationStatuses,
+  requiresDedicatedChapterPublish,
   responseBelongsToSelectedDocument,
   type GuidedDocument,
   type NarrativeContext,
@@ -291,13 +292,12 @@ export default function NarrativeContextWorkbench({
     ) return;
     const document = selected;
     const draftSnapshot = { ...draft };
-    if (
-      document.document_role === "chapter" &&
-      remoteContext?.resolution_state === "confirmed" &&
-      (remoteContext.publication_status === "draft" || remoteContext.publication_status === "in_review") &&
-      draftSnapshot.documentRole === "chapter" &&
-      draftSnapshot.publicationStatus === "published"
-    ) {
+    if (requiresDedicatedChapterPublish(
+      document.document_role,
+      remoteContext || document.narrative_context,
+      draftSnapshot.documentRole,
+      draftSnapshot.publicationStatus,
+    )) {
       setError("当前草稿不能通过普通保存直接转成已发布。请先保存其他改动，再使用下方“作者定稿并发布”入口确认。");
       requestAnimationFrame(() => errorRef.current?.focus());
       return;
@@ -607,12 +607,11 @@ export default function NarrativeContextWorkbench({
                     onChange={(event) => update("publicationStatus", event.target.value as NarrativeContextDraft["publicationStatus"])}
                   >
                     {publicationStatuses
-                      .filter(([value]) => !(
-                        value === "published" &&
-                        draft.documentRole === "chapter" &&
-                        selected.document_role === "chapter" &&
-                        remoteContext?.resolution_state === "confirmed" &&
-                        (remoteContext.publication_status === "draft" || remoteContext.publication_status === "in_review")
+                      .filter(([value]) => !requiresDedicatedChapterPublish(
+                        selected.document_role,
+                        remoteContext || selected.narrative_context,
+                        draft.documentRole,
+                        value,
                       ))
                       .map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                   </select>

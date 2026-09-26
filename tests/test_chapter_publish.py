@@ -279,6 +279,147 @@ def test_generic_revision_and_replacement_cannot_publish_existing_pending_chapte
     assert [row["id"] for row in still_active] == [chapter["id"]]
 
 
+def test_unconfirmed_draft_cannot_publish_via_generic_context_revision():
+    with TestClient(app) as client, _quiet_writes():
+        project_id = _project(client)
+        chapter = _chapter(
+            client, project_id, name="unconfirmed.md", confirmed=False,
+        )
+        revision_url = (
+            f"/api/v1/projects/{project_id}/documents/{chapter['id']}"
+            "/narrative-context/revisions"
+        )
+        direct = client.post(
+            revision_url,
+            json={
+                "expected_revision": 1,
+                "resolution_state": "confirmed",
+                "publication_status": "published",
+            },
+        )
+        assert direct.status_code == 409, direct.text
+        assert direct.json()["detail"]["code"] == "chapter_publish_endpoint_required"
+
+        # Reclassifying the unresolved draft does not erase its history.
+        reclassified = client.post(
+            revision_url,
+            json={
+                "expected_revision": 1,
+                "document_role": "reference",
+                "resolution_state": "confirmed",
+                "publication_status": "unknown",
+            },
+        )
+        assert reclassified.status_code == 201, reclassified.text
+        switched_back = client.post(
+            revision_url,
+            json={
+                "expected_revision": 2,
+                "document_role": "chapter",
+                "resolution_state": "confirmed",
+                "publication_status": "published",
+            },
+        )
+        assert switched_back.status_code == 409, switched_back.text
+        assert switched_back.json()["detail"]["code"] == "chapter_publish_endpoint_required"
+
+        confirmed_draft = client.post(
+            revision_url,
+            json={
+                "expected_revision": 2,
+                "document_role": "chapter",
+                "resolution_state": "confirmed",
+                "publication_status": "draft",
+            },
+        )
+        assert confirmed_draft.status_code == 201, confirmed_draft.text
+        published = _publish(
+            client, project_id, chapter,
+            revision=confirmed_draft.json()["revision"],
+        )
+        assert published.status_code == 201, published.text
+
+
+def test_same_name_replacement_cannot_publish_after_role_or_status_detour():
+    with TestClient(app) as client, _quiet_writes():
+        project_id = _project(client)
+        chapter = _chapter(client, project_id, name="chapter.md")
+        revision_url = (
+            f"/api/v1/projects/{project_id}/documents/{chapter['id']}"
+            "/narrative-context/revisions"
+        )
+        reclassified = client.post(
+            revision_url,
+            json={
+                "expected_revision": 1,
+                "document_role": "reference",
+                "resolution_state": "confirmed",
+                "publication_status": "published",
+            },
+        )
+        assert reclassified.status_code == 201, reclassified.text
+
+        bypass = client.post(
+            f"/api/v1/projects/{project_id}/documents/text",
+            json={
+                "name": "chapter.md",
+                "content": "未经作者定稿的新版本。",
+                "replace_document_id": chapter["id"],
+                "document_role": "chapter",
+                "narrative_context": {
+                    "resolution_state": "confirmed",
+                    "publication_status": "published",
+                },
+            },
+        )
+        assert bypass.status_code == 409, bypass.text
+        assert bypass.json()["detail"]["code"] == "chapter_publish_endpoint_required"
+        active = client.get(f"/api/v1/projects/{project_id}/documents").json()
+        assert [row["id"] for row in active] == [chapter["id"]]
+
+        # A draft replacement still works, followed by the explicit action.
+        draft = client.post(
+            f"/api/v1/projects/{project_id}/documents/text",
+            json={
+                "name": "chapter.md",
+                "content": "作者正在修订的新版本。",
+                "replace_document_id": chapter["id"],
+                "document_role": "chapter",
+                "narrative_context": {
+                    "resolution_state": "confirmed",
+                    "publication_status": "draft",
+                },
+            },
+        )
+        assert draft.status_code == 201, draft.text
+        assert _publish(client, project_id, draft.json()).status_code == 201
+
+
+def test_published_chapter_replacement_with_new_content_requires_republication():
+    with TestClient(app) as client, _quiet_writes():
+        project_id = _project(client)
+        old = _chapter(
+            client, project_id, name="existing-history.md", publication="published",
+        )
+        bypass = client.post(
+            f"/api/v1/projects/{project_id}/documents/text",
+            json={
+                "name": "existing-history.md",
+                "content": "新写的章节内容，尚未由作者定稿。",
+                "replace_document_id": old["id"],
+                "document_role": "chapter",
+                "narrative_context": {
+                    "resolution_state": "confirmed",
+                    "publication_status": "published",
+                },
+            },
+        )
+        assert bypass.status_code == 409, bypass.text
+        assert bypass.json()["detail"]["code"] == "chapter_publish_endpoint_required"
+        active = client.get(f"/api/v1/projects/{project_id}/documents").json()
+        assert [row["id"] for row in active] == [old["id"]]
+
+
 def test_importing_existing_published_history_is_still_allowed():
     with TestClient(app) as client, _quiet_writes():
         project_id = _project(client)

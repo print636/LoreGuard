@@ -15,6 +15,7 @@ import {
   narrativeContextPayload,
   normalizeNarrativeContextInference,
   responseBelongsToSelectedDocument,
+  requiresDedicatedChapterPublish,
   selectedDraftsStillCurrent,
 } from "../src/features/workflow/guidedReview.ts";
 
@@ -344,6 +345,26 @@ test("analysis requests keep baseline targets server-derived and draft targets e
       no_formal_context_expected: true,
     },
   );
+});
+
+test("unconfirmed and inferred draft chapters cannot bypass the explicit author publication step", () => {
+  for (const resolution of ["unresolved", "inferred", "confirmed"]) {
+    assert.equal(requiresDedicatedChapterPublish(
+      "chapter", { resolution_state: resolution, publication_status: "draft" }, "chapter", "published",
+    ), true);
+    assert.equal(requiresDedicatedChapterPublish(
+      "chapter", { resolution_state: resolution, publication_status: "in_review" }, "chapter", "published",
+    ), true);
+  }
+  assert.equal(requiresDedicatedChapterPublish(
+    "chapter", { resolution_state: "confirmed", publication_status: "draft" }, "chapter", "draft",
+  ), false);
+  assert.equal(requiresDedicatedChapterPublish(
+    "reference", { resolution_state: "confirmed", publication_status: "published" }, "chapter", "published",
+  ), false);
+  assert.equal(requiresDedicatedChapterPublish(
+    "chapter", { resolution_state: "confirmed", publication_status: "unknown" }, "chapter", "published",
+  ), false);
 });
 
 test("draft-only entry fails closed for potential formal context but permits confirmed retirement", () => {

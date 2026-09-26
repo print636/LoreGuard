@@ -409,16 +409,19 @@ def _begin_project_write_transaction(db) -> None:
         db.connection().exec_driver_sql("BEGIN IMMEDIATE")
 
 
-def _has_confirmed_draft_chapter_history(db, document_ids: list[str]) -> bool:
-    """Detect a pending chapter even after a later role/status correction."""
+def _has_draft_or_review_history(db, document_ids: list[str]) -> bool:
+    """A draft cannot become published through a later metadata correction.
+
+    Resolution and effective authority may change between revisions.  The
+    publication history is the durable signal, including an unresolved draft
+    that an author has not confirmed yet.
+    """
     if not document_ids:
         return False
     return db.scalar(
         select(DocumentNarrativeContextRevisionRow.id)
         .where(
             DocumentNarrativeContextRevisionRow.document_id.in_(document_ids),
-            DocumentNarrativeContextRevisionRow.resolution_state == "confirmed",
-            DocumentNarrativeContextRevisionRow.authority_tier == "draft",
             DocumentNarrativeContextRevisionRow.publication_status.in_(
                 ("draft", "in_review")
             ),
@@ -428,18 +431,17 @@ def _has_confirmed_draft_chapter_history(db, document_ids: list[str]) -> bool:
 
 
 def _reject_replacement_publish_bypass(
-    db,
     *,
     resolved_role: str,
     narrative_context: NarrativeContextInput | None,
-    superseded_document_ids: list[str],
+    version: int,
 ) -> None:
     if (
-        resolved_role == "chapter"
+        version > 1
+        and resolved_role == "chapter"
         and narrative_context is not None
         and narrative_context.resolution_state == "confirmed"
         and narrative_context.publication_status == "published"
-        and _has_confirmed_draft_chapter_history(db, superseded_document_ids)
     ):
         raise HTTPException(
             409,
@@ -2848,8 +2850,9 @@ def create_document_narrative_context_revision(
                 and latest.resolution_state == "confirmed"
                 and latest.publication_status == "published"
             )
-            if not already_published and _has_confirmed_draft_chapter_history(
-                db, [document_id]
+            if not already_published and (
+                document.version > 1
+                or _has_draft_or_review_history(db, [document_id])
             ):
                 raise HTTPException(
                     409,
@@ -3077,10 +3080,9 @@ def create_text_document(
             payload.story_scope,
         )
         _reject_replacement_publish_bypass(
-            db,
             resolved_role=document_role,
             narrative_context=payload.narrative_context,
-            superseded_document_ids=superseded,
+            version=version,
         )
         row = DocumentRow(project_id=project_id, name=payload.name, content=payload.content, version=version)
         try:
@@ -3254,10 +3256,9 @@ async def upload_document(
             story_scope,
         )
         _reject_replacement_publish_bypass(
-            db,
             resolved_role=resolved_role,
             narrative_context=parsed_narrative_context,
-            superseded_document_ids=superseded,
+            version=version,
         )
         row = DocumentRow(project_id=project_id, name=file.filename, content=content, version=version)
         try:
