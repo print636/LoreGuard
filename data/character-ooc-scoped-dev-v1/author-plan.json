@@ -19,7 +19,7 @@
       "comparison_key": "behavior_boundary:可识别病史",
       "applicability_scope": "面向不特定公众公开",
       "positive_proposition": "迟蘅面向不特定公众公开真实病人的姓名与病况前，会核对本人许可覆盖的具体内容与受众。",
-      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 3},
+      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 3, "source_quote": "核对本人许可覆盖的具体内容与受众"},
       "expected_direction_if_confirmed": "positive",
       "actual_candidate_id": null,
       "actual_axis_alignment": null
@@ -33,7 +33,7 @@
       "comparison_key": "value:未核实风向预报",
       "applicability_scope": "绿讯期间面向船民发布出航建议",
       "positive_proposition": "柳泛在绿讯期间面向船民发布未核实风向预报及出航建议时，会清楚标注尚未核实或待复测。",
-      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A02", "line": 5},
+      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A02", "line": 5, "source_quote": "清楚标注预报未核实或待复测"},
       "historical_support": [{"document_name": "03-published-history-v1.1.md", "fragment_id": "H01", "line": 2}],
       "expected_direction_if_confirmed": "positive",
       "actual_candidate_id": null,

@@ -41,17 +41,18 @@
     "scope": {"schema_version": 1, "timeline_key": "main", "release": {"key": "v1.2", "ordinal": 12}, "branch": {"path": ["main"]}}
   },
   "cases": [
-    {"case_id": "p01_two_real_patients", "draft_file": "drafts/01-two-real-patients.md"},
-    {"case_id": "p02_omitted_subject_announcements", "draft_file": "drafts/02-omitted-subject-announcements.md"},
-    {"case_id": "n03_fictional_patients", "draft_file": "drafts/03-fictional-patients.md"},
-    {"case_id": "n04_red_alert_private_channel", "draft_file": "drafts/04-red-alert-private-channel.md"},
-    {"case_id": "n05_do_not_combine_rows", "draft_file": "drafts/05-do-not-combine-rows.md"},
-    {"case_id": "n06_one_event_two_mentions", "draft_file": "drafts/06-one-event-two-mentions.md"},
-    {"case_id": "n07_other_actor_upload", "draft_file": "drafts/07-other-actor-upload.md"},
-    {"case_id": "n08_rehearsal_and_counterfactual", "draft_file": "drafts/08-rehearsal-and-counterfactual.md"},
-    {"case_id": "n09_published_growth_in_format", "draft_file": "drafts/09-published-growth-in-format.md"},
-    {"case_id": "u10_vague_consent", "draft_file": "drafts/10-vague-consent.md"}
+    {"case_id": "p01_two_real_patients", "draft_file": "drafts/01-two-real-patients.md", "axis_key": "medical_public_identifiable_history"},
+    {"case_id": "p02_omitted_subject_announcements", "draft_file": "drafts/02-omitted-subject-announcements.md", "axis_key": "unverified_public_forecast_uncertainty"},
+    {"case_id": "n03_fictional_patients", "draft_file": "drafts/03-fictional-patients.md", "axis_key": "medical_public_identifiable_history"},
+    {"case_id": "n04_red_alert_private_channel", "draft_file": "drafts/04-red-alert-private-channel.md", "axis_key": "unverified_public_forecast_uncertainty"},
+    {"case_id": "n05_do_not_combine_rows", "draft_file": "drafts/05-do-not-combine-rows.md", "axis_key": "unverified_public_forecast_uncertainty"},
+    {"case_id": "n06_one_event_two_mentions", "draft_file": "drafts/06-one-event-two-mentions.md", "axis_key": "medical_public_identifiable_history"},
+    {"case_id": "n07_other_actor_upload", "draft_file": "drafts/07-other-actor-upload.md", "axis_key": "medical_public_identifiable_history"},
+    {"case_id": "n08_rehearsal_and_counterfactual", "draft_file": "drafts/08-rehearsal-and-counterfactual.md", "axis_key": "unverified_public_forecast_uncertainty"},
+    {"case_id": "n09_published_growth_in_format", "draft_file": "drafts/09-published-growth-in-format.md", "axis_key": "unverified_public_forecast_uncertainty"},
+    {"case_id": "u10_vague_consent", "draft_file": "drafts/10-vague-consent.md", "axis_key": "medical_public_identifiable_history"}
   ],
   "author_plan_file": "author-plan.json",
+  "author_plan_sha256": "a788b6ac60ee355278a97d7c7a9fa508f182241abda86228bb178220b84624f0",
   "oracle_file": "oracle.json"
 }
