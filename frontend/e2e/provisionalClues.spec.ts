@@ -41,6 +41,7 @@ const issue = {
 type MockState = {
   clueFailures: number;
   clueResponse: unknown;
+  issueResponse?: unknown[];
   unexpected: string[];
   feedbackPosts: number;
   exportReads: number;
@@ -70,7 +71,7 @@ async function mockCompletedReport(page: Page, state: MockState) {
     else if (path === `/api/v1/projects/${projectId}/analysis-runs`) body = state.secondClueResponse ? [run, secondRun] : [run];
     else if (path === `/api/v1/analysis-runs/${runId}`) body = run;
     else if (path === `/api/v1/analysis-runs/${secondRunId}` && state.secondClueResponse) body = secondRun;
-    else if (path === `/api/v1/analysis-runs/${runId}/issues` || (state.secondClueResponse && path === `/api/v1/analysis-runs/${secondRunId}/issues`)) body = [issue];
+    else if (path === `/api/v1/analysis-runs/${runId}/issues` || (state.secondClueResponse && path === `/api/v1/analysis-runs/${secondRunId}/issues`)) body = state.issueResponse ?? [issue];
     else if (path === `/api/v1/issues/${issue.id}/feedback`) {
       if (route.request().method() === "POST") {
         state.feedbackPosts += 1;
@@ -162,6 +163,25 @@ test("pending clues remain a separate reading section and do not become formal i
     await clues.screenshot({ path: testInfo.outputPath("provisional-clues-375.png") });
     await page.screenshot({ path: "../artifacts/playwright/provisional-report-375.png", fullPage: true });
   }
+  expect(state.unexpected).toEqual([]);
+});
+
+test("zero formal issues with an unverified clue never reads as a clean pass", async ({ page }) => {
+  const state: MockState = {
+    clueFailures: 0, clueResponse: { items: [clue], truncated: false },
+    issueResponse: [], unexpected: [], feedbackPosts: 0, exportReads: 0,
+  };
+  await mockCompletedReport(page, state);
+  await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
+
+  const formalIssues = page.locator(".issues");
+  const clues = page.getByRole("region", { name: /待复核线索/ });
+  await expect(formalIssues.getByRole("heading", { name: "正式一致性问题 0" })).toBeVisible();
+  await expect(formalIssues).toContainText("另有 1 条待复核线索列于下方，未计入正式问题");
+  await expect(formalIssues).not.toContainText(clue.proposed_statement);
+  await expect(clues).toContainText(clue.proposed_statement);
+  await expect(page.locator(".railSummary")).toContainText("正式一致性问题");
+  await expect(page.locator(".railSummary")).not.toContainText("待复核线索");
   expect(state.unexpected).toEqual([]);
 });
 

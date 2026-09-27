@@ -192,6 +192,7 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "signal_full_line_echo_v2": (
                 settings.character_signal_full_line_prompt_v2
             ),
+            "scoped_axis_drift_v1": settings.character_scoped_axis_drift_v1,
             "signal_core_scope_v3": settings.character_signal_core_scope_prompt_v3,
             "signal_support_id_v4": settings.character_signal_support_id_v4,
             "signal_semantic_scope_v5": settings.character_signal_semantic_scope_v5,

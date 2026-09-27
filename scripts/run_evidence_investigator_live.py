@@ -355,6 +355,7 @@ _CHARACTER_CONSISTENCY_LIMIT_KEYS = frozenset(
     }
 )
 _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY = "signal_full_line_echo_v2"
+_CHARACTER_SCOPED_AXIS_DRIFT_KEY = "scoped_axis_drift_v1"
 _CHARACTER_SIGNAL_CORE_SCOPE_KEY = "signal_core_scope_v3"
 _CHARACTER_SIGNAL_SUPPORT_ID_KEY = "signal_support_id_v4"
 _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY = "signal_support_segmenter_version"
@@ -2982,6 +2983,7 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         or set(character_limits) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
+            | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
             _CHARACTER_CONSISTENCY_LIMIT_KEYS
@@ -3059,6 +3061,11 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         if type(variant) is not bool:
             return None
         safe_character_limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY] = variant
+    if _CHARACTER_SCOPED_AXIS_DRIFT_KEY in character_limits:
+        variant = character_limits[_CHARACTER_SCOPED_AXIS_DRIFT_KEY]
+        if type(variant) is not bool:
+            return None
+        safe_character_limits[_CHARACTER_SCOPED_AXIS_DRIFT_KEY] = variant
     if _CHARACTER_SIGNAL_CORE_SCOPE_KEY in character_limits:
         variant = character_limits[_CHARACTER_SIGNAL_CORE_SCOPE_KEY]
         if type(variant) is not bool or (

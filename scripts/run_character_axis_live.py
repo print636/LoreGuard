@@ -44,6 +44,7 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_CONSISTENCY_LIMIT_KEYS,
     _CHARACTER_SIGNAL_CORE_SCOPE_KEY,
     _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY,
+    _CHARACTER_SCOPED_AXIS_DRIFT_KEY,
     _CHARACTER_SIGNAL_SUPPORT_ID_KEY,
     _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY,
     _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION,
@@ -126,6 +127,7 @@ SAFE_REASON_KEYS = frozenset({
     "drift_release_unknown", "drift_release_inapplicable",
     "draft_source_excerpt_repaired",
     "observation_limit", "below_sensitivity_threshold", "baseline_limit",
+    "scoped_axis_review_disabled", "equivalent_approved_axis_baseline_collapsed",
 })
 SAFE_SIGNAL_SOURCE_KINDS = frozenset({
     "formal_character_profile", "published_history", "draft",
@@ -812,6 +814,7 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or set(limits) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
+            | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
             _CHARACTER_CONSISTENCY_LIMIT_KEYS
@@ -883,6 +886,11 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     if (
         _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY in limits
         and type(limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY]) is not bool
+    ):
+        return None
+    if (
+        _CHARACTER_SCOPED_AXIS_DRIFT_KEY in limits
+        and type(limits[_CHARACTER_SCOPED_AXIS_DRIFT_KEY]) is not bool
     ):
         return None
     if _CHARACTER_SIGNAL_CORE_SCOPE_KEY in limits and (

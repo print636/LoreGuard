@@ -2329,6 +2329,25 @@ def test_dev_report_projects_trace_outcome_and_verdict_to_fixed_enums(
     assert normal_case["review_verdict"] == "explained"
 
 
+def test_safe_case_trace_keeps_scoped_enums_without_source_or_model_text():
+    scoped = {
+        "observations": [
+            {"citation": "C01", "object_match": "same", "situation_match": "different"},
+            {"citation": "C02", "object_match": "same", "situation_match": "same"},
+        ],
+        "independent_events": "unclear",
+    }
+    safe = axis_live._safe_case_trace_summary({"scoped_axis_review": scoped})
+    assert safe["scoped_axis_review"] == scoped
+    assert "scoped_axis_review" not in axis_live._safe_case_trace_summary({
+        "scoped_axis_review": {
+            **scoped,
+            "observations": [{"citation": "sk-private-token", "object_match": "same",
+                              "situation_match": "same"}],
+        }
+    })
+
+
 @pytest.mark.parametrize(
     "failure_code", ["baseline_admission_failed", "candidate_review_failed"]
 )

@@ -276,6 +276,27 @@ class PreparedCharacterDrift(BaseModel):
     reason: str
 
 
+class ScopedObservationApplicability(BaseModel):
+    """Separate object/situation judgment for one frozen current observation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    citation: str = Field(pattern=r"^C[0-9]{2}$")
+    object_match: Literal["same", "different", "unclear"]
+    situation_match: Literal["same", "different", "unclear"]
+
+
+class ScopedAxisApplicability(BaseModel):
+    """Per-C author-scope review and whether multiple C are distinct events."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    observations: tuple[ScopedObservationApplicability, ...] = Field(
+        min_length=1, max_length=8
+    )
+    independent_events: Literal["yes", "no", "unclear", "not_applicable"]
+
+
 class ModelDriftDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -284,6 +305,7 @@ class ModelDriftDecision(BaseModel):
     ]
     explanation: str = Field(min_length=2, max_length=300)
     citations: tuple[str, ...] = Field(min_length=1, max_length=8)
+    scope_applicability: ScopedAxisApplicability | None = Field(default=None, exclude=True)
 
 
 _DECISION_ADAPTER = TypeAdapter(ModelDriftDecision)
@@ -343,25 +365,28 @@ CHARACTER_REVIEW_SYSTEM_PROMPT = """你是 LoreGuard 的角色一致性证据审
 """
 
 
-def prepare_character_drift(case: CharacterDriftCase) -> PreparedCharacterDrift:
-    baseline = case.baseline
-    if (
+CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT = CHARACTER_REVIEW_SYSTEM_PROMPT.replace(
+    "只返回一个 JSON 对象，且只能包含 verdict、explanation、citations：",
+    "只返回一个 JSON 对象，且必须且只能包含 verdict、explanation、citations、scope_applicability：",
+) + """
+对于已由作者批准、带对象和适用情境的价值观/行为边界轴，先判断每条 C 原文是否确属作者定义的对象与适用情境。`approved_axis_comparison_key`、`approved_axis_applicability_scope` 和正向命题只是作者定义，不证明新稿行为满足条件；模型填写的 trait_key、context、极性也不是证据。不能仅因出现同一个名词就认定是同一行为关系，不能把他人、假广播、引语、否定、假设或尚未发生的事归给该角色。
+scope_applicability 必须包含 observations 与 independent_events。observations 必须逐条覆盖每一个 C 编号，每条只能有 citation、object_match、situation_match；后两项各只能是 same、different、unclear。每一条 C 都要单独根据其原文判断对象关系及情境，不能将 C01 的对象与 C02 的情境拼成一次合格行为；不明选 unclear。independent_events 只能是 yes、no、unclear、not_applicable；只有需要两次行为且 C 确属不同时间/事件时才选 yes，同一事件的跨行复述选 no，无法判断选 unclear，单条 C 或明确陈述选 not_applicable。只有所依赖的每个 C 对象与情境均为 same，且所需行为确属独立事件，才可选择 contradicts；主 citations 必须覆盖每条 C。已有合理的历史成长、例外或临时原因时，应按 G/X 原文审查，不得自动定为冲突。回答不得改写剧情。
+"""
+
+
+def _is_scoped_approved_axis(baseline: ConfirmedTraitSnapshot) -> bool:
+    return (
         baseline.approved_axis_identity is not None
         and baseline.dimension in {"value", "behavior_boundary"}
-    ):
-        # The targeted binder has not yet proved that the draft names this
-        # exact object in the author's situation. A bound ID alone is not a
-        # safe comparison for an object-bearing principle.
-        return PreparedCharacterDrift(
-            id=case.id,
-            subtype=_subtype(baseline.dimension),
-            case=case,
-            matching_observations=(),
-            candidate_level="none",
-            reviewer_eligible=False,
-            deterministic_conflict=False,
-            reason="scoped_axis_target_binding_unavailable",
-        )
+    )
+
+
+def prepare_character_drift(case: CharacterDriftCase) -> PreparedCharacterDrift:
+    baseline = case.baseline
+    # A clean, server-bound target may now nominate a scoped-axis observation.
+    # Its author-defined object and situation are still *not* proven by the
+    # binding: the reviewer must assess both from the frozen C evidence before
+    # any formal conflict can be promoted.
     if baseline.approved_axis_identity is not None and not baseline.axis_direction_verified:
         return PreparedCharacterDrift(
             id=case.id,
@@ -540,7 +565,10 @@ def prepare_character_drift(case: CharacterDriftCase) -> PreparedCharacterDrift:
         case=case,
         matching_observations=opposed,
         candidate_level="possible",
-        reviewer_eligible=False,
+        # A single scoped-axis action is still not drift. Review it only so
+        # the author's object/situation can be checked before we show even a
+        # low-confidence hint; it cannot become a formal conflict below.
+        reviewer_eligible=_is_scoped_approved_axis(baseline),
         deterministic_conflict=False,
         reason="single_behavior_is_not_drift",
     )
@@ -559,6 +587,11 @@ class CharacterConsistencyReviewer:
 
     def review(self, candidate: PreparedCharacterDrift) -> CharacterReviewResult:
         settings = self.settings
+        scoped_axis = _is_scoped_approved_axis(candidate.case.baseline)
+        system_prompt = (
+            CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT
+            if scoped_axis else CHARACTER_REVIEW_SYSTEM_PROMPT
+        )
         if not settings.enable_character_consistency:
             return _review_result("disabled", "feature_disabled")
         if not candidate.reviewer_eligible:
@@ -590,6 +623,17 @@ class CharacterConsistencyReviewer:
                             "approved_axis_positive_proposition": (
                                 candidate.case.baseline.axis_positive_proposition
                             ),
+                            **(
+                                {
+                                    "approved_axis_comparison_key": (
+                                        candidate.case.baseline.approved_axis_comparison_key
+                                    ),
+                                    "approved_axis_applicability_scope": (
+                                        candidate.case.baseline.approved_axis_applicability_scope
+                                    ),
+                                }
+                                if scoped_axis else {}
+                            ),
                             "approved_axis_baseline_polarity": (
                                 candidate.case.baseline.axis_polarity
                             ),
@@ -615,14 +659,14 @@ class CharacterConsistencyReviewer:
             separators=(",", ":"),
         )
         estimate = estimate_issue_evidence_review_tokens(
-            CHARACTER_REVIEW_SYSTEM_PROMPT,
+            system_prompt,
             user_prompt,
             completion_reserve=settings.character_drift_max_completion_tokens,
         )
         if estimate > settings.character_drift_token_budget:
             return _review_result("skipped", "token_budget")
         try:
-            response = self.provider.complete(CHARACTER_REVIEW_SYSTEM_PROMPT, user_prompt)
+            response = self.provider.complete(system_prompt, user_prompt)
         except ProviderError as exc:
             category = getattr(exc, "category", None)
             reason = category if isinstance(category, str) and category else "provider_error"
@@ -652,7 +696,11 @@ class CharacterConsistencyReviewer:
             )
         try:
             decision = _DECISION_ADAPTER.validate_json(text)
-            _validate_decision(decision, allowed)
+            _validate_decision(
+                decision, allowed,
+                scoped_axis=scoped_axis,
+                current_count=len(candidate.matching_observations),
+            )
             if candidate.reason in {_MEDICAL_REVIEW_ONLY, _GROWTH_REVIEW_ONLY}:
                 labels = _explanation_only_labels(candidate)
                 if decision.verdict == "explained" and not set(decision.citations) & labels:
@@ -759,6 +807,64 @@ def promote_character_drift(
         )
 
     decision = review.decision
+    if _is_scoped_approved_axis(candidate.case.baseline):
+        applicability = decision.scope_applicability
+        if applicability is None:
+            return _consistency_result(
+                candidate,
+                "unverifiable", False, "unknown",
+                "模型未完成对象与适用情境核对，不能判断角色冲突。",
+                evidence,
+                sensitivity,
+                "scoped_axis_applicability_not_proven",
+            )
+        assessments = applicability.observations
+        if all(
+            "different" in (row.object_match, row.situation_match)
+            for row in assessments
+        ):
+            return _consistency_result(
+                candidate,
+                "no_issue", False, "high",
+                "当前行为均不属于这条角色设定规定的对象或适用情境。",
+                evidence,
+                sensitivity,
+                "scoped_axis_outside_applicability",
+            )
+        if any(
+            row.object_match != "same" or row.situation_match != "same"
+            for row in assessments
+        ):
+            return _consistency_result(
+                candidate,
+                "unverifiable", False, "unknown",
+                "并非每条当前证据都能证明属于同一对象与适用情境，不能拼接或推断角色冲突。",
+                evidence,
+                sensitivity,
+                "scoped_axis_applicability_unclear",
+            )
+        if candidate.reason == "two_independent_behaviors" and (
+            applicability.independent_events != "yes"
+        ):
+            return _consistency_result(
+                candidate,
+                "unverifiable", False, "unknown",
+                "当前材料未能证明两次反向行为是独立事件，不能把同一事件的复述累计为角色冲突。",
+                evidence,
+                sensitivity,
+                "scoped_axis_event_independence_unproven",
+            )
+        if candidate.reason == "single_behavior_is_not_drift":
+            return _consistency_result(
+                candidate,
+                "needs_confirmation",
+                _mode_rank(sensitivity) >= _candidate_visibility("possible"),
+                "low",
+                "对象与情境相符，但目前只有一次反向行为；不能据此断言角色设定被违反。",
+                evidence,
+                sensitivity,
+                "single_behavior_is_not_drift",
+            )
     if candidate.reason in {_MEDICAL_REVIEW_ONLY, _GROWTH_REVIEW_ONLY}:
         eligible_labels = _explanation_only_labels(candidate)
         if not eligible_labels or decision.verdict == "contradicts":
@@ -1336,10 +1442,39 @@ def _evidence_rows(
     return rows, frozenset(labels)
 
 
-def _validate_decision(decision: ModelDriftDecision, allowed: frozenset[str]) -> None:
+def _validate_decision(
+    decision: ModelDriftDecision,
+    allowed: frozenset[str],
+    *,
+    scoped_axis: bool = False,
+    current_count: int = 0,
+) -> None:
     citations = set(decision.citations)
     if len(citations) != len(decision.citations) or not citations <= allowed:
         raise ValueError("citation_not_allowed")
+    current_labels = {
+        f"C{index:02d}" for index in range(1, current_count + 1)
+    }
+    if scoped_axis:
+        applicability = decision.scope_applicability
+        if applicability is None:
+            raise ValueError("scoped_axis_applicability_required")
+        scope_citations = [row.citation for row in applicability.observations]
+        if (
+            len(scope_citations) != len(set(scope_citations))
+            or set(scope_citations) != current_labels
+            or (
+                current_count == 1
+                and applicability.independent_events != "not_applicable"
+            )
+        ):
+            raise ValueError("scoped_axis_citation_invalid")
+        if decision.verdict in {"contradicts", "explained"} and (
+            not current_labels <= citations
+        ):
+            raise ValueError("scoped_axis_current_coverage_incomplete")
+    elif decision.scope_applicability is not None:
+        raise ValueError("unexpected_scoped_axis_applicability")
     if decision.verdict == "contradicts" and not (
         any(value.startswith("B") for value in citations)
         and any(value.startswith("C") for value in citations)

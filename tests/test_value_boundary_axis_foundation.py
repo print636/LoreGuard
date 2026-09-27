@@ -302,7 +302,7 @@ def test_sqlite_downgrade_rejects_new_axes_and_round_trips_core_only():
 
 
 @pytest.mark.parametrize("dimension", ("value", "behavior_boundary"))
-def test_scoped_axis_snapshot_requires_object_and_situation_and_abstains(dimension):
+def test_scoped_axis_snapshot_requires_object_and_situation_and_single_behavior_abstains(dimension):
     evidence = EvidenceSpan(
         document_id="profile", document_name="profile.md",
         line_start=1, line_end=1, text="林澈在家庭危机时保护家人。",
@@ -352,8 +352,8 @@ def test_scoped_axis_snapshot_requires_object_and_situation_and_abstains(dimensi
         approved_axis_observation_polarities=((observation.id, "negative"),),
     )
     prepared = prepare_character_drift(case)
-    assert prepared.reason == "scoped_axis_target_binding_unavailable"
-    assert prepared.reviewer_eligible is False
+    assert prepared.reason == "single_behavior_is_not_drift"
+    assert prepared.reviewer_eligible is True
     assert prepared.deterministic_conflict is False
 
 

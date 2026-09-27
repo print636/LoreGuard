@@ -416,39 +416,53 @@ def test_signal_extractor_rejects_invalid_json_without_leaking_content():
     assert result.diagnostics.reason_counts == {"invalid_json": 2}
 
 
-def test_signal_full_line_prompt_v2_is_opt_in_and_default_prompt_is_unchanged():
+def test_signal_full_line_prompt_v2_is_default_and_can_be_disabled():
     chunk = CharacterSignalChunk(
         "prompt-variant", "profile.md", "林澈一直喜欢蜜瓜。", 10,
         "formal_character_profile",
     )
     default_provider = FakeProvider('{"records":[]}')
-    enabled_provider = FakeProvider('{"records":[]}')
+    disabled_provider = FakeProvider('{"records":[]}')
 
     CharacterSignalExtractor(default_provider, settings=settings()).extract(chunk)
     CharacterSignalExtractor(
-        enabled_provider,
-        settings=settings(character_signal_full_line_prompt_v2=True),
+        disabled_provider,
+        settings=settings(character_signal_full_line_prompt_v2=False),
     ).extract(chunk)
 
-    assert default_provider.calls == [(CHARACTER_SIGNAL_SYSTEM_PROMPT, _chunk_prompt(chunk))]
-    enabled_system, enabled_user = enabled_provider.calls[0]
-    assert enabled_system == CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
-    assert enabled_user.startswith(_chunk_prompt(chunk))
-    assert "示例甲。示例乙。" in enabled_system
-    assert "完整回显" in enabled_user.split("原文如下：", 1)[1]
-    assert "key_object 必须逐字出现在这些原文行中" in enabled_user
+    default_system, default_user = default_provider.calls[0]
+    assert default_system == CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
+    assert default_user.startswith(_chunk_prompt(chunk))
+    assert "示例甲。示例乙。" in default_system
+    assert "完整回显" in default_user.split("原文如下：", 1)[1]
+    assert "key_object 必须逐字出现在这些原文行中" in default_user
+    assert disabled_provider.calls == [(CHARACTER_SIGNAL_SYSTEM_PROMPT, _chunk_prompt(chunk))]
+
+
+def test_signal_full_line_prompt_v2_environment_can_explicitly_disable(monkeypatch):
+    monkeypatch.setenv("CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2", "false")
+    assert settings().character_signal_full_line_prompt_v2 is False
 
 
 def test_signal_core_scope_v3_requires_v2_and_keeps_default_off():
     assert settings().character_signal_core_scope_prompt_v3 is False
     with pytest.raises(ValueError, match="core scope v3 requires full line v2"):
-        settings(character_signal_core_scope_prompt_v3=True)
+        settings(
+            character_signal_full_line_prompt_v2=False,
+            character_signal_core_scope_prompt_v3=True,
+        )
 
 
 @pytest.mark.parametrize(
     ("overrides", "expected_error"),
     (
-        ({"character_signal_core_scope_prompt_v3": True}, "core scope v3 requires full line v2"),
+        (
+            {
+                "character_signal_full_line_prompt_v2": False,
+                "character_signal_core_scope_prompt_v3": True,
+            },
+            "core scope v3 requires full line v2",
+        ),
         (
             {
                 "character_signal_full_line_prompt_v2": "false",
@@ -3790,12 +3804,16 @@ def test_core_label_scope_subtypes_and_retry_accounting_are_observation_only():
     assert result.diagnostics.completion_tokens == 18
     assert result.diagnostics.charged_tokens >= 52
     assert result.diagnostics.charged_tokens <= settings().character_signal_token_budget
-    assert provider.calls[0] == (CHARACTER_SIGNAL_SYSTEM_PROMPT, _chunk_prompt(chunk))
+    assert provider.calls[0] == (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
+        _chunk_prompt(chunk, full_line_prompt_v2=True),
+    )
     assert provider.calls[1] == (
-        CHARACTER_SIGNAL_SYSTEM_PROMPT,
+        CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
         _regeneration_prompt(
-            _chunk_prompt(chunk), ("core_label_scope",),
+            _chunk_prompt(chunk, full_line_prompt_v2=True), ("core_label_scope",),
             failures=(_SignalValidationFailure(0, "core_label_scope"),),
+            full_line_prompt_v2=True,
         ),
     )
 

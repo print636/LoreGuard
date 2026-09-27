@@ -35,6 +35,7 @@ from app.db import (
 )
 from app.character_consistency_stage import failed_character_consistency_stage
 from app.character_trait_extraction import (
+    CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
 )
@@ -611,7 +612,10 @@ class RunReliabilityTests(unittest.TestCase):
             drift_provider=FailedProvider(),
         )
         with self.assertRaisesRegex(RuntimeError, "private response"):
-            provider.complete(CHARACTER_SIGNAL_SYSTEM_PROMPT, "private story")
+            provider.complete(
+                CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
+                "private story",
+            )
 
         accounting = usage.safe_dict(terminal_status="failed")
         self.assertIsNotNone(accounting)

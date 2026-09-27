@@ -98,7 +98,8 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
         "signal_max_completion_tokens"
     ] == 4_096
     assert result["character_consistency_limits"]["signal_max_records"] == 48
-    assert result["character_consistency_limits"]["signal_full_line_echo_v2"] is False
+    assert result["character_consistency_limits"]["signal_full_line_echo_v2"] is True
+    assert result["character_consistency_limits"]["scoped_axis_drift_v1"] is False
     assert result["character_consistency_limits"]["signal_core_scope_v3"] is False
     assert result["character_consistency_limits"]["signal_support_id_v4"] is False
     assert result["character_consistency_limits"]["signal_semantic_scope_v5"] is False
@@ -158,7 +159,8 @@ def test_character_runtime_fingerprint_tracks_stage_and_effective_provider_limit
     baseline_limits = safe_runtime_provenance(baseline)["character_consistency_limits"]
     baseline_digest = _character_limits_digest(baseline)
     variants = (
-        {"character_signal_full_line_prompt_v2": True},
+        {"character_signal_full_line_prompt_v2": False},
+        {"character_scoped_axis_drift_v1": True},
         {
             "character_signal_full_line_prompt_v2": True,
             "character_signal_core_scope_prompt_v3": True,

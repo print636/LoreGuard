@@ -272,9 +272,13 @@ class Settings(BaseSettings):
         default=8_000, ge=256, le=12_000
     )
     character_signal_max_records: int = Field(default=48, ge=1, le=64)
-    # Experimental prompt A/B for the primary character signal extractor.
-    # Keep disabled until frozen DEV results justify changing the default.
-    character_signal_full_line_prompt_v2: bool = False
+    # Ask the primary character signal extractor to echo complete source lines.
+    # The strict evidence binder is unchanged; explicitly set the env flag to
+    # false to roll this prompt variant back for a deployment or comparison.
+    character_signal_full_line_prompt_v2: bool = True
+    # Scoped value/boundary OOC review has bounded mock integration coverage,
+    # but no cross-story real-model quality gate yet. Keep opt-in.
+    character_scoped_axis_drift_v1: bool = False
     # Scope experiment depends on the full-line evidence protocol.
     character_signal_core_scope_prompt_v3: bool = False
     # Formal-profile support-ID experiment; history/draft keep the old schema.

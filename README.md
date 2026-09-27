@@ -44,8 +44,15 @@ quality gate.
 baseline binding path: an author supplies an object key, applicability scope,
 positive proposition, and explicit scope acknowledgment for a verified formal
 candidate. The server checks the frozen source, object identity, axis version,
-and hashes. This does **not** enable scoped draft matching or OOC issue creation;
-those remain disabled pending separate actor, scope, and direction verification.
+and hashes. Set `CHARACTER_SCOPED_AXIS_DRIFT_V1=true` to enable this
+default-off path for an isolated experiment. New runs can then nominate a draft observation through a clean,
+single-target extraction bound to that exact frozen object. A separate model
+review must cite the current draft and confirm both object and situation before
+any scoped-axis conflict can be reported; a different or unclear situation is
+not promoted as an OOC issue, and one action alone cannot prove drift. This is
+an **experimental review path**, not a measured cross-story OOC accuracy claim:
+actor attribution, model judgments, and incomplete coverage can still miss
+valid cases, so authors must inspect both evidence spans and coverage status.
 
 An author-confirmed character trait remains active even if its source document
 is later retired or reclassified as reference material. The character workbench
@@ -63,6 +70,11 @@ claim or a new real-model OOC accuracy result.
 For draft actions, a narrow source-bound check rejects obvious non-occurrence,
 rumor, hypothetical, and possessive-other-actor claims before they become
 character observations. It does not resolve complex cross-sentence meaning.
+When the optional character-consistency stage is enabled, its primary signal
+extractor now defaults to the V2 complete-source-line echo prompt. Set
+`CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2=false` to use the earlier prompt for a
+deployment or comparison. The evidence binder is unchanged, and this prompt
+default is not a claim that character-OOC review passes on open stories.
 An opt-in, default-off source-excerpt repair can restore a single model-quoted
 draft action to its exact full source line only when both the excerpt and full
 line independently pass the existing binding checks; it never relaxes formal

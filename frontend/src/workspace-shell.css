@@ -512,6 +512,7 @@ body {
 .mainCanvas .visualization .graphCanvas { height: calc(100dvh - 230px); min-height: 480px; }
 .mainCanvas .clarifications,
 .mainCanvas .issues { margin: 0 0 18px; }
+.formalIssueIntro { max-width: 76ch; margin: 0 0 18px; color: var(--text-2); line-height: 1.7; }
 .mainCanvas .issues article,
 .mainCanvas .clarifications article { grid-template-columns: 54px minmax(0, 1fr); }
 .mainCanvas .provisionalClues {

@@ -1,6 +1,6 @@
 # 角色轴 v2 DEV：整行证据提示 A/B 检查点（2026-09-24）
 
-本检查点记录构建 `5973a4343ae007f08fc2ad3661da2e7bd5ea43d7` 上的六次真实模型 HTTP 诊断。使用预先固定的 [character-axis-challenge-v2 清单](../data/character-axis-challenge-v2/manifest.json)及其中的 DEV 世界观；这是开发者可见资料，**不是盲测或迁移集成绩**。六次按 OFF1 → ON1 → OFF2 → ON2 → OFF3 → ON3 交替进行，每次新建独立项目。两组服务的源码摘要、模型配置指纹和评测预算相同；对照的角色抽取配置仅有 `character_signal_full_line_prompt_v2` 开关不同，该实验开关默认关闭。ON 只增加完整原文行回显和对象原词的提示，证据校验与候选准入未放宽。
+本检查点记录构建 `5973a4343ae007f08fc2ad3661da2e7bd5ea43d7` 上的六次真实模型 HTTP 诊断。使用预先固定的 [character-axis-challenge-v2 清单](../data/character-axis-challenge-v2/manifest.json)及其中的 DEV 世界观；这是开发者可见资料，**不是盲测或迁移集成绩**。六次按 OFF1 → ON1 → OFF2 → ON2 → OFF3 → ON3 交替进行，每次新建独立项目。两组服务的源码摘要、模型配置指纹和评测预算相同；对照的角色抽取配置仅有 `character_signal_full_line_prompt_v2` 开关不同，在该历史构建中实验开关默认关闭。ON 只增加完整原文行回显和对象原词的提示，证据校验与候选准入未放宽。
 
 | 结果 | OFF（三次） | ON（三次） |
 | --- | ---: | ---: |

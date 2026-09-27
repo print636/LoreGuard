@@ -4914,6 +4914,170 @@ def test_approved_axis_primary_key_match_still_requires_clean_targeted_binding()
         assert all(axis_id not in prompt for _, prompt in provider.calls)
 
 
+def _run_scoped_axis_stage(
+    source_lines: tuple[str, ...], *, situation_match: str,
+    duplicate_baseline: bool = False, independent_events: str = "not_applicable",
+    scoped_enabled: bool = True,
+):
+    definition = "家人遇险时是否保护家人"
+    scope_text = "家人遇险时"
+    proposition = "家人遇险时，林澈保护家人"
+    baseline = ConfirmedTraitSnapshot.model_validate({
+        **_confirmed_trait(dimension="value", trait_key="保护家人").model_dump(),
+        "statement": proposition,
+        "evidence": [
+            EvidenceSpan(
+                document_id="profile", document_name="profile.md",
+                line_start=1, line_end=1, text=proposition + "。",
+            ).model_dump()
+        ],
+        "approved_axis_id": "11111111-1111-4111-8111-111111111111",
+        "approved_axis_version": 1,
+        "approved_axis_display_name": "保护家人",
+        "approved_axis_definition": definition,
+        "approved_axis_definition_sha256": hashlib.sha256(
+            definition.encode("utf-8")
+        ).hexdigest(),
+        "approved_axis_comparison_key": "value:家人",
+        "approved_axis_applicability_scope": scope_text,
+        "approved_axis_applicability_scope_sha256": hashlib.sha256(
+            scope_text.encode("utf-8")
+        ).hexdigest(),
+        "axis_positive_proposition": proposition,
+        "axis_positive_proposition_sha256": hashlib.sha256(
+            proposition.encode("utf-8")
+        ).hexdigest(),
+        "axis_alignment": "same",
+        "axis_polarity": "positive",
+    })
+    entry = (
+        _snapshot_stub("scoped", "value:家人"), baseline,
+        NarrativeScopeV1(), "林澈",
+    )
+    entries = [entry]
+    if duplicate_baseline:
+        # One author axis can have two same-direction confirmed source labels.
+        # They are still two frozen facts but one OOC comparison for this run.
+        entries.append((
+            _snapshot_stub("scoped-peer", "value:家人"),
+            baseline.model_copy(update={
+                "id": "ct_scoped_peer", "trait_key": "守护家人",
+            }),
+            NarrativeScopeV1(), "林澈",
+        ))
+    observations = tuple({
+        **_record(
+            evidence=line, polarity="negative", kind="action",
+            dimension="value", trait_key="保护家人",
+            statement="林澈抛下家人独自离开", line=index,
+        ),
+        "key_object": "家人",
+    } for index, line in enumerate(source_lines, start=1))
+    current_citations = [f"C{index:02d}" for index in range(1, len(source_lines) + 1)]
+    review = json.dumps({
+        "verdict": "contradicts",
+        "explanation": "两次行为与作者设定方向相反。",
+        "citations": ["B01", *current_citations],
+        "scope_applicability": {
+            "observations": [
+                {
+                    "citation": citation, "object_match": "same",
+                    "situation_match": situation_match,
+                }
+                for citation in current_citations
+            ],
+            "independent_events": independent_events,
+        },
+    }, ensure_ascii=False)
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"适用情境反例-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content="\n".join(source_lines),
+            narrative_context=_context(publication="draft"),
+        )
+        run_id = _new_run(client, project["id"])
+        provider = QueueProvider(_response(), _response(*observations), review)
+        with patch.object(
+            CharacterConsistencyStage, "_load_confirmed_traits", return_value=entries
+        ):
+            result = _run_stage(
+                run_id, provider, character_scoped_axis_drift_v1=scoped_enabled
+            )
+    return result, provider
+
+
+def test_scoped_axis_different_situation_is_not_a_formal_issue():
+    """A model-nominated same-object action is not enough to satisfy author scope."""
+    result, _ = _run_scoped_axis_stage(
+        ("家人已经安全，林澈仍抛下家人独自离开。",),
+        situation_match="different",
+    )
+    assert result.issues == ()
+    assert result.diagnostics["counts"]["drift_reviewed"] == 1
+    assert result.diagnostics["counts"]["drift_no_issue"] == 1
+    assert result.diagnostics["case_trace"][0]["promote_reason"] == (
+        "scoped_axis_outside_applicability"
+    )
+    assert result.diagnostics["case_trace"][0]["scoped_axis_review"] == {
+        "observations": [{
+            "citation": "C01", "object_match": "same",
+            "situation_match": "different",
+        }],
+        "independent_events": "not_applicable",
+    }
+
+
+def test_scoped_axis_same_scope_two_actions_make_one_issue_for_two_confirmed_labels():
+    result, provider = _run_scoped_axis_stage(
+        (
+            "家人遇险时，林澈抛下家人独自离开。",
+            "第二次家人遇险时，林澈仍抛下家人独自离开。",
+        ),
+        situation_match="same", duplicate_baseline=True,
+        independent_events="yes",
+    )
+    assert len(result.issues) == 1
+    assert result.issues[0].category.value == "character_drift"
+    assert result.diagnostics["counts"]["drift_reviewed"] == 1
+    assert result.diagnostics["reason_counts"][
+        "equivalent_approved_axis_baseline_collapsed"
+    ] == 1
+    assert result.diagnostics["case_trace"][0]["final_outcome"] == "conflict"
+    assert result.diagnostics["case_trace"][0]["scoped_axis_review"][
+        "independent_events"
+    ] == "yes"
+    assert len(provider.calls) == 3
+
+
+def test_scoped_axis_same_event_repeated_on_two_lines_cannot_be_conflict():
+    result, _ = _run_scoped_axis_stage(
+        (
+            "家人遇险时，林澈抛下家人独自离开。",
+            "同一事件的记录再次写道：家人遇险时，林澈抛下家人独自离开。",
+        ),
+        situation_match="same", independent_events="no",
+    )
+    assert result.issues == ()
+    assert result.diagnostics["case_trace"][0]["promote_reason"] == (
+        "scoped_axis_event_independence_unproven"
+    )
+
+
+def test_scoped_axis_review_is_default_off_with_explicit_partial_coverage():
+    result, provider = _run_scoped_axis_stage(
+        ("家人遇险时，林澈抛下家人独自离开。",),
+        situation_match="same", scoped_enabled=False,
+    )
+    assert result.issues == ()
+    assert result.diagnostics["outcome"] == "partial"
+    assert result.diagnostics["reason_counts"]["scoped_axis_review_disabled"] == 1
+    assert result.diagnostics["counts"]["drift_reviewed"] == 0
+    assert len(provider.calls) == 1
+
+
 def _snapshot_stub(candidate_id: str, comparison_key: str | None = None):
     return SimpleNamespace(
         candidate_id=candidate_id,

@@ -512,6 +512,20 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     ),
     [diagnostics.model, diagnostics.character_consistency],
   );
+  const currentProvisionalClueCount = provisionalClues.status === "ready" && provisionalClues.runId === run
+    ? provisionalClues.items.length
+    : null;
+  let provisionalClueCaveat = "待复核线索的读取状态见下方；不能据此断定剧情无误。";
+  if (currentProvisionalClueCount === 0) {
+    provisionalClueCaveat = "本次没有可安全定位的待复核线索，但不代表剧情无误或审查完整。";
+  } else if (currentProvisionalClueCount !== null) {
+    provisionalClueCaveat = `另有 ${currentProvisionalClueCount} 条待复核线索列于下方，未计入正式问题，请人工核对。`;
+  } else if (provisionalClues.status === "error" && provisionalClues.runId === run) {
+    provisionalClueCaveat = "待复核线索读取失败，无法确认是否存在线索；请在下方重试。";
+  }
+  const formalIssueEmptyText = runInfo?.status === "completed"
+    ? `本次未生成正式一致性问题。${provisionalClueCaveat}${modelStatus.emptyCaveat ? ` ${modelStatus.emptyCaveat}` : ""}`
+    : null;
   const characterStageStatus = useMemo(
     () => describeCharacterReviewStage(diagnostics.character_consistency),
     [diagnostics.character_consistency],
@@ -2707,7 +2721,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   <div>
                     <p className="eyebrow">EVIDENCE REPORT</p>
                     <h2>
-                      一致性问题 <em>{visibleIssues.length}</em>
+                      正式一致性问题 <em>{visibleIssues.length}</em>
                     </h2>
                   </div>
                   <div className="reportFilters" aria-label="报告筛选">
@@ -2783,11 +2797,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     )}
                   </div>
                 </div>
+                <p className="formalIssueIntro">
+                  正式报告问题仍需作者核对，不等于已证实冲突；角色漂移条目应同时核对既有设定与当前新稿两侧证据。只有单侧材料或未通过完整校验的模型提案不能直接当作正式冲突；待复核线索另列在下方，不参与这里的数量、反馈和导出。
+                </p>
                 {issues.length === 0 && !busy && (
                   <div className="empty">
-                    {runInfo?.status === "completed"
-                      ? `当前未发现有证据支持的一致性问题。${modelStatus.emptyCaveat ? ` ${modelStatus.emptyCaveat}` : ""}`
-                      : "选择项目运行，或从历史任务恢复报告。"}
+                    {formalIssueEmptyText || "选择项目运行，或从历史任务恢复报告。"}
                   </div>
                 )}
                 {issues.length > 0 && visibleIssues.length === 0 && (
@@ -2941,7 +2956,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                               <span>{provisionalClueDimensionLabel(clue.dimension)}</span>
                             </div>
                             <h3><small>模型提案（未验证）</small>{clue.proposed_statement}</h3>
-                            <p>待复核原因：模型输出未通过整包校验。</p>
+                            <p>待复核原因：同批模型输出未通过完整校验。本条只保留原文定位与模型提案，尚未验证为角色事实或冲突。</p>
                             <blockquote>
                               <b>冻结原文 · {clue.document_name} v{clue.document_version} · 第 {clue.line_start}{clue.line_end === clue.line_start ? "" : `–${clue.line_end}`} 行</b>
                               <span>{clue.evidence}</span>
@@ -3036,7 +3051,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </section>
           <section className="railSummary" aria-label="运行摘要">
             <div>
-              <small>一致性问题</small>
+              <small>正式一致性问题</small>
               <b>{issues.length}</b>
             </div>
             <div>
@@ -3066,16 +3081,16 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           <div className="railPreviewScroll">
             <section className="issuePreview">
               <div className="railSectionHead">
-                <h3>问题预览</h3>
+                <h3>正式问题预览</h3>
                 <button onClick={() => navigateWorkspace("report")}>
                   全部 {issues.length}
                 </button>
               </div>
               {visibleIssues.length === 0 ? (
                 <div className="railEmpty">
-                  {runInfo?.status === "completed"
-                    ? `当前未发现有证据支持的一致性问题。${modelStatus.emptyCaveat ? ` ${modelStatus.emptyCaveat}` : ""}`
-                    : "完成或恢复一次分析后，这里会显示真实问题。"}
+                  {issues.length > 0
+                    ? "当前筛选条件下没有正式问题，请到报告页调整筛选。"
+                    : formalIssueEmptyText || "完成或恢复一次分析后，这里会显示报告问题。"}
                 </div>
               ) : (
                 visibleIssues.slice(0, 4).map((issue) => (

@@ -47,6 +47,7 @@ from .character_trait_extraction import (
     draft_preference_context_requires_review,
     preference_modifier_bridge,
     safe_pronoun_evidence_range,
+    scoped_axis_object_identity,
     stable_trait_identity,
     trait_keys_compatible,
 )
@@ -446,6 +447,29 @@ class CharacterConsistencyStage:
             if entry[1].approved_axis_identity is None
             or entry[1].axis_direction_verified
         ]
+        scoped_axis_review_disabled = 0
+        if not settings.character_scoped_axis_drift_v1:
+            scoped_axis_review_disabled = sum(
+                entry[1].approved_axis_identity is not None
+                and entry[1].dimension in {"value", "behavior_boundary"}
+                for entry in baselines
+            )
+            baselines = [
+                entry for entry in baselines
+                if entry[1].approved_axis_identity is None
+                or entry[1].dimension not in {"value", "behavior_boundary"}
+            ]
+            if scoped_axis_review_disabled:
+                reason_counts["scoped_axis_review_disabled"] += (
+                    scoped_axis_review_disabled
+                )
+        review_baselines, duplicate_axis_baselines = (
+            _deduplicate_approved_review_baselines(baselines)
+        )
+        if duplicate_axis_baselines:
+            reason_counts["equivalent_approved_axis_baseline_collapsed"] += (
+                duplicate_axis_baselines
+            )
         if shadowed_baselines:
             reason_counts["lower_authority_baseline_shadowed"] += shadowed_baselines
 
@@ -475,6 +499,7 @@ class CharacterConsistencyStage:
             len(planned_chunks) > settings.character_consistency_max_chunks_per_run
             or bool(reason_counts["invalid_confirmed_trait_snapshot"])
             or bool(unaligned_axes)
+            or bool(scoped_axis_review_disabled)
         )
         chunk_cap = settings.character_consistency_max_chunks_per_run
         if partial and any(source.source_kind == "draft" for source, _ in planned_chunks):
@@ -517,7 +542,7 @@ class CharacterConsistencyStage:
                 continue
             context = _safe_server_context(
                 source,
-                baselines=baselines,
+                baselines=review_baselines,
                 authority_baselines=authority_baselines,
             )
             server_contexts[source.document.id] = context
@@ -1359,7 +1384,7 @@ class CharacterConsistencyStage:
         drift_no_issue = 0
         drift_scope_skipped = 0
         case_trace: list[dict[str, Any]] = []
-        for baseline_row, baseline, baseline_scope, character_key in baselines[
+        for baseline_row, baseline, baseline_scope, character_key in review_baselines[
             : settings.character_consistency_max_candidates_per_run
         ]:
             self.checkpoint()
@@ -1582,9 +1607,9 @@ class CharacterConsistencyStage:
                 )
             )
 
-        if len(baselines) > settings.character_consistency_max_candidates_per_run:
+        if len(review_baselines) > settings.character_consistency_max_candidates_per_run:
             partial = True
-            reason_counts["baseline_limit"] += len(baselines) - (
+            reason_counts["baseline_limit"] += len(review_baselines) - (
                 settings.character_consistency_max_candidates_per_run
             )
 
@@ -1870,6 +1895,15 @@ class CharacterConsistencyStage:
                     approved_axis_definition_sha256=payload.get(
                         "approved_axis_definition_sha256"
                     ),
+                    approved_axis_comparison_key=payload.get(
+                        "approved_axis_comparison_key"
+                    ),
+                    approved_axis_applicability_scope=payload.get(
+                        "approved_axis_applicability_scope"
+                    ),
+                    approved_axis_applicability_scope_sha256=payload.get(
+                        "approved_axis_applicability_scope_sha256"
+                    ),
                     axis_positive_proposition=payload.get(
                         "axis_positive_proposition"
                     ),
@@ -1946,23 +1980,33 @@ def _signal_matches_target(
     signal: CharacterSignal, target: CharacterSignalTarget
 ) -> bool:
     if target.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS:
+        scoped_axis = (
+            target.dimension in {"value", "behavior_boundary"}
+            and target.approved_axis_identity is not None
+        )
         return (
             _key(signal.character) == _key(target.character)
             and signal.dimension == target.dimension
             and (
-                target.dimension == "preference"
+                scoped_axis
+                or target.dimension == "preference"
                 or stable_trait_identity(signal.dimension, signal.trait_key)
                 == stable_trait_identity(target.dimension, target.trait_key)
             )
             and bool(signal.key_object.strip())
             and (
-                stable_trait_identity(
-                    signal.dimension, signal.trait_key, signal.key_object
-                ) == target.comparison_key
-                or preference_modifier_bridge(
-                    baseline_comparison_key=target.comparison_key,
-                    baseline_polarity=target.baseline_polarity,
-                    observation=signal,
+                scoped_axis_object_identity(
+                    signal.dimension, signal.key_object
+                ) == target.approved_axis_comparison_key
+                if scoped_axis else (
+                    stable_trait_identity(
+                        signal.dimension, signal.trait_key, signal.key_object
+                    ) == target.comparison_key
+                    or preference_modifier_bridge(
+                        baseline_comparison_key=target.comparison_key,
+                        baseline_polarity=target.baseline_polarity,
+                        observation=signal,
+                    )
                 )
             )
         )
@@ -1991,6 +2035,7 @@ def _verified_target_axis_polarity(
     directions: set[str] = set()
     for entry in baselines:
         _, baseline, baseline_scope, _ = entry
+        scoped_axis = target.dimension in {"value", "behavior_boundary"}
         if (
             baseline.approved_axis_identity != target.approved_axis_identity
             or not baseline.axis_direction_verified
@@ -1998,8 +2043,25 @@ def _verified_target_axis_polarity(
             or baseline.trait_key != target.trait_key
             or baseline.polarity != target.baseline_polarity
             or _key(baseline.character) != _key(target.character)
-            or stable_trait_identity(baseline.dimension, baseline.trait_key)
-            != target.comparison_key
+            or (
+                baseline.approved_axis_comparison_key
+                if scoped_axis
+                else stable_trait_identity(baseline.dimension, baseline.trait_key)
+            ) != target.comparison_key
+            or (
+                scoped_axis
+                and (
+                    baseline.approved_axis_applicability_scope
+                    != target.approved_axis_applicability_scope
+                    or baseline.approved_axis_applicability_scope_sha256
+                    != target.approved_axis_applicability_scope_sha256
+                    or baseline.axis_positive_proposition
+                    != target.axis_positive_proposition
+                    or baseline.axis_positive_proposition_sha256
+                    != target.axis_positive_proposition_sha256
+                    or _frozen_comparison_identity(entry) != target.comparison_key
+                )
+            )
             or _trait_applies_to_release(baseline, source.scope) is not True
             or _baseline_shadowed_at_scope(entry, baselines, source.scope)
             or scope_relation(
@@ -2339,12 +2401,12 @@ def _safe_server_context(
 ) -> _SafeServerContext:
     """Build a bounded, content-free alignment hint for draft extraction.
 
-    Only immutable identifiers needed to reuse a comparison axis cross the
-    model boundary. An object-bearing comparison key may disclose its short
-    object anchor; baseline statements, contexts, evidence, source names,
-    URLs and provider configuration are never serialized. Scope and release
-    validity are enforced server-side; the scope payload is not sent. Older
-    unaligned axes can participate in authority checks without becoming hints.
+    The primary pass receives only short comparison identifiers, not baseline
+    evidence or provenance. For an approved value/boundary axis, the targeted
+    pass also receives its author-frozen applicability and positive proposition
+    as untrusted semantic hints, never as draft evidence. Narrative release
+    validity remains server-side. Older unaligned axes can participate in
+    authority checks without becoming hints.
     """
 
     base_payload: dict[str, Any] = {
@@ -2384,7 +2446,8 @@ def _safe_server_context(
     # key has conflicting polarity, or different behavioral contexts, its
     # first sorted row is not a safe extraction hint for this draft.
     hint_variants: dict[
-        tuple[str, str, str, str], set[tuple[tuple[str, ...], str]]
+        tuple[str, str, str, str],
+        set[tuple[tuple[str, ...], str, tuple[str, str, str]]],
     ] = defaultdict(set)
     unverified_object_keys: set[tuple[str, str, str, str]] = set()
     for entry in eligible_entries:
@@ -2401,10 +2464,28 @@ def _safe_server_context(
             and not _frozen_comparison_identity(entry)
         ):
             unverified_object_keys.add(identity)
+        scoped_axis = (
+            baseline.dimension in {"value", "behavior_boundary"}
+            and baseline.approved_axis_identity is not None
+        )
+        if scoped_axis and (
+            _frozen_comparison_identity(entry)
+            != baseline.approved_axis_comparison_key
+            or not all(_safe_context_label(value) for value in (
+                baseline.approved_axis_applicability_scope,
+                baseline.axis_positive_proposition,
+            ))
+        ):
+            unverified_object_keys.add(identity)
         hint_variants[identity].add((
             contexts,
             baseline.axis_polarity
             if baseline.axis_direction_verified else baseline.polarity,
+            (
+                baseline.approved_axis_comparison_key or "",
+                baseline.approved_axis_applicability_scope_sha256 or "",
+                baseline.axis_positive_proposition_sha256 or "",
+            ) if scoped_axis else ("", "", ""),
         ))
     ambiguous_hint_keys = {
         identity for identity, variants in hint_variants.items() if len(variants) > 1
@@ -2413,7 +2494,7 @@ def _safe_server_context(
     applicable: list[
         tuple[
             str, str, str, str, str, str,
-            tuple[str, int, str] | None, str | None,
+            tuple[str, int, str] | None, str | None, dict[str, str],
         ]
     ] = []
     seen: set[tuple[str, str, str, str]] = set()
@@ -2424,15 +2505,22 @@ def _safe_server_context(
             continue
         seen.add(identity)
         if identity in ambiguous_hint_keys:
-            applicable.append(("", "", "", "", "", "", None, None))
+            applicable.append(("", "", "", "", "", "", None, None, {}))
             continue
-        # The approved ID is the *internal* comparison identity. The model
-        # still receives a legacy-shaped neutral trait label/key so it cannot
-        # claim an axis ID in its output. A second raw label on the same
-        # approved axis therefore collapses to this first safe hint.
+        # The approved ID is internal. Core axes retain a neutral label key;
+        # scoped axes use the exact frozen author object key. Neither lets a
+        # model claim an axis ID in its output. A second raw label on the same
+        # approved axis collapses to this first safe hint.
+        axis_key = baseline.approved_axis_identity
+        scoped_axis = (
+            baseline.dimension in {"value", "behavior_boundary"}
+            and axis_key is not None
+        )
         comparison_key = (
-            stable_trait_identity(baseline.dimension, baseline.trait_key)
-            if baseline.approved_axis_identity is not None else identity[2]
+            baseline.approved_axis_comparison_key
+            if scoped_axis
+            else stable_trait_identity(baseline.dimension, baseline.trait_key)
+            if axis_key is not None else identity[2]
         )
         labels = (
             baseline.character,
@@ -2441,7 +2529,6 @@ def _safe_server_context(
             comparison_key,
             baseline.polarity,
         )
-        axis_key = baseline.approved_axis_identity
         axis_definition = baseline.approved_axis_definition if axis_key else None
         if not all(_safe_context_label(value) for value in labels) or (
             axis_definition is not None
@@ -2449,10 +2536,27 @@ def _safe_server_context(
         ):
             # Count the applicable baseline but never serialize a suspicious
             # label.  The resulting partial marker prevents a false clean bill.
-            applicable.append(("", "", "", "", "", "", None, None))
+            applicable.append(("", "", "", "", "", "", None, None, {}))
             continue
+        scoped_fields = (
+            {
+                "approved_axis_comparison_key": comparison_key,
+                "approved_axis_applicability_scope": (
+                    baseline.approved_axis_applicability_scope
+                ),
+                "approved_axis_applicability_scope_sha256": (
+                    baseline.approved_axis_applicability_scope_sha256
+                ),
+                "axis_positive_proposition": baseline.axis_positive_proposition,
+                "axis_positive_proposition_sha256": (
+                    baseline.axis_positive_proposition_sha256
+                ),
+            }
+            if scoped_axis else {}
+        )
         applicable.append(
-            (*labels, _safe_baseline_hint(baseline.statement), axis_key, axis_definition)
+            (*labels, _safe_baseline_hint(baseline.statement), axis_key,
+             axis_definition, scoped_fields)
         )
 
     eligible_count = len(applicable)
@@ -2466,7 +2570,7 @@ def _safe_server_context(
             "trait_key": trait_key,
             "comparison_key": comparison_key,
         }
-        for character, dimension, trait_key, comparison_key, _, _, _, _ in selected
+        for character, dimension, trait_key, comparison_key, _, _, _, _, _ in selected
     ]
 
     while True:
@@ -2494,6 +2598,7 @@ def _safe_server_context(
                             "negative" if baseline_polarity == "positive" else "positive"
                         ),
                         "baseline_hint": baseline_hint,
+                        **scoped_fields,
                         **(
                             {
                                 "approved_axis_id": axis_key[0],
@@ -2508,6 +2613,7 @@ def _safe_server_context(
                 for (
                     character, dimension, trait_key, comparison_key,
                     baseline_polarity, baseline_hint, axis_key, axis_definition,
+                    scoped_fields,
                 ) in selected
                 if baseline_polarity in {"positive", "negative"} and baseline_hint
             )
@@ -2921,10 +3027,52 @@ def _baseline_hint_identity(
         ),
         (
             stable_trait_identity(baseline.dimension, baseline.trait_key)
-            if frozen_key and baseline.dimension != "preference"
+            if (
+                frozen_key
+                and baseline.dimension != "preference"
+                and baseline.approved_axis_identity is None
+            )
             else ""
         ),
     )
+
+
+def _deduplicate_approved_review_baselines(
+    baselines: list[BaselineEntry],
+) -> tuple[list[BaselineEntry], int]:
+    """Review one equivalent author axis once while retaining raw traits elsewhere.
+
+    Different scope, release range, authority, author object/situation, or
+    direction never collapse. This is a report-level coalescing decision, not
+    a mutation of confirmed character facts or their frozen run snapshots.
+    """
+
+    selected: list[BaselineEntry] = []
+    seen: set[tuple[Any, ...]] = set()
+    collapsed = 0
+    for entry in baselines:
+        _, baseline, scope, character_key = entry
+        axis = baseline.approved_axis_identity
+        if axis is None:
+            selected.append(entry)
+            continue
+        identity = (
+            character_key, baseline.dimension, axis,
+            baseline.axis_polarity, baseline.authority_tier, baseline.origin,
+            baseline.valid_from_release_ordinal,
+            baseline.valid_until_release_ordinal,
+            tuple(baseline.contexts),
+            baseline.approved_axis_comparison_key,
+            baseline.approved_axis_applicability_scope_sha256,
+            baseline.axis_positive_proposition_sha256,
+            payload_sha256(scope.model_dump(mode="json")),
+        )
+        if identity in seen:
+            collapsed += 1
+            continue
+        seen.add(identity)
+        selected.append(entry)
+    return selected, collapsed
 
 
 def _context_coverage(
@@ -3888,6 +4036,39 @@ def _safe_case_trace(
 ) -> dict[str, Any]:
     decision = review.decision if review is not None else None
     citation_refs, citation_refs_incomplete = _safe_citation_refs(prepared, review)
+    scoped_review: dict[str, Any] | None = None
+    if (
+        baseline.approved_axis_identity is not None
+        and baseline.dimension in {"value", "behavior_boundary"}
+        and prepared is not None
+        and review is not None
+        and review.diagnostics.outcome == "completed"
+        and decision is not None
+        and decision.scope_applicability is not None
+    ):
+        rows = decision.scope_applicability.observations
+        expected = {
+            f"C{index:02d}"
+            for index in range(1, len(prepared.matching_observations) + 1)
+        }
+        if (
+            0 < len(rows) <= 8
+            and {row.citation for row in rows} == expected
+            and len({row.citation for row in rows}) == len(rows)
+        ):
+            scoped_review = {
+                "observations": [
+                    {
+                        "citation": row.citation,
+                        "object_match": row.object_match,
+                        "situation_match": row.situation_match,
+                    }
+                    for row in rows
+                ],
+                "independent_events": (
+                    decision.scope_applicability.independent_events
+                ),
+            }
     roles = (
         sorted(
             {
@@ -3979,6 +4160,7 @@ def _safe_case_trace(
         "citation_roles": roles,
         "citation_refs": citation_refs,
         "citation_refs_incomplete": citation_refs_incomplete,
+        **({"scoped_axis_review": scoped_review} if scoped_review is not None else {}),
         "final_outcome": final_outcome,
         "visible": bool(visible),
         "promote_reason": promote_reason,

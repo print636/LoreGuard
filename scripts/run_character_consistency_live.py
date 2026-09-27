@@ -823,6 +823,7 @@ def _safe_case_trace_summary(row: dict[str, Any]) -> dict[str, Any]:
         candidate_id_sha256 = (
             "" if "confirmed_candidate_id_sha256" in row else None
         )
+    scoped_review = _safe_scoped_axis_review(row.get("scoped_axis_review"))
     return {
         "character_key": row.get("character_key"),
         "dimension": row.get("dimension"),
@@ -846,7 +847,50 @@ def _safe_case_trace_summary(row: dict[str, Any]) -> dict[str, Any]:
         "final_outcome": row.get("final_outcome"),
         "visible": row.get("visible"),
         "promote_reason": row.get("promote_reason"),
+        **({"scoped_axis_review": scoped_review} if scoped_review is not None else {}),
     }
+
+
+def _safe_scoped_axis_review(value: object) -> dict[str, Any] | None:
+    """Retain only reviewed C handles and fixed enums, never source/model text."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "observations", "independent_events"
+    }:
+        return None
+    rows = value.get("observations")
+    independence = value.get("independent_events")
+    if (
+        not isinstance(rows, list)
+        or not 1 <= len(rows) <= 8
+        or independence not in {"yes", "no", "unclear", "not_applicable"}
+    ):
+        return None
+    safe_rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "citation", "object_match", "situation_match"
+        }:
+            return None
+        citation = row.get("citation")
+        object_match = row.get("object_match")
+        situation_match = row.get("situation_match")
+        if (
+            not isinstance(citation, str)
+            or re.fullmatch(r"C[0-9]{2}", citation) is None
+            or citation in seen
+            or object_match not in {"same", "different", "unclear"}
+            or situation_match not in {"same", "different", "unclear"}
+        ):
+            return None
+        seen.add(citation)
+        safe_rows.append({
+            "citation": citation,
+            "object_match": object_match,
+            "situation_match": situation_match,
+        })
+    return {"observations": safe_rows, "independent_events": independence}
 
 
 def _safe_evidence_refs(evidence: object) -> list[dict[str, Any]]:
