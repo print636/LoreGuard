@@ -21,6 +21,7 @@ from .character_drift import (
     PreparedCharacterDrift,
     SupportEvidence,
     _evidence_rows,
+    _validate_decision,
     prepare_character_drift,
     promote_character_drift,
 )
@@ -78,7 +79,7 @@ from .narrative_context import (
 from .pipeline import DocumentInput
 
 
-CHARACTER_CONSISTENCY_CHECKER_VERSION = "character-consistency-stage-v1"
+CHARACTER_CONSISTENCY_CHECKER_VERSION = "character-consistency-stage-v2"
 PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY = "_provisional_draft_clues_v1"
 _SUGGESTION = "请核对是否存在尚未记录的成长、伪装或情境依据"
 _BRIDGE_PATTERN = re.compile(
@@ -1712,9 +1713,30 @@ class CharacterConsistencyStage:
                     partial = True
                     reason_counts["stage_token_budget"] += 1
 
+            review_for_promotion = review
+            if (
+                review is not None
+                and review.diagnostics.outcome == "completed"
+                and review.decision is not None
+                and not _review_citation_binding_complete(prepared, review)
+            ):
+                # A verdict whose handles cannot be projected back to the
+                # frozen B/C table must not become a formal issue or silently
+                # fall back to arbitrary first evidence rows.
+                partial = True
+                reason_counts["review_citation_binding_invalid"] += 1
+                review_for_promotion = CharacterReviewResult(
+                    diagnostics=review.diagnostics.model_copy(
+                        update={
+                            "outcome": "degraded",
+                            "reason": "citation_binding_invalid",
+                        }
+                    )
+                )
+
             promoted = promote_character_drift(
                 prepared,
-                review,
+                review_for_promotion,
                 sensitivity=settings.character_consistency_sensitivity,
             )
             baseline_spans = prepared.case.baseline.evidence
@@ -1722,18 +1744,18 @@ class CharacterConsistencyStage:
             evidence_pair_reason = None
             if not baseline_spans or not current_spans:
                 evidence_pair_reason = "drift_evidence_pair_missing"
-            else:
+            elif not _review_has_exact_citation_binding(
+                prepared, review_for_promotion
+            ):
+                # Completed reviews and safely retained first-pass decisions
+                # are checked against the exact B/C handles they cite.  Only a
+                # server-selected clue with no usable review citations relies
+                # on the first minimum evidence pair.
                 baseline_ref = baseline_spans[0]
                 current_ref = current_spans[0].evidence
-                if (
-                    baseline_ref.document_id,
-                    baseline_ref.line_start,
-                    baseline_ref.line_end,
-                ) == (
-                    current_ref.document_id,
-                    current_ref.line_start,
-                    current_ref.line_end,
-                ):
+                if _character_evidence_identity(
+                    baseline_ref
+                ) == _character_evidence_identity(current_ref):
                     evidence_pair_reason = "drift_evidence_pair_not_distinct"
             scoped_review_clue = (
                 promoted.outcome == "unverifiable"
@@ -1752,7 +1774,7 @@ class CharacterConsistencyStage:
                     matched_observations=prepared.matching_observations,
                     prepared=prepared,
                     prepare_reason=prepared.reason,
-                    review=review,
+                    review=review_for_promotion,
                     final_outcome=promoted.outcome,
                     visible=(
                         promoted.visible
@@ -1786,10 +1808,14 @@ class CharacterConsistencyStage:
             finding = _to_issue(
                 promoted=promoted,
                 prepared=prepared,
+                review=review_for_promotion,
                 confirmed_candidate_id=baseline_row.candidate_id,
                 judgement=(
-                    review.decision.verdict
-                    if review is not None and review.decision is not None
+                    review_for_promotion.decision.verdict
+                    if (
+                        review_for_promotion is not None
+                        and review_for_promotion.decision is not None
+                    )
                     else (
                         "deterministic_conflict"
                         if prepared.deterministic_conflict
@@ -3815,6 +3841,7 @@ def _to_issue(
     *,
     promoted,
     prepared,
+    review: CharacterReviewResult | None,
     confirmed_candidate_id: str,
     judgement: str,
 ) -> ConsistencyIssue:
@@ -3822,15 +3849,74 @@ def _to_issue(
     current_spans = [row.evidence for row in prepared.matching_observations]
     if not baseline_spans or not current_spans:
         raise ValueError("character drift issue requires baseline and current evidence")
-    evidence: list[EvidenceSpan] = [baseline_spans[0], current_spans[0]]
-    seen = {
-        (row.document_id, row.line_start, row.line_end) for row in evidence
-    }
-    for row in promoted.evidence:
-        key = (row.document_id, row.line_start, row.line_end)
-        if key not in seen and len(evidence) < 12:
-            evidence.append(row)
-            seen.add(key)
+    cited_evidence, cited_refs = _review_cited_evidence(prepared, review)
+    first_pass_evidence, first_pass_refs = _first_pass_review_cited_evidence(
+        prepared, review
+    )
+    baseline_keys = {_character_evidence_identity(row) for row in baseline_spans}
+    current_keys = {_character_evidence_identity(row) for row in current_spans}
+    cited_keys = {_character_evidence_identity(row) for row in cited_evidence}
+    completed_review = (
+        review is not None
+        and review.diagnostics.outcome == "completed"
+        and review.decision is not None
+    )
+    if (
+        cited_evidence
+        and cited_keys & baseline_keys
+        and cited_keys & current_keys
+        and _citation_refs_have_distinct_pair(cited_refs)
+    ):
+        # A completed model review must display the exact frozen spans named by
+        # its validated B/C/G/X handles.  Showing the first baseline/current
+        # rows instead can make an otherwise correct verdict cite the wrong
+        # scene when a case contains multiple evidence spans.
+        evidence = list(cited_evidence)
+        evidence_binding = "review_citations_v1"
+    elif (
+        first_pass_evidence
+        and {
+            _character_evidence_identity(row) for row in first_pass_evidence
+        }
+        & baseline_keys
+        and {
+            _character_evidence_identity(row) for row in first_pass_evidence
+        }
+        & current_keys
+        and _citation_refs_have_distinct_pair(first_pass_refs)
+    ):
+        # The first role/OOC verdict was structurally validated before the
+        # dedicated event-identity pass failed.  Its exact B/C selection is
+        # still safer evidence for a review clue than an arbitrary C01
+        # fallback.  This binding is deliberately distinct from a completed
+        # two-pass review and never carries event-identity metadata.
+        evidence = list(first_pass_evidence)
+        evidence_binding = "first_pass_review_citations_v1"
+        cited_refs = first_pass_refs
+    elif completed_review:
+        raise ValueError("completed character review has no exact B/C citation binding")
+    else:
+        # No model decision exists for conservative server-side clues such as a
+        # single reverse behaviour.  Keep the minimum two-sided evidence pair
+        # and label it as server-selected rather than implying model citation.
+        if _character_evidence_identity(
+            baseline_spans[0]
+        ) == _character_evidence_identity(current_spans[0]):
+            raise ValueError("character drift evidence pair must be distinct")
+        # Without a completed model verdict there is no trustworthy citation
+        # telling us which optional growth/exception rows are relevant.  A
+        # server-only clue therefore exposes only the minimum B/C comparison;
+        # appending every support row would imply a relation the reviewer did
+        # not establish and would corrupt provenance labels.
+        evidence = [baseline_spans[0], current_spans[0]]
+        evidence_binding = "server_evidence_pair_v1"
+        cited_refs = ()
+    selection_metadata_bound = (
+        completed_review
+        and evidence_binding == "review_citations_v1"
+        and review is not None
+        and _review_citation_binding_complete(prepared, review)
+    )
     conflict = promoted.outcome == "conflict"
     severity = Severity.high if conflict else (
         Severity.medium if promoted.confidence_band == "medium" else Severity.low
@@ -3880,10 +3966,336 @@ def _to_issue(
             "judgement": judgement,
             "final_outcome": promoted.outcome,
             "review_reason": promoted.reason,
+            "evidence_binding": evidence_binding,
+            **(
+                {"review_citation_refs": list(cited_refs)}
+                if cited_refs else {}
+            ),
+            **(
+                {"event_independence": review.decision.event_independence}
+                if selection_metadata_bound
+                and review is not None
+                and review.decision is not None
+                and review.decision.event_independence
+                in {"yes", "no", "unclear"}
+                else {}
+            ),
+            **(
+                {
+                    "independent_event_citations": list(
+                        review.decision.independent_event_citations
+                    )
+                }
+                if selection_metadata_bound
+                and review is not None
+                and review.decision is not None
+                and review.decision.event_independence == "yes"
+                and review.decision.independent_event_citations is not None
+                else {}
+            ),
+            **(
+                {
+                    "event_identity_verification": (
+                        review.event_identity_verification.relation
+                    )
+                }
+                if selection_metadata_bound
+                and review is not None
+                and review.event_identity_verification is not None
+                else {}
+            ),
             "checker_version": CHARACTER_CONSISTENCY_CHECKER_VERSION,
             "scope_relation": prepared.case.scope_compatibility,
             "sensitivity": promoted.sensitivity,
         },
+    )
+
+
+def _review_cited_evidence(
+    prepared: PreparedCharacterDrift,
+    review: CharacterReviewResult | None,
+) -> tuple[tuple[EvidenceSpan, ...], tuple[dict[str, Any], ...]]:
+    """Resolve validated reviewer handles to their exact frozen spans.
+
+    The provider never supplies coordinates.  Handles are resolved only
+    against the same server-owned table used to construct the review prompt;
+    any inconsistency fails closed.  A server-selected fallback is reserved
+    for clues that never had a completed model decision.
+    """
+
+    if (
+        review is None
+        or review.diagnostics.outcome != "completed"
+        or review.decision is None
+    ):
+        return (), ()
+    return _resolve_review_citations(prepared, review.decision.citations)
+
+
+def _resolve_review_citations(
+    prepared: PreparedCharacterDrift,
+    citations: tuple[str, ...],
+) -> tuple[tuple[EvidenceSpan, ...], tuple[dict[str, Any], ...]]:
+    """Resolve a structurally validated handle list against one frozen packet."""
+
+    if not citations or len(set(citations)) != len(citations):
+        return (), ()
+
+    by_handle: dict[str, EvidenceSpan] = {}
+    for index, evidence in enumerate(prepared.case.baseline.evidence, start=1):
+        by_handle[f"B{index:02d}"] = evidence
+    for index, observation in enumerate(prepared.matching_observations, start=1):
+        by_handle[f"C{index:02d}"] = observation.evidence
+    bridge_index = exception_index = 0
+    for support in prepared.case.support_evidence:
+        if support.kind == "causal_bridge":
+            bridge_index += 1
+            by_handle[f"G{bridge_index:02d}"] = support.evidence
+        else:
+            exception_index += 1
+            by_handle[f"X{exception_index:02d}"] = support.evidence
+
+    resolved: list[EvidenceSpan] = []
+    seen: set[tuple[str, str, int, int, str]] = set()
+    ordered_handles = sorted(
+        citations,
+        key=lambda handle: (
+            "BCGX".index(handle[0])
+            if isinstance(handle, str)
+            and handle
+            and handle[0] in "BCGX"
+            else 99,
+            int(handle[1:])
+            if isinstance(handle, str) and handle[1:].isdigit()
+            else 999,
+        ),
+    )
+    for handle in ordered_handles:
+        if (
+            not isinstance(handle, str)
+            or not _CASE_TRACE_CITATION_HANDLE.fullmatch(handle)
+            or handle not in by_handle
+        ):
+            return (), ()
+        evidence = by_handle[handle]
+        key = _character_evidence_identity(evidence)
+        if key not in seen:
+            resolved.append(evidence)
+            seen.add(key)
+
+    resolved_refs: list[dict[str, Any]] = []
+    for response_index, handle in enumerate(citations):
+        evidence = by_handle[handle]
+        key = _character_evidence_identity(evidence)
+        evidence_index = next(
+            index
+            for index, row in enumerate(resolved)
+            if _character_evidence_identity(row) == key
+        )
+        resolved_refs.append(
+            {
+                "handle": handle,
+                "role": handle[0],
+                "evidence_index": evidence_index,
+                "response_index": response_index,
+            }
+        )
+    if len(resolved) > 12:
+        return (), ()
+    return tuple(resolved), tuple(resolved_refs)
+
+
+def _first_pass_review_cited_evidence(
+    prepared: PreparedCharacterDrift,
+    review: CharacterReviewResult | None,
+) -> tuple[tuple[EvidenceSpan, ...], tuple[dict[str, Any], ...]]:
+    """Bind only validated first-pass B/C handles after event review degrades.
+
+    The reviewer retains its first decision only after the main response has
+    passed the strict schema and citation contract.  Revalidate that contract
+    here because stage results can also be injected by tests or alternate
+    runtimes.  G/X rows are intentionally omitted: an unavailable second pass
+    cannot make the overall two-pass conclusion complete, and the review clue
+    needs only the exact baseline/current comparison that prompted review.
+    """
+
+    if not _first_pass_event_identity_binding_complete(prepared, review):
+        return (), ()
+    assert review is not None and review.decision is not None
+    citations = tuple(
+        handle
+        for handle in review.decision.citations
+        if handle.startswith(("B", "C"))
+    )
+    return _resolve_review_citations(prepared, citations)
+
+
+def _first_pass_event_identity_binding_complete(
+    prepared: PreparedCharacterDrift,
+    review: CharacterReviewResult | None,
+) -> bool:
+    if (
+        review is None
+        or review.diagnostics.outcome != "degraded"
+        or not review.diagnostics.reason.startswith("event_identity_")
+        or not 1 <= review.diagnostics.attempted_calls <= 2
+        or review.decision is None
+        or review.event_identity_verification is not None
+        or prepared.reason != "two_independent_behaviors"
+        or prepared.case.material_coverage != "complete"
+        or review.decision.verdict != "contradicts"
+    ):
+        return False
+    scoped_axis = (
+        prepared.case.baseline.approved_axis_identity is not None
+        and prepared.case.baseline.dimension in {"value", "behavior_boundary"}
+    )
+    try:
+        _, allowed = _evidence_rows(prepared)
+        _validate_decision(
+            review.decision,
+            allowed,
+            scoped_axis=scoped_axis,
+            current_count=len(prepared.matching_observations),
+            require_independent_events=not scoped_axis,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if scoped_axis:
+        applicability = review.decision.scope_applicability
+        if (
+            applicability is None
+            or applicability.independent_events != "yes"
+            or any(
+                row.object_match != "same" or row.situation_match != "same"
+                for row in applicability.observations
+            )
+        ):
+            return False
+        selected = {row.citation for row in applicability.observations}
+    else:
+        if review.decision.event_independence != "yes":
+            return False
+        selected = set(review.decision.independent_event_citations or ())
+    cited_current = {
+        handle for handle in review.decision.citations if handle.startswith("C")
+    }
+    if len(selected) != 2 or selected != cited_current:
+        return False
+    evidence, refs = _resolve_review_citations(
+        prepared,
+        tuple(
+            handle
+            for handle in review.decision.citations
+            if handle.startswith(("B", "C"))
+        ),
+    )
+    return (
+        bool(evidence)
+        and {row.get("role") for row in refs} >= {"B", "C"}
+        and _citation_refs_have_distinct_pair(refs)
+    )
+
+
+def _review_has_exact_citation_binding(
+    prepared: PreparedCharacterDrift,
+    review: CharacterReviewResult | None,
+) -> bool:
+    if review is None or review.decision is None:
+        return False
+    if review.diagnostics.outcome == "completed":
+        return _review_citation_binding_complete(prepared, review)
+    return _first_pass_event_identity_binding_complete(prepared, review)
+
+
+def _character_evidence_identity(
+    evidence: EvidenceSpan,
+) -> tuple[str, str, int, int, str]:
+    """Distinguish frozen versions that reuse one document coordinate.
+
+    EvidenceSpan does not yet carry a document-version field.  A published
+    snapshot and a later draft can therefore legitimately share document_id
+    and line numbers while containing different text.  Including the frozen
+    text prevents a current C citation from being aliased to an older B span.
+    """
+
+    return (
+        evidence.document_id,
+        evidence.document_name,
+        evidence.line_start,
+        evidence.line_end,
+        evidence.text,
+    )
+
+
+def _review_citation_binding_complete(
+    prepared: PreparedCharacterDrift,
+    review: CharacterReviewResult,
+) -> bool:
+    """Require a lossless, two-sided mapping for a completed model verdict."""
+
+    if review.diagnostics.outcome != "completed" or review.decision is None:
+        return False
+    evidence, refs = _review_cited_evidence(prepared, review)
+    if not evidence or len(refs) != len(review.decision.citations):
+        return False
+    roles = {row.get("role") for row in refs}
+    if not {"B", "C"} <= roles:
+        return False
+    if not _citation_refs_have_distinct_pair(refs):
+        return False
+    if review.decision.verdict == "explained" and not roles & {"G", "X"}:
+        return False
+    if prepared.reason == "two_independent_behaviors":
+        cited = {row["handle"] for row in refs if row.get("role") == "C"}
+        selected_for_verification: set[str] | None = None
+        if review.decision.event_independence == "yes":
+            selected_pair = review.decision.independent_event_citations
+            if (
+                selected_pair is None
+                or len(selected_pair) != 2
+                or cited != set(selected_pair)
+            ):
+                return False
+            selected_for_verification = set(selected_pair)
+        elif review.decision.independent_event_citations:
+            return False
+        applicability = review.decision.scope_applicability
+        if (
+            applicability is not None
+            and applicability.independent_events == "yes"
+        ):
+            selected_for_verification = {
+                row.citation for row in applicability.observations
+            }
+        if (
+            review.decision.verdict == "contradicts"
+            and prepared.case.material_coverage == "complete"
+            and selected_for_verification is not None
+        ):
+            verification = review.event_identity_verification
+            if (
+                verification is None
+                or set(verification.citations) != selected_for_verification
+            ):
+                return False
+    return True
+
+
+def _citation_refs_have_distinct_pair(
+    refs: tuple[dict[str, Any], ...],
+) -> bool:
+    baseline_indexes = {
+        row.get("evidence_index") for row in refs if row.get("role") == "B"
+    }
+    current_indexes = {
+        row.get("evidence_index") for row in refs if row.get("role") == "C"
+    }
+    return any(
+        baseline_index != current_index
+        for baseline_index in baseline_indexes
+        for current_index in current_indexes
+        if type(baseline_index) is int and type(current_index) is int
     )
 
 
@@ -4384,6 +4796,33 @@ def _safe_case_trace(
         "citation_roles": roles,
         "citation_refs": citation_refs,
         "citation_refs_incomplete": citation_refs_incomplete,
+        **(
+            {"event_independence": decision.event_independence}
+            if decision is not None
+            and decision.event_independence in {"yes", "no", "unclear"}
+            else {}
+        ),
+        **(
+            {
+                "independent_event_citations": list(
+                    decision.independent_event_citations
+                )
+            }
+            if decision is not None
+            and decision.event_independence == "yes"
+            and decision.independent_event_citations is not None
+            else {}
+        ),
+        **(
+            {
+                "event_identity_verification": (
+                    review.event_identity_verification.relation
+                )
+            }
+            if review is not None
+            and review.event_identity_verification is not None
+            else {}
+        ),
         **({"scoped_axis_review": scoped_review} if scoped_review is not None else {}),
         "final_outcome": final_outcome,
         "visible": bool(visible),

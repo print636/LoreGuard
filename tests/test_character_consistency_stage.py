@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from app.character_consistency_stage import (
     CharacterConsistencyStage,
+    CharacterConsistencyStageResult,
     failed_character_consistency_stage,
     _FrozenDocument,
     _classify_frozen_source,
@@ -23,6 +24,8 @@ from app.character_consistency_stage import (
     _explicit_support_kind,
     _find_support_evidence,
     _safe_case_trace,
+    _review_citation_binding_complete,
+    _to_issue,
     _safe_accepted_draft_observation_refs,
     _safe_baseline_hint,
     _safe_server_context,
@@ -45,6 +48,7 @@ from app.character_drift import (
     ModelDriftDecision,
     SupportEvidence,
     prepare_character_drift,
+    promote_character_drift,
 )
 from app.character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
@@ -62,22 +66,29 @@ from app.character_trait_extraction import (
 )
 from app.config import Settings
 from app.db import (
+    AnalysisDiagnosticRow,
     AnalysisRunCharacterTraitInputRow,
+    AnalysisRunInputRow,
     AnalysisRunRow,
     CharacterTraitAxisRow,
     CharacterTraitCandidateRow,
     CharacterTraitReviewRow,
+    IssueRow,
     SessionLocal,
 )
 from app.main import app, settings as app_settings, write_limiter
-from app.domain import EvidenceSpan
+from app.domain import ConsistencyIssue, EvidenceSpan, IssueCategory, Severity
 from app.narrative_context import (
     NarrativeScopeV1,
     classify_character_source_kind,
     payload_sha256,
 )
 from app.pipeline import DocumentInput
-from app.service import _load_verified_snapshot, execute_analysis
+from app.service import (
+    _load_verified_snapshot,
+    document_content_sha256,
+    execute_analysis,
+)
 
 
 class QueueProvider:
@@ -1501,6 +1512,145 @@ def _confirmed_directness_project(client: TestClient) -> dict:
     return project
 
 
+def test_service_and_api_keep_versioned_same_coordinate_review_clue():
+    """B may live only in the trait snapshot while C reuses its coordinate."""
+
+    with TestClient(app) as client:
+        project = _confirmed_directness_project(client)
+        run_id = _new_run(client, project["id"])
+        current_text = "祁雾在台上反复绕弯，从不直接回答任何问题。"
+        with SessionLocal() as db:
+            trait_input = db.scalar(
+                select(AnalysisRunCharacterTraitInputRow).where(
+                    AnalysisRunCharacterTraitInputRow.run_id == run_id
+                )
+            )
+            assert trait_input is not None
+            baseline = EvidenceSpan.model_validate(
+                trait_input.payload["evidence"][0]
+            )
+            document_input = db.scalar(
+                select(AnalysisRunInputRow).where(
+                    AnalysisRunInputRow.run_id == run_id,
+                    AnalysisRunInputRow.document_id == baseline.document_id,
+                )
+            )
+            assert document_input is not None
+            document_input.content = current_text
+            document_input.content_sha256 = document_content_sha256(current_text)
+            db.commit()
+            candidate_id = trait_input.candidate_id
+
+        current = baseline.model_copy(update={"text": current_text})
+        valid = ConsistencyIssue(
+            category=IssueCategory.character_drift,
+            severity=Severity.medium,
+            confidence=0.68,
+            title="祁雾的角色表现需要确认",
+            explanation="当前反向表现仍需作者复核。",
+            evidence=[baseline, current],
+            suggestion="核对角色设定",
+            metadata={
+                "character_key": "祁雾",
+                "dimension": "core_personality",
+                "trait_key": "directness",
+                "confirmed_candidate_id": candidate_id,
+                "final_outcome": "needs_confirmation",
+                "review_reason": "event_identity_verification_unavailable",
+                "evidence_binding": "first_pass_review_citations_v1",
+                "review_citation_refs": [
+                    {
+                        "handle": "B01",
+                        "role": "B",
+                        "evidence_index": 0,
+                        "response_index": 0,
+                    },
+                    {
+                        "handle": "C01",
+                        "role": "C",
+                        "evidence_index": 1,
+                        "response_index": 1,
+                    },
+                ],
+            },
+        )
+        wrong_candidate = valid.model_copy(
+            update={
+                "metadata": {
+                    **valid.metadata,
+                    "confirmed_candidate_id": str(uuid4()),
+                }
+            }
+        )
+        forged_baseline = valid.model_copy(
+            update={
+                "evidence": [
+                    baseline.model_copy(update={"text": "未冻结的旧设定原文"}),
+                    current,
+                ]
+            }
+        )
+        stage_result = CharacterConsistencyStageResult(
+            issues=(),
+            review_clues=(valid, wrong_candidate, forged_baseline),
+            diagnostics={
+                "outcome": "completed",
+                "usage": {"attempted_calls": 0},
+            },
+        )
+        with (
+            patch.object(app_settings, "enable_character_consistency", True),
+            patch(
+                "app.service.CharacterConsistencyStage.run",
+                return_value=stage_result,
+            ),
+        ):
+            execute_analysis(run_id, raise_on_failure=True)
+
+        response = client.get(f"/api/v1/analysis-runs/{run_id}/review-clues")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["unavailable_count"] == 0
+        assert len(payload["items"]) == 1
+        assert [row["text"] for row in payload["items"][0]["evidence"]] == [
+            baseline.text,
+            current_text,
+        ]
+        with SessionLocal() as db:
+            rows = list(
+                db.scalars(
+                    select(IssueRow).where(
+                        IssueRow.run_id == run_id,
+                        IssueRow.report_class == "review_clue",
+                    )
+                ).all()
+            )
+            assert len(rows) == 1
+            diagnostics = db.get(AnalysisDiagnosticRow, run_id).payload
+            assert diagnostics["character_review_clues"] == {
+                "stored": 1,
+                "rejected_unbound": 2,
+            }
+            trait_input = db.scalar(
+                select(AnalysisRunCharacterTraitInputRow).where(
+                    AnalysisRunCharacterTraitInputRow.run_id == run_id
+                )
+            )
+            tampered_payload = {
+                **trait_input.payload,
+                "evidence_sha256": "0" * 64,
+            }
+            trait_input.payload = tampered_payload
+            trait_input.payload_sha256 = payload_sha256(tampered_payload)
+            db.commit()
+
+        unavailable = client.get(
+            f"/api/v1/analysis-runs/{run_id}/review-clues"
+        ).json()
+        assert unavailable["items"] == []
+        assert unavailable["unavailable_count"] == 1
+
+
 def _confirmed_speech_project(client: TestClient) -> dict:
     project = client.post(
         "/api/v1/projects", json={"name": f"说话方式补抽-{uuid4().hex}"}
@@ -1643,6 +1793,8 @@ def test_positive_state_does_not_suppress_targeted_recall_of_opposed_speech():
                     "verdict": "needs_confirmation",
                     "explanation": "两次反向说话表现需要进一步确认。",
                     "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
                 },
                 ensure_ascii=False,
             ),
@@ -1728,6 +1880,8 @@ def test_two_independent_primary_speech_samples_suppress_targeted_recall():
                     "verdict": "needs_confirmation",
                     "explanation": "两次反向说话表现需要进一步确认。",
                     "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
                 },
                 ensure_ascii=False,
             ),
@@ -3346,6 +3500,8 @@ def test_single_personality_behavior_is_clue_and_two_behaviors_can_need_confirma
                         "verdict": "needs_confirmation",
                         "explanation": "两次反向表现已达到复核门槛，但材料不足以确认人格永久改变。",
                         "citations": ["B01", "C01", "C02"],
+                        "event_independence": "yes",
+                        "independent_event_citations": ["C01", "C02"],
                     },
                     ensure_ascii=False,
                 ),
@@ -3355,6 +3511,8 @@ def test_single_personality_behavior_is_clue_and_two_behaviors_can_need_confirma
         assert len(two.review_clues) == 1
         assert two.review_clues[0].severity.value == "medium"
         assert two.review_clues[0].metadata["judgement"] == "needs_confirmation"
+        assert two.review_clues[0].metadata["event_independence"] == "yes"
+        assert two.review_clues[0].metadata["evidence_binding"] == "review_citations_v1"
 
 
 def test_provider_review_failure_keeps_bound_clue_and_partial_diagnostic():
@@ -4306,6 +4464,266 @@ def test_case_trace_explained_citations_resolve_frozen_bridge_and_exception_coor
     assert '"summary"' not in serialized
 
 
+def test_character_issue_uses_exact_review_citations_instead_of_first_case_spans():
+    original = _citation_trace_case(observation_count=2)
+    first_baseline = original.case.baseline.evidence[0]
+    second_baseline = EvidenceSpan(
+        document_id="profile-second",
+        document_name="profile.md",
+        line_start=9,
+        line_end=9,
+        text="林澈一直喜欢蜜瓜。",
+    )
+    baseline = original.case.baseline.model_copy(
+        update={"evidence": (first_baseline, second_baseline)}
+    )
+    case = original.case.model_copy(update={"baseline": baseline})
+    prepared = prepare_character_drift(case).model_copy(
+        # Exercise the resolver defensively with a legacy/synthetic prepared
+        # packet containing more than the new minimal review subset.
+        update={"matching_observations": case.observations}
+    )
+    review = _trace_review(("B02", "C02"), verdict="contradicts")
+    promoted = promote_character_drift(prepared, review)
+
+    issue = _to_issue(
+        promoted=promoted,
+        prepared=prepared,
+        review=review,
+        confirmed_candidate_id="candidate-1",
+        judgement="contradicts",
+    )
+
+    assert [
+        (row.document_id, row.line_start, row.line_end)
+        for row in issue.evidence
+    ] == [
+        ("profile-second", 9, 9),
+        ("draft-1", 2, 2),
+    ]
+    assert issue.metadata["evidence_binding"] == "review_citations_v1"
+    assert issue.metadata["review_citation_refs"] == [
+        {
+            "handle": "B02", "role": "B", "evidence_index": 0,
+            "response_index": 0,
+        },
+        {
+            "handle": "C02", "role": "C", "evidence_index": 1,
+            "response_index": 1,
+        },
+    ]
+
+
+def test_server_only_character_clue_labels_evidence_as_non_model_selected():
+    prepared = _citation_trace_case()
+    promoted = promote_character_drift(prepared, None)
+
+    issue = _to_issue(
+        promoted=promoted,
+        prepared=prepared,
+        review=None,
+        confirmed_candidate_id="candidate-1",
+        judgement="needs_confirmation",
+    )
+
+    assert issue.metadata["evidence_binding"] == "server_evidence_pair_v1"
+    assert "review_citation_refs" not in issue.metadata
+    assert [row.document_id for row in issue.evidence] == ["profile", "draft-0"]
+
+
+def test_degraded_event_identity_clue_binds_validated_first_pass_pair_only():
+    prepared = _citation_trace_case(observation_count=3).model_copy(
+        update={"reason": "two_independent_behaviors"}
+    )
+    review = CharacterReviewResult(
+        decision=ModelDriftDecision(
+            verdict="contradicts",
+            explanation="第二与第三条表面上属于两次独立事件。",
+            citations=("B01", "C02", "C03"),
+            event_independence="yes",
+            independent_event_citations=("C02", "C03"),
+        ),
+        diagnostics=CharacterReviewDiagnostics(
+            outcome="degraded",
+            reason="event_identity_read_timeout",
+            attempted_calls=2,
+        ),
+    )
+    promoted = promote_character_drift(prepared, review)
+
+    issue = _to_issue(
+        promoted=promoted,
+        prepared=prepared,
+        review=review,
+        confirmed_candidate_id="candidate-1",
+        judgement="needs_confirmation",
+    )
+
+    assert promoted.reason == "event_identity_verification_unavailable"
+    assert issue.metadata["evidence_binding"] == "first_pass_review_citations_v1"
+    assert [row.document_id for row in issue.evidence] == [
+        "profile", "draft-1", "draft-2",
+    ]
+    assert issue.metadata["review_citation_refs"] == [
+        {
+            "handle": "B01", "role": "B", "evidence_index": 0,
+            "response_index": 0,
+        },
+        {
+            "handle": "C02", "role": "C", "evidence_index": 1,
+            "response_index": 1,
+        },
+        {
+            "handle": "C03", "role": "C", "evidence_index": 2,
+            "response_index": 2,
+        },
+    ]
+    assert "event_independence" not in issue.metadata
+    assert "independent_event_citations" not in issue.metadata
+    assert "event_identity_verification" not in issue.metadata
+
+
+def test_forged_degraded_event_identity_decision_cannot_claim_first_pass_binding():
+    prepared = _citation_trace_case(observation_count=3).model_copy(
+        update={"reason": "two_independent_behaviors"}
+    )
+    forged = CharacterReviewResult(
+        decision=ModelDriftDecision(
+            verdict="contradicts",
+            explanation="引用选择与独立事件字段不一致。",
+            citations=("B01", "C01", "C02"),
+            event_independence="yes",
+            independent_event_citations=("C02", "C03"),
+        ),
+        diagnostics=CharacterReviewDiagnostics(
+            outcome="degraded",
+            reason="event_identity_read_timeout",
+            attempted_calls=2,
+        ),
+    )
+    promoted = promote_character_drift(prepared, forged)
+
+    issue = _to_issue(
+        promoted=promoted,
+        prepared=prepared,
+        review=forged,
+        confirmed_candidate_id="candidate-1",
+        judgement="needs_confirmation",
+    )
+
+    assert issue.metadata["evidence_binding"] == "server_evidence_pair_v1"
+    assert [row.document_id for row in issue.evidence] == ["profile", "draft-0"]
+    assert "review_citation_refs" not in issue.metadata
+
+
+def test_character_issue_normalizes_evidence_roles_even_if_model_reverses_citations():
+    prepared = _citation_trace_case()
+    review = _trace_review(("C01", "B01"), verdict="contradicts")
+    promoted = promote_character_drift(prepared, review)
+
+    issue = _to_issue(
+        promoted=promoted,
+        prepared=prepared,
+        review=review,
+        confirmed_candidate_id="candidate-1",
+        judgement="contradicts",
+    )
+
+    assert [row.document_id for row in issue.evidence] == ["profile", "draft-0"]
+    assert issue.metadata["review_citation_refs"] == [
+        {
+            "handle": "C01", "role": "C", "evidence_index": 1,
+            "response_index": 0,
+        },
+        {
+            "handle": "B01", "role": "B", "evidence_index": 0,
+            "response_index": 1,
+        },
+    ]
+
+
+def test_completed_review_with_unresolvable_handle_cannot_fall_back_to_first_spans():
+    prepared = _citation_trace_case()
+    forged = _trace_review(("B99", "C01"), verdict="contradicts")
+    promoted = promote_character_drift(prepared, forged)
+
+    assert not _review_citation_binding_complete(prepared, forged)
+    with pytest.raises(ValueError, match="no exact B/C citation binding"):
+        _to_issue(
+            promoted=promoted,
+            prepared=prepared,
+            review=forged,
+            confirmed_candidate_id="candidate-1",
+            judgement="contradicts",
+        )
+
+
+def test_completed_review_cannot_reuse_one_span_as_both_baseline_and_current():
+    original = _citation_trace_case()
+    current_span = original.matching_observations[0].evidence
+    baseline = original.case.baseline.model_copy(
+        update={"evidence": (current_span,)}
+    )
+    prepared = original.model_copy(
+        update={
+            "case": original.case.model_copy(update={"baseline": baseline})
+        }
+    )
+    review = _trace_review(("B01", "C01"), verdict="contradicts")
+    promoted = promote_character_drift(prepared, review)
+
+    assert not _review_citation_binding_complete(prepared, review)
+    with pytest.raises(ValueError, match="no exact B/C citation binding"):
+        _to_issue(
+            promoted=promoted,
+            prepared=prepared,
+            review=review,
+            confirmed_candidate_id="candidate-1",
+            judgement="contradicts",
+        )
+
+
+def test_character_issue_preserves_versioned_text_at_reused_document_coordinate():
+    original = _citation_trace_case()
+    current = original.matching_observations[0].evidence
+    prior_version = current.model_copy(
+        update={"text": "旧版本同一行：林澈仍表示喜欢蜜瓜。"}
+    )
+    baseline = original.case.baseline.model_copy(
+        update={
+            "evidence": (
+                original.case.baseline.evidence[0],
+                prior_version,
+            )
+        }
+    )
+    prepared = original.model_copy(
+        update={"case": original.case.model_copy(update={"baseline": baseline})}
+    )
+    review = _trace_review(("B01", "B02", "C01"), verdict="contradicts")
+    promoted = promote_character_drift(prepared, review)
+
+    assert _review_citation_binding_complete(prepared, review)
+    issue = _to_issue(
+        promoted=promoted,
+        prepared=prepared,
+        review=review,
+        confirmed_candidate_id="candidate-1",
+        judgement="contradicts",
+    )
+
+    assert [row.text for row in issue.evidence] == [
+        original.case.baseline.evidence[0].text,
+        prior_version.text,
+        current.text,
+    ]
+    assert [row["evidence_index"] for row in issue.metadata["review_citation_refs"]] == [
+        0,
+        1,
+        2,
+    ]
+
+
 def test_explained_review_without_visible_issue_retains_frozen_growth_citation_ref():
     profile_line = "林澈喜欢蜜瓜。"
     growth_line = "训练后林澈逐渐改变了待人方式。"
@@ -4415,7 +4833,10 @@ def test_case_trace_citation_coordinate_or_name_out_of_bounds_fails_closed(
 
 
 def test_case_trace_citation_refs_are_bounded_and_marked_incomplete_if_truncated():
-    prepared = _citation_trace_case(observation_count=7)
+    initial = _citation_trace_case(observation_count=7)
+    prepared = initial.model_copy(
+        update={"matching_observations": initial.case.observations}
+    )
     # The validated provider contract permits at most eight citations. This
     # synthetic over-limit result still must not grow persisted diagnostics.
     oversized = ModelDriftDecision.model_construct(
@@ -5180,7 +5601,19 @@ def _run_scoped_axis_stage(
             narrative_context=_context(publication="draft"),
         )
         run_id = _new_run(client, project["id"])
-        provider = QueueProvider(_response(), _response(*observations), review)
+        provider_responses = [_response(), _response(*observations), review]
+        if (
+            scoped_enabled
+            and len(source_lines) == 2
+            and situation_match == "same"
+            and independent_events == "yes"
+        ):
+            provider_responses.append(json.dumps({
+                "relation": "different_events",
+                "explanation": "两段原文明确描述两次不同事件。",
+                "citations": current_citations,
+            }, ensure_ascii=False))
+        provider = QueueProvider(*provider_responses)
         with patch.object(
             CharacterConsistencyStage, "_load_confirmed_traits", return_value=entries
         ):
@@ -5216,14 +5649,17 @@ def test_scoped_axis_same_scope_two_actions_make_one_issue_for_two_confirmed_lab
     result, provider = _run_scoped_axis_stage(
         (
             "家人遇险时，林澈抛下家人独自离开。",
-            "第二次家人遇险时，林澈仍抛下家人独自离开。",
+            "次日，另一场家人遇险中，林澈仍抛下家人独自离开。",
         ),
         situation_match="same", duplicate_baseline=True,
         independent_events="yes",
     )
     assert len(result.issues) == 1
     assert result.issues[0].category.value == "character_drift"
-    assert result.diagnostics["counts"]["drift_reviewed"] == 1
+    assert result.issues[0].metadata["event_identity_verification"] == (
+        "different_events"
+    )
+    assert result.diagnostics["counts"]["drift_reviewed"] == 2
     assert result.diagnostics["reason_counts"][
         "equivalent_approved_axis_baseline_collapsed"
     ] == 1
@@ -5231,7 +5667,10 @@ def test_scoped_axis_same_scope_two_actions_make_one_issue_for_two_confirmed_lab
     assert result.diagnostics["case_trace"][0]["scoped_axis_review"][
         "independent_events"
     ] == "yes"
-    assert len(provider.calls) == 3
+    assert result.diagnostics["case_trace"][0][
+        "event_identity_verification"
+    ] == "different_events"
+    assert len(provider.calls) == 4
 
 
 def test_scoped_axis_same_event_repeated_on_two_lines_cannot_be_conflict():

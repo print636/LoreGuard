@@ -779,6 +779,37 @@ def _build_provenance(
         evidence_details = []
         aggregate_sources: set[str] = set()
         character_semantic = issue.category == IssueCategory.character_drift
+        character_roles_by_evidence_index: dict[int, set[str]] = {}
+        if character_semantic and isinstance(issue.metadata, dict):
+            raw_refs = issue.metadata.get("review_citation_refs")
+            if (
+                issue.metadata.get("evidence_binding")
+                in {
+                    "review_citations_v1",
+                    "first_pass_review_citations_v1",
+                }
+                and isinstance(raw_refs, list)
+                and 0 < len(raw_refs) <= 8
+            ):
+                valid_refs = True
+                for raw_ref in raw_refs:
+                    if not isinstance(raw_ref, dict):
+                        valid_refs = False
+                        break
+                    role = raw_ref.get("role")
+                    evidence_index = raw_ref.get("evidence_index")
+                    if (
+                        role not in {"B", "C", "G", "X"}
+                        or type(evidence_index) is not int
+                        or not 0 <= evidence_index < len(issue.evidence)
+                    ):
+                        valid_refs = False
+                        break
+                    character_roles_by_evidence_index.setdefault(
+                        evidence_index, set()
+                    ).add(role)
+                if not valid_refs:
+                    character_roles_by_evidence_index = {}
         for evidence_index, evidence in enumerate(issue.evidence):
             key = (
                 evidence.document_id,
@@ -789,13 +820,26 @@ def _build_provenance(
             )
             sources = sorted(evidence_source_map.get(key, set()))
             if character_semantic and not sources:
-                sources = [
-                    (
-                        "confirmed_trait_snapshot"
-                        if evidence_index == 0
-                        else "character_signal_model"
+                roles = character_roles_by_evidence_index.get(evidence_index, set())
+                if roles:
+                    sources = sorted(
+                        {
+                            "confirmed_trait_snapshot"
+                            if role == "B"
+                            else "character_signal_model"
+                            if role == "C"
+                            else "character_support_evidence"
+                            for role in roles
+                        }
                     )
-                ]
+                else:
+                    sources = [
+                        (
+                            "confirmed_trait_snapshot"
+                            if evidence_index == 0
+                            else "character_signal_model"
+                        )
+                    ]
             aggregate_sources.update(sources)
             evidence_details.append(
                 {

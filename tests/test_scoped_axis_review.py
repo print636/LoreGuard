@@ -12,6 +12,7 @@ from app.character_drift import (
     CharacterReviewDiagnostics,
     CharacterReviewResult,
     ConfirmedTraitSnapshot,
+    EventIdentityDecision,
     ModelDriftDecision,
     _validate_decision,
     prepare_character_drift,
@@ -60,7 +61,11 @@ def _case(
             evidence=EvidenceSpan(
                 document_id="draft", document_name="draft.md",
                 line_start=index, line_end=index,
-                text="家庭危机时，林澈拒绝保护家人。",
+                text=(
+                    "家庭危机时，林澈拒绝保护家人。"
+                    if index == 1
+                    else "次日，另一场家庭危机中，林澈再次拒绝保护家人。"
+                ),
             ),
         )
         for index in range(1, count + 1)
@@ -99,11 +104,38 @@ def _decision(
     })
 
 
-def _review(decision: ModelDriftDecision) -> CharacterReviewResult:
+def _review(
+    decision: ModelDriftDecision,
+    *,
+    event_relation: str = "different_events",
+) -> CharacterReviewResult:
+    applicability = decision.scope_applicability
+    verification = None
+    if (
+        applicability is not None
+        and applicability.independent_events == "yes"
+        and len(applicability.observations) == 2
+    ):
+        verification = EventIdentityDecision(
+            relation=event_relation,
+            explanation=(
+                "两段原文属于不同事件。"
+                if event_relation == "different_events"
+                else "两段原文属于同一连续事件。"
+                if event_relation == "same_event"
+                else "无法确认事件边界。"
+            ),
+            citations=tuple(
+                row.citation for row in applicability.observations
+            ),
+        )
     return CharacterReviewResult(
         decision=decision,
+        event_identity_verification=verification,
         diagnostics=CharacterReviewDiagnostics(
-            outcome="completed", reason="completed", attempted_calls=1,
+            outcome="completed",
+            reason="completed",
+            attempted_calls=2 if verification is not None else 1,
         ),
     )
 
@@ -118,6 +150,16 @@ def test_scoped_axis_two_independent_actions_can_reach_reviewer_and_conflict(
     result = promote_character_drift(prepared, _review(_decision("same", "same")))
     assert result.outcome == "conflict"
     assert result.reason == "model_contradicts"
+
+
+def test_scoped_axis_second_pass_same_event_blocks_formal_conflict():
+    result = promote_character_drift(
+        prepare_character_drift(_case()),
+        _review(_decision("same", "same"), event_relation="same_event"),
+    )
+
+    assert result.outcome == "needs_confirmation"
+    assert result.reason == "scoped_event_identity_same_event"
 
 
 @pytest.mark.parametrize("object_match,situation_match,expected,reason", [
@@ -236,15 +278,49 @@ def test_scoped_axis_reviewer_requires_every_current_citation():
         )
 
 
+def test_scoped_axis_insufficient_verdict_still_requires_baseline_and_current():
+    decision = _decision("same", "same").model_copy(
+        update={
+            "verdict": "insufficient_evidence",
+            "citations": ("C01", "C02"),
+        }
+    )
+
+    with pytest.raises(ValueError, match="decision_requires_baseline_and_current"):
+        _validate_decision(
+            decision,
+            frozenset({"B01", "C01", "C02"}),
+            scoped_axis=True,
+            current_count=2,
+        )
+
+
+def test_scoped_axis_rejects_ordinary_multi_event_pair_field():
+    decision = _decision("same", "same").model_copy(
+        update={"independent_event_citations": ("C01", "C02")}
+    )
+
+    with pytest.raises(ValueError, match="unexpected_independent_event_citations"):
+        _validate_decision(
+            decision,
+            frozenset({"B01", "C01", "C02"}),
+            scoped_axis=True,
+            current_count=2,
+        )
+
+
 class _Provider:
-    def __init__(self, payload: dict):
-        self.payload = payload
+    def __init__(self, payload: dict, *additional_payloads: dict):
+        self.payloads = [payload, *additional_payloads]
         self.calls: list[tuple[str, str]] = []
 
     def complete(self, system: str, user: str):
         self.calls.append((system, user))
+        if not self.payloads:
+            raise AssertionError("unexpected logical model call")
+        payload = self.payloads.pop(0)
         return SimpleNamespace(
-            text=json.dumps(self.payload, ensure_ascii=False),
+            text=json.dumps(payload, ensure_ascii=False),
             prompt_tokens=10, completion_tokens=10,
         )
 
@@ -271,17 +347,24 @@ def test_scoped_axis_reviewer_sends_author_scope_and_rejects_missing_gate():
 
 
 def test_scoped_axis_reviewer_accepts_complete_bounded_scope_assessment():
-    provider = _Provider({
-        "verdict": "contradicts", "explanation": "两次行为与已确认设定相反。",
-        "citations": ["B01", "C01", "C02"],
-        "scope_applicability": {
-            "observations": [
-                {"citation": "C01", "object_match": "same", "situation_match": "same"},
-                {"citation": "C02", "object_match": "same", "situation_match": "same"},
-            ],
-            "independent_events": "yes",
+    provider = _Provider(
+        {
+            "verdict": "contradicts", "explanation": "两次行为与已确认设定相反。",
+            "citations": ["B01", "C01", "C02"],
+            "scope_applicability": {
+                "observations": [
+                    {"citation": "C01", "object_match": "same", "situation_match": "same"},
+                    {"citation": "C02", "object_match": "same", "situation_match": "same"},
+                ],
+                "independent_events": "yes",
+            },
         },
-    })
+        {
+            "relation": "different_events",
+            "explanation": "两段原文属于不同事件。",
+            "citations": ["C01", "C02"],
+        },
+    )
     settings = Settings(
         _env_file=None, openai_api_key="test-key",
         openai_base_url="https://mock.invalid/v1", openai_model="mock",
@@ -290,5 +373,7 @@ def test_scoped_axis_reviewer_accepts_complete_bounded_scope_assessment():
     prepared = prepare_character_drift(_case())
     review = CharacterConsistencyReviewer(provider, settings=settings).review(prepared)
     assert review.diagnostics.outcome == "completed"
+    assert review.diagnostics.attempted_calls == 2
     assert review.decision is not None
+    assert review.event_identity_verification is not None
     assert promote_character_drift(prepared, review).outcome == "conflict"

@@ -103,8 +103,10 @@ export function normalizeReviewClueResult(payload: unknown): ReviewClueResult {
     const evidence = clue.evidence.map(evidenceSpan) as [Evidence, Evidence, ...Evidence[]];
     if (
       evidence[0].document_id === evidence[1].document_id &&
+      evidence[0].document_name === evidence[1].document_name &&
       evidence[0].line_start === evidence[1].line_start &&
-      evidence[0].line_end === evidence[1].line_end
+      evidence[0].line_end === evidence[1].line_end &&
+      evidence[0].text === evidence[1].text
     ) {
       throw new TypeError("角色审查线索的双侧证据不可指向同一位置");
     }

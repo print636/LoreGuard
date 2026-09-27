@@ -54,6 +54,28 @@ an **experimental review path**, not a measured cross-story OOC accuracy claim:
 actor attribution, model judgments, and incomplete coverage can still miss
 valid cases, so authors must inspect both evidence spans and coverage status.
 
+Character-review evidence is now projected from the reviewer's validated
+`B/C/G/X` handles back to the exact frozen spans used in that call. A completed
+review whose handles cannot be resolved to both baseline and current evidence
+fails closed and cannot become a formal issue; the report never substitutes
+the first available scene. Repeated-behaviour OOC review sends a bounded pool
+of source-diverse observations; the model must identify and cite exactly two
+current observations and return a structured independent-event judgment. A
+second, narrowly prompted model call then receives only those two C spans and
+must independently classify their event identity before formal promotion.
+Failure, invalid citations, budget/deadline exhaustion, or a non-different
+answer stays in review. Same-document nearby spans additionally require an
+explicit time/event boundary at the start of the later evidence line, even if
+both model calls label them independent.
+When the first review is valid but the event-identity pass cannot complete,
+the clue uses a separate `first_pass_review_citations_v1` binding and displays
+only the exact first-pass B/C selection; it does not publish an event-identity
+result or become a formal issue.
+A repeated description of one event therefore
+stays in review instead of being counted twice. These are evidence-integrity
+contracts, not an open-story accuracy result; see the
+[v2 development checkpoint](docs/character-ooc-evidence-binding-v2-20260927.md).
+
 An author-confirmed character trait remains active even if its source document
 is later retired or reclassified as reference material. The character workbench
 offers an explicit, audited per-trait withdrawal with confirmation; it excludes

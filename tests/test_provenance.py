@@ -7,7 +7,12 @@ import httpx
 from app.domain import ConsistencyIssue, EvidenceSpan, IssueCategory, ParsedDirective, Severity
 from app.model_extractor import ModelEnhancedExtractor, merge_directives
 from app.parser import ParsedDocument
-from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
+from app.pipeline import (
+    AnalysisPipeline,
+    BaselineExtractor,
+    DocumentInput,
+    build_result_provenance,
+)
 from app.provider import OpenAICompatibleProvider, RetryPolicy
 from scripts.run_phase1_model_acceptance import _directive_fingerprint, _issue_fingerprint
 from tests.test_model_extractor import completion, settings
@@ -227,6 +232,76 @@ class ProvenanceTests(unittest.TestCase):
         serialized = json.dumps(result.diagnostics["provenance"], ensure_ascii=False)
         for forbidden in ("private baseline evidence", "private model evidence", "prompt", "api_key", "http"):
             self.assertNotIn(forbidden, serialized)
+
+    def test_character_review_provenance_uses_frozen_citation_roles(self):
+        baseline = EvidenceSpan(
+            document_id="profile", document_name="profile.md",
+            line_start=2, line_end=2, text="private baseline",
+        )
+        current = EvidenceSpan(
+            document_id="draft", document_name="draft.md",
+            line_start=8, line_end=8, text="private current",
+        )
+        support = EvidenceSpan(
+            document_id="history", document_name="history.md",
+            line_start=5, line_end=5, text="private support",
+        )
+        for binding, evidence, refs, expected in (
+            (
+                "review_citations_v1",
+                [baseline, current, support],
+                [
+                    {"handle": "C01", "role": "C", "evidence_index": 1, "response_index": 0},
+                    {"handle": "B01", "role": "B", "evidence_index": 0, "response_index": 1},
+                    {"handle": "G01", "role": "G", "evidence_index": 2, "response_index": 2},
+                ],
+                {
+                    ("profile.md", 2): ["confirmed_trait_snapshot"],
+                    ("draft.md", 8): ["character_signal_model"],
+                    ("history.md", 5): ["character_support_evidence"],
+                },
+            ),
+            (
+                "first_pass_review_citations_v1",
+                [baseline, current],
+                [
+                    {"handle": "B01", "role": "B", "evidence_index": 0, "response_index": 0},
+                    {"handle": "C01", "role": "C", "evidence_index": 1, "response_index": 1},
+                ],
+                {
+                    ("profile.md", 2): ["confirmed_trait_snapshot"],
+                    ("draft.md", 8): ["character_signal_model"],
+                },
+            ),
+        ):
+            with self.subTest(binding=binding):
+                issue = ConsistencyIssue(
+                    category=IssueCategory.character_drift,
+                    severity=Severity.medium,
+                    confidence=0.7,
+                    title="角色表现需要确认",
+                    explanation="证据需要复核",
+                    evidence=evidence,
+                    suggestion="检查",
+                    metadata={
+                        "evidence_binding": binding,
+                        "review_citation_refs": refs,
+                    },
+                )
+                result = build_result_provenance(
+                    [],
+                    [issue],
+                    [
+                        DocumentInput("profile", "profile.md", "private baseline"),
+                        DocumentInput("draft", "draft.md", "private current"),
+                        DocumentInput("history", "history.md", "private support"),
+                    ],
+                )
+                details = {
+                    (row["path"], row["line"]): row["sources"]
+                    for row in result["issues"][0]["evidence_source_details"]
+                }
+                self.assertEqual(details, expected)
 
     def test_multiline_clarification_lists_every_contributing_line(self):
         directive = ParsedDirective(

@@ -30,6 +30,18 @@ test("review clue requires a separate report class and both source spans", () =>
     indentedSource,
   );
   assert.equal(result.items[0].metadata.final_outcome, "needs_confirmation");
+  const versionedSameCoordinate = {
+    ...clue,
+    evidence: [
+      clue.evidence[0],
+      { ...clue.evidence[0], text: "同一文档坐标的新冻结版本原文。" },
+    ],
+  };
+  assert.equal(
+    normalizeReviewClueResult({ items: [versionedSameCoordinate], truncated: false })
+      .items[0].evidence[1].text,
+    "同一文档坐标的新冻结版本原文。",
+  );
   assert.equal(
     normalizeReviewClueResult({
       items: [{ ...clue, metadata: { ...clue.metadata, final_outcome: "unverifiable" } }],

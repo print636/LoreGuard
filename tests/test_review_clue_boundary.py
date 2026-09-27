@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.db import (
-    AnalysisDiagnosticRow, AnalysisRunComparisonRow, AnalysisRunRow,
+    AnalysisDiagnosticRow, AnalysisRunComparisonRow, AnalysisRunInputRow,
+    AnalysisRunRow,
     FeedbackRow, IssueComparisonItemRow, IssueRow, ProjectRow, SessionLocal,
     WorkspaceRow,
 )
@@ -17,7 +18,13 @@ from app.character_consistency_stage import CharacterConsistencyStageResult
 from app.domain import ConsistencyIssue, EvidenceSpan, IssueCategory, Severity
 from app.main import app, settings
 from app.run_comparison import MATCHER_VERSION, mark_comparison_unverifiable
-from app.service import _character_review_source_index, execute_analysis
+from app.service import (
+    _character_review_source_index,
+    _verified_character_review_clues,
+    document_content_sha256,
+    execute_analysis,
+)
+from app.pipeline import DocumentInput
 
 
 def _evidence(label: str) -> dict:
@@ -47,6 +54,86 @@ def _issue(run_id: str, report_class: str, *, label: str) -> IssueRow:
     )
 
 
+def _freeze_issue_evidence(db, run_id: str, *issues: IssueRow) -> None:
+    frozen: dict[str, dict] = {}
+    for issue in issues:
+        for span in issue.evidence:
+            existing = frozen.get(span["document_id"])
+            if existing is not None:
+                assert existing == span
+                continue
+            frozen[span["document_id"]] = span
+    for ordinal, span in enumerate(frozen.values()):
+        db.add(AnalysisRunInputRow(
+            run_id=run_id,
+            document_id=span["document_id"],
+            document_name=span["document_name"],
+            document_version=1,
+            content=span["text"],
+            content_sha256=document_content_sha256(span["text"]),
+            ordinal=ordinal,
+        ))
+
+
+def test_modern_first_pass_clue_role_bindings_fail_closed():
+    baseline = EvidenceSpan(
+        document_id="shared", document_name="story.md",
+        line_start=1, line_end=1, text="旧版本：祁雾说话直来直往。",
+    )
+    current = baseline.model_copy(
+        update={"text": "新版本：祁雾从不直接回答问题。"}
+    )
+    refs = [
+        {"handle": "B01", "role": "B", "evidence_index": 0, "response_index": 0},
+        {"handle": "C01", "role": "C", "evidence_index": 1, "response_index": 1},
+    ]
+    valid = ConsistencyIssue(
+        category=IssueCategory.character_drift,
+        severity=Severity.medium,
+        confidence=0.68,
+        title="祁雾的角色表现需要确认",
+        explanation="事件同一性复核未完成。",
+        evidence=[baseline, current],
+        suggestion="核对设定",
+        metadata={
+            "confirmed_candidate_id": "candidate-1",
+            "final_outcome": "needs_confirmation",
+            "review_reason": "event_identity_verification_unavailable",
+            "evidence_binding": "first_pass_review_citations_v1",
+            "review_citation_refs": refs,
+        },
+    )
+    malformed_handle = valid.model_copy(update={"metadata": {
+        **valid.metadata,
+        "review_citation_refs": [{**refs[0], "handle": "Bgarbage"}, refs[1]],
+    }})
+    mixed_role_index = valid.model_copy(update={"metadata": {
+        **valid.metadata,
+        "review_citation_refs": [refs[0], {**refs[1], "evidence_index": 0}],
+    }})
+    unverified_event_metadata = valid.model_copy(update={"metadata": {
+        **valid.metadata,
+        "event_identity_verification": "different_events",
+    }})
+
+    accepted, rejected = _verified_character_review_clues(
+        (valid, malformed_handle, mixed_role_index, unverified_event_metadata),
+        [DocumentInput("shared", "story.md", current.text)],
+        confirmed_trait_evidence_by_candidate={
+            "candidate-1": frozenset({(
+                baseline.document_id,
+                baseline.document_name,
+                baseline.line_start,
+                baseline.line_end,
+                baseline.text,
+            )}),
+        },
+    )
+
+    assert accepted == (valid,)
+    assert rejected == 3
+
+
 def test_clues_are_separate_from_all_formal_surfaces_and_feedback_writes():
     with TestClient(app) as client:
         project = client.post(
@@ -64,6 +151,7 @@ def test_clues_are_separate_from_all_formal_surfaces_and_feedback_writes():
             formal = _issue(baseline_run.id, "formal", label="正式")
             clue = _issue(baseline_run.id, "review_clue", label="待复核")
             db.add_all((formal, clue))
+            _freeze_issue_evidence(db, baseline_run.id, clue)
             db.flush()
             # A historical clue may already have feedback; retain it for audit.
             db.add(FeedbackRow(
@@ -161,10 +249,12 @@ def test_clue_endpoint_is_bounded_and_workspace_scoped():
             run = AnalysisRunRow(project_id=project["id"], status="completed")
             db.add(run)
             db.flush()
-            db.add_all(
+            clues = [
                 _issue(run.id, "review_clue", label=f"线索{index}")
                 for index in range(65)
-            )
+            ]
+            db.add_all(clues)
+            _freeze_issue_evidence(db, run.id, *clues)
             other_workspace = WorkspaceRow(name="private workspace")
             db.add(other_workspace)
             db.flush()
@@ -214,6 +304,7 @@ def test_scan_limit_reports_uninspected_rows_without_claiming_they_are_invalid()
             valid = _issue(run.id, "review_clue", label="末尾有效线索")
             valid.id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
             db.add(valid)
+            _freeze_issue_evidence(db, run.id, valid)
             db.commit()
             run_id = run.id
         response = client.get(f"/api/v1/analysis-runs/{run_id}/review-clues")

@@ -147,6 +147,7 @@ from .service import (
     document_content_sha256,
     execute_analysis,
     _character_review_source_index,
+    _character_review_snapshot_evidence_index,
     _load_verified_snapshot,
     _verified_character_review_clues,
     run_input_metadata,
@@ -6200,6 +6201,7 @@ def _safe_review_clue_payload(
     *,
     legacy_frozen_documents=None,
     legacy_source_index=None,
+    confirmed_trait_evidence_by_candidate=None,
 ) -> dict | None:
     """Reject malformed old rows individually before returning contentful clues."""
 
@@ -6227,7 +6229,7 @@ def _safe_review_clue_payload(
         or not 2 <= len(row.evidence) <= 12
     ):
         return None
-    refs: list[tuple[str, int, int]] = []
+    refs: list[tuple[str, str, int, int, str]] = []
     for span in row.evidence:
         if not isinstance(span, dict):
             return None
@@ -6247,23 +6249,25 @@ def _safe_review_clue_payload(
             or not 1 <= line_start <= line_end <= 10_000_000
         ):
             return None
-        refs.append((document_id, line_start, line_end))
+        refs.append((document_id, document_name, line_start, line_end, text))
     if refs[0] == refs[1]:
         return None
     payload = _serialize_issue(row)
-    if metadata.get("legacy_report_reclassified") is True:
-        if legacy_frozen_documents is None:
-            return None
-        try:
-            parsed = ConsistencyIssue.model_validate(payload)
-            verified, rejected = _verified_character_review_clues(
-                (parsed,), legacy_frozen_documents,
-                source_index=legacy_source_index,
-            )
-        except (TypeError, ValueError):
-            return None
-        if rejected or len(verified) != 1:
-            return None
+    if legacy_frozen_documents is None:
+        return None
+    try:
+        parsed = ConsistencyIssue.model_validate(payload)
+        verified, rejected = _verified_character_review_clues(
+            (parsed,), legacy_frozen_documents,
+            source_index=legacy_source_index,
+            confirmed_trait_evidence_by_candidate=(
+                confirmed_trait_evidence_by_candidate
+            ),
+        )
+    except (TypeError, ValueError):
+        return None
+    if rejected or len(verified) != 1:
+        return None
     return payload
 
 
@@ -6481,19 +6485,19 @@ def get_review_clues(
         scan_limited = total > len(rows)
         legacy_documents = None
         legacy_source_index = None
-        if any(
-            isinstance(row.extra, dict)
-            and row.extra.get("legacy_report_reclassified") is True
-            for row in rows
-        ):
+        confirmed_trait_evidence_by_candidate = None
+        if rows:
             try:
                 legacy_documents, _ = _load_verified_snapshot(db, run_id)
                 legacy_source_index = _character_review_source_index(
                     legacy_documents
                 )
+                confirmed_trait_evidence_by_candidate = (
+                    _character_review_snapshot_evidence_index(db, run_id)
+                )
             except Exception:
-                # A legacy run without verifiable frozen inputs cannot prove
-                # the displayed source lines. Keep its row, but omit content.
+                # A run without verifiable frozen inputs cannot prove the
+                # displayed source lines. Keep its row, but omit content.
                 legacy_documents = None
         items: list[dict] = []
         valid_count = 0
@@ -6503,6 +6507,9 @@ def get_review_clues(
                 row,
                 legacy_frozen_documents=legacy_documents,
                 legacy_source_index=legacy_source_index,
+                confirmed_trait_evidence_by_candidate=(
+                    confirmed_trait_evidence_by_candidate
+                ),
             )
             if payload is None:
                 unavailable_count += 1

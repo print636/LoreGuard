@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import timedelta
 from hashlib import sha256
 from math import ceil, isfinite
+import re
 from threading import Event, Lock, Thread
 from time import perf_counter
 from typing import Any, Callable
@@ -34,6 +35,7 @@ from .db import (
 from .character_traits import (
     CHARACTER_TRAIT_SCHEMA_VERSION,
     MAX_CONFIRMED_TRAITS_PER_RUN,
+    TraitEvidenceInput,
     candidate_snapshot_comparison_key,
     candidate_snapshot_payload,
     _validated_comparison_key,
@@ -49,7 +51,12 @@ from .character_consistency_stage import (
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from .character_history_semantic_review import HISTORY_REVIEW_SYSTEM_PROMPT
 from .character_draft_actor_review_provider import DRAFT_ACTOR_REVIEW_SYSTEM_PROMPT
-from .character_drift import CHARACTER_REVIEW_SYSTEM_PROMPT
+from .character_drift import (
+    CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
+    CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT,
+    CHARACTER_REVIEW_SYSTEM_PROMPT,
+    CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT,
+)
 from .character_trait_extraction import (
     CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
     CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
@@ -64,7 +71,7 @@ from .character_trait_extraction import (
     _validate_signal_prompt_variant_settings,
     _bounded_provider,
 )
-from .domain import AnalysisCancelled, ConsistencyIssue, IssueCategory
+from .domain import AnalysisCancelled, ConsistencyIssue, EvidenceSpan, IssueCategory
 from .evidence_investigator_runtime import (
     EvidenceInvestigatorRuntime,
     InvestigatorUsageAccumulator,
@@ -131,6 +138,7 @@ _SAFE_INTERRUPTED_PROVIDER_CATEGORIES = {
     "transport",
 }
 _SIGNED_64_MAX = (1 << 63) - 1
+_CHARACTER_REVIEW_CITATION_HANDLE = re.compile(r"^[BCGX][0-9]{2}$")
 
 
 class WorkerLeaseLost(RuntimeError):
@@ -918,7 +926,12 @@ class _CharacterConsistencyAccountingProvider:
                 self.draft_actor_review_completion_reserve
                 or self.settings.character_draft_actor_review_completion_tokens
             )
-        elif system == CHARACTER_REVIEW_SYSTEM_PROMPT:
+        elif system in {
+            CHARACTER_REVIEW_SYSTEM_PROMPT,
+            CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
+            CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT,
+            CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT,
+        }:
             provider = self.drift_provider
             completion_reserve = self.settings.character_drift_max_completion_tokens
         else:
@@ -2766,11 +2779,226 @@ def _character_review_source_index(
     )
 
 
+def _character_review_snapshot_evidence_index(
+    db,
+    run_id: str,
+) -> dict[str, frozenset[tuple[str, str, int, int, str]]]:
+    """Load exact B evidence from the hash-verified confirmed-trait snapshot.
+
+    A confirmed trait remains authoritative after its original document is
+    retired or replaced.  Its frozen B text therefore cannot always be
+    rebound against the current run's document bodies.  The hash-verified run
+    trait payload is the second trusted source, keyed by candidate so a clue
+    cannot borrow evidence from another confirmed trait.
+    """
+
+    run = db.get(AnalysisRunRow, run_id)
+    if run is None:
+        raise RuntimeError(
+            "RUN_INPUT_SNAPSHOT_CORRUPT: analysis run is missing"
+        )
+    rows = list(
+        db.scalars(
+            select(AnalysisRunCharacterTraitInputRow)
+            .where(AnalysisRunCharacterTraitInputRow.run_id == run_id)
+            .order_by(
+                AnalysisRunCharacterTraitInputRow.ordinal,
+                AnalysisRunCharacterTraitInputRow.id,
+            )
+        ).all()
+    )
+    if [row.ordinal for row in rows] != list(range(len(rows))):
+        raise RuntimeError(
+            "RUN_INPUT_SNAPSHOT_CORRUPT: character profile ordinals are invalid"
+        )
+    result: dict[str, frozenset[tuple[str, str, int, int, str]]] = {}
+    for row in rows:
+        payload = row.payload
+        if (
+            row.project_id != run.project_id
+            or not isinstance(payload, dict)
+            or payload_sha256(payload) != row.payload_sha256
+            or payload.get("candidate_id") != row.candidate_id
+            or payload.get("confirmation_review_id") != row.confirmation_review_id
+            or payload.get("candidate_lock_version") != row.candidate_lock_version
+        ):
+            raise RuntimeError(
+                "RUN_INPUT_SNAPSHOT_CORRUPT: character profile snapshot is invalid"
+            )
+        raw_evidence = payload.get("evidence")
+        if (
+            not isinstance(raw_evidence, list)
+            or not 1 <= len(raw_evidence) <= 12
+            or payload.get("evidence_sha256") != payload_sha256(raw_evidence)
+            or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("input_id"), str)
+                or not isinstance(item.get("document_id"), str)
+                or not isinstance(item.get("document_name"), str)
+                or type(item.get("document_version")) is not int
+                or not isinstance(item.get("content_sha256"), str)
+                or type(item.get("line_start")) is not int
+                or type(item.get("line_end")) is not int
+                or not isinstance(item.get("text"), str)
+                for item in raw_evidence
+            )
+        ):
+            raise RuntimeError(
+                "RUN_INPUT_SNAPSHOT_CORRUPT: character profile evidence is invalid"
+            )
+        try:
+            evidence = tuple(
+                TraitEvidenceInput.model_validate(item) for item in raw_evidence
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "RUN_INPUT_SNAPSHOT_CORRUPT: character profile evidence is invalid"
+            ) from exc
+        if any(
+            not 1 <= len(span.document_id.strip()) <= 200
+            or not 1 <= len(span.document_name.strip()) <= 255
+            or type(span.line_start) is not int
+            or type(span.line_end) is not int
+            or not 1 <= span.line_start <= span.line_end <= 10_000_000
+            or not 1 <= len(span.text.strip()) <= 20_000
+            for span in evidence
+        ):
+            raise RuntimeError(
+                "RUN_INPUT_SNAPSHOT_CORRUPT: character profile evidence is invalid"
+            )
+        result[row.candidate_id] = frozenset(
+            (
+                span.document_id,
+                span.document_name,
+                span.line_start,
+                span.line_end,
+                span.text,
+            )
+            for span in evidence
+        )
+    return result
+
+
+def _character_review_evidence_identity(
+    span: EvidenceSpan,
+) -> tuple[str, str, int, int, str]:
+    return (
+        span.document_id,
+        span.document_name,
+        span.line_start,
+        span.line_end,
+        span.text,
+    )
+
+
+def _character_review_snapshot_identity(
+    span: EvidenceSpan,
+) -> tuple[str, str, int, int, str]:
+    return (
+        span.document_id,
+        span.document_name,
+        span.line_start,
+        span.line_end,
+        span.text,
+    )
+
+
+def _character_review_clue_roles(
+    clue: ConsistencyIssue,
+) -> dict[int, set[str]] | None:
+    metadata = clue.metadata
+    binding = metadata.get("evidence_binding")
+    if binding == "server_evidence_pair_v1":
+        return (
+            {0: {"B"}, 1: {"C"}}
+            if len(clue.evidence) == 2
+            and not clue.metadata.get("review_citation_refs")
+            else None
+        )
+    if binding not in {
+        "review_citations_v1",
+        "first_pass_review_citations_v1",
+    }:
+        # Pre-v2 clues have no role map and can only use the legacy all-document
+        # verification below.  Unknown v2-like bindings fail closed.
+        return {} if binding is None else None
+    raw_refs = metadata.get("review_citation_refs")
+    if not isinstance(raw_refs, list) or not 1 <= len(raw_refs) <= 8:
+        return None
+    roles: dict[int, set[str]] = {}
+    seen_handles: set[str] = set()
+    response_indexes: set[int] = set()
+    for raw in raw_refs:
+        if not isinstance(raw, dict):
+            return None
+        handle = raw.get("handle")
+        role = raw.get("role")
+        evidence_index = raw.get("evidence_index")
+        response_index = raw.get("response_index")
+        if (
+            not isinstance(handle, str)
+            or _CHARACTER_REVIEW_CITATION_HANDLE.fullmatch(handle) is None
+            or handle in seen_handles
+            or role not in {"B", "C", "G", "X"}
+            or not handle.startswith(role)
+            or type(evidence_index) is not int
+            or not 0 <= evidence_index < len(clue.evidence)
+            or type(response_index) is not int
+            or not 0 <= response_index < len(raw_refs)
+            or response_index in response_indexes
+        ):
+            return None
+        if binding == "first_pass_review_citations_v1" and role not in {"B", "C"}:
+            return None
+        seen_handles.add(handle)
+        response_indexes.add(response_index)
+        roles.setdefault(evidence_index, set()).add(role)
+        if "B" in roles[evidence_index] and len(roles[evidence_index]) != 1:
+            return None
+    if response_indexes != set(range(len(raw_refs))):
+        return None
+    if set(roles) != set(range(len(clue.evidence))):
+        return None
+    present = {role for values in roles.values() for role in values}
+    if not {"B", "C"} <= present:
+        return None
+    if binding == "first_pass_review_citations_v1" and any(
+        key in metadata
+        for key in (
+            "event_independence",
+            "independent_event_citations",
+            "event_identity_verification",
+        )
+    ):
+        return None
+    return roles
+
+
+def _span_matches_frozen_document(
+    span: EvidenceSpan,
+    frozen: dict[str, DocumentInput],
+    source_lines: dict[str, list[str]],
+) -> bool:
+    document = frozen.get(span.document_id)
+    lines = source_lines.get(span.document_id, ())
+    if (
+        document is None
+        or document.name != span.document_name
+        or not 1 <= span.line_start <= span.line_end <= len(lines)
+    ):
+        return False
+    literal = "\n".join(lines[span.line_start - 1:span.line_end])
+    return span.text in {literal, literal.strip()}
+
+
 def _verified_character_review_clues(
     clues: tuple[ConsistencyIssue, ...],
     documents: list[DocumentInput],
     *,
     source_index: tuple[dict[str, DocumentInput], dict[str, list[str]]] | None = None,
+    confirmed_trait_evidence_by_candidate: (
+        dict[str, frozenset[tuple[str, str, int, int, str]]] | None
+    ) = None,
 ) -> tuple[tuple[ConsistencyIssue, ...], int]:
     """Rebind both sides and every supporting citation to frozen run input."""
 
@@ -2788,31 +3016,59 @@ def _verified_character_review_clues(
         ):
             rejected += 1
             continue
-        valid = True
-        for span in clue.evidence:
-            document = frozen.get(span.document_id)
-            lines = source_lines.get(span.document_id, ())
-            if (
-                document is None
-                or document.name != span.document_name
-                or not 1 <= span.line_start <= span.line_end <= len(lines)
-            ):
-                valid = False
-                break
-            literal = "\n".join(lines[span.line_start - 1:span.line_end])
-            if span.text not in {literal, literal.strip()}:
-                valid = False
-                break
-        if valid and (
-            clue.evidence[0].document_id,
-            clue.evidence[0].line_start,
-            clue.evidence[0].line_end,
-        ) == (
-            clue.evidence[1].document_id,
-            clue.evidence[1].line_start,
-            clue.evidence[1].line_end,
-        ):
-            valid = False
+        roles = _character_review_clue_roles(clue)
+        valid = roles is not None
+        candidate_id = clue.metadata.get("confirmed_candidate_id")
+        trait_evidence = (
+            confirmed_trait_evidence_by_candidate.get(candidate_id, frozenset())
+            if confirmed_trait_evidence_by_candidate is not None
+            and isinstance(candidate_id, str)
+            else frozenset()
+        )
+        if valid:
+            for index, span in enumerate(clue.evidence):
+                document_match = _span_matches_frozen_document(
+                    span, frozen, source_lines
+                )
+                if roles:
+                    evidence_roles = roles[index]
+                    baseline_match = (
+                        _character_review_snapshot_identity(span) in trait_evidence
+                    )
+                    if (
+                        ("B" in evidence_roles and not baseline_match)
+                        or (
+                            evidence_roles & {"C", "G", "X"}
+                            and not document_match
+                        )
+                    ):
+                        valid = False
+                        break
+                elif not document_match:
+                    valid = False
+                    break
+        if valid:
+            if roles:
+                baseline_identities = {
+                    _character_review_evidence_identity(clue.evidence[index])
+                    for index, values in roles.items()
+                    if "B" in values
+                }
+                current_identities = {
+                    _character_review_evidence_identity(clue.evidence[index])
+                    for index, values in roles.items()
+                    if "C" in values
+                }
+                valid = any(
+                    baseline != current
+                    for baseline in baseline_identities
+                    for current in current_identities
+                )
+            else:
+                valid = (
+                    _character_review_evidence_identity(clue.evidence[0])
+                    != _character_review_evidence_identity(clue.evidence[1])
+                )
         if valid:
             accepted.append(clue)
         else:
@@ -3257,9 +3513,17 @@ def execute_analysis(
                         for span in clue.evidence
                     )
                 )
+            confirmed_trait_evidence_by_candidate = (
+                _character_review_snapshot_evidence_index(db, run_id)
+                if character_review_clues else {}
+            )
             character_review_clues, rejected_review_clues = (
                 _verified_character_review_clues(
-                    character_review_clues, documents
+                    character_review_clues,
+                    documents,
+                    confirmed_trait_evidence_by_candidate=(
+                        confirmed_trait_evidence_by_candidate
+                    ),
                 )
             )
             result.diagnostics["character_review_clues"] = {

@@ -10,11 +10,15 @@ import httpx
 import pytest
 
 from app.character_drift import (
+    CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
+    CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT,
     CHARACTER_REVIEW_SYSTEM_PROMPT,
+    CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT,
     CharacterConsistencyReviewer,
     CharacterDriftCase,
     ConfirmedTraitSnapshot,
     SupportEvidence,
+    _adjacent_pair_lacks_explicit_source_boundary,
     prepare_character_drift,
     promote_character_drift,
 )
@@ -100,6 +104,26 @@ def provider_completion(content: str, *, status: int = 200) -> httpx.Response:
             ],
             "usage": {"prompt_tokens": 17, "completion_tokens": 9},
         },
+    )
+
+
+def event_identity_payload(
+    relation: str = "different_events",
+    citations: tuple[str, str] = ("C01", "C02"),
+) -> str:
+    return json.dumps(
+        {
+            "relation": relation,
+            "explanation": (
+                "两段原文明确属于不同事件。"
+                if relation == "different_events"
+                else "两段原文描述同一个连续事件。"
+                if relation == "same_event"
+                else "原文不足以确认事件边界。"
+            ),
+            "citations": list(citations),
+        },
+        ensure_ascii=False,
     )
 
 
@@ -4911,6 +4935,526 @@ def test_trait_alignment_accepts_stable_cross_wording_identity():
     assert prepared.reviewer_eligible
 
 
+def test_repeated_behavior_conflict_requires_model_confirmed_event_independence():
+    prepared = prepare_character_drift(
+        drift_case(
+            signal(
+                identifier="event-a",
+                statement="林澈主动向陌生人发言",
+                polarity="positive",
+                observation_kind="action",
+                line=4,
+            ),
+            signal(
+                identifier="event-b",
+                statement="林澈又主动主持陌生人的会议",
+                polarity="positive",
+                observation_kind="interaction",
+                line=8,
+            ),
+        )
+    )
+    review = CharacterConsistencyReviewer(
+        FakeProvider(
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "两处文字可能只是同一事件的重复叙述。",
+                    "citations": ["B01", "C01", "C02"],
+                    "event_independence": "no",
+                    "independent_event_citations": [],
+                },
+                ensure_ascii=False,
+            )
+        ),
+        settings=settings(),
+    ).review(prepared)
+
+    assert review.diagnostics.outcome == "completed"
+    result = promote_character_drift(prepared, review)
+    assert result.outcome == "needs_confirmation"
+    assert result.reason == "event_independence_not_proven"
+
+
+@pytest.mark.parametrize(
+    ("verification_relation", "expected_reason"),
+    (
+        ("same_event", "event_identity_same_event"),
+        ("different_events", "event_identity_source_boundary_unproven"),
+    ),
+)
+def test_adjacent_same_scene_pair_cannot_be_formal_even_if_models_say_independent(
+    verification_relation: str,
+    expected_reason: str,
+):
+    observations = tuple(
+        row.model_copy(
+            update={
+                "evidence": row.evidence.model_copy(
+                    update={"document_id": "one-scene", "document_name": "draft.md"}
+                )
+            }
+        )
+        for row in (
+            signal(
+                identifier="same-scene-a",
+                statement="迎新会上，林澈主动走向陌生记者并介绍自己",
+                polarity="positive",
+                observation_kind="interaction",
+                line=12,
+            ),
+            signal(
+                identifier="same-scene-b",
+                statement="林澈仍站在讲台旁，继续主动与这名记者攀谈",
+                polarity="positive",
+                observation_kind="interaction",
+                line=13,
+            ),
+        )
+    )
+    prepared = prepare_character_drift(drift_case(*observations))
+    review = CharacterConsistencyReviewer(
+        SequenceProvider(
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "两处行为与基线相反。",
+                    "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            ),
+            event_identity_payload(verification_relation),
+        ),
+        settings=settings(),
+    ).review(prepared)
+
+    assert review.diagnostics.outcome == "completed"
+    assert review.diagnostics.attempted_calls == 2
+    result = promote_character_drift(prepared, review)
+    assert result.outcome == "needs_confirmation"
+    assert result.reason == expected_reason
+
+
+def test_adjacent_pair_with_explicit_later_time_boundary_can_be_formal():
+    observations = tuple(
+        row.model_copy(
+            update={
+                "evidence": row.evidence.model_copy(
+                    update={"document_id": "timed-scenes", "document_name": "draft.md"}
+                )
+            }
+        )
+        for row in (
+            signal(
+                identifier="timed-scene-a",
+                statement="清晨，林澈主动与陌生记者攀谈",
+                polarity="positive",
+                observation_kind="interaction",
+                line=12,
+            ),
+            signal(
+                identifier="timed-scene-b",
+                statement="三小时后，林澈主动邀请初次见面的船长用餐",
+                polarity="positive",
+                observation_kind="interaction",
+                line=13,
+            ),
+        )
+    )
+    prepared = prepare_character_drift(drift_case(*observations))
+    provider = SequenceProvider(
+        json.dumps(
+            {
+                "verdict": "contradicts",
+                "explanation": "两次独立行为均与基线相反。",
+                "citations": ["B01", "C01", "C02"],
+                "event_independence": "yes",
+                "independent_event_citations": ["C01", "C02"],
+            },
+            ensure_ascii=False,
+        ),
+        event_identity_payload("different_events"),
+    )
+
+    review = CharacterConsistencyReviewer(provider, settings=settings()).review(
+        prepared
+    )
+
+    assert review.diagnostics.outcome == "completed"
+    assert provider.calls[1][0] == CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT
+    verification_input = json.loads(provider.calls[1][1])
+    assert [row["id"] for row in verification_input["evidence"]] == ["C01", "C02"]
+    assert "candidate" not in verification_input
+    assert promote_character_drift(prepared, review).outcome == "conflict"
+
+
+def test_negated_time_phrase_is_not_accepted_as_event_boundary():
+    rows = tuple(
+        row.model_copy(
+            update={
+                "evidence": row.evidence.model_copy(
+                    update={"document_id": "negated-boundary", "document_name": "draft.md"}
+                )
+            }
+        )
+        for row in (
+            signal(
+                identifier="negated-boundary-a",
+                statement="迎新会上，林澈主动与记者交谈",
+                polarity="positive",
+                observation_kind="interaction",
+                line=12,
+            ),
+            signal(
+                identifier="negated-boundary-b",
+                statement="第二天，并没有到来；这仍是迎新会当天的连续交谈",
+                polarity="positive",
+                observation_kind="interaction",
+                line=13,
+            ),
+        )
+    )
+    prepared = prepare_character_drift(drift_case(*rows))
+
+    assert _adjacent_pair_lacks_explicit_source_boundary(
+        prepared, ("C01", "C02")
+    )
+
+
+@pytest.mark.parametrize(
+    ("verification_response", "diagnostic_reason"),
+    (
+        (
+            ProviderError("safe", category="read_timeout"),
+            "event_identity_read_timeout",
+        ),
+        (
+            event_identity_payload("different_events", ("C01", "C99")),
+            "event_identity_invalid_model_response",
+        ),
+    ),
+)
+def test_event_identity_second_pass_failure_stays_review_clue(
+    verification_response: str | Exception,
+    diagnostic_reason: str,
+):
+    prepared = prepare_character_drift(
+        drift_case(
+            signal(
+                identifier="verify-failure-a",
+                statement="林澈主动向陌生人发言",
+                polarity="positive",
+                observation_kind="action",
+                line=4,
+            ),
+            signal(
+                identifier="verify-failure-b",
+                statement="三周后，林澈主动主持陌生人的会议",
+                polarity="positive",
+                observation_kind="interaction",
+                line=80,
+            ),
+        )
+    )
+    first_response = json.dumps(
+        {
+            "verdict": "contradicts",
+            "explanation": "两次行为与基线相反。",
+            "citations": ["B01", "C01", "C02"],
+            "event_independence": "yes",
+            "independent_event_citations": ["C01", "C02"],
+        },
+        ensure_ascii=False,
+    )
+
+    review = CharacterConsistencyReviewer(
+        SequenceProvider(first_response, verification_response),
+        settings=settings(),
+    ).review(prepared)
+    promoted = promote_character_drift(prepared, review)
+
+    assert review.diagnostics.outcome == "degraded"
+    assert review.diagnostics.reason == diagnostic_reason
+    assert review.diagnostics.attempted_calls == 2
+    assert promoted.outcome == "needs_confirmation"
+    assert promoted.reason == "event_identity_verification_unavailable"
+
+
+def test_repeated_behavior_review_must_cite_every_decisive_current_event():
+    prepared = prepare_character_drift(
+        drift_case(
+            signal(
+                identifier="event-a",
+                statement="林澈主动向陌生人发言",
+                polarity="positive",
+                observation_kind="action",
+                line=4,
+            ),
+            signal(
+                identifier="event-b",
+                statement="林澈又主动主持陌生人的会议",
+                polarity="positive",
+                observation_kind="interaction",
+                line=8,
+            ),
+        )
+    )
+    review = CharacterConsistencyReviewer(
+        FakeProvider(
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "只引用了一次行为。",
+                    "citations": ["B01", "C01"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            )
+        ),
+        settings=settings(),
+    ).review(prepared)
+
+    assert review.decision is None
+    assert review.diagnostics.reason == "invalid_model_response"
+
+
+def test_repeated_behavior_review_candidate_pool_is_bounded():
+    observations = tuple(
+        signal(
+            identifier=f"event-{index}",
+            statement=f"林澈第{index}次主动向陌生人发言",
+            polarity="positive",
+            observation_kind="action",
+            line=index + 1,
+        )
+        for index in range(10)
+    )
+    prepared = prepare_character_drift(drift_case(*observations))
+
+    assert prepared.reason == "two_independent_behaviors"
+    assert len(prepared.matching_observations) == 6
+
+
+def test_default_budget_admits_six_candidate_pool_and_event_verification():
+    observations = tuple(
+        signal(
+            identifier=f"budgeted-event-{index}",
+            statement=(
+                f"第{index + 1}周，林澈在新的调查现场主动邀请陌生证人长谈"
+            ),
+            polarity="positive",
+            observation_kind="interaction",
+            line=10 + index * 20,
+        )
+        for index in range(6)
+    )
+    prepared = prepare_character_drift(drift_case(*observations))
+    provider = SequenceProvider(
+        json.dumps(
+            {
+                "verdict": "contradicts",
+                "explanation": "第一周与第六周的行为属于两次独立事件。",
+                "citations": ["B01", "C01", "C06"],
+                "event_independence": "yes",
+                "independent_event_citations": ["C01", "C06"],
+            },
+            ensure_ascii=False,
+        ),
+        event_identity_payload("different_events", ("C01", "C06")),
+    )
+
+    review = CharacterConsistencyReviewer(provider, settings=settings()).review(
+        prepared
+    )
+
+    assert review.diagnostics.outcome == "completed"
+    assert review.diagnostics.attempted_calls == 2
+    assert review.diagnostics.charged_tokens <= settings().character_drift_token_budget
+    assert promote_character_drift(prepared, review).outcome == "conflict"
+
+
+def test_event_identity_preflight_sizes_the_actual_reduced_second_pass_pair():
+    observations = []
+    for index in range(4):
+        summary_length = 300 if index < 2 else 20
+        evidence_length = 20 if index < 2 else 290
+        row = signal(
+            identifier=f"projected-budget-{index}",
+            statement="S" * summary_length,
+            polarity="positive",
+            observation_kind="action",
+            line=10 + index * 20,
+        )
+        observations.append(
+            row.model_copy(
+                update={
+                    "evidence": row.evidence.model_copy(
+                        update={"text": "T" * evidence_length}
+                    )
+                }
+            )
+        )
+    prepared = prepare_character_drift(drift_case(*observations))
+    provider = SequenceProvider(
+        json.dumps(
+            {
+                "verdict": "contradicts",
+                "explanation": "第三与第四条属于两次独立事件。",
+                "citations": ["B01", "C03", "C04"],
+                "event_independence": "yes",
+                "independent_event_citations": ["C03", "C04"],
+            },
+            ensure_ascii=False,
+        ),
+        event_identity_payload("different_events", ("C03", "C04")),
+    )
+
+    review = CharacterConsistencyReviewer(
+        provider,
+        settings=settings(character_drift_token_budget=3_600),
+    ).review(prepared)
+
+    # Full first-pass rows make C01/C02 look largest because their summaries
+    # are long.  The reduced second-pass payload makes C03/C04 the true worst
+    # pair because only their much longer frozen text is sent.  Admission must
+    # reject that combined package before paying for the first call.
+    assert review.diagnostics.outcome == "skipped"
+    assert review.diagnostics.reason == "event_identity_combined_token_budget"
+    assert provider.calls == []
+
+
+def test_repeated_behavior_reviewer_can_select_later_independent_event_pair():
+    adjacent_first = signal(
+        identifier="same-event-first",
+        statement="林澈走上台，主动向陌生人发言",
+        polarity="positive",
+        observation_kind="action",
+        line=4,
+    )
+    adjacent_repeat = signal(
+        identifier="same-event-repeat",
+        statement="林澈继续在台上主持这场会议",
+        polarity="positive",
+        observation_kind="interaction",
+        line=5,
+    )
+    later_scene = signal(
+        identifier="later-event",
+        statement="数周后，林澈主动加入了陌生人的谈话",
+        polarity="positive",
+        observation_kind="action",
+        line=80,
+    )
+    observations = tuple(
+        row.model_copy(
+            update={
+                "evidence": row.evidence.model_copy(
+                    update={"document_id": "same-draft", "document_name": "draft.md"}
+                )
+            }
+        )
+        for row in (adjacent_first, adjacent_repeat, later_scene)
+    )
+
+    prepared = prepare_character_drift(drift_case(*observations))
+    assert tuple(row.id for row in prepared.matching_observations) == tuple(
+        row.id for row in observations
+    )
+    review = CharacterConsistencyReviewer(
+        SequenceProvider(
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "第一处与数周后的行为属于两次独立事件。",
+                    "citations": ["B01", "C01", "C03"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C03"],
+                },
+                ensure_ascii=False,
+            ),
+            event_identity_payload("different_events", ("C01", "C03")),
+        ),
+        settings=settings(),
+    ).review(prepared)
+
+    assert review.diagnostics.outcome == "completed"
+    assert review.diagnostics.attempted_calls == 2
+    assert review.decision is not None
+    assert promote_character_drift(prepared, review).outcome == "conflict"
+
+
+@pytest.mark.parametrize("verdict", ("needs_confirmation", "insufficient_evidence"))
+def test_every_base_review_verdict_requires_baseline_and_current(verdict: str):
+    base = baseline(
+        dimension="preference", trait_key="食物偏好:蜜瓜", polarity="positive"
+    )
+    prepared = prepare_character_drift(
+        drift_case(
+            signal(
+                identifier=f"one-sided-{verdict}",
+                statement="林澈明确表示讨厌蜜瓜",
+                polarity="negative",
+                observation_kind="explicit_declaration",
+                line=9,
+                dimension="preference",
+                trait_key="食物偏好:蜜瓜",
+            ),
+            base=base,
+        )
+    )
+    review = CharacterConsistencyReviewer(
+        FakeProvider(
+            json.dumps(
+                {
+                    "verdict": verdict,
+                    "explanation": "目前只能确认当前一句。",
+                    "citations": ["C01"],
+                },
+                ensure_ascii=False,
+            )
+        ),
+        settings=settings(),
+    ).review(prepared)
+
+    assert review.decision is None
+    assert review.diagnostics.reason == "invalid_model_response"
+
+
+def test_ordinary_review_rejects_multi_event_selection_fields():
+    prepared = prepare_character_drift(
+        drift_case(
+            signal(
+                identifier="ordinary-extra-pair",
+                statement="林澈明确宣称自己已经变得外向",
+                polarity="positive",
+                observation_kind="explicit_declaration",
+                line=9,
+            )
+        )
+    )
+    review = CharacterConsistencyReviewer(
+        FakeProvider(
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "与基线相反。",
+                    "citations": ["B01", "C01"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C01"],
+                },
+                ensure_ascii=False,
+            )
+        ),
+        settings=settings(),
+    ).review(prepared)
+
+    assert review.decision is None
+    assert review.diagnostics.reason == "invalid_model_response"
+
+
 def test_preference_alignment_prefers_exact_key_over_object_wording():
     assert trait_keys_compatible(
         dimension="preference",
@@ -5625,9 +6169,78 @@ def test_core_scope_v3_accounting_accepts_only_exact_active_primary_system():
 
     accounting.complete(TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT, "targeted")
     accounting.complete(CHARACTER_REVIEW_SYSTEM_PROMPT, "review")
+    accounting.complete(CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT, "multi review")
+    accounting.complete(
+        CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT, "event identity review"
+    )
+    accounting.complete(CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT, "scoped review")
     assert len(signal.calls) == 2
-    assert len(drift.calls) == 1
-    assert usage.logical_calls == 3
+    assert len(drift.calls) == 4
+    assert usage.logical_calls == 6
+    with pytest.raises(RuntimeError, match="unsupported character consistency provider purpose"):
+        accounting.complete(
+            CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT + "\n", "mutated review"
+        )
+    assert len(drift.calls) == 4
+    assert usage.logical_calls == 6
+
+
+def test_multi_event_reviewer_routes_both_logical_calls_through_accounting():
+    from app.service import (
+        CharacterConsistencyUsageAccumulator,
+        _CharacterConsistencyAccountingProvider,
+    )
+
+    configured = settings()
+    first = json.dumps(
+        {
+            "verdict": "contradicts",
+            "explanation": "两次行为与基线相反。",
+            "citations": ["B01", "C01", "C02"],
+            "event_independence": "yes",
+            "independent_event_citations": ["C01", "C02"],
+        },
+        ensure_ascii=False,
+    )
+    drift = SequenceProvider(first, event_identity_payload())
+    usage = CharacterConsistencyUsageAccumulator()
+    accounting = _CharacterConsistencyAccountingProvider(
+        configured,
+        usage,
+        signal_provider=FakeProvider('{"records":[]}'),
+        drift_provider=drift,
+    )
+    prepared = prepare_character_drift(
+        drift_case(
+            signal(
+                identifier="accounted-event-a",
+                statement="林澈主动向陌生人发言",
+                polarity="positive",
+                observation_kind="action",
+                line=4,
+            ),
+            signal(
+                identifier="accounted-event-b",
+                statement="三周后，林澈主动主持陌生人的会议",
+                polarity="positive",
+                observation_kind="interaction",
+                line=80,
+            ),
+        )
+    )
+
+    review = CharacterConsistencyReviewer(
+        accounting,
+        settings=configured,
+    ).review(prepared)
+
+    assert review.diagnostics.outcome == "completed"
+    assert [system for system, _ in drift.calls] == [
+        CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT,
+        CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
+    ]
+    assert usage.logical_calls == 2
+    assert promote_character_drift(prepared, review).outcome == "conflict"
 
 
 def test_default_signal_budget_admits_two_maximum_prompt_packages_without_retry_metadata():
@@ -5796,12 +6409,16 @@ def test_drift_provider_retries_transport_then_returns_review():
         calls += 1
         if calls == 1:
             raise httpx.ConnectTimeout("private upstream detail", request=request)
+        if calls == 3:
+            return provider_completion(event_identity_payload())
         return provider_completion(
             json.dumps(
                 {
                     "verdict": "contradicts",
                     "explanation": "当前行为与已确认基线直接相反。",
                     "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
                 },
                 ensure_ascii=False,
             )
@@ -5824,10 +6441,12 @@ def test_drift_provider_retries_transport_then_returns_review():
     result = reviewer.review(prepared)
 
     assert result.diagnostics.outcome == "completed"
-    assert result.diagnostics.attempted_calls == 1
+    assert result.diagnostics.attempted_calls == 2
     assert result.decision is not None
     assert result.decision.verdict == "contradicts"
-    assert calls == 2
+    assert result.event_identity_verification is not None
+    assert result.event_identity_verification.relation == "different_events"
+    assert calls == 3
     assert reviewer.provider.retry_policy.max_attempts == 2
     assert reviewer.provider.settings.provider_total_deadline_seconds == 24
 
@@ -5954,6 +6573,8 @@ def test_incomplete_material_cannot_be_promoted_to_missing_bridge_conflict():
                     "verdict": "contradicts",
                     "explanation": "当前行为与基线相反。",
                     "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
                 },
                 ensure_ascii=False,
             )
