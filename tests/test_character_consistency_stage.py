@@ -53,6 +53,7 @@ from app.character_trait_extraction import (
     CharacterSignalChunk,
     CharacterSignalDiagnostics,
     CharacterSignalExtractionResult,
+    CharacterSignalExtractor,
     CharacterSignalTarget,
     SupportTraceAttemptV1,
     SupportTraceEventV1,
@@ -1086,6 +1087,120 @@ def test_stage_support_trace_exports_validated_formal_chunk_only():
         profile_line, draft_line, "private-profile.md", "private-draft.md",
         "L1:A1", "L1:A2",
     ))
+
+
+def test_baseline_trace_flag_off_preserves_diagnostics_shape():
+    profile_line = "林澈长期喜欢蜜瓜。"
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"基线诊断关闭-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="private-profile.md",
+            role="character_profile", content=profile_line,
+            narrative_context=_context(publication="published"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(_response(_record(
+                evidence=profile_line, polarity="positive",
+                kind="explicit_declaration",
+            ))),
+        )
+    assert result.diagnostics["outcome"] == "completed"
+    assert "baseline_trace_chunks" not in result.diagnostics
+    assert "baseline_trace_chunks_omitted_count" not in result.diagnostics
+
+
+def test_baseline_trace_opt_in_does_not_change_extractor_result_or_retry():
+    profile_line = "林澈长期喜欢蜜瓜。"
+    chunk = CharacterSignalChunk(
+        document_id="private-document", document_name="private-profile.md",
+        content=profile_line, global_line_start=1,
+        source_kind="formal_character_profile",
+    )
+    response = _response(_record(
+        evidence=profile_line, polarity="positive",
+        kind="explicit_declaration",
+    ))
+    off_provider = QueueProvider(response)
+    on_provider = QueueProvider(response)
+    off = CharacterSignalExtractor(
+        off_provider, settings=_settings(character_signal_baseline_trace_v1=False)
+    ).extract(chunk)
+    on = CharacterSignalExtractor(
+        on_provider, settings=_settings(character_signal_baseline_trace_v1=True)
+    ).extract(chunk)
+    assert len(off_provider.calls) == len(on_provider.calls) == 1
+    assert off.model_dump() == on.model_dump()
+    assert off.diagnostics.baseline_trace is None
+    assert on.diagnostics.baseline_trace is not None
+    assert on.diagnostics.baseline_trace.final_state == "clean"
+
+
+def test_baseline_trace_identifies_history_chunk_and_retry_without_content():
+    profile_line = "林澈长期喜欢蜜瓜。"
+    history_line = "林澈每周都买一颗蜜瓜。"
+    formal = _record(
+        evidence=profile_line, polarity="positive", kind="explicit_declaration",
+    )
+    history = _record(
+        evidence=history_line, polarity="positive", kind="action",
+        statement="林澈每周都买一颗蜜瓜",
+    )
+    rejected = {**history, "statement": "林澈在外星散步"}
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"基线逐块诊断-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="private-profile.md",
+            role="character_profile", content=profile_line,
+            narrative_context=_context(publication="published"),
+        )
+        _create_document(
+            client, project["id"], name="private-history.md",
+            role="chapter", content=history_line,
+            narrative_context=_context(publication="published"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(_response(formal), _response(rejected), _response(history)),
+            character_signal_baseline_trace_v1=True,
+        )
+    traces = result.diagnostics["baseline_trace_chunks"]
+    assert len(traces) == 2
+    assert traces[0]["source_kind"] == "formal_character_profile"
+    assert traces[0]["trace"]["final_state"] == "clean"
+    history_trace = traces[1]
+    assert {
+        key: history_trace[key] for key in (
+            "source_document_ordinal", "document_chunk_ordinal",
+            "stage_chunk_ordinal", "source_kind", "outcome", "availability",
+        )
+    } == {
+        "source_document_ordinal": 1, "document_chunk_ordinal": 1,
+        "stage_chunk_ordinal": 2, "source_kind": "published_history",
+        "outcome": "completed", "availability": "available",
+    }
+    assert history_trace["trace"]["final_state"] == "clean"
+    assert history_trace["trace"]["attempts"] == [
+        {
+            "attempt": 1, "status": "rejected", "submitted_record_count": 1,
+            "package_reason": None,
+            "rejected_records": [{"record_ordinal": 1, "reason": "statement_support"}],
+        },
+        {
+            "attempt": 2, "status": "completed", "submitted_record_count": 1,
+            "package_reason": None, "rejected_records": [],
+        },
+    ]
+    serialized = json.dumps(traces, ensure_ascii=False)
+    for private in (
+        profile_line, history_line, "林澈在外星散步", "林澈",
+        "private-profile.md", "private-history.md", "sk-private-secret",
+    ):
+        assert private not in serialized
 
 
 def test_stage_draft_trace_bounds_entries_and_marks_missing_trace_unavailable(

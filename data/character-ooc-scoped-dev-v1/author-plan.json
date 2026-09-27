@@ -1,0 +1,43 @@
+{
+  "schema_version": "character-ooc-scoped-dev-author-plan-v1",
+  "world_id": "shanchao-scoped-ooc",
+  "status": "proposed_not_confirmed",
+  "dataset_boundary": {
+    "developer_visible": true,
+    "human_author_confirmed": false,
+    "author_confirmation_mode": "developer_simulation_only",
+    "may_claim_external_accuracy": false
+  },
+  "review_instruction": "仅供开发者显式模拟作者审核：必须在产品中对照真实候选的来源分句、原标签和极性、对象及适用情境，再决定是否确认和相对轴正向命题的方向。此文件不是已完成的作者确认，也不得从 oracle 自动生成决定。",
+  "proposed_axes": [
+    {
+      "axis_key": "medical_public_identifiable_history",
+      "character_key": "迟蘅",
+      "dimension": "behavior_boundary",
+      "display_name": "可识别病史的公众公开授权",
+      "definition": "真实病人的姓名和病况面向不特定公众公开前，是否核对本人许可覆盖的具体内容与受众。",
+      "comparison_key": "behavior_boundary:可识别病史",
+      "applicability_scope": "面向不特定公众公开",
+      "positive_proposition": "迟蘅面向不特定公众公开真实病人的姓名与病况前，会核对本人许可覆盖的具体内容与受众。",
+      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 3},
+      "expected_direction_if_confirmed": "positive",
+      "actual_candidate_id": null,
+      "actual_axis_alignment": null
+    },
+    {
+      "axis_key": "unverified_public_forecast_uncertainty",
+      "character_key": "柳泛",
+      "dimension": "value",
+      "display_name": "未核实风向预报的不确定性公开",
+      "definition": "绿讯期间向船民发布出航建议时，是否清楚标示尚未核实的风向推算存在不确定性。",
+      "comparison_key": "value:未核实风向预报",
+      "applicability_scope": "绿讯期间面向船民发布出航建议",
+      "positive_proposition": "柳泛在绿讯期间面向船民发布未核实风向预报及出航建议时，会清楚标注尚未核实或待复测。",
+      "source": {"document_name": "02-character-profiles.md", "fragment_id": "A02", "line": 5},
+      "historical_support": [{"document_name": "03-published-history-v1.1.md", "fragment_id": "H01", "line": 2}],
+      "expected_direction_if_confirmed": "positive",
+      "actual_candidate_id": null,
+      "actual_axis_alignment": null
+    }
+  ]
+}

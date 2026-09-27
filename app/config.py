@@ -308,6 +308,9 @@ class Settings(BaseSettings):
     # Anonymous draft record dispositions across logical package attempts.
     # Opt-in diagnostics only; it does not change admission or retry policy.
     character_signal_draft_trace_v1: bool = False
+    # Formal and published-history package rejection pointers. Disabled by
+    # default; this retains neither source prose nor any model response.
+    character_signal_baseline_trace_v1: bool = False
     # Opt-in exact source-line restoration for a draft model's short echo.
     # The excerpt itself must independently prove the proposed direct claim.
     character_signal_draft_source_excerpt_repair_v1: bool = False

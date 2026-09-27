@@ -1,0 +1,57 @@
+{
+  "schema_version": "character-ooc-scoped-dev-manifest-v1",
+  "world_id": "shanchao-scoped-ooc",
+  "license": "Apache-2.0",
+  "dataset_boundary": {
+    "original_synthetic_story": true,
+    "developer_visible": true,
+    "blind_holdout": false,
+    "human_author_confirmed": false,
+    "author_confirmation_mode": "developer_simulation_only",
+    "production_quality": false,
+    "may_claim_external_accuracy": false
+  },
+  "common_documents_in_import_order": [
+    {
+      "file": "01-world-setting.md",
+      "document_role": "canon",
+      "resolution_state": "confirmed",
+      "publication_status": "published",
+      "scope": {"schema_version": 1, "timeline_key": "main", "release": {"key": "v1.0", "ordinal": 10}, "branch": {"path": ["main"]}}
+    },
+    {
+      "file": "02-character-profiles.md",
+      "document_role": "character_profile",
+      "resolution_state": "confirmed",
+      "publication_status": "published",
+      "scope": {"schema_version": 1, "timeline_key": "main", "release": {"key": "v1.0", "ordinal": 10}, "branch": {"path": ["main"]}}
+    },
+    {
+      "file": "03-published-history-v1.1.md",
+      "document_role": "chapter",
+      "resolution_state": "confirmed",
+      "publication_status": "published",
+      "scope": {"schema_version": 1, "timeline_key": "main", "release": {"key": "v1.1", "ordinal": 11}, "branch": {"path": ["main"]}}
+    }
+  ],
+  "case_draft_defaults": {
+    "document_role": "chapter",
+    "resolution_state": "confirmed",
+    "publication_status": "draft",
+    "scope": {"schema_version": 1, "timeline_key": "main", "release": {"key": "v1.2", "ordinal": 12}, "branch": {"path": ["main"]}}
+  },
+  "cases": [
+    {"case_id": "p01_two_real_patients", "draft_file": "drafts/01-two-real-patients.md"},
+    {"case_id": "p02_omitted_subject_announcements", "draft_file": "drafts/02-omitted-subject-announcements.md"},
+    {"case_id": "n03_fictional_patients", "draft_file": "drafts/03-fictional-patients.md"},
+    {"case_id": "n04_red_alert_private_channel", "draft_file": "drafts/04-red-alert-private-channel.md"},
+    {"case_id": "n05_do_not_combine_rows", "draft_file": "drafts/05-do-not-combine-rows.md"},
+    {"case_id": "n06_one_event_two_mentions", "draft_file": "drafts/06-one-event-two-mentions.md"},
+    {"case_id": "n07_other_actor_upload", "draft_file": "drafts/07-other-actor-upload.md"},
+    {"case_id": "n08_rehearsal_and_counterfactual", "draft_file": "drafts/08-rehearsal-and-counterfactual.md"},
+    {"case_id": "n09_published_growth_in_format", "draft_file": "drafts/09-published-growth-in-format.md"},
+    {"case_id": "u10_vague_consent", "draft_file": "drafts/10-vague-consent.md"}
+  ],
+  "author_plan_file": "author-plan.json",
+  "oracle_file": "oracle.json"
+}

@@ -1,0 +1,180 @@
+{
+  "schema_version": "character-ooc-scoped-dev-oracle-v1",
+  "world_id": "shanchao-scoped-ooc",
+  "dataset_boundary": {
+    "developer_visible": true,
+    "original_synthetic_story": true,
+    "blind_holdout": false,
+    "human_author_confirmed": false,
+    "author_confirmation_mode": "developer_simulation_only",
+    "production_quality": false,
+    "may_claim_external_accuracy": false
+  },
+  "scoring_contract": {
+    "case_count": 10,
+    "conflict_case_count": 2,
+    "case_isolation_required": true,
+    "author_confirmation_required_for_formal_conflict": true,
+    "complete_coverage_required_for_quality_observation": true,
+    "partial_or_unknown_is_unassessed": true,
+    "zero_formal_issues_does_not_imply_clean_pass": true,
+    "report_case_level_results_not_external_accuracy": true
+  },
+  "cases": [
+    {
+      "case_id": "p01_two_real_patients",
+      "case_boundary": "开发者可见合成 DEV，作者确认是模拟，不能对外宣称准确率。",
+      "kind": "potential_ooc",
+      "axis_key": "medical_public_identifiable_history",
+      "draft_file": "drafts/01-two-real-patients.md",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 3}],
+      "current": [{"fragment_id": "D01", "line": 2}, {"fragment_id": "D02", "line": 3}],
+      "expected_when_confirmed_and_complete": {"formal_issue_count": 1, "outcome": "conflict", "required_citations": ["B01", "C01", "C02"]},
+      "applicability_if_both_current_observations_bound": [
+        {"citation": "C01", "object_match": "same", "situation_match": "same"},
+        {"citation": "C02", "object_match": "same", "situation_match": "same"}
+      ],
+      "independent_events": "yes",
+      "reason": "两位真实病人分别明确拒绝公众公开；迟蘅在不同日期亲自上传，可识别内容与公共受众均有原文证据。"
+    },
+    {
+      "case_id": "p02_omitted_subject_announcements",
+      "case_boundary": "开发者可见合成 DEV，作者确认是模拟，不能对外宣称准确率。",
+      "kind": "potential_ooc",
+      "axis_key": "unverified_public_forecast_uncertainty",
+      "draft_file": "drafts/02-omitted-subject-announcements.md",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A02", "line": 5}],
+      "current": [{"fragment_id": "D01", "line": 2}, {"fragment_id": "D02", "line": 3}],
+      "expected_when_confirmed_and_complete": {"formal_issue_count": 1, "outcome": "conflict", "required_citations": ["B01", "C01", "C02"]},
+      "applicability_if_both_current_observations_bound": [
+        {"citation": "C01", "object_match": "same", "situation_match": "same"},
+        {"citation": "C02", "object_match": "same", "situation_match": "same"}
+      ],
+      "independent_events": "yes",
+      "reason": "每一行先点名柳泛，后用同一句的“却”承接她本人写公告；两日互异，仍需用整行原文证明行为归属。"
+    },
+    {
+      "case_id": "n03_fictional_patients",
+      "case_boundary": "开发者可见合成 DEV，作者确认是模拟，不能对外宣称准确率。",
+      "kind": "hard_negative_object",
+      "axis_key": "medical_public_identifiable_history",
+      "draft_file": "drafts/03-fictional-patients.md",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 3}],
+      "current": [{"fragment_id": "D01", "line": 2}, {"fragment_id": "D02", "line": 3}],
+      "expected_when_confirmed_and_complete": {"formal_issue_count": 0, "outcome": "no_formal_issue"},
+      "applicability_if_both_current_observations_bound": [
+        {"citation": "C01", "object_match": "different", "situation_match": "same"},
+        {"citation": "C02", "object_match": "different", "situation_match": "same"}
+      ],
+      "independent_events": "yes",
+      "reason": "出现病历与姓名等字词，材料却明确是虚构人物；对象并非真实病人的可识别病史。"
+    },
+    {
+      "case_id": "n04_red_alert_private_channel",
+      "case_boundary": "开发者可见合成 DEV，作者确认是模拟，不能对外宣称准确率。",
+      "kind": "hard_negative_situation",
+      "axis_key": "unverified_public_forecast_uncertainty",
+      "draft_file": "drafts/04-red-alert-private-channel.md",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A02", "line": 5}],
+      "current": [{"fragment_id": "D01", "line": 2}, {"fragment_id": "D02", "line": 3}],
+      "expected_when_confirmed_and_complete": {"formal_issue_count": 0, "outcome": "no_formal_issue"},
+      "applicability_if_both_current_observations_bound": [
+        {"citation": "C01", "object_match": "same", "situation_match": "different"},
+        {"citation": "C02", "object_match": "same", "situation_match": "different"}
+      ],
+      "independent_events": "yes",
+      "reason": "同属未核实风向估计，但红讯封闭救援专线不属于绿讯面向船民的出航建议。"
+    },
+    {
+      "case_id": "n05_do_not_combine_rows",
+      "case_boundary": "开发者可见合成 DEV，作者确认是模拟，不能对外宣称准确率。",
+      "kind": "hard_negative_cross_row_scope",
+      "axis_key": "unverified_public_forecast_uncertainty",
+      "draft_file": "drafts/05-do-not-combine-rows.md",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A02", "line": 5}],
+      "current": [{"fragment_id": "D01", "line": 2}, {"fragment_id": "D02", "line": 3}],
+      "expected_when_confirmed_and_complete": {"formal_issue_count": 0, "outcome": "no_formal_issue"},
+      "applicability_if_both_current_observations_bound": [
+        {"citation": "C01", "object_match": "same", "situation_match": "different"},
+        {"citation": "C02", "object_match": "different", "situation_match": "same"}
+      ],
+      "independent_events": "yes",
+      "reason": "第一条有未核实对象但处于红讯；第二条处于绿讯但风向已经复测。对象与情境不能跨 C 拼成一次适用行为。"
+    },
+    {
+      "case_id": "n06_one_event_two_mentions",
+      "case_boundary": "开发者可见合成 DEV，作者确认是模拟，不能对外宣称准确率。",
+      "kind": "hard_negative_event_identity",
+      "axis_key": "medical_public_identifiable_history",
+      "draft_file": "drafts/06-one-event-two-mentions.md",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 3}],
+      "current": [{"fragment_id": "D01", "line": 2}, {"fragment_id": "D02", "line": 3}],
+      "expected_when_confirmed_and_complete": {"formal_issue_count": 0, "outcome": "single_behavior_clue_or_unverifiable"},
+      "applicability_if_both_current_observations_bound": [
+        {"citation": "C01", "object_match": "same", "situation_match": "same"},
+        {"citation": "C02", "object_match": "same", "situation_match": "same"}
+      ],
+      "independent_events": "no",
+      "reason": "D02 明说仅追述 D01 的同一项上传；若抽取器只记录一次，应至多待复核；若产生两条 C，复核必须拒绝把它们算作两次独立行为。"
+    },
+    {
+      "case_id": "n07_other_actor_upload",
+      "case_boundary": "开发者可见合成 DEV，作者确认是模拟，不能对外宣称准确率。",
+      "kind": "hard_negative_actor",
+      "axis_key": "medical_public_identifiable_history",
+      "draft_file": "drafts/07-other-actor-upload.md",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 3}],
+      "current": [{"fragment_id": "D01", "line": 2}, {"fragment_id": "D02", "line": 3}],
+      "expected_when_confirmed_and_complete": {"formal_issue_count": 0, "outcome": "no_target_actor_observation"},
+      "applicability_if_both_current_observations_bound": null,
+      "independent_events": "not_applicable",
+      "reason": "迟蘅出现在两行，但公开病史的执行者和操作审计均为周尧；若将其归于迟蘅是抽取或证据绑定错误。"
+    },
+    {
+      "case_id": "n08_rehearsal_and_counterfactual",
+      "case_boundary": "开发者可见合成 DEV，作者确认是模拟，不能对外宣称准确率。",
+      "kind": "hard_negative_non_event",
+      "axis_key": "unverified_public_forecast_uncertainty",
+      "draft_file": "drafts/08-rehearsal-and-counterfactual.md",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A02", "line": 5}],
+      "current": [{"fragment_id": "D01", "line": 2}, {"fragment_id": "D02", "line": 3}],
+      "expected_when_confirmed_and_complete": {"formal_issue_count": 0, "outcome": "no_actual_forecast_observation"},
+      "applicability_if_both_current_observations_bound": null,
+      "independent_events": "not_applicable",
+      "reason": "剧本台词与假设问题没有成为现实中的绿讯风向公告；直接抽成柳泛的实际决定即为错误。"
+    },
+    {
+      "case_id": "n09_published_growth_in_format",
+      "case_boundary": "开发者可见合成 DEV，作者确认是模拟，不能对外宣称准确率。",
+      "kind": "hard_negative_growth_explained",
+      "axis_key": "unverified_public_forecast_uncertainty",
+      "draft_file": "drafts/09-published-growth-in-format.md",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A02", "line": 5}],
+      "published_context": [{"document_name": "03-published-history-v1.1.md", "fragment_id": "H01", "line": 2}],
+      "current": [{"fragment_id": "D01", "line": 2}, {"fragment_id": "D02", "line": 3}],
+      "expected_when_confirmed_and_complete": {"formal_issue_count": 0, "outcome": "no_formal_issue"},
+      "applicability_if_both_current_observations_bound": [
+        {"citation": "C01", "object_match": "same", "situation_match": "same"},
+        {"citation": "C02", "object_match": "same", "situation_match": "same"}
+      ],
+      "independent_events": "yes",
+      "reason": "上一卷已实际完成并公开图例训练；新稿两次均明确显示未核实、待复测，表达方式变化并未违反价值观。若模型仍提出反向观察，须对照 H01 与 D01/D02 解释，不能凭其自造成长。"
+    },
+    {
+      "case_id": "u10_vague_consent",
+      "case_boundary": "开发者可见合成 DEV，作者确认是模拟，不能对外宣称准确率。",
+      "kind": "uncertain_material",
+      "axis_key": "medical_public_identifiable_history",
+      "draft_file": "drafts/10-vague-consent.md",
+      "baseline": [{"document_name": "02-character-profiles.md", "fragment_id": "A01", "line": 3}],
+      "current": [{"fragment_id": "D01", "line": 2}, {"fragment_id": "D02", "line": 3}],
+      "expected_when_confirmed_and_complete": {"formal_issue_count": 0, "outcome": "needs_confirmation_or_unverifiable", "clean_pass": false},
+      "applicability_if_both_current_observations_bound": [
+        {"citation": "C01", "object_match": "same", "situation_match": "same"},
+        {"citation": "C02", "object_match": "same", "situation_match": "same"}
+      ],
+      "independent_events": "yes",
+      "reason": "两次公开均发生且对象与情境相符，但留存文字不证明许可覆盖范围，也不证明迟蘅未核对其他许可材料；不能把资料缺失当成已知拒绝。"
+    }
+  ]
+}

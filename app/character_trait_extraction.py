@@ -89,6 +89,7 @@ _MAX_SIGNAL_REGENERATION_METADATA_CHARS = 8_192
 ASSERTION_INDEX_V1 = "assertion-index-v1"
 SUPPORT_TRACE_V1 = "support-trace-v1"
 DRAFT_SIGNAL_TRACE_V1 = "draft-signal-trace-v1"
+BASELINE_SIGNAL_TRACE_V1 = "baseline-signal-trace-v1"
 DRAFT_SOURCE_EXCERPT_REPAIR_V1 = "draft-source-excerpt-repair-v1"
 _MAX_SUPPORT_CLAUSES_PER_CHUNK = 256
 _MAX_SUPPORT_CLAUSES_PER_LINE = 64
@@ -216,6 +217,10 @@ _SIGNAL_PACKAGE_VALIDATION_REASONS = frozenset(
         *_REJECTION_REASONS,
     }
 )
+_BASELINE_PACKAGE_REASONS = frozenset({
+    "response_too_large", "invalid_json", "record_limit",
+    "regeneration_coverage_regression",
+})
 
 _EXPLICIT_CORE_PERSONALITY = re.compile(
     r"(?:这也?是|这属于|属于|被定义为|被设定为|被视为|构成).{0,16}核心(?:性格|人格)"
@@ -980,6 +985,106 @@ class DraftSignalTraceV1(BaseModel):
         return self
 
 
+class BaselineTraceRejectionV1(BaseModel):
+    """A rejected record ordinal; never the model's record or source text."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record_ordinal: int = Field(ge=1, le=_MAX_SIGNAL_RESPONSE_RECORDS, strict=True)
+    reason: str
+
+    @model_validator(mode="after")
+    def _fixed_reason(self) -> BaselineTraceRejectionV1:
+        if self.reason not in (
+            _SIGNAL_PACKAGE_VALIDATION_REASONS | _V5_REJECTION_REASONS
+        ):
+            raise ValueError("unsafe baseline rejection reason")
+        return self
+
+
+class BaselineTraceAttemptV1(BaseModel):
+    """One logical package generation; transport retries are not counted."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt: int = Field(ge=1, le=2, strict=True)
+    status: Literal["completed", "rejected", "no_response"]
+    submitted_record_count: int | None = Field(
+        default=None, ge=0, le=_MAX_SIGNAL_RESPONSE_RECORDS, strict=True
+    )
+    package_reason: str | None = None
+    rejected_records: tuple[BaselineTraceRejectionV1, ...] = Field(
+        default=(), max_length=_MAX_SIGNAL_RESPONSE_RECORDS
+    )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> BaselineTraceAttemptV1:
+        if self.package_reason is not None and self.package_reason not in (
+            _BASELINE_PACKAGE_REASONS
+        ):
+            raise ValueError("unsafe baseline package reason")
+        if self.status == "completed" and (
+            self.submitted_record_count is None
+            or self.package_reason is not None
+            or self.rejected_records
+        ):
+            raise ValueError("completed baseline package cannot reject records")
+        if self.status == "rejected" and not (
+            self.package_reason is not None or self.rejected_records
+        ):
+            raise ValueError("rejected baseline package lacks a fixed reason")
+        if self.status == "rejected" and (
+            self.submitted_record_count is None
+            and self.package_reason not in {"invalid_json", "response_too_large"}
+            or self.submitted_record_count is not None
+            and self.package_reason in {"invalid_json", "response_too_large"}
+        ):
+            raise ValueError("baseline package reason disagrees with parsing")
+        if self.status == "no_response" and (
+            self.submitted_record_count is not None
+            or self.package_reason is not None
+            or self.rejected_records
+        ):
+            raise ValueError("no-response baseline package has record details")
+        if self.submitted_record_count is None and self.rejected_records:
+            raise ValueError("unparsed baseline package has record ordinals")
+        if tuple(row.record_ordinal for row in self.rejected_records) != tuple(
+            sorted({row.record_ordinal for row in self.rejected_records})
+        ) or any(
+            row.record_ordinal > self.submitted_record_count
+            for row in self.rejected_records
+            if self.submitted_record_count is not None
+        ):
+            raise ValueError("baseline rejection ordinals are inconsistent")
+        return self
+
+
+class BaselineSignalTraceV1(BaseModel):
+    """Bounded, content-free source chunk trace for formal/history extraction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["baseline-signal-trace-v1"] = BASELINE_SIGNAL_TRACE_V1
+    attempts: tuple[BaselineTraceAttemptV1, ...] = Field(max_length=2)
+    final_state: Literal["clean", "no_clean_package", "no_call"]
+
+    @model_validator(mode="after")
+    def _consistent(self) -> BaselineSignalTraceV1:
+        if tuple(row.attempt for row in self.attempts) != tuple(
+            range(1, len(self.attempts) + 1)
+        ):
+            raise ValueError("baseline attempts are not ordered")
+        if self.final_state == "no_call" and self.attempts:
+            raise ValueError("no-call baseline trace has attempts")
+        if self.final_state == "no_clean_package" and not self.attempts:
+            raise ValueError("unclean baseline trace has no attempt")
+        if self.final_state == "clean" and (
+            not self.attempts or self.attempts[-1].status != "completed"
+        ):
+            raise ValueError("clean baseline trace lacks a completed package")
+        return self
+
+
 class CharacterSignalDiagnostics(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -1011,6 +1116,7 @@ class CharacterSignalDiagnostics(BaseModel):
     # The stage exports a separately bounded and validated trace when enabled.
     support_trace: SupportTraceV1 | None = Field(default=None, exclude=True)
     draft_trace: DraftSignalTraceV1 | None = Field(default=None, exclude=True)
+    baseline_trace: BaselineSignalTraceV1 | None = Field(default=None, exclude=True)
     # Controlled, source-ID-only results retained in memory for Phase B. They
     # never enter the ordinary pending-candidate or baseline protocol.
     scope_review_decisions: tuple[ScopeReviewDecision, ...] = Field(
@@ -1168,12 +1274,13 @@ def _validate_signal_prompt_variant_settings(settings: Settings) -> None:
     scope_review = settings.character_signal_scope_review_v1
     support_trace = settings.character_signal_support_trace_v1
     draft_trace = settings.character_signal_draft_trace_v1
+    baseline_trace = settings.character_signal_baseline_trace_v1
     draft_excerpt_repair = settings.character_signal_draft_source_excerpt_repair_v1
     if any(
         type(flag) is not bool
         for flag in (
             full_line, core_scope, support_id, semantic_scope, scope_review,
-            support_trace, draft_trace, draft_excerpt_repair,
+            support_trace, draft_trace, baseline_trace, draft_excerpt_repair,
         )
     ):
         raise RuntimeError("character signal prompt variant flags must be bool")
@@ -1458,12 +1565,21 @@ class CharacterSignalExtractor:
         draft_trace_enabled = (
             settings.character_signal_draft_trace_v1 and chunk.source_kind == "draft"
         )
+        baseline_trace_enabled = (
+            settings.character_signal_baseline_trace_v1
+            and chunk.source_kind in {"formal_character_profile", "published_history"}
+            and not targets
+        )
         if not settings.enable_character_consistency:
             return _empty_result(
                 "disabled",
                 reason_counts={"feature_disabled": 1},
                 support_trace=_support_trace_for_result(trace_index, [], 0),
                 draft_trace=_draft_trace_for_result([], 0) if draft_trace_enabled else None,
+                baseline_trace=(
+                    _baseline_trace_for_result([], 0)
+                    if baseline_trace_enabled else None
+                ),
             )
         if len(chunk.content) > settings.character_signal_max_chunk_chars:
             return _empty_result(
@@ -1471,6 +1587,10 @@ class CharacterSignalExtractor:
                 reason_counts={"chunk_too_large": 1},
                 support_trace=_support_trace_for_result(trace_index, [], 0),
                 draft_trace=_draft_trace_for_result([], 0) if draft_trace_enabled else None,
+                baseline_trace=(
+                    _baseline_trace_for_result([], 0)
+                    if baseline_trace_enabled else None
+                ),
             )
         if scope_review_v1 and not _scope_review_source_matches_chunk(
             source_identity, frozen_content, chunk
@@ -1479,6 +1599,10 @@ class CharacterSignalExtractor:
                 "skipped",
                 reason_counts={"scope_review_source_mismatch": 1},
                 support_trace=_support_trace_for_result(trace_index, [], 0),
+                baseline_trace=(
+                    _baseline_trace_for_result([], 0)
+                    if baseline_trace_enabled else None
+                ),
             )
         review_reserve = (
             _estimated_scope_review_reserve(
@@ -1525,6 +1649,7 @@ class CharacterSignalExtractor:
                         extra_reason="regeneration_metadata_limit",
                         support_index=trace_index,
                         draft_trace_enabled=draft_trace_enabled,
+                        baseline_trace_enabled=baseline_trace_enabled,
                     )
             estimate = estimate_issue_evidence_review_tokens(
                 system_prompt,
@@ -1550,6 +1675,10 @@ class CharacterSignalExtractor:
                             _draft_trace_for_result([], 0)
                             if draft_trace_enabled else None
                         ),
+                        baseline_trace=(
+                            _baseline_trace_for_result([], 0)
+                            if baseline_trace_enabled else None
+                        ),
                     )
                 return _failed_package_result(
                     validation_attempts,
@@ -1561,6 +1690,7 @@ class CharacterSignalExtractor:
                     token_admission=admission,
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
+                    baseline_trace_enabled=baseline_trace_enabled,
                 )
 
             remaining_deadline = total_deadline - (self._monotonic() - started)
@@ -1574,6 +1704,7 @@ class CharacterSignalExtractor:
                     extra_reason="regeneration_deadline",
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
+                    baseline_trace_enabled=baseline_trace_enabled,
                 )
 
             call_provider = self.provider
@@ -1605,6 +1736,7 @@ class CharacterSignalExtractor:
                     extra_reason=reason,
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
+                    baseline_trace_enabled=baseline_trace_enabled,
                 )
             except Exception:
                 total_charged_tokens += estimate
@@ -1617,6 +1749,7 @@ class CharacterSignalExtractor:
                     extra_reason="provider_error",
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
+                    baseline_trace_enabled=baseline_trace_enabled,
                 )
 
             prompt_tokens = _safe_tokens(getattr(response, "prompt_tokens", 0))
@@ -1784,6 +1917,12 @@ class CharacterSignalExtractor:
                             )
                             if draft_trace_enabled else None
                         ),
+                        baseline_trace=(
+                            _baseline_trace_for_result(
+                                validation_attempts, attempted_calls, final_clean=True
+                            )
+                            if baseline_trace_enabled else None
+                        ),
                         scope_review_decisions=(
                             review_outcome.decisions if review_outcome else ()
                         ),
@@ -1802,6 +1941,7 @@ class CharacterSignalExtractor:
             charged_tokens=total_charged_tokens,
             support_index=trace_index,
             draft_trace_enabled=draft_trace_enabled,
+            baseline_trace_enabled=baseline_trace_enabled,
         )
 
 
@@ -2321,6 +2461,60 @@ def _draft_trace_for_result(
         return None
 
 
+def _baseline_trace_for_result(
+    validations: list[_ValidatedSignalPackage],
+    attempted_calls: int,
+    *,
+    final_clean: bool = False,
+) -> BaselineSignalTraceV1 | None:
+    """Project validated rejection pointers without retaining model text."""
+
+    if not 0 <= attempted_calls <= 2 or len(validations) > attempted_calls:
+        return None
+    try:
+        attempts: list[BaselineTraceAttemptV1] = []
+        for index in range(attempted_calls):
+            if index >= len(validations):
+                attempts.append(BaselineTraceAttemptV1(
+                    attempt=index + 1, status="no_response"
+                ))
+                continue
+            validation = validations[index]
+            rejected = tuple(
+                BaselineTraceRejectionV1(
+                    record_ordinal=failure.record_index + 1,
+                    reason=failure.reason,
+                )
+                for failure in validation.failures
+                if failure.record_index is not None
+            )
+            package_reasons = tuple(
+                failure.reason for failure in validation.failures
+                if failure.record_index is None
+            )
+            if len(package_reasons) > 1:
+                return None
+            attempts.append(BaselineTraceAttemptV1(
+                attempt=index + 1,
+                status="completed" if validation.complete else "rejected",
+                submitted_record_count=(
+                    validation.raw_records if validation.parsed else None
+                ),
+                package_reason=package_reasons[0] if package_reasons else None,
+                rejected_records=rejected,
+            ))
+        return BaselineSignalTraceV1(
+            attempts=tuple(attempts),
+            final_state=(
+                "clean" if final_clean else
+                "no_clean_package" if attempted_calls else "no_call"
+            ),
+        )
+    except (TypeError, ValueError):
+        # Diagnostics never affect extraction, retries, or record admission.
+        return None
+
+
 def _support_trace_attempt(
     index: AssertionIndexV1,
     raw_records: list[Any],
@@ -2699,6 +2893,7 @@ def _failed_package_result(
     token_admission: CharacterSignalTokenAdmission | None = None,
     support_index: AssertionIndexV1 | None = None,
     draft_trace_enabled: bool = False,
+    baseline_trace_enabled: bool = False,
 ) -> CharacterSignalExtractionResult:
     reasons: Counter[str] = Counter()
     mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
@@ -2765,6 +2960,10 @@ def _failed_package_result(
         draft_trace=(
             _draft_trace_for_result(attempts, attempted_calls)
             if draft_trace_enabled else None
+        ),
+        baseline_trace=(
+            _baseline_trace_for_result(attempts, attempted_calls)
+            if baseline_trace_enabled else None
         ),
     )
 
@@ -6414,6 +6613,7 @@ def _empty_result(
     token_admission: CharacterSignalTokenAdmission | None = None,
     support_trace: SupportTraceV1 | None = None,
     draft_trace: DraftSignalTraceV1 | None = None,
+    baseline_trace: BaselineSignalTraceV1 | None = None,
     provisional_draft_clues: tuple[CharacterSignal, ...] = (),
 ) -> CharacterSignalExtractionResult:
     return CharacterSignalExtractionResult(
@@ -6434,6 +6634,7 @@ def _empty_result(
             token_admission=token_admission,
             support_trace=support_trace,
             draft_trace=draft_trace,
+            baseline_trace=baseline_trace,
         )
     )
 

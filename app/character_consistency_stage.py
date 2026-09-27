@@ -32,6 +32,7 @@ from .character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
     MAX_TARGETED_CHARACTER_SIGNAL_CANDIDATE_LINES,
+    BaselineSignalTraceV1,
     CharacterSignal,
     CharacterSignalChunk,
     CharacterDimension,
@@ -166,6 +167,7 @@ _MAX_TOKEN_ADMISSION_EVENTS = 24
 _MAX_EVIDENCE_MISMATCH_CHUNKS = 128
 _MAX_SUPPORT_TRACE_CHUNKS = 128
 _MAX_DRAFT_TRACE_CHUNKS = 128
+_MAX_BASELINE_TRACE_CHUNKS = 128
 _DRAFT_TRACE_PHASES = frozenset({
     "primary_extraction", "targeted_recall", "targeted_verification",
 })
@@ -369,6 +371,7 @@ class CharacterConsistencyStage:
                 "degraded", "invalid_remaining_budget",
                 support_trace_enabled=settings.character_signal_support_trace_v1,
                 draft_trace_enabled=settings.character_signal_draft_trace_v1,
+                baseline_trace_enabled=settings.character_signal_baseline_trace_v1,
             )
 
         stage_budget = min(
@@ -380,6 +383,7 @@ class CharacterConsistencyStage:
                 "skipped", "run_token_budget",
                 support_trace_enabled=settings.character_signal_support_trace_v1,
                 draft_trace_enabled=settings.character_signal_draft_trace_v1,
+                baseline_trace_enabled=settings.character_signal_baseline_trace_v1,
             )
 
         usage = _Usage()
@@ -393,6 +397,8 @@ class CharacterConsistencyStage:
         support_trace_chunks_omitted = 0
         draft_trace_chunks: list[dict[str, Any]] = []
         draft_trace_chunks_omitted = 0
+        baseline_trace_chunks: list[dict[str, Any]] = []
+        baseline_trace_chunks_omitted = 0
         provisional_draft_candidates: list[
             tuple[_FrozenDocument, CharacterSignal]
         ] = []
@@ -415,6 +421,7 @@ class CharacterConsistencyStage:
                     source_eligible=0,
                     support_trace_enabled=settings.character_signal_support_trace_v1,
                     draft_trace_enabled=settings.character_signal_draft_trace_v1,
+                    baseline_trace_enabled=settings.character_signal_baseline_trace_v1,
                 )
             )
 
@@ -789,6 +796,44 @@ class CharacterConsistencyStage:
                 "trace": trace,
             })
 
+        def record_baseline_trace(
+            extraction: object,
+            *,
+            source: _FrozenDocument,
+            chunk: object,
+            chunk_ordinal: int,
+        ) -> None:
+            nonlocal baseline_trace_chunks_omitted
+            if (
+                not settings.character_signal_baseline_trace_v1
+                or source.source_kind not in {
+                    "formal_character_profile", "published_history"
+                }
+            ):
+                return
+            if len(baseline_trace_chunks) >= _MAX_BASELINE_TRACE_CHUNKS:
+                baseline_trace_chunks_omitted += 1
+                return
+            diagnostics = getattr(extraction, "diagnostics", None)
+            raw_outcome = getattr(diagnostics, "outcome", None)
+            outcome = (
+                raw_outcome
+                if type(raw_outcome) is str and raw_outcome in _SAFE_SIGNAL_OUTCOMES
+                else "degraded"
+            )
+            trace = _validated_baseline_trace_payload(
+                getattr(diagnostics, "baseline_trace", None)
+            )
+            baseline_trace_chunks.append({
+                "source_document_ordinal": source.ordinal,
+                "document_chunk_ordinal": original_chunk_ordinals[id(chunk)],
+                "stage_chunk_ordinal": chunk_ordinal,
+                "source_kind": source.source_kind,
+                "outcome": outcome,
+                "availability": "available" if trace is not None else "unavailable",
+                "trace": trace,
+            })
+
         def record_token_admission(
             phase: str,
             extraction: object,
@@ -888,6 +933,10 @@ class CharacterConsistencyStage:
                 model_completed_chunks += 1
             record_support_trace(
                 extraction, source=source, chunk_ordinal=chunk_ordinal
+            )
+            record_baseline_trace(
+                extraction, source=source, chunk=chunk,
+                chunk_ordinal=chunk_ordinal,
             )
             record_draft_trace(
                 "primary_extraction", extraction,
@@ -1737,6 +1786,9 @@ class CharacterConsistencyStage:
             draft_trace_enabled=settings.character_signal_draft_trace_v1,
             draft_trace_chunks=draft_trace_chunks,
             draft_trace_chunks_omitted_count=draft_trace_chunks_omitted,
+            baseline_trace_enabled=settings.character_signal_baseline_trace_v1,
+            baseline_trace_chunks=baseline_trace_chunks,
+            baseline_trace_chunks_omitted_count=baseline_trace_chunks_omitted,
         )
         provisional_clues, provisional_truncated = _safe_provisional_draft_clues(
             provisional_draft_candidates, accepted_signals=signals
@@ -4193,6 +4245,19 @@ def _validated_draft_trace_payload(trace: object) -> dict[str, Any] | None:
         return None
 
 
+def _validated_baseline_trace_payload(trace: object) -> dict[str, Any] | None:
+    """Export only bounded enum/ordinal facts from a typed extractor trace."""
+
+    if not isinstance(trace, BaselineSignalTraceV1):
+        return None
+    try:
+        return BaselineSignalTraceV1.model_validate(trace.model_dump()).model_dump(
+            mode="json"
+        )
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def _diagnostics(
     *,
     outcome: str,
@@ -4219,6 +4284,9 @@ def _diagnostics(
     draft_trace_enabled: bool = False,
     draft_trace_chunks: list[dict[str, Any]] | None = None,
     draft_trace_chunks_omitted_count: int = 0,
+    baseline_trace_enabled: bool = False,
+    baseline_trace_chunks: list[dict[str, Any]] | None = None,
+    baseline_trace_chunks_omitted_count: int = 0,
     **counts: Any,
 ) -> dict[str, Any]:
     diagnostics = {
@@ -4277,12 +4345,17 @@ def _diagnostics(
         diagnostics["draft_trace_chunks_omitted_count"] = (
             draft_trace_chunks_omitted_count
         )
+    if baseline_trace_enabled:
+        diagnostics["baseline_trace_chunks"] = list(baseline_trace_chunks or ())
+        diagnostics["baseline_trace_chunks_omitted_count"] = (
+            baseline_trace_chunks_omitted_count
+        )
     return diagnostics
 
 
 def _empty_stage_result(
     outcome: str, reason_code: str, *, support_trace_enabled: bool = False,
-    draft_trace_enabled: bool = False,
+    draft_trace_enabled: bool = False, baseline_trace_enabled: bool = False,
 ) -> CharacterConsistencyStageResult:
     enabled = outcome != "disabled"
     diagnostics = {
@@ -4323,6 +4396,9 @@ def _empty_stage_result(
     if draft_trace_enabled:
         diagnostics["draft_trace_chunks"] = []
         diagnostics["draft_trace_chunks_omitted_count"] = 0
+    if baseline_trace_enabled:
+        diagnostics["baseline_trace_chunks"] = []
+        diagnostics["baseline_trace_chunks_omitted_count"] = 0
     return CharacterConsistencyStageResult(
         diagnostics=diagnostics
     )

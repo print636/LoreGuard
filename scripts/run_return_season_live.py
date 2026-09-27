@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.character_trait_extraction import DraftSignalTraceV1
+from app.character_trait_extraction import BaselineSignalTraceV1, DraftSignalTraceV1
 from app.chunking import chunk_document
 from app.pipeline import DocumentInput
 from scripts import run_character_axis_live as legacy
@@ -375,6 +375,69 @@ def _safe_draft_trace_chunks(stage: object) -> tuple[list[dict[str, Any]], int] 
     return safe, omitted
 
 
+def _safe_baseline_trace_chunks(stage: object) -> tuple[list[dict[str, Any]], int] | None:
+    """Keep only fixed enum and ordinal fields from baseline diagnostics."""
+
+    if type(stage) is not dict:
+        return None
+    raw = stage.get("baseline_trace_chunks")
+    omitted = stage.get("baseline_trace_chunks_omitted_count")
+    if (
+        type(raw) is not list or len(raw) > 128
+        or type(omitted) is not int or not 0 <= omitted <= 1_000_000
+    ):
+        return None
+    safe: list[dict[str, Any]] = []
+    seen_stage_chunks: set[int] = set()
+    for row in raw:
+        if type(row) is not dict or set(row) != {
+            "source_document_ordinal", "document_chunk_ordinal",
+            "stage_chunk_ordinal", "source_kind", "outcome",
+            "availability", "trace",
+        }:
+            return None
+        source_ordinal = row["source_document_ordinal"]
+        document_chunk = row["document_chunk_ordinal"]
+        stage_chunk = row["stage_chunk_ordinal"]
+        if (
+            type(source_ordinal) is not int or not 0 <= source_ordinal < len(BASELINE)
+            or type(document_chunk) is not int or not 1 <= document_chunk <= 128
+            or type(stage_chunk) is not int or not 1 <= stage_chunk <= 128
+            or stage_chunk in seen_stage_chunks
+            or type(row["source_kind"]) is not str
+            or row["source_kind"] not in {
+                "formal_character_profile", "published_history"
+            } or type(row["outcome"]) is not str
+            or row["outcome"] not in {
+                "disabled", "completed", "partial", "degraded", "skipped"
+            } or type(row["availability"]) is not str
+            or row["availability"] not in {"available", "unavailable"}
+        ):
+            return None
+        if row["availability"] == "unavailable":
+            if row["trace"] is not None:
+                return None
+            trace = None
+        else:
+            try:
+                trace = BaselineSignalTraceV1.model_validate(
+                    row["trace"]
+                ).model_dump(mode="json")
+            except (TypeError, ValueError):
+                return None
+        safe.append({
+            "source_document_ordinal": source_ordinal,
+            "document_chunk_ordinal": document_chunk,
+            "stage_chunk_ordinal": stage_chunk,
+            "source_kind": row["source_kind"],
+            "outcome": row["outcome"],
+            "availability": row["availability"],
+            "trace": trace,
+        })
+        seen_stage_chunks.add(stage_chunk)
+    return safe, omitted
+
+
 def _execute_arm(
     client: httpx.Client, fixture: Fixture, *, simulated: bool,
     timeout_seconds: float, runtime_digest: str, draft_trace_enabled: bool,
@@ -397,11 +460,34 @@ def _execute_arm(
     known_documents = set(BASELINE) | {DRAFT}
     baseline = legacy._run_summary(client, baseline_run, known_documents=known_documents)
     _check_runtime(client, runtime_digest, baseline)
+    baseline_diagnostics = legacy._request(
+        client, "GET", f"/api/v1/analysis-runs/{baseline_id}/diagnostics",
+        "baseline_trace_diagnostics",
+    )
+    baseline_stage = (
+        baseline_diagnostics.get("character_consistency")
+        if type(baseline_diagnostics) is dict else None
+    )
+    baseline_trace = _safe_baseline_trace_chunks(baseline_stage)
     admitted = legacy._baseline_admission(baseline)["admitted"] is True
     public = {
         "arm": "simulated_author" if simulated else "unconfirmed_baseline",
         "project_id_sha256": legacy._sha256(project_id),
         "baseline": legacy._public_run(baseline),
+        "baseline_trace_chunks": (
+            baseline_trace[0] if baseline_trace is not None else None
+        ),
+        "baseline_trace_chunks_omitted_count": (
+            baseline_trace[1] if baseline_trace is not None else None
+        ),
+        "baseline_trace_status": (
+            "disabled" if type(baseline_stage) is dict
+            and "baseline_trace_chunks" not in baseline_stage else
+            "trace_unavailable" if baseline_trace is None else
+            "partial_unavailable" if baseline_trace[1] > 0
+            or any(row["availability"] != "available" for row in baseline_trace[0]) else
+            "no_trace_records" if not baseline_trace[0] else "available"
+        ),
         "baseline_admitted": admitted,
         "candidate_inventory": None,
         "simulated_confirmed_count": 0,

@@ -235,6 +235,121 @@ def test_trace_schema_rejects_private_fields_and_invalid_claims():
     assert runner._safe_draft_trace_chunks(unavailable) is not None
 
 
+def test_baseline_trace_projects_only_enums_ordinals_and_rejects_private_fields():
+    stage = {
+        "baseline_trace_chunks": [{
+            "source_document_ordinal": 2,
+            "document_chunk_ordinal": 3,
+            "stage_chunk_ordinal": 5,
+            "source_kind": "published_history",
+            "outcome": "completed",
+            "availability": "available",
+            "trace": {
+                "schema_version": "baseline-signal-trace-v1",
+                "attempts": [
+                    {"attempt": 1, "status": "rejected",
+                     "submitted_record_count": 1, "package_reason": None,
+                     "rejected_records": [
+                         {"record_ordinal": 1, "reason": "statement_support"}
+                     ]},
+                    {"attempt": 2, "status": "completed",
+                     "submitted_record_count": 1, "package_reason": None,
+                     "rejected_records": []},
+                ],
+                "final_state": "clean",
+            },
+        }],
+        "baseline_trace_chunks_omitted_count": 0,
+    }
+    safe, omitted = runner._safe_baseline_trace_chunks(stage)
+    assert omitted == 0
+    assert safe[0]["source_document_ordinal"] == 2
+    assert [row["attempt"] for row in safe[0]["trace"]["attempts"]] == [1, 2]
+    secret = "sk-private-provider-credential"
+    for mutation in (
+        lambda payload: payload["baseline_trace_chunks"][0].update({"name": secret}),
+        lambda payload: payload["baseline_trace_chunks"][0]["trace"].update(
+            {"statement": secret}
+        ),
+        lambda payload: payload["baseline_trace_chunks"][0]["trace"]["attempts"][0]
+            ["rejected_records"][0].update({"reason": secret}),
+        lambda payload: payload["baseline_trace_chunks"][0].update(
+            {"source_kind": [secret]}
+        ),
+        lambda payload: payload["baseline_trace_chunks"][0]["trace"]["attempts"][0]
+            ["rejected_records"][0].update({"record_ordinal": 65}),
+    ):
+        poisoned = json.loads(json.dumps(stage))
+        mutation(poisoned)
+        assert runner._safe_baseline_trace_chunks(poisoned) is None
+    assert secret not in json.dumps(safe, ensure_ascii=False)
+
+
+def test_partial_baseline_report_keeps_safe_chunk_trace_before_stopping(monkeypatch):
+    fixture = runner.verify_fixture()
+    stage = {
+        "baseline_trace_chunks": [{
+            "source_document_ordinal": 1,
+            "document_chunk_ordinal": 2,
+            "stage_chunk_ordinal": 4,
+            "source_kind": "formal_character_profile",
+            "outcome": "degraded",
+            "availability": "available",
+            "trace": {
+                "schema_version": "baseline-signal-trace-v1",
+                "attempts": [
+                    {"attempt": 1, "status": "rejected",
+                     "submitted_record_count": 1, "package_reason": None,
+                     "rejected_records": [
+                         {"record_ordinal": 1, "reason": "statement_support"}
+                     ]},
+                    {"attempt": 2, "status": "rejected",
+                     "submitted_record_count": 1, "package_reason": None,
+                     "rejected_records": [
+                         {"record_ordinal": 1, "reason": "statement_support"}
+                     ]},
+                ],
+                "final_state": "no_clean_package",
+            },
+        }],
+        "baseline_trace_chunks_omitted_count": 0,
+    }
+
+    def request(_client, method, _path, route, **_kwargs):
+        if route == "project_create" and method == "POST":
+            return {"id": "project-id"}
+        if route == "baseline_trace_diagnostics" and method == "GET":
+            return {"character_consistency": stage}
+        pytest.fail(f"unexpected request route: {route}")
+
+    monkeypatch.setattr(runner.legacy, "_request", request)
+    monkeypatch.setattr(runner, "_upload", lambda *_args: None)
+    monkeypatch.setattr(runner.legacy, "_start_run", lambda *_args, **_kwargs: "run-id")
+    monkeypatch.setattr(
+        runner.legacy, "_wait_run", lambda *_args, **_kwargs: {"id": "run-id"}
+    )
+    monkeypatch.setattr(
+        runner.legacy, "_run_summary",
+        lambda *_args, **_kwargs: {"stage_outcome": "partial"},
+    )
+    monkeypatch.setattr(runner, "_check_runtime", lambda *_args: None)
+    monkeypatch.setattr(
+        runner.legacy, "_baseline_admission", lambda *_args: {"admitted": False}
+    )
+    monkeypatch.setattr(runner.legacy, "_public_run", lambda *_args: {})
+    public, draft = runner._execute_arm(
+        object(), fixture, simulated=False, timeout_seconds=5,
+        runtime_digest="a" * 64, draft_trace_enabled=False,
+    )
+    assert draft is None
+    assert public["baseline_admitted"] is False
+    assert public["arm_stop_reason"] == "baseline_admission_failed"
+    assert public["baseline_trace_status"] == "available"
+    assert public["baseline_trace_chunks"][0]["trace"]["attempts"][1][
+        "rejected_records"
+    ] == [{"record_ordinal": 1, "reason": "statement_support"}]
+
+
 def test_cross_line_model_claim_does_not_bind_one_dxx_case():
     fixture = runner.verify_fixture()
     trace, _ = runner._safe_draft_trace_chunks(
