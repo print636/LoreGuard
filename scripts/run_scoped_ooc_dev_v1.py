@@ -35,6 +35,7 @@ DATASET = ROOT / "data" / "character-ooc-scoped-dev-v1"
 SCHEMA = "scoped-ooc-dev-runner-v1"
 DECISIONS_SCHEMA = "scoped-ooc-dev-author-decisions-v1"
 REVIEWER_DECLARATION = "developer_simulated_author_reviewed_frozen_source_axis_and_direction"
+REQUIRED_SUPPORT_SEGMENTER_VERSION = "assertion-index-v1"
 PINNED_SHA256 = {
     "manifest.json": "7fd745c870e6a07284a98b08f650f7655831eca690f4efd1f531b6d1fc126b07",
     "author-plan.json": "a788b6ac60ee355278a97d7c7a9fa508f182241abda86228bb178220b84624f0",
@@ -322,6 +323,10 @@ def _service_preflight(client: httpx.Client) -> tuple[dict[str, Any], str, dict[
         or limits.get("signal_full_line_echo_v2") is not True
     ):
         _fail("scoped_review_runtime_not_enabled", "runtime_preflight")
+    if limits.get("signal_support_id_v4") is not True:
+        _fail("signal_support_id_v4_not_enabled", "runtime_preflight")
+    if limits.get("signal_support_segmenter_version") != REQUIRED_SUPPORT_SEGMENTER_VERSION:
+        _fail("signal_support_segmenter_version_mismatch", "runtime_preflight")
     model = health.get("model")
     configured = type(model) is dict and model.get("configured") is True
     if not configured:

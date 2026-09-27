@@ -43,6 +43,54 @@ def test_default_port_fails_before_any_http(monkeypatch):
     assert result["failure"]["code"] == "isolation_base_url_invalid"
 
 
+@pytest.mark.parametrize(
+    ("support_enabled", "segmenter_version", "expected_failure"),
+    [
+        (False, None, "signal_support_id_v4_not_enabled"),
+        (None, None, "signal_support_id_v4_not_enabled"),
+        (True, "unexpected-version", "signal_support_segmenter_version_mismatch"),
+    ],
+)
+def test_prepare_requires_v4_health_before_project_create(
+    monkeypatch, support_enabled, segmenter_version, expected_failure,
+):
+    fixture = runner.verify_fixture()
+    provenance = {"character_consistency_limits": {
+        "scoped_axis_drift_v1": True,
+        "signal_full_line_echo_v2": True,
+        "signal_support_id_v4": support_enabled,
+        "signal_support_segmenter_version": segmenter_version,
+    }}
+    health = {"runtime_provenance": provenance, "model": {"configured": True}}
+    monkeypatch.setattr(runner.isolation, "_verify_live_isolation",
+                        lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.legacy, "_code_state", lambda: {
+        "git_head": "a" * 40, "worktree_clean": True,
+    })
+    monkeypatch.setattr(runner.legacy, "_local_service_artifact_sha256",
+                        lambda _root: "b" * 64)
+    monkeypatch.setattr(runner.legacy, "_service_preflight_gate",
+                        lambda *_args: "c" * 64)
+    monkeypatch.setattr(runner.legacy, "_safe_character_runtime_provenance",
+                        lambda value: value)
+
+    def request(_client, method, path, route, **_kwargs):
+        assert (method, path, route) == ("GET", "/health", "health"), (
+            "preflight must fail before creating a project or calling a model"
+        )
+        return health
+
+    monkeypatch.setattr(runner.legacy, "_request", request)
+    with pytest.raises(runner.legacy.SafeFailure) as failure:
+        runner._prepare(
+            object(), fixture, args=argparse.Namespace(run_timeout_seconds=1),
+            expected={},
+        )
+    assert failure.value.payload == {
+        "code": expected_failure, "stage": "runtime_preflight", "details": {},
+    }
+
+
 def test_exact_source_target_quote_and_unique_candidate(monkeypatch):
     fixture = runner.verify_fixture()
     axis = fixture.plan["proposed_axes"][0]
