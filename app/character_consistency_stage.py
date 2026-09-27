@@ -46,6 +46,7 @@ from .character_trait_extraction import (
     _draft_axes_may_match,
     _draft_preference_proves_direct,
     build_pending_trait_candidates,
+    draft_actor_review_evidence_range,
     draft_preference_context_is_relevant,
     draft_preference_context_requires_review,
     preference_modifier_bridge,
@@ -679,6 +680,20 @@ class CharacterConsistencyStage:
         targeted_reviewer_reserve_tokens = min(
             settings.character_drift_token_budget, stage_budget
         )
+        draft_actor_sources: dict[str, ScopeReviewSourceIdentity] = {}
+        if settings.character_draft_actor_review_v1:
+            for source, _ in selected_chunks:
+                if (
+                    source.source_kind != "draft"
+                    or source.input_id in draft_actor_sources
+                ):
+                    continue
+                draft_actor_sources[source.input_id] = ScopeReviewSourceIdentity(
+                    run_input_id=source.input_id,
+                    document_id=source.document.id,
+                    document_version=source.document_version,
+                    content_sha256=source.content_sha256,
+                )
         token_admission_events: list[dict[str, int | str | None]] = []
         token_admission_omitted = 0
 
@@ -886,11 +901,19 @@ class CharacterConsistencyStage:
                 settings.character_history_semantic_review_v1
                 and source.source_kind == "published_history"
             )
-            # The formal review shares this logical signal allowance. Preserve
-            # the stage's drift-review reserve before assigning that allowance.
+            draft_actor_review_v1 = (
+                settings.character_draft_actor_review_v1
+                and source.source_kind == "draft"
+            )
+            draft_actor_source = draft_actor_sources.get(source.input_id)
+            # Source-semantic review shares this logical signal allowance.
+            # Preserve the stage's drift-review reserve before assigning it.
             signal_available = (
                 max(0, remaining - targeted_reviewer_reserve_tokens)
-                if scope_review_v1 or history_review_v1 else remaining
+                if scope_review_v1
+                or history_review_v1
+                or draft_actor_review_v1
+                else remaining
             )
             call_settings = settings.model_copy(
                 update={
@@ -929,19 +952,30 @@ class CharacterConsistencyStage:
                     source_kind=source.source_kind,  # type: ignore[arg-type]
                     server_context=server_contexts[source.document.id].payload,
                 ),
-                source_identity=scope_source or history_source,
+                source_identity=(
+                    scope_source or history_source or draft_actor_source
+                ),
                 frozen_content=(
                     source.document.content
-                    if scope_review_v1 or history_review_v1 else None
+                    if scope_review_v1
+                    or history_review_v1
+                    or draft_actor_review_v1
+                    else None
                 ),
             )
             if (
                 source.source_kind == "draft"
-                and extraction.diagnostics.outcome == "degraded"
                 and extraction.diagnostics.attempted_calls > 0
-                and not extraction.signals
-                and not extraction.draft_observations
-                and not extraction.pending_candidates
+                and extraction.provisional_draft_clues
+                and (
+                    extraction.diagnostics.outcome == "partial"
+                    or (
+                        extraction.diagnostics.outcome == "degraded"
+                        and not extraction.signals
+                        and not extraction.draft_observations
+                        and not extraction.pending_candidates
+                    )
+                )
             ):
                 provisional_draft_candidates.extend(
                     (source, signal)
@@ -971,7 +1005,10 @@ class CharacterConsistencyStage:
                 stage_remaining_before=remaining,
                 reviewer_reserve=(
                     targeted_reviewer_reserve_tokens
-                    if scope_review_v1 or history_review_v1 else 0
+                    if scope_review_v1
+                    or history_review_v1
+                    or draft_actor_review_v1
+                    else 0
                 ),
             )
             usage.add(extraction.diagnostics)
@@ -1113,7 +1150,18 @@ class CharacterConsistencyStage:
                 )
                 targeted = CharacterSignalExtractor(
                     self.provider, settings=targeted_settings
-                ).extract_targeted(targeted_chunk, (target,))
+                ).extract_targeted(
+                    targeted_chunk,
+                    (target,),
+                    **(
+                        {
+                            "source_identity": draft_actor_source,
+                            "frozen_content": source.document.content,
+                        }
+                        if draft_actor_review_v1
+                        else {}
+                    ),
+                )
                 record_draft_trace(
                     "targeted_recall", targeted,
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
@@ -1195,6 +1243,12 @@ class CharacterConsistencyStage:
                         _target_candidate_line_ranges(
                             targeted_chunk,
                             target,
+                            draft_actor_review_v1=draft_actor_review_v1,
+                            source_identity=draft_actor_source,
+                            frozen_content=(
+                                source.document.content
+                                if draft_actor_review_v1 else None
+                            ),
                         )
                     )
                     if not candidate_ranges:
@@ -1261,6 +1315,14 @@ class CharacterConsistencyStage:
                     targeted_chunk,
                     (target,),
                     candidate_evidence_ranges=candidate_ranges,
+                    **(
+                        {
+                            "source_identity": draft_actor_source,
+                            "frozen_content": source.document.content,
+                        }
+                        if draft_actor_review_v1
+                        else {}
+                    ),
                 )
                 record_draft_trace(
                     "targeted_verification", verification,
@@ -2441,6 +2503,10 @@ def _direct_frozen_preference_bridge_source(
 def _target_candidate_line_ranges(
     chunk: CharacterSignalChunk,
     target: CharacterSignalTarget,
+    *,
+    draft_actor_review_v1: bool = False,
+    source_identity: ScopeReviewSourceIdentity | None = None,
+    frozen_content: str | None = None,
 ) -> tuple[tuple[tuple[int, int], ...], int]:
     """Select bounded, exact named lines or strictly proven adjacent spans.
 
@@ -2465,6 +2531,14 @@ def _target_candidate_line_ranges(
         paired = safe_pronoun_evidence_range(
             chunk, target.character, line_number
         )
+        if paired is None and draft_actor_review_v1:
+            paired = draft_actor_review_evidence_range(
+                chunk,
+                target.character,
+                line_number,
+                source_identity=source_identity,
+                frozen_content=frozen_content,
+            )
         candidate = paired or (line_number, line_number)
         if any(
             not (candidate[1] < start or candidate[0] > end)
@@ -4008,13 +4082,16 @@ def _safe_provisional_draft_clues(
     # clue's axis or make that actor/line ambiguous. Merge intervals so long
     # accepted spans do not require expanding every line.
     accepted_ranges: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
+    accepted_by_actor: dict[str, list[CharacterSignal]] = defaultdict(list)
     for accepted in accepted_signals:
         if accepted.source_kind != "draft":
             continue
-        owner = (accepted.evidence.document_id, _key(accepted.character))
+        actor = _key(accepted.character)
+        owner = (accepted.evidence.document_id, actor)
         accepted_ranges[owner].append((
             accepted.evidence.line_start, accepted.evidence.line_end
         ))
+        accepted_by_actor[actor].append(accepted)
     accepted_intervals: dict[
         tuple[str, str], tuple[list[int], list[tuple[int, int]]]
     ] = {}
@@ -4038,6 +4115,12 @@ def _safe_provisional_draft_clues(
             position = bisect_right(starts, clue.line_end) - 1
             if position >= 0 and merged[position][1] >= clue.line_start:
                 continue
+        if any(
+            {accepted.polarity, _signal.polarity} == {"positive", "negative"}
+            and _draft_axes_may_match(_signal, accepted)
+            for accepted in accepted_by_actor.get(actor, ())
+        ):
+            continue
         unique.setdefault(clue.id, clue)
     return (
         tuple(list(unique.values())[:_MAX_PROVISIONAL_DRAFT_CLUES]),

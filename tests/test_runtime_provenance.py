@@ -146,6 +146,105 @@ def test_history_semantic_review_runtime_identity_rejects_tampering():
     assert axis_live._safe_character_runtime_provenance(missing) is None
 
 
+def test_draft_actor_review_is_default_off_and_records_effective_protocol_caps():
+    off = safe_runtime_provenance(configured_settings())
+    on = safe_runtime_provenance(configured_settings(
+        character_draft_actor_review_v1=True,
+        character_signal_timeout_seconds=10,
+        character_signal_total_deadline_seconds=35,
+        provider_timeout_seconds=7,
+        provider_total_deadline_seconds=20,
+        provider_max_response_bytes=8_192,
+    ))
+    off_limits = off["character_consistency_limits"]
+    limits = on["character_consistency_limits"]
+
+    assert off_limits["draft_actor_review_v1"] is False
+    assert off_limits["draft_actor_review_schema_version"] is None
+    assert off_limits["draft_actor_review_batch_schema_version"] is None
+    assert off_limits["draft_actor_review_prompt_version"] is None
+    assert off_limits["draft_actor_review_signal_prompt_version"] is None
+    assert off_limits["draft_actor_review_clause_index_version"] is None
+    assert off_limits["draft_actor_review_token_reserve"] == 6_000
+    assert off_limits["draft_actor_review_completion_tokens"] == 2_048
+    assert off_limits["draft_actor_review_max_response_bytes"] == 32_768
+    assert off_limits["draft_actor_review_timeout_seconds"] == 30.0
+    assert off_limits["draft_actor_review_max_attempts"] == 1
+    assert off_limits["draft_actor_review_provider_timeout_seconds"] == 30.0
+    assert off_limits["draft_actor_review_provider_total_deadline_seconds"] == 30.0
+    assert off_limits[
+        "draft_actor_review_provider_max_completion_tokens"
+    ] == 1_024
+    assert off_limits[
+        "draft_actor_review_provider_max_response_bytes"
+    ] == 32_768
+    assert off_limits["draft_actor_review_provider_max_attempts"] == 1
+    assert limits["draft_actor_review_v1"] is True
+    assert limits["draft_actor_review_schema_version"] == (
+        "character-draft-actor-review-v1"
+    )
+    assert limits["draft_actor_review_batch_schema_version"] == (
+        "character-draft-actor-review-batch-v1"
+    )
+    assert limits["draft_actor_review_prompt_version"] == (
+        "character-draft-actor-review-prompt-v1"
+    )
+    assert limits["draft_actor_review_signal_prompt_version"] == (
+        "character-draft-actor-signal-prompt-v1"
+    )
+    assert limits["draft_actor_review_clause_index_version"] == (
+        "draft-actor-clause-index-v1"
+    )
+    assert limits["draft_actor_review_provider_timeout_seconds"] == 7
+    assert limits["draft_actor_review_provider_total_deadline_seconds"] == 20
+    assert limits["draft_actor_review_provider_max_completion_tokens"] == 1_024
+    assert limits["draft_actor_review_provider_max_response_bytes"] == 8_192
+    assert limits["draft_actor_review_provider_max_attempts"] == 1
+    assert live_runner._safe_runtime_provenance(off) == off
+    assert live_runner._safe_runtime_provenance(on) == on
+    assert axis_live._safe_character_runtime_provenance(off) is not None
+    assert axis_live._safe_character_runtime_provenance(on) is not None
+
+
+def test_draft_actor_review_runtime_identity_is_strict_but_reads_legacy_reports():
+    provenance = safe_runtime_provenance(configured_settings(
+        character_draft_actor_review_v1=True,
+    ))
+
+    for changes in (
+        {"draft_actor_review_v1": "true"},
+        {"signal_full_line_echo_v2": False},
+        {"draft_actor_review_schema_version": "unknown"},
+        {"draft_actor_review_batch_schema_version": "unknown"},
+        {"draft_actor_review_prompt_version": "unknown"},
+        {"draft_actor_review_signal_prompt_version": "unknown"},
+        {"draft_actor_review_clause_index_version": "unknown"},
+        {"draft_actor_review_max_attempts": 2},
+        {"draft_actor_review_provider_max_attempts": 2},
+        {"draft_actor_review_provider_max_completion_tokens": 1_025},
+        {"draft_actor_review_provider_max_response_bytes": 32_769},
+        {"draft_actor_review_provider_total_deadline_seconds": 29},
+        {"draft_actor_review_provider_timeout_seconds": 31},
+    ):
+        malformed = json.loads(json.dumps(provenance))
+        malformed["character_consistency_limits"].update(changes)
+        assert live_runner._safe_runtime_provenance(malformed) is None, changes
+        assert axis_live._safe_character_runtime_provenance(malformed) is None, changes
+
+    missing = json.loads(json.dumps(provenance))
+    missing["character_consistency_limits"].pop(
+        "draft_actor_review_clause_index_version"
+    )
+    assert live_runner._safe_runtime_provenance(missing) is None
+    assert axis_live._safe_character_runtime_provenance(missing) is None
+
+    legacy = json.loads(json.dumps(provenance))
+    for key in live_runner._CHARACTER_DRAFT_ACTOR_REVIEW_KEYS:
+        legacy["character_consistency_limits"].pop(key)
+    assert live_runner._safe_runtime_provenance(legacy) == legacy
+    assert axis_live._safe_character_runtime_provenance(legacy) is not None
+
+
 def test_runtime_provenance_is_content_free_and_records_effective_identity():
     result = safe_runtime_provenance(configured_settings())
     serialized = json.dumps(result, sort_keys=True)

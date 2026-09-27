@@ -321,6 +321,26 @@ class Settings(BaseSettings):
     character_history_semantic_review_max_attempts: int = Field(
         default=1, ge=1, le=1
     )
+    # Optional semantic resolution of draft actor attribution after every
+    # deterministic source/evidence gate except actor binding has passed.
+    # It remains opt-in and fail-closed; one logical batch receives one
+    # transport attempt and shares the character-stage usage ledger.
+    character_draft_actor_review_v1: bool = False
+    character_draft_actor_review_token_reserve: int = Field(
+        default=6_000, ge=256, le=20_000
+    )
+    character_draft_actor_review_completion_tokens: int = Field(
+        default=2_048, ge=64, le=8_192
+    )
+    character_draft_actor_review_max_response_bytes: int = Field(
+        default=32_768, ge=1_024, le=32_768
+    )
+    character_draft_actor_review_timeout_seconds: float = Field(
+        default=30.0, gt=0, le=30.0
+    )
+    character_draft_actor_review_max_attempts: int = Field(
+        default=1, ge=1, le=1
+    )
     # Content-free observation of V4 support-slot submission/validation only.
     # It neither changes prompts nor accepts otherwise rejected records.
     character_signal_support_trace_v1: bool = False
@@ -615,6 +635,11 @@ class Settings(BaseSettings):
         ):
             raise ValueError("character history semantic review v1 requires full line v2")
         if (
+            self.character_draft_actor_review_v1
+            and not self.character_signal_full_line_prompt_v2
+        ):
+            raise ValueError("character draft actor review v1 requires full line v2")
+        if (
             self.character_signal_support_trace_v1
             and not self.character_signal_support_id_v4
         ):
@@ -636,6 +661,14 @@ class Settings(BaseSettings):
             < self.character_history_semantic_review_timeout_seconds
         ):
             raise ValueError("character signal deadline is shorter than history semantic review timeout")
+        if (
+            self.character_draft_actor_review_v1
+            and self.character_signal_total_deadline_seconds
+            < self.character_draft_actor_review_timeout_seconds
+        ):
+            raise ValueError(
+                "character signal deadline is shorter than draft actor review timeout"
+            )
         if (
             self.character_drift_total_deadline_seconds
             < self.character_drift_timeout_seconds

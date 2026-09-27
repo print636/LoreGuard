@@ -48,10 +48,12 @@ from .character_consistency_stage import (
 )
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from .character_history_semantic_review import HISTORY_REVIEW_SYSTEM_PROMPT
+from .character_draft_actor_review_provider import DRAFT_ACTOR_REVIEW_SYSTEM_PROMPT
 from .character_drift import CHARACTER_REVIEW_SYSTEM_PROMPT
 from .character_trait_extraction import (
     CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
     CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
+    CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1,
     CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1,
     CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1,
     CHARACTER_SIGNAL_SEMANTIC_SCOPE_PROMPT_V5,
@@ -401,6 +403,8 @@ class _CharacterConsistencyAccountingProvider:
         scope_review_completion_reserve: int | None = None,
         history_review_provider=None,
         history_review_completion_reserve: int | None = None,
+        draft_actor_review_provider=None,
+        draft_actor_review_completion_reserve: int | None = None,
     ) -> None:
         self.settings = settings
         self.usage = usage
@@ -418,6 +422,10 @@ class _CharacterConsistencyAccountingProvider:
         self.scope_review_completion_reserve = scope_review_completion_reserve
         self.history_review_provider = history_review_provider
         self.history_review_completion_reserve = history_review_completion_reserve
+        self.draft_actor_review_provider = draft_actor_review_provider
+        self.draft_actor_review_completion_reserve = (
+            draft_actor_review_completion_reserve
+        )
 
     def fork_for_character_consistency(
         self,
@@ -456,8 +464,14 @@ class _CharacterConsistencyAccountingProvider:
             self.usage,
             signal_provider=signal_provider,
             drift_provider=drift_provider,
+            scope_review_provider=self.scope_review_provider,
+            scope_review_completion_reserve=self.scope_review_completion_reserve,
             history_review_provider=self.history_review_provider,
             history_review_completion_reserve=self.history_review_completion_reserve,
+            draft_actor_review_provider=self.draft_actor_review_provider,
+            draft_actor_review_completion_reserve=(
+                self.draft_actor_review_completion_reserve
+            ),
         )
 
     def fork_for_character_scope_review(
@@ -563,6 +577,10 @@ class _CharacterConsistencyAccountingProvider:
             scope_review_completion_reserve=reserve,
             history_review_provider=self.history_review_provider,
             history_review_completion_reserve=self.history_review_completion_reserve,
+            draft_actor_review_provider=self.draft_actor_review_provider,
+            draft_actor_review_completion_reserve=(
+                self.draft_actor_review_completion_reserve
+            ),
         )
 
     def fork_for_character_history_semantic_review(
@@ -660,6 +678,121 @@ class _CharacterConsistencyAccountingProvider:
             scope_review_completion_reserve=self.scope_review_completion_reserve,
             history_review_provider=review_provider,
             history_review_completion_reserve=reserve,
+            draft_actor_review_provider=self.draft_actor_review_provider,
+            draft_actor_review_completion_reserve=(
+                self.draft_actor_review_completion_reserve
+            ),
+        )
+
+    def fork_for_character_draft_actor_review(
+        self,
+        *,
+        timeout_seconds: float,
+        remaining_deadline_seconds: float,
+        completion_reserve: int,
+        max_response_bytes: int,
+        max_attempts: int,
+    ):
+        """Give the source-bound draft actor batch one bounded model call."""
+
+        _validate_signal_prompt_variant_settings(self.settings)
+        if not self.settings.character_draft_actor_review_v1:
+            raise ValueError("character draft actor review is disabled")
+        if any(
+            type(value) not in {int, float}
+            or not isfinite(float(value))
+            or value <= 0
+            for value in (timeout_seconds, remaining_deadline_seconds)
+        ):
+            raise ValueError("character draft actor review deadline is invalid")
+        if (
+            type(completion_reserve) is not int
+            or completion_reserve < 64
+            or type(max_response_bytes) is not int
+            or max_response_bytes < 1
+            or type(max_attempts) is not int
+            or max_attempts != 1
+        ):
+            raise ValueError("character draft actor review limits are invalid")
+
+        review_provider = self.signal_provider
+        reserve = min(
+            completion_reserve,
+            self.settings.character_draft_actor_review_completion_tokens,
+        )
+        if isinstance(review_provider, OpenAICompatibleProvider):
+            provider_settings = review_provider.settings
+            deadline = min(
+                value
+                for value in (
+                    float(timeout_seconds),
+                    float(remaining_deadline_seconds),
+                    float(self.settings.character_signal_total_deadline_seconds),
+                    provider_settings.provider_total_deadline_seconds,
+                    self.settings.provider_total_deadline_seconds,
+                )
+                if value is not None
+            )
+            timeout = min(
+                float(timeout_seconds),
+                deadline,
+                float(self.settings.character_draft_actor_review_timeout_seconds),
+                float(self.settings.provider_timeout_seconds),
+                float(provider_settings.provider_timeout_seconds),
+            )
+            completion = min(
+                value
+                for value in (
+                    reserve,
+                    provider_settings.provider_max_completion_tokens,
+                    self.settings.provider_max_completion_tokens,
+                )
+                if value is not None
+            )
+            response_bytes = min(
+                value
+                for value in (
+                    max_response_bytes,
+                    self.settings.character_draft_actor_review_max_response_bytes,
+                    provider_settings.provider_max_response_bytes,
+                    self.settings.provider_max_response_bytes,
+                )
+                if value is not None
+            )
+            bounded_settings = provider_settings.model_copy(
+                update={
+                    "enable_model_extraction": False,
+                    "enable_review_agent": False,
+                    "enable_issue_evidence_review": False,
+                    "enable_evidence_investigator": False,
+                    "enable_character_consistency": True,
+                    "provider_timeout_seconds": timeout,
+                    "provider_total_deadline_seconds": deadline,
+                    "provider_max_attempts": 1,
+                    "provider_max_completion_tokens": completion,
+                    "provider_max_response_bytes": response_bytes,
+                }
+            )
+            review_provider = OpenAICompatibleProvider(
+                bounded_settings,
+                transport=review_provider.transport,
+                retry_policy=replace(review_provider.retry_policy, max_attempts=1),
+                sleep=review_provider.sleep,
+                monotonic=review_provider.monotonic,
+                wall_time=review_provider.wall_time,
+                random_value=review_provider.random_value,
+            )
+        return _CharacterConsistencyAccountingProvider(
+            self.settings,
+            self.usage,
+            signal_provider=self.signal_provider,
+            drift_provider=self.drift_provider,
+            scope_review_provider=self.scope_review_provider,
+            scope_review_completion_reserve=self.scope_review_completion_reserve,
+            history_review_provider=self.history_review_provider,
+            history_review_completion_reserve=self.history_review_completion_reserve,
+            draft_actor_review_provider=review_provider,
+            draft_actor_review_completion_reserve=reserve,
         )
 
     def complete(self, system: str, user: str):
@@ -678,6 +811,10 @@ class _CharacterConsistencyAccountingProvider:
             )
         )
         allowed_primary_systems = {active_primary_system}
+        if self.settings.character_draft_actor_review_v1:
+            allowed_primary_systems.add(
+                active_primary_system + CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
+            )
         if self.settings.character_signal_semantic_scope_v5:
             allowed_primary_systems.add(
                 CHARACTER_SIGNAL_SYSTEM_PROMPT_V5
@@ -693,7 +830,13 @@ class _CharacterConsistencyAccountingProvider:
             allowed_primary_systems.add(
                 active_primary_system + CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4
             )
-        if system in allowed_primary_systems | {TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT}:
+        allowed_targeted_systems = {TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT}
+        if self.settings.character_draft_actor_review_v1:
+            allowed_targeted_systems.add(
+                TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
+                + CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
+            )
+        if system in allowed_primary_systems | allowed_targeted_systems:
             provider = self.signal_provider
             completion_reserve = self.settings.character_signal_max_completion_tokens
         elif (
@@ -747,6 +890,33 @@ class _CharacterConsistencyAccountingProvider:
             completion_reserve = (
                 self.history_review_completion_reserve
                 or self.settings.character_history_semantic_review_completion_tokens
+            )
+        elif (
+            system == DRAFT_ACTOR_REVIEW_SYSTEM_PROMPT
+            and self.settings.character_draft_actor_review_v1
+        ):
+            if self.draft_actor_review_provider is None:
+                bounded = self.fork_for_character_draft_actor_review(
+                    timeout_seconds=(
+                        self.settings.character_draft_actor_review_timeout_seconds
+                    ),
+                    remaining_deadline_seconds=(
+                        self.settings.character_signal_total_deadline_seconds
+                    ),
+                    completion_reserve=(
+                        self.settings.character_draft_actor_review_completion_tokens
+                    ),
+                    max_response_bytes=(
+                        self.settings.character_draft_actor_review_max_response_bytes
+                    ),
+                    max_attempts=1,
+                )
+                provider = bounded.draft_actor_review_provider
+            else:
+                provider = self.draft_actor_review_provider
+            completion_reserve = (
+                self.draft_actor_review_completion_reserve
+                or self.settings.character_draft_actor_review_completion_tokens
             )
         elif system == CHARACTER_REVIEW_SYSTEM_PROMPT:
             provider = self.drift_provider

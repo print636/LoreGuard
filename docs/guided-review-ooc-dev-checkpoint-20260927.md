@@ -1,6 +1,6 @@
 # 引导审查与复杂 OOC：2026-09-27 开发检查点
 
-被测代码：`e89a86a2e852ed50c5fe2f9618d78c3ff71bd123`。本页区分界面/安全合同的自动测试与真实模型的开发者可见诊断；二者均不能证明开放剧情准确率。
+原引导审查与复杂 OOC 检查的被测代码：`e89a86a2e852ed50c5fe2f9618d78c3ff71bd123`。本页区分界面/安全合同的自动测试与真实模型的开发者可见诊断；二者均不能证明开放剧情准确率。下述 draft actor smoke 来自本阶段提交前的候选工作树，不归因于该旧提交。
 
 ## 已验证的工程合同
 
@@ -8,6 +8,14 @@
 - 页面要求当前冻结资料对应的完整基线和至少一条仍有效的作者确认特征。项目级计数不保证所选章节的每个角色都有档案。提交前重读基线；跨标签撤销、断线、旧请求以及项目/账户切换时均不使用过期状态创建任务。
 - 新增原创、开发者可见的复杂剧情 DEV 文本和 7 项模拟模型合同测试。它们覆盖事故及训练解释性格变化、真实医嘱解释临时饮食例外、朗读台词与实际行动分离、双人物后的歧义代词弃权，以及同句明确行动和唯一前指的正例。7 项均通过，但模拟模型测试不是模型质量评分；详见 [`data/character-ooc-complex-dev-v1/README.md`](../data/character-ooc-complex-dev-v1/README.md)。
 - 同一提交的本地后端全套为 2611 passed、7 skipped，前端单测 162 passed，非 Docker 浏览器测试 21 passed。Windows 本机 Docker Engine 不可用，故本机 Docker 系统用例未通过启动；[GitHub CI](https://github.com/print636/LoreGuard/actions/runs/36253893444) 的四个 job 均通过，包含 Linux 上的 Compose 与系统端到端测试。
+
+## 待审新稿主体复核：7-window 已知 DEV smoke
+
+本阶段另有默认关闭的 `CHARACTER_DRAFT_ACTOR_REVIEW_V1`。它只接收待审新稿里除主体归属外已通过绑定门的候选：服务端结构预筛并冻结原文窗口后，每个信号抽取逻辑周期至多以一次批量、严格 JSON 调用复核当期窗口；一次分析可含多个此类周期。模型的 `supported` 仍须经过服务端来源校验和 `source_context_veto`。有效 `rejected` 保持拒收；安全、来源完整的 `uncertain`／`source_context_veto` 最多进入 provisional 待复核线索，不进入正式问题、计数、反馈或导出。协议校验或传输失败 fail closed、保持部分覆盖，也不生成 provisional 线索。一次行为仍不能单独证明 OOC。
+
+真实模型只运行了这一次 7-window 的已知 DEV smoke，并非人工盲测：2 个正例得到 `supported`，2 个带明确反证的样例得到 `rejected`，3 个含普通关键词的样例得到 `uncertain`；后 3 个均未触发服务端 `source_context_veto`。这只能说明该次固定输入的批量协议跑通及本次返回分布，不能外推主体归属准确率、OOC 准确率／召回率、跨故事表现或生产质量。
+
+本次一次传输尝试报告 prompt 4,342 Token、completion 1,256 Token；本地准入账本计费 9,586 Token，墙钟耗时 10.533 秒。`charged` 是本地预算记账口径，不等同于 Provider 账单。该 smoke 由一次性隔离 harness 调用现有 protocol，未保存可复运行命令或机器产物；这些精确数值只是当次未归档的开发观察，不是可复现实验结论。
 
 ## 真实模型 DEV 诊断：未进入 OOC 评分
 

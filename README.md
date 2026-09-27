@@ -81,10 +81,14 @@ line independently pass the existing binding checks; it never relaxes formal
 baseline evidence requirements. Incomplete model packages still yield partial
 coverage rather than silently recycling a provisional record into OOC issues.
 
+`CHARACTER_DRAFT_ACTOR_REVIEW_V1` 是另一个默认关闭的实验门，只复核待审新稿中其余绑定检查均已通过、仅主体归属仍待判断的候选。服务端先作结构预筛并绑定冻结原文窗口；每个信号抽取逻辑周期至多使用一次批量调用要求严格 JSON，一次分析含多个分块或 targeted 周期时总调用可多于一次。模型返回 `supported` 后仍须通过服务端的来源复核和 `source_context_veto`。安全、来源完整的 `uncertain`／`source_context_veto` 最多进入 provisional 待复核线索，不进入正式问题、计数、反馈或导出；有效的显式 `rejected` 保持拒收，协议、预算、deadline 或传输失败则 fail closed、保留部分覆盖且不产生 provisional 线索。该门不审查正式基线，也不把一次行为证明为 OOC；真实模型目前只有一次 7-window 的已知 DEV smoke，不是盲测或准确率结果，详见[开发检查点](docs/guided-review-ooc-dev-checkpoint-20260927.md)。
+
 An incomplete, parseable primary draft response may also produce a separate,
 read-only list of provisional clues. Each clue is rechecked against the run's
-frozen source and is visibly labeled as an unverified model proposal. A later
-clean package supersedes it. These clues never enter facts, OOC issues, issue
+frozen source and is visibly labeled as an unverified model proposal. For the
+ordinary package-validation path, a later clean package supersedes that clue;
+source-bound actor-review uncertainty follows the stricter rule above. These
+clues never enter facts, OOC issues, issue
 counts, feedback, Markdown exports, or visualizations; partial coverage remains
 partial. `GET /api/v1/analysis-runs/{run_id}/provisional-clues` returns at most
 64 workspace-authorized clues with an explicit truncation flag. The ordinary

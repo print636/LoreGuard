@@ -39,6 +39,17 @@ from .character_history_semantic_review import (
     run_history_semantic_review,
     segment_history_line,
 )
+from .character_draft_actor_review import (
+    DraftActorClauseIndex,
+    DraftActorProposal,
+    build_draft_actor_clause_index,
+    build_draft_actor_review_request,
+    screen_draft_actor_proposal,
+)
+from .character_draft_actor_review_provider import (
+    DraftActorReviewBatchEntry,
+    run_draft_actor_review,
+)
 from .domain import EvidenceSpan
 from .provider import OpenAICompatibleProvider, ProviderError, RetryPolicy
 from .usage import estimate_issue_evidence_review_tokens
@@ -88,6 +99,7 @@ MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS = 320
 MAX_TARGETED_CHARACTER_SIGNAL_TARGET_PAYLOAD_BYTES = 40_960
 MAX_TARGETED_CHARACTER_SIGNAL_CANDIDATE_LINES = 64
 _MAX_TARGETED_SAME_SUBJECT_TEMPLATE_BYTES = 4_096
+_MAX_TARGETED_DRAFT_ACTOR_PROPOSAL_BYTES = 8_192
 _MAX_SIGNAL_RESPONSE_RECORDS = 64
 _MAX_DRAFT_TRACE_LINE_ORDINAL = 12_000
 # Retry metadata is derived from validated records, but up to 64 bounded
@@ -99,6 +111,7 @@ SUPPORT_TRACE_V1 = "support-trace-v1"
 DRAFT_SIGNAL_TRACE_V1 = "draft-signal-trace-v1"
 BASELINE_SIGNAL_TRACE_V1 = "baseline-signal-trace-v1"
 DRAFT_SOURCE_EXCERPT_REPAIR_V1 = "draft-source-excerpt-repair-v1"
+DRAFT_ACTOR_SIGNAL_PROMPT_V1 = "character-draft-actor-signal-prompt-v1"
 _MAX_SUPPORT_CLAUSES_PER_CHUNK = 256
 _MAX_SUPPORT_CLAUSES_PER_LINE = 64
 _MAX_SUPPORT_PROMPT_CHARS = 20_000
@@ -229,6 +242,13 @@ _BASELINE_PACKAGE_REASONS = frozenset({
     "response_too_large", "invalid_json", "record_limit",
     "regeneration_coverage_regression",
 })
+
+
+class _DraftActorAttributionRequired(ValueError):
+    """The record passed every pre-actor gate but needs semantic attribution."""
+
+    def __init__(self) -> None:
+        super().__init__("character_support")
 
 _EXPLICIT_CORE_PERSONALITY = re.compile(
     r"(?:这也?是|这属于|属于|被定义为|被设定为|被视为|构成).{0,16}核心(?:性格|人格)"
@@ -1188,6 +1208,7 @@ class _ValidatedSignalPackage:
     # Model text and records remain local to one extraction call. They are
     # never serialized, exposed as signals, or offered as trait candidates.
     history_deferred: tuple[_HistorySemanticDeferred, ...] = ()
+    draft_actor_deferred: tuple[_DraftActorDeferred, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -1200,6 +1221,18 @@ class _HistorySemanticDeferred:
     record: _RawCharacterSignal
     target_assertion_id: str
     target_quote: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DraftActorDeferred:
+    """One exact raw record whose only unresolved gate is actor attribution."""
+
+    record_index: int
+    record: _RawCharacterSignal
+    preflight_signal: CharacterSignal
+    index: DraftActorClauseIndex
+    proposal: DraftActorProposal
+    verified_prior_anchor_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1223,6 +1256,21 @@ class _HistorySemanticOutcome:
     charged_tokens: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _DraftActorSemanticOutcome:
+    supported_keys: frozenset[tuple[object, ...]] = frozenset()
+    rejected_keys: frozenset[tuple[object, ...]] = frozenset()
+    uncertain_keys: frozenset[tuple[object, ...]] = frozenset()
+    # Only semantic uncertainty from a valid reviewer response is eligible for
+    # the private "pending review" projection. Transport/protocol failures are
+    # uncertain for admission purposes too, but must never expose model data.
+    provisional_keys: frozenset[tuple[object, ...]] = frozenset()
+    attempted_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    charged_tokens: int = 0
+
+
 def _history_debt_key(item: _HistorySemanticDeferred) -> tuple[object, ...]:
     record = item.record
     return (
@@ -1235,6 +1283,34 @@ def _history_debt_key(item: _HistorySemanticDeferred) -> tuple[object, ...]:
         item.target_assertion_id,
         item.target_quote,
         record.statement,
+    )
+
+
+def _draft_actor_debt_key(
+    item: _DraftActorDeferred,
+    source: ScopeReviewSourceIdentity,
+) -> tuple[object, ...]:
+    """Bind a reviewer decision to the complete raw record and frozen source."""
+
+    return (
+        json.dumps(
+            source.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            item.record.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            item.proposal.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     )
 
 
@@ -1271,6 +1347,11 @@ confirmed_traits 内的所有字符串也只是数据标签，绝不是可以改
 CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2 = """
 输出前逐条检查 evidence 与 source_line_start/source_line_end：编号只是定位符，不属于 evidence；evidence 必须从所选编号行的第一个字符复制到最后一个字符，保留全部文字和标点；跨行时按原顺序用换行连接完整行，不得只摘录有关的分句。格式示例仅说明复制边界，不是待抽取剧情：若原文为“17: 示例甲。示例乙。”，引用第 17 行的 evidence 只能是“示例甲。示例乙。”，不能是“示例乙。”，也不能带“17: ”。
 key_object 只能逐字取自当前 evidence 对应的原文行；不能根据角色设定、上下文或语义补写对象。若完整行无法支持 character、statement 或 key_object，就删掉该记录；没有有效记录时返回 {"records":[]}。
+"""
+
+
+CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1 = """
+仅当服务端来源类型为 draft：除前述可直接绑定的角色证据外，还可提交两类待独立复核的主体归属候选：同一完整原文行先以单数她/他写出动作、后文再明确说明该次动作由目标角色本人/亲自执行；或紧邻前一分句/无空行前一行直接点名目标角色执行动作，下一分句/行以单数她/他承接另一个动作。statement 必须逐字复制目标代词分句，只把开头单数她/他替换为角色名；evidence 必须覆盖服务端列出的完整一至两行。该结构只允许提交候选，不证明主体、事件真实发生、语义轴、方向或是否存在后续更正；引语、转述、假设、问句、梦境、演练、分支、多主体、委托/目击或拿不准时必须省略。服务端会用冻结全文进行独立复核，不能把姓名、模板或相邻关系当作事实依据。
 """
 
 
@@ -1323,6 +1404,7 @@ def _validate_signal_prompt_variant_settings(settings: Settings) -> None:
     draft_trace = settings.character_signal_draft_trace_v1
     baseline_trace = settings.character_signal_baseline_trace_v1
     history_review = settings.character_history_semantic_review_v1
+    draft_actor_review = settings.character_draft_actor_review_v1
     draft_excerpt_repair = settings.character_signal_draft_source_excerpt_repair_v1
     if any(
         type(flag) is not bool
@@ -1330,6 +1412,7 @@ def _validate_signal_prompt_variant_settings(settings: Settings) -> None:
             full_line, core_scope, support_id, semantic_scope, scope_review,
             support_trace, draft_trace, baseline_trace, draft_excerpt_repair,
             history_review,
+            draft_actor_review,
         )
     ):
         raise RuntimeError("character signal prompt variant flags must be bool")
@@ -1345,6 +1428,8 @@ def _validate_signal_prompt_variant_settings(settings: Settings) -> None:
         raise RuntimeError("character signal support trace v1 requires support id v4")
     if history_review and not full_line:
         raise RuntimeError("character history semantic review requires full line v2")
+    if draft_actor_review and not full_line:
+        raise RuntimeError("character draft actor review requires full line v2")
 
 
 CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4 = """
@@ -1444,6 +1529,10 @@ class CharacterSignalExtractor:
             self.settings.character_history_semantic_review_v1
             and chunk.source_kind == "published_history"
         )
+        draft_actor_review_v1 = (
+            self.settings.character_draft_actor_review_v1
+            and chunk.source_kind == "draft"
+        )
         support_index: AssertionIndexV1 | None = None
         support_prompt = ""
         if formal_support_v4:
@@ -1473,6 +1562,10 @@ class CharacterSignalExtractor:
                     + (CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2 if full_line_prompt_v2 else "")
                     + (CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3 if core_scope_prompt_v3 else "")
                     + (CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4 if formal_support_v4 else "")
+                    + (
+                        CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
+                        if draft_actor_review_v1 else ""
+                    )
                 )
             ),
             user_prompt=(
@@ -1483,6 +1576,7 @@ class CharacterSignalExtractor:
             support_index=support_index,
             scope_review_v1=scope_review_v1,
             history_review_v1=history_review_v1,
+            draft_actor_review_v1=draft_actor_review_v1,
             source_identity=source_identity,
             frozen_content=frozen_content,
         )
@@ -1493,6 +1587,8 @@ class CharacterSignalExtractor:
         targets: tuple[CharacterSignalTarget, ...],
         *,
         candidate_evidence_ranges: tuple[tuple[int, int], ...] = (),
+        source_identity: ScopeReviewSourceIdentity | None = None,
+        frozen_content: str | None = None,
     ) -> CharacterSignalExtractionResult:
         """Run at most one caller-controlled, content-free targeted draft pass."""
 
@@ -1514,6 +1610,11 @@ class CharacterSignalExtractor:
             return skipped("targeted_no_targets")
         if len(targets) > self.settings.character_signal_targeted_max_targets_per_chunk:
             return skipped("targeted_target_limit", len(targets))
+        draft_actor_review_v1 = self.settings.character_draft_actor_review_v1
+        if draft_actor_review_v1 and not _draft_actor_source_matches_chunk(
+            source_identity, frozen_content, chunk
+        ):
+            return skipped("draft_actor_review_source_mismatch")
         if candidate_evidence_ranges:
             lines = chunk.content.splitlines()
             if (
@@ -1557,6 +1658,17 @@ class CharacterSignalExtractor:
                             start,
                         )
                         != (start, end)
+                        and not (
+                            draft_actor_review_v1
+                            and draft_actor_review_evidence_range(
+                                chunk,
+                                targets[0].character,
+                                start,
+                                source_identity=source_identity,
+                                frozen_content=frozen_content,
+                            )
+                            == (start, end)
+                        )
                     )
                     or any(
                         _ranges_overlap((start, end), excluded)
@@ -1586,6 +1698,9 @@ class CharacterSignalExtractor:
                 chunk,
                 targets,
                 candidate_evidence_ranges=candidate_evidence_ranges,
+                draft_actor_review_v1=draft_actor_review_v1,
+                source_identity=source_identity,
+                frozen_content=frozen_content,
             )
         except (UnicodeError, ValueError):
             # Prompt-size and encoding checks are security boundaries, not
@@ -1594,10 +1709,20 @@ class CharacterSignalExtractor:
             return skipped("targeted_invalid_targets")
         return self._extract_with_prompt(
             chunk,
-            system_prompt=TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
+            system_prompt=(
+                TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
+                + (
+                    CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
+                    if draft_actor_review_v1 else ""
+                )
+            ),
             user_prompt=targeted_prompt,
             targets=targets,
             allowed_targeted_evidence_ranges=candidate_evidence_ranges,
+            full_line_prompt_v2=self.settings.character_signal_full_line_prompt_v2,
+            draft_actor_review_v1=draft_actor_review_v1,
+            source_identity=source_identity,
+            frozen_content=frozen_content,
         )
 
     def _extract_with_prompt(
@@ -1612,6 +1737,7 @@ class CharacterSignalExtractor:
         support_index: AssertionIndexV1 | None = None,
         scope_review_v1: bool = False,
         history_review_v1: bool = False,
+        draft_actor_review_v1: bool = False,
         source_identity: (
             ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None
         ) = None,
@@ -1676,6 +1802,17 @@ class CharacterSignalExtractor:
                     if baseline_trace_enabled else None
                 ),
             )
+        if draft_actor_review_v1 and not _draft_actor_source_matches_chunk(
+            source_identity, frozen_content, chunk
+        ):
+            return _empty_result(
+                "skipped",
+                reason_counts={"draft_actor_review_source_mismatch": 1},
+                draft_trace=(
+                    _draft_trace_for_result([], 0)
+                    if draft_trace_enabled else None
+                ),
+            )
         review_reserve = (
             _estimated_scope_review_reserve(
                 chunk, support_index, source_identity, settings
@@ -1684,23 +1821,43 @@ class CharacterSignalExtractor:
         )
         if history_review_v1:
             review_reserve = settings.character_history_semantic_review_token_reserve
+        if draft_actor_review_v1:
+            review_reserve = settings.character_draft_actor_review_token_reserve
         started = self._monotonic()
         total_deadline = _effective_signal_deadline(settings)
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_charged_tokens = 0
         attempted_calls = 0
-        history_attempted_calls = 0
+        auxiliary_attempted_calls = 0
         validation_attempts: list[_ValidatedSignalPackage] = []
         verified_before_clean: list[CharacterSignal] = []
         history_coverage_debt: set[tuple[object, ...]] = set()
+        draft_actor_coverage_debt: set[tuple[object, ...]] = set()
+        draft_actor_rejected: set[tuple[object, ...]] = set()
+        draft_actor_supported: set[tuple[object, ...]] = set()
+        provisional_draft_actor_clues: tuple[CharacterSignal, ...] = ()
+        draft_actor_review_performed = False
         retry_categories: tuple[str, ...] = ()
         retry_failures: tuple[_SignalValidationFailure, ...] = ()
+
+        def draft_actor_diagnostic_reasons() -> dict[str, int]:
+            output: dict[str, int] = {}
+            if draft_actor_coverage_debt:
+                output["draft_actor_review_incomplete"] = len(
+                    draft_actor_coverage_debt
+                )
+            if draft_actor_rejected:
+                output["draft_actor_review_rejected"] = len(
+                    draft_actor_rejected
+                )
+            return output
 
         def validate_response(
             response_text: Any,
             *,
             history_supported: frozenset[int] = frozenset(),
+            actor_supported: frozenset[tuple[object, ...]] = frozenset(),
         ) -> _ValidatedSignalPackage:
             return _validate_signal_package(
                 response_text,
@@ -1718,6 +1875,10 @@ class CharacterSignalExtractor:
                 draft_trace_enabled=draft_trace_enabled,
                 history_review_v1=history_review_v1,
                 history_supported_record_indices=history_supported,
+                draft_actor_review_v1=draft_actor_review_v1,
+                draft_actor_supported_keys=actor_supported,
+                source_identity=source_identity,
+                frozen_content=frozen_content,
             )
 
         for package_attempt in range(settings.character_signal_package_max_attempts):
@@ -1737,16 +1898,18 @@ class CharacterSignalExtractor:
                             settings.character_signal_semantic_scope_v5
                             and support_index is not None
                         ),
+                        draft_actor_review_v1=draft_actor_review_v1,
                     )
                 except ValueError:
                     return _failed_package_result(
                         validation_attempts,
-                        attempted_calls=attempted_calls + history_attempted_calls,
+                        attempted_calls=attempted_calls + auxiliary_attempted_calls,
                         trace_attempted_calls=attempted_calls,
                         prompt_tokens=total_prompt_tokens,
                         completion_tokens=total_completion_tokens,
                         charged_tokens=total_charged_tokens,
                         extra_reason="regeneration_metadata_limit",
+                        extra_reason_counts=draft_actor_diagnostic_reasons(),
                         support_index=trace_index,
                         draft_trace_enabled=draft_trace_enabled,
                         baseline_trace_enabled=baseline_trace_enabled,
@@ -1782,12 +1945,13 @@ class CharacterSignalExtractor:
                     )
                 return _failed_package_result(
                     validation_attempts,
-                    attempted_calls=attempted_calls + history_attempted_calls,
+                    attempted_calls=attempted_calls + auxiliary_attempted_calls,
                     trace_attempted_calls=attempted_calls,
                     prompt_tokens=total_prompt_tokens,
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
                     extra_reason="regeneration_token_budget",
+                    extra_reason_counts=draft_actor_diagnostic_reasons(),
                     token_admission=admission,
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
@@ -1798,12 +1962,13 @@ class CharacterSignalExtractor:
             if remaining_deadline <= 0:
                 return _failed_package_result(
                     validation_attempts,
-                    attempted_calls=attempted_calls + history_attempted_calls,
+                    attempted_calls=attempted_calls + auxiliary_attempted_calls,
                     trace_attempted_calls=attempted_calls,
                     prompt_tokens=total_prompt_tokens,
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
                     extra_reason="regeneration_deadline",
+                    extra_reason_counts=draft_actor_diagnostic_reasons(),
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
                     baseline_trace_enabled=baseline_trace_enabled,
@@ -1831,12 +1996,13 @@ class CharacterSignalExtractor:
                 total_charged_tokens += estimate
                 return _failed_package_result(
                     validation_attempts,
-                    attempted_calls=attempted_calls + history_attempted_calls,
+                    attempted_calls=attempted_calls + auxiliary_attempted_calls,
                     trace_attempted_calls=attempted_calls,
                     prompt_tokens=total_prompt_tokens,
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
                     extra_reason=reason,
+                    extra_reason_counts=draft_actor_diagnostic_reasons(),
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
                     baseline_trace_enabled=baseline_trace_enabled,
@@ -1845,12 +2011,13 @@ class CharacterSignalExtractor:
                 total_charged_tokens += estimate
                 return _failed_package_result(
                     validation_attempts,
-                    attempted_calls=attempted_calls + history_attempted_calls,
+                    attempted_calls=attempted_calls + auxiliary_attempted_calls,
                     trace_attempted_calls=attempted_calls,
                     prompt_tokens=total_prompt_tokens,
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
                     extra_reason="provider_error",
+                    extra_reason_counts=draft_actor_diagnostic_reasons(),
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
                     baseline_trace_enabled=baseline_trace_enabled,
@@ -1866,7 +2033,10 @@ class CharacterSignalExtractor:
                 estimate, prompt_tokens + completion_tokens
             )
             response_text = getattr(response, "text", "")
-            validation = validate_response(response_text)
+            validation = validate_response(
+                response_text,
+                actor_supported=frozenset(draft_actor_supported),
+            )
             if (
                 history_review_v1
                 and validation.history_deferred
@@ -1889,7 +2059,7 @@ class CharacterSignalExtractor:
                     ),
                     monotonic=self._monotonic,
                 )
-                history_attempted_calls += history_review.attempted_calls
+                auxiliary_attempted_calls += history_review.attempted_calls
                 total_prompt_tokens += history_review.prompt_tokens
                 total_completion_tokens += history_review.completion_tokens
                 total_charged_tokens += history_review.charged_tokens
@@ -1908,6 +2078,61 @@ class CharacterSignalExtractor:
                         response_text,
                         history_supported=history_review.supported_indices,
                     )
+            if draft_actor_review_v1 and validation.draft_actor_deferred:
+                assert isinstance(source_identity, ScopeReviewSourceIdentity)
+                if not draft_actor_review_performed:
+                    draft_actor_review_performed = True
+                    actor_review = _review_draft_actor_deferred(
+                        validation.draft_actor_deferred,
+                        chunk=chunk,
+                        source_identity=source_identity,
+                        frozen_content=frozen_content,
+                        provider=self._base_provider,
+                        settings=settings,
+                        token_budget=max(
+                            0,
+                            settings.character_signal_token_budget
+                            - total_charged_tokens,
+                        ),
+                        remaining_deadline_seconds=(
+                            total_deadline - (self._monotonic() - started)
+                        ),
+                        monotonic=self._monotonic,
+                    )
+                    auxiliary_attempted_calls += actor_review.attempted_calls
+                    total_prompt_tokens += actor_review.prompt_tokens
+                    total_completion_tokens += actor_review.completion_tokens
+                    total_charged_tokens += actor_review.charged_tokens
+                    draft_actor_supported.update(actor_review.supported_keys)
+                    draft_actor_rejected.update(actor_review.rejected_keys)
+                    draft_actor_coverage_debt.difference_update(
+                        actor_review.supported_keys | actor_review.rejected_keys
+                    )
+                    draft_actor_coverage_debt.update(
+                        actor_review.uncertain_keys
+                    )
+                    if actor_review.supported_keys:
+                        validation = validate_response(
+                            response_text,
+                            actor_supported=frozenset(draft_actor_supported),
+                        )
+                    provisional_draft_actor_clues = (
+                        _provisional_draft_actor_subset(
+                            validation,
+                            eligible_keys=actor_review.provisional_keys,
+                            chunk=chunk,
+                            source_identity=source_identity,
+                            frozen_content=frozen_content,
+                        )
+                    )
+                else:
+                    for item in validation.draft_actor_deferred:
+                        key = _draft_actor_debt_key(item, source_identity)
+                        if (
+                            key not in draft_actor_supported
+                            and key not in draft_actor_rejected
+                        ):
+                            draft_actor_coverage_debt.add(key)
             if validation.complete and verified_before_clean:
                 missing = _regeneration_coverage_regressions(
                     verified_before_clean,
@@ -1957,6 +2182,14 @@ class CharacterSignalExtractor:
                     reasons["history_semantic_review_incomplete"] += len(
                         history_coverage_debt
                     )
+                if draft_actor_coverage_debt:
+                    reasons["draft_actor_review_incomplete"] += len(
+                        draft_actor_coverage_debt
+                    )
+                if draft_actor_rejected:
+                    reasons["draft_actor_review_rejected"] += len(
+                        draft_actor_rejected
+                    )
                 review_outcome: _ScopeReviewOutcome | None = None
                 if scope_review_v1 and clean:
                     review_outcome = _review_clean_signals(
@@ -1997,20 +2230,25 @@ class CharacterSignalExtractor:
                 observations = tuple(
                     row for row in clean if row.source_kind == "draft"
                 )
+                provisional_clues = _draft_actor_clues_after_clean(
+                    provisional_draft_actor_clues,
+                    accepted_signals=clean,
+                )
                 return CharacterSignalExtractionResult(
                     signals=clean,
                     pending_candidates=candidates,
                     draft_observations=observations,
+                    provisional_draft_clues=provisional_clues,
                     diagnostics=CharacterSignalDiagnostics(
                         outcome=(
                             "partial"
-                            if history_coverage_debt
+                            if history_coverage_debt or draft_actor_coverage_debt
                             or review_outcome is not None
                             and len(clean) < len(validation.signals)
                             else "completed"
                         ),
                         attempted_calls=(
-                            attempted_calls + history_attempted_calls
+                            attempted_calls + auxiliary_attempted_calls
                             + (review_outcome.attempted_calls if review_outcome else 0)
                         ),
                         raw_records=sum(
@@ -2080,11 +2318,12 @@ class CharacterSignalExtractor:
 
         return _failed_package_result(
             validation_attempts,
-            attempted_calls=attempted_calls + history_attempted_calls,
+            attempted_calls=attempted_calls + auxiliary_attempted_calls,
             trace_attempted_calls=attempted_calls,
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             charged_tokens=total_charged_tokens,
+            extra_reason_counts=draft_actor_diagnostic_reasons(),
             support_index=trace_index,
             draft_trace_enabled=draft_trace_enabled,
             baseline_trace_enabled=baseline_trace_enabled,
@@ -2105,6 +2344,10 @@ def _validate_signal_package(
     draft_trace_enabled: bool = False,
     history_review_v1: bool = False,
     history_supported_record_indices: frozenset[int] = frozenset(),
+    draft_actor_review_v1: bool = False,
+    draft_actor_supported_keys: frozenset[tuple[object, ...]] = frozenset(),
+    source_identity: ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None = None,
+    frozen_content: str | None = None,
 ) -> _ValidatedSignalPackage:
     try:
         response_bytes = len(text.encode("utf-8")) if isinstance(text, str) else None
@@ -2168,12 +2411,15 @@ def _validate_signal_package(
     signals: list[CharacterSignal] = []
     accepted_groups: set[tuple[str | int | None, ...]] = set()
     accepted_signal_ids: set[str] = set()
+    deferred_groups: set[tuple[str | int | None, ...]] = set()
+    deferred_signal_ids: set[str] = set()
     ignored_duplicate_records = 0
     draft_source_excerpt_repairs = 0
     accepted_record_indices: list[int] = []
     duplicate_record_indices: list[int] = []
     failures: list[_SignalValidationFailure] = []
     history_deferred: list[_HistorySemanticDeferred] = []
+    draft_actor_deferred: list[_DraftActorDeferred] = []
     targeted_evidence: dict[
         tuple[str, str, str], set[tuple[int, int]]
     ] = defaultdict(set)
@@ -2211,7 +2457,8 @@ def _validate_signal_package(
             if restored is not None:
                 record, repair_probe = restored
         try:
-            signal = _bind_record(
+            signal, actor_deferred = _bind_record_with_draft_actor_review(
+                record_index,
                 record,
                 chunk,
                 support_index=support_index,
@@ -2222,7 +2469,12 @@ def _validate_signal_package(
                     and not targets
                     and record_index in history_supported_record_indices
                 ),
+                draft_actor_review_v1=draft_actor_review_v1,
+                draft_actor_supported_keys=draft_actor_supported_keys,
+                source_identity=source_identity,
+                frozen_content=frozen_content,
             )
+            assert signal is not None
             if repair_probe is not None and (
                 signal.dimension != repair_probe.dimension
                 or signal.polarity != repair_probe.polarity
@@ -2263,7 +2515,12 @@ def _validate_signal_package(
             continue
 
         group_identity = _raw_signal_group_identity(record)
-        if group_identity in accepted_groups or signal.id in accepted_signal_ids:
+        if (
+            group_identity in accepted_groups
+            or signal.id in accepted_signal_ids
+            or group_identity in deferred_groups
+            or signal.id in deferred_signal_ids
+        ):
             ignored_duplicate_records += 1
             duplicate_record_indices.append(record_index)
             continue
@@ -2331,6 +2588,19 @@ def _validate_signal_package(
                 continue
             seen_evidence.add(evidence_identity)
 
+        if actor_deferred is not None:
+            # Outer targeted policy is part of eligibility too. The reviewer
+            # never sees a wrong-axis, wrong-direction, disallowed-range,
+            # duplicate, or over-limit candidate.
+            deferred_groups.add(group_identity)
+            deferred_signal_ids.add(signal.id)
+            reasons["character_support"] += 1
+            failures.append(
+                _SignalValidationFailure(record_index, "character_support")
+            )
+            draft_actor_deferred.append(actor_deferred)
+            continue
+
         accepted_groups.add(group_identity)
         accepted_signal_ids.add(signal.id)
         signals.append(signal)
@@ -2387,6 +2657,7 @@ def _validate_signal_package(
             if draft_trace_enabled else None
         ),
         history_deferred=tuple(history_deferred),
+        draft_actor_deferred=tuple(draft_actor_deferred),
     )
 
 
@@ -2844,6 +3115,7 @@ def _regeneration_prompt(
     full_line_prompt_v2: bool = False,
     support_id_v4: bool = False,
     semantic_scope_v5: bool = False,
+    draft_actor_review_v1: bool = False,
 ) -> str:
     if (
         len(failures) > _MAX_SIGNAL_RESPONSE_RECORDS
@@ -2923,7 +3195,7 @@ def _regeneration_prompt(
             "source_line_start、source_line_end、evidence 这 12 个字段；"
             "source_line_start/source_line_end 必须是整数，其余字段必须是字符串。"
             "不得回显 targets、候选证据范围、canonical_statement、"
-            "canonical_statements 或其中的策略字段，"
+            "canonical_statements、actor_review_statement_proposals 或其中的策略字段，"
             "也不得添加 authority、source_kind 等服务端字段。"
         )
     if targeted and "character_support" in categories:
@@ -2933,6 +3205,13 @@ def _regeneration_prompt(
             "先独立核对原文行为、target 语义轴与 requested_polarity；仅在三者匹配时"
             "将该范围的一个模板逐字复制到 statement，不得回显模板字段或挪用别行模板。"
             "没有匹配模板时行为句须直接点名角色；没有证据则删记录或返回空 records。"
+        )
+    if draft_actor_review_v1 and "character_support" in categories:
+        corrections.append(
+            "若候选范围提供 actor_review_statement_proposals，它只给出可复核的 statement "
+            "格式，不证明主体、事件真实发生、target 语义轴或 requested_polarity。"
+            "只有原文确实支持全部输出字段时才可逐字使用；不得改写、移到其他范围或回显"
+            "该策略字段。独立复核已明确拒绝或拿不准的记录应删除；没有合格证据可返回空 records。"
         )
     if targeted and "targeted_target_mismatch" in categories:
         corrections.append(
@@ -3057,6 +3336,7 @@ def _failed_package_result(
     completion_tokens: int,
     charged_tokens: int,
     extra_reason: str | None = None,
+    extra_reason_counts: dict[str, int] | None = None,
     token_admission: CharacterSignalTokenAdmission | None = None,
     support_index: AssertionIndexV1 | None = None,
     draft_trace_enabled: bool = False,
@@ -3074,6 +3354,15 @@ def _failed_package_result(
         core_scope_counts.update(attempt.core_label_scope_counts or {})
     if extra_reason:
         reasons[extra_reason] += 1
+    if extra_reason_counts:
+        reasons.update({
+            key: value
+            for key, value in extra_reason_counts.items()
+            if isinstance(key, str)
+            and key
+            and type(value) is int
+            and value > 0
+        })
     # Select one incomplete parsed package. More independently safe clues win;
     # ties retain the earlier package. Never union records across attempts.
     global_failure = extra_reason in _PROVISIONAL_DRAFT_GLOBAL_PROVIDER_FAILURES or any(
@@ -3255,6 +3544,510 @@ def _history_review_source_matches_chunk(
     chunk_lines = chunk.content.splitlines()
     first = chunk.global_line_start - 1
     return bool(chunk_lines) and lines[first:first + len(chunk_lines)] == chunk_lines
+
+
+def _draft_actor_source_matches_chunk(
+    source: ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None,
+    frozen_content: str | None,
+    chunk: CharacterSignalChunk,
+) -> bool:
+    return (
+        chunk.source_kind == "draft"
+        and isinstance(source, ScopeReviewSourceIdentity)
+        and not isinstance(source, HistoryReviewSourceIdentity)
+        and _scope_review_source_matches_chunk(source, frozen_content, chunk)
+    )
+
+
+def _frozen_line_evidence(
+    frozen_content: str, line_start: int, line_end: int
+) -> str:
+    segments = frozen_content.splitlines(keepends=True)
+    if not (1 <= line_start <= line_end <= len(segments)):
+        raise ValueError("draft actor evidence range is invalid")
+    evidence = "".join(segments[line_start - 1 : line_end])
+    if evidence.endswith("\r\n"):
+        return evidence[:-2]
+    if evidence.endswith(("\n", "\r")):
+        return evidence[:-1]
+    return evidence
+
+
+_DRAFT_ACTOR_PRIOR_UNSAFE_TAIL = re.compile(
+    r"^(?:的|和|与|跟|同|、|让|请|叫|派|由|看见|看到|看着|望着|"
+    r"听见|听到|得知|转述|命令|指使)"
+)
+
+
+def _trusted_draft_prior_anchor(
+    clause: ScopeReviewClause, *, character: str
+) -> bool:
+    """Derive prior-anchor trust from frozen source, never model fields."""
+
+    text = clause.text.strip()
+    return bool(
+        text.startswith(character)
+        and len(text) > len(character)
+        and not _DRAFT_ACTOR_PRIOR_UNSAFE_TAIL.match(text[len(character) :])
+        and not _UNSAFE_COREFERENCE_BRANCH.search(text)
+        and not _REPORTED_OR_QUOTED_SPEECH.search(text)
+    )
+
+
+def _draft_actor_structural_candidates(
+    chunk: CharacterSignalChunk,
+    character: str,
+    line_start: int,
+    line_end: int,
+    *,
+    source_identity: ScopeReviewSourceIdentity | None,
+    frozen_content: str | None,
+) -> tuple[
+    DraftActorClauseIndex,
+    tuple[tuple[DraftActorProposal, frozenset[str]], ...],
+] | None:
+    """Build only server-derived proposals that pass the protocol screen."""
+
+    if (
+        not _draft_actor_source_matches_chunk(
+            source_identity, frozen_content, chunk
+        )
+        or not isinstance(source_identity, ScopeReviewSourceIdentity)
+        or not isinstance(frozen_content, str)
+        or not (
+            chunk.global_line_start <= line_start <= line_end
+            <= chunk.global_line_end
+            and line_end - line_start <= 1
+        )
+    ):
+        return None
+    try:
+        index = build_draft_actor_clause_index(
+            frozen_content,
+            source_identity,
+            line_start=line_start,
+            line_end=line_end,
+        )
+        evidence = _frozen_line_evidence(
+            frozen_content, line_start, line_end
+        )
+    except (TypeError, ValueError, UnicodeError):
+        return None
+
+    ordered = tuple(clause for line in index.lines for clause in line.clauses)
+    candidates: list[tuple[DraftActorProposal, frozenset[str]]] = []
+    for target_position, target in enumerate(ordered):
+        if (
+            not target.text.startswith(("她", "他"))
+            or target.text.startswith(("她们", "他们"))
+            or len(target.text) < 2
+        ):
+            continue
+        statement = character + target.text[1:]
+        # A preceding direct named-actor clause is trusted only because this
+        # server code derives its exact immutable clause ID from frozen source.
+        if target_position:
+            anchor = ordered[target_position - 1]
+            if _trusted_draft_prior_anchor(anchor, character=character):
+                proposal = DraftActorProposal(
+                    source_sha256=source_identity.content_sha256,
+                    line_start=line_start,
+                    line_end=line_end,
+                    evidence=evidence,
+                    target_clause_id=target.support_id,
+                    actor_anchor_id=anchor.support_id,
+                    anchor_kind="verified_prior_named_anchor",
+                    character=character,
+                    statement=statement,
+                )
+                verified = frozenset({anchor.support_id})
+                decision = screen_draft_actor_proposal(
+                    index,
+                    proposal,
+                    frozen_content=frozen_content,
+                    expected_source=source_identity,
+                    verified_prior_anchor_ids=verified,
+                )
+                if decision.eligible_for_semantic_review:
+                    candidates.append((proposal, verified))
+
+        # Same-line corroboration is deliberately screened by the protocol;
+        # mere name occurrence or a model-selected anchor is never trusted.
+        for anchor in ordered[target_position + 1 :]:
+            if anchor.line_number != target.line_number:
+                continue
+            proposal = DraftActorProposal(
+                source_sha256=source_identity.content_sha256,
+                line_start=line_start,
+                line_end=line_end,
+                evidence=evidence,
+                target_clause_id=target.support_id,
+                actor_anchor_id=anchor.support_id,
+                anchor_kind="same_line_corroboration",
+                character=character,
+                statement=statement,
+            )
+            decision = screen_draft_actor_proposal(
+                index,
+                proposal,
+                frozen_content=frozen_content,
+                expected_source=source_identity,
+            )
+            if decision.eligible_for_semantic_review:
+                candidates.append((proposal, frozenset()))
+
+    unique: dict[str, tuple[DraftActorProposal, frozenset[str]]] = {}
+    for proposal, verified in candidates:
+        key = json.dumps(
+            proposal.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        unique.setdefault(key, (proposal, verified))
+    return index, tuple(unique.values())
+
+
+def draft_actor_review_evidence_range(
+    chunk: CharacterSignalChunk,
+    character: str,
+    named_line: int,
+    *,
+    source_identity: ScopeReviewSourceIdentity | None,
+    frozen_content: str | None,
+) -> tuple[int, int] | None:
+    """Expose one adjacent range only when frozen structure can be screened."""
+
+    candidate = (named_line, named_line + 1)
+    built = _draft_actor_structural_candidates(
+        chunk,
+        character,
+        *candidate,
+        source_identity=source_identity,
+        frozen_content=frozen_content,
+    )
+    if built is None:
+        return None
+    _, proposals = built
+    return candidate if any(
+        proposal.anchor_kind == "verified_prior_named_anchor"
+        and proposal.line_start == named_line
+        and proposal.line_end == named_line + 1
+        for proposal, _ in proposals
+    ) else None
+
+
+def _draft_actor_deferred_candidate(
+    record_index: int,
+    record: _RawCharacterSignal,
+    preflight_signal: CharacterSignal,
+    chunk: CharacterSignalChunk,
+    *,
+    source_identity: ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None,
+    frozen_content: str | None,
+) -> _DraftActorDeferred | None:
+    if not isinstance(source_identity, ScopeReviewSourceIdentity):
+        return None
+    built = _draft_actor_structural_candidates(
+        chunk,
+        record.character,
+        record.source_line_start,
+        record.source_line_end,
+        source_identity=source_identity,
+        frozen_content=frozen_content,
+    )
+    if built is None:
+        return None
+    index, candidates = built
+    exact = tuple(
+        (proposal, verified)
+        for proposal, verified in candidates
+        if proposal.statement == record.statement
+        and proposal.evidence == record.evidence
+    )
+    if len(exact) != 1:
+        return None
+    proposal, verified = exact[0]
+    return _DraftActorDeferred(
+        record_index=record_index,
+        record=record,
+        preflight_signal=preflight_signal,
+        index=index,
+        proposal=proposal,
+        verified_prior_anchor_ids=verified,
+    )
+
+
+def _draft_signals_overlap(left: CharacterSignal, right: CharacterSignal) -> bool:
+    return (
+        left.evidence.document_id == right.evidence.document_id
+        and left.evidence.line_start <= right.evidence.line_end
+        and right.evidence.line_start <= left.evidence.line_end
+    )
+
+
+def _draft_signals_axis_conflict(
+    left: CharacterSignal, right: CharacterSignal
+) -> bool:
+    return (
+        {left.polarity, right.polarity} == {"positive", "negative"}
+        and _draft_axes_may_match(left, right)
+    )
+
+
+def _provisional_draft_actor_subset(
+    validation: _ValidatedSignalPackage,
+    *,
+    eligible_keys: frozenset[tuple[object, ...]],
+    chunk: CharacterSignalChunk,
+    source_identity: ScopeReviewSourceIdentity,
+    frozen_content: str | None,
+) -> tuple[CharacterSignal, ...]:
+    """Project only source-bound preflights from one safe reviewer attempt."""
+
+    deferred = validation.draft_actor_deferred
+    if (
+        not eligible_keys
+        or not validation.parsed
+        or not deferred
+        or not _draft_actor_source_matches_chunk(
+            source_identity, frozen_content, chunk
+        )
+        or Counter(
+            (failure.record_index, failure.reason)
+            for failure in validation.failures
+        )
+        != Counter(
+            (item.record_index, "character_support") for item in deferred
+        )
+        or validation.reason_counts != {"character_support": len(deferred)}
+    ):
+        return ()
+
+    chunk_lines = chunk.content.splitlines()
+    candidates: list[tuple[_DraftActorDeferred, CharacterSignal]] = []
+    for item in deferred:
+        if _draft_actor_debt_key(item, source_identity) not in eligible_keys:
+            continue
+        signal = item.preflight_signal
+        evidence = signal.evidence
+        local_start = evidence.line_start - chunk.global_line_start
+        local_end = evidence.line_end - chunk.global_line_start + 1
+        if (
+            signal.source_kind != "draft"
+            or evidence.document_id != source_identity.document_id
+            or evidence.document_id != chunk.document_id
+            or evidence.document_name != chunk.document_name
+            or evidence.line_start != item.record.source_line_start
+            or evidence.line_end != item.record.source_line_end
+            or not 0 <= local_start < local_end <= len(chunk_lines)
+            or evidence.text != "\n".join(chunk_lines[local_start:local_end]).strip()
+        ):
+            return ()
+        candidates.append((item, signal))
+
+    safe: list[CharacterSignal] = []
+    for item, signal in candidates:
+        other_deferred = (
+            other.preflight_signal for other in deferred if other is not item
+        )
+        if any(
+            _draft_signals_overlap(signal, other)
+            or _draft_axes_may_match(signal, other)
+            for other in other_deferred
+        ):
+            continue
+        if any(
+            _draft_signals_overlap(signal, accepted)
+            or _draft_signals_axis_conflict(signal, accepted)
+            for accepted in validation.signals
+        ):
+            continue
+        safe.append(signal)
+    return tuple(safe)
+
+
+def _draft_actor_clues_after_clean(
+    clues: tuple[CharacterSignal, ...],
+    *,
+    accepted_signals: tuple[CharacterSignal, ...],
+) -> tuple[CharacterSignal, ...]:
+    """Use clean output only as a veto; never merge records across attempts."""
+
+    return tuple(
+        clue
+        for clue in clues
+        if not any(
+            _draft_signals_overlap(clue, signal)
+            or _draft_signals_axis_conflict(clue, signal)
+            for signal in accepted_signals
+        )
+    )
+
+
+_DRAFT_ACTOR_PROVISIONAL_REASONS = frozenset({
+    "reviewer_uncertain",
+    "source_context_veto",
+})
+_DRAFT_ACTOR_REVIEW_INTEGRITY_FAILURES = frozenset({
+    "source_mismatch",
+    "response_too_large",
+    "response_invalid",
+    "response_mismatch",
+    "basis_invalid",
+    "slot_conflict",
+})
+
+
+def _review_draft_actor_deferred(
+    deferred: tuple[_DraftActorDeferred, ...],
+    *,
+    chunk: CharacterSignalChunk,
+    source_identity: ScopeReviewSourceIdentity,
+    frozen_content: str | None,
+    provider: _ChatProvider,
+    settings: Settings,
+    token_budget: int,
+    remaining_deadline_seconds: float,
+    monotonic: Any,
+) -> _DraftActorSemanticOutcome:
+    """Review every eligible window in one logical and transport batch."""
+
+    all_keys = frozenset(
+        _draft_actor_debt_key(item, source_identity) for item in deferred
+    )
+    if (
+        not deferred
+        or not isinstance(frozen_content, str)
+        or not _draft_actor_source_matches_chunk(
+            source_identity, frozen_content, chunk
+        )
+    ):
+        return _DraftActorSemanticOutcome(uncertain_keys=all_keys)
+
+    grouped: dict[tuple[int, int], list[_DraftActorDeferred]] = defaultdict(list)
+    for item in deferred:
+        grouped[(item.index.line_start, item.index.line_end)].append(item)
+
+    entries: list[DraftActorReviewBatchEntry] = []
+    key_groups: list[tuple[tuple[tuple[object, ...], ...], ...]] = []
+    try:
+        for window in sorted(grouped):
+            rows = grouped[window]
+            index = rows[0].index
+            if any(row.index != index for row in rows):
+                raise ValueError("draft actor window index mismatch")
+            unique: dict[str, list[_DraftActorDeferred]] = {}
+            proposals: dict[str, DraftActorProposal] = {}
+            verified_prior: set[str] = set()
+            for row in rows:
+                proposal_key = json.dumps(
+                    row.proposal.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                unique.setdefault(proposal_key, []).append(row)
+                proposals.setdefault(proposal_key, row.proposal)
+                verified_prior.update(row.verified_prior_anchor_ids)
+            ordered_keys = tuple(sorted(unique))
+            request = build_draft_actor_review_request(
+                index,
+                tuple(proposals[key] for key in ordered_keys),
+                frozen_content=frozen_content,
+                expected_source=source_identity,
+                verified_prior_anchor_ids=frozenset(verified_prior),
+            )
+            entries.append(
+                DraftActorReviewBatchEntry(
+                    request=request,
+                    expected_source=source_identity,
+                    frozen_content=frozen_content,
+                )
+            )
+            key_groups.append(
+                tuple(
+                    tuple(
+                        _draft_actor_debt_key(row, source_identity)
+                        for row in unique[key]
+                    )
+                    for key in ordered_keys
+                )
+            )
+        run = run_draft_actor_review(
+            tuple(entries),
+            provider=provider,
+            token_budget=token_budget,
+            completion_reserve=(
+                settings.character_draft_actor_review_completion_tokens
+            ),
+            timeout_seconds=settings.character_draft_actor_review_timeout_seconds,
+            remaining_deadline_seconds=remaining_deadline_seconds,
+            max_response_bytes=(
+                settings.character_draft_actor_review_max_response_bytes
+            ),
+            max_attempts=1,
+            monotonic=monotonic,
+        )
+    except (TypeError, ValueError, UnicodeError):
+        return _DraftActorSemanticOutcome(uncertain_keys=all_keys)
+
+    supported: set[tuple[object, ...]] = set()
+    rejected: set[tuple[object, ...]] = set()
+    uncertain: set[tuple[object, ...]] = set()
+    provisional: set[tuple[object, ...]] = set()
+    evaluations = run.evaluation.evaluations
+    decisions = tuple(
+        decision
+        for evaluation in evaluations
+        for decision in evaluation.decisions
+    )
+    provisional_review_is_safe = (
+        run.failure_reason is None
+        and not any(
+            decision.reason in _DRAFT_ACTOR_REVIEW_INTEGRITY_FAILURES
+            for decision in decisions
+        )
+    )
+    if len(evaluations) != len(entries):
+        uncertain.update(all_keys)
+    else:
+        for entry, evaluation, proposal_keys in zip(
+            entries, evaluations, key_groups
+        ):
+            if len(evaluation.decisions) != len(entry.request.proposals):
+                uncertain.update(key for keys in proposal_keys for key in keys)
+                continue
+            for proposal, decision, keys in zip(
+                entry.request.proposals,
+                evaluation.decisions,
+                proposal_keys,
+            ):
+                if decision.proposal_id != proposal.proposal_id:
+                    uncertain.update(keys)
+                elif decision.verdict == "supported":
+                    supported.update(keys)
+                elif decision.verdict == "rejected":
+                    rejected.update(keys)
+                else:
+                    uncertain.update(keys)
+                    if (
+                        provisional_review_is_safe
+                        and decision.reason in _DRAFT_ACTOR_PROVISIONAL_REASONS
+                    ):
+                        provisional.update(keys)
+    unresolved = all_keys - supported - rejected - uncertain
+    uncertain.update(unresolved)
+    return _DraftActorSemanticOutcome(
+        supported_keys=frozenset(supported),
+        rejected_keys=frozenset(rejected),
+        uncertain_keys=frozenset(uncertain),
+        provisional_keys=frozenset(provisional),
+        attempted_calls=run.attempted_calls,
+        prompt_tokens=run.prompt_tokens,
+        completion_tokens=run.completion_tokens,
+        charged_tokens=run.charged_tokens,
+    )
 
 
 def _history_adjacent_correction(
@@ -4617,6 +5410,68 @@ def _repair_draft_source_excerpt(
     return restored, excerpt_signal
 
 
+def _bind_record_with_draft_actor_review(
+    record_index: int,
+    record: _RawCharacterSignal,
+    chunk: CharacterSignalChunk,
+    *,
+    support_index: AssertionIndexV1 | None = None,
+    semantic_scope_v5: bool = False,
+    scope_review_v1: bool = False,
+    skip_lexical_polarity: bool = False,
+    draft_actor_review_v1: bool = False,
+    draft_actor_supported_keys: frozenset[tuple[object, ...]] = frozenset(),
+    source_identity: ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None = None,
+    frozen_content: str | None = None,
+) -> tuple[CharacterSignal | None, _DraftActorDeferred | None]:
+    """Defer only the actor gate, then re-run every remaining binder gate."""
+
+    try:
+        return (
+            _bind_record(
+                record,
+                chunk,
+                support_index=support_index,
+                semantic_scope_v5=semantic_scope_v5,
+                scope_review_v1=scope_review_v1,
+                skip_lexical_polarity=skip_lexical_polarity,
+            ),
+            None,
+        )
+    except _DraftActorAttributionRequired:
+        if not draft_actor_review_v1:
+            raise ValueError("character_support") from None
+        # Prove that actor attribution is the *only* failed gate before any
+        # content reaches the semantic reviewer. This signal is validation-
+        # local and is never admitted unless an exact reviewer certificate is
+        # present; supported responses run this same complete bind again.
+        preflight = _bind_record(
+            record,
+            chunk,
+            support_index=support_index,
+            semantic_scope_v5=semantic_scope_v5,
+            scope_review_v1=scope_review_v1,
+            skip_lexical_polarity=skip_lexical_polarity,
+            skip_draft_actor_attribution=True,
+        )
+        deferred = _draft_actor_deferred_candidate(
+            record_index,
+            record,
+            preflight,
+            chunk,
+            source_identity=source_identity,
+            frozen_content=frozen_content,
+        )
+        if deferred is None or not isinstance(
+            source_identity, ScopeReviewSourceIdentity
+        ):
+            raise ValueError("character_support") from None
+        key = _draft_actor_debt_key(deferred, source_identity)
+        if key not in draft_actor_supported_keys:
+            return preflight, deferred
+        return preflight, None
+
+
 def _bind_record(
     record: _RawCharacterSignal,
     chunk: CharacterSignalChunk,
@@ -4625,6 +5480,7 @@ def _bind_record(
     semantic_scope_v5: bool = False,
     scope_review_v1: bool = False,
     skip_lexical_polarity: bool = False,
+    skip_draft_actor_attribution: bool = False,
 ) -> CharacterSignal:
     if skip_lexical_polarity and (
         chunk.source_kind != "published_history"
@@ -4635,6 +5491,13 @@ def _bind_record(
         or scope_review_v1
     ):
         raise ValueError("statement_support")
+    if skip_draft_actor_attribution and (
+        chunk.source_kind != "draft"
+        or support_index is not None
+        or semantic_scope_v5
+        or scope_review_v1
+    ):
+        raise ValueError("character_support")
     v4_clause: SupportClauseV1 | None = None
     v4_scope: str | None = None
     v5_binding: _V5ScopeBinding | None = None
@@ -4692,7 +5555,12 @@ def _bind_record(
             and _DIRECT_PREFERENCE_CUE.search(record.statement)
             and _draft_preference_assertion_supported(record, evidence_text)
         ):
-            raise ValueError("character_support")
+            if skip_draft_actor_attribution:
+                pass
+            elif chunk.source_kind == "draft":
+                raise _DraftActorAttributionRequired()
+            else:
+                raise ValueError("character_support")
     scoped_core_label = None
     scoped_evidence = None
     if chunk.source_kind == "formal_character_profile" and not scope_review_v1:
@@ -6319,6 +7187,9 @@ def _targeted_chunk_prompt(
     targets: tuple[CharacterSignalTarget, ...],
     *,
     candidate_evidence_ranges: tuple[tuple[int, int], ...] = (),
+    draft_actor_review_v1: bool = False,
+    source_identity: ScopeReviewSourceIdentity | None = None,
+    frozen_content: str | None = None,
 ) -> str:
     lines = chunk.content.splitlines()
     allowed_lines = {
@@ -6366,6 +7237,7 @@ def _targeted_chunk_prompt(
     )
     candidate_payload: list[dict[str, int | str | list[str]]] = []
     same_subject_template_bytes = 0
+    actor_proposal_bytes = 0
     for start, end in candidate_evidence_ranges:
         candidate: dict[str, int | str | list[str]] = {
             "line_start": start,
@@ -6396,6 +7268,34 @@ def _targeted_chunk_prompt(
             ):
                 candidate["canonical_statements"] = list(same_subject_templates)
                 same_subject_template_bytes += template_bytes
+        if draft_actor_review_v1 and len(targets) == 1:
+            built = _draft_actor_structural_candidates(
+                chunk,
+                targets[0].character,
+                start,
+                end,
+                source_identity=source_identity,
+                frozen_content=frozen_content,
+            )
+            actor_statements = tuple(dict.fromkeys(
+                proposal.statement
+                for proposal, _ in (built[1] if built is not None else ())
+            ))
+            serialized_actor_statements = json.dumps(
+                actor_statements,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            proposal_bytes = len(serialized_actor_statements.encode("utf-8"))
+            if (
+                actor_statements
+                and actor_proposal_bytes + proposal_bytes
+                <= _MAX_TARGETED_DRAFT_ACTOR_PROPOSAL_BYTES
+            ):
+                candidate["actor_review_statement_proposals"] = list(
+                    actor_statements
+                )
+                actor_proposal_bytes += proposal_bytes
         candidate_payload.append(candidate)
     serialized_candidate_ranges = json.dumps(
         candidate_payload,
@@ -6416,6 +7316,16 @@ def _targeted_chunk_prompt(
         if any("canonical_statements" in candidate for candidate in candidate_payload)
         else ""
     )
+    actor_proposal_note = (
+        "actor_review_statement_proposals 只是冻结原文通过结构筛选后可交给独立主体复核器的 "
+        "statement 格式候选，不证明主体、事件真实发生、target 语义轴或 requested_polarity；"
+        "仅当草稿本身支持全部字段时才可逐字使用，不能改写或挪用到其他范围。\n"
+        if any(
+            "actor_review_statement_proposals" in candidate
+            for candidate in candidate_payload
+        )
+        else ""
+    )
     if (
         len(serialized_targets.encode("utf-8"))
         > MAX_TARGETED_CHARACTER_SIGNAL_TARGET_PAYLOAD_BYTES
@@ -6424,7 +7334,7 @@ def _targeted_chunk_prompt(
     return (
         "服务端来源类型：draft\n"
         f"检索视图：{'candidate_lines_only' if candidate_evidence_ranges else 'full_chunk'}\n"
-        f"{pronoun_template_note}{same_subject_template_note}"
+        f"{pronoun_template_note}{same_subject_template_note}{actor_proposal_note}"
         f"候选证据范围：{serialized_candidate_ranges}\n"
         f"targets：{serialized_targets}\n"
         f"可引用全局行：{chunk.global_line_start}-{chunk.global_line_end}\n"

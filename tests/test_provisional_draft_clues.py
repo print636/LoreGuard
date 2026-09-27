@@ -340,6 +340,34 @@ def test_compatible_opposite_axes_only_suppress_overlapping_source_lines():
     assert [item.line_start for item in distinct] == [10, 11]
     assert truncated is False
 
+    # Final accepted draft observations veto a conflicting provisional axis
+    # even when their source spans do not overlap.
+    assert _safe_provisional_draft_clues(
+        [(source, first)], accepted_signals=(opposite_other_line,)
+    ) == ((), False)
+
+    same_direction_other_line = opposite_other_line.model_copy(update={
+        "id": "cs_" + "c" * 32,
+        "polarity": "positive",
+        "statement": "林澈继续主动和陌生人交谈",
+    })
+    same_direction, truncated = _safe_provisional_draft_clues(
+        [(source, first)], accepted_signals=(same_direction_other_line,)
+    )
+    assert [item.line_start for item in same_direction] == [10]
+    assert truncated is False
+
+    for offset, non_opposing in enumerate(("neutral", "unclear"), start=1):
+        accepted = opposite_other_line.model_copy(update={
+            "id": "cs_" + str(offset) * 32,
+            "polarity": non_opposing,
+        })
+        retained, truncated = _safe_provisional_draft_clues(
+            [(source, first)], accepted_signals=(accepted,)
+        )
+        assert [item.line_start for item in retained] == [10]
+        assert truncated is False
+
 
 def test_private_projection_validates_immutable_input_and_rejects_tampering():
     source = frozen_source()

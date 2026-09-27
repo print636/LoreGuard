@@ -405,6 +405,34 @@ _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS = frozenset({
 _CHARACTER_HISTORY_SEMANTIC_REVIEW_SCHEMA_VERSION = "character-history-semantic-review-v1"
 _CHARACTER_HISTORY_SEMANTIC_REVIEW_PROMPT_VERSION = "character-history-semantic-review-prompt-v1"
 _CHARACTER_HISTORY_SEMANTIC_REVIEW_SEGMENTER_VERSION = "character-history-line-segmenter-v1"
+_CHARACTER_DRAFT_ACTOR_REVIEW_KEY = "draft_actor_review_v1"
+_CHARACTER_DRAFT_ACTOR_REVIEW_KEYS = frozenset({
+    _CHARACTER_DRAFT_ACTOR_REVIEW_KEY,
+    "draft_actor_review_schema_version",
+    "draft_actor_review_batch_schema_version",
+    "draft_actor_review_prompt_version",
+    "draft_actor_review_signal_prompt_version",
+    "draft_actor_review_clause_index_version",
+    "draft_actor_review_token_reserve",
+    "draft_actor_review_completion_tokens",
+    "draft_actor_review_max_response_bytes",
+    "draft_actor_review_timeout_seconds",
+    "draft_actor_review_max_attempts",
+    "draft_actor_review_provider_timeout_seconds",
+    "draft_actor_review_provider_total_deadline_seconds",
+    "draft_actor_review_provider_max_completion_tokens",
+    "draft_actor_review_provider_max_response_bytes",
+    "draft_actor_review_provider_max_attempts",
+})
+_CHARACTER_DRAFT_ACTOR_REVIEW_SCHEMA_VERSION = "character-draft-actor-review-v1"
+_CHARACTER_DRAFT_ACTOR_REVIEW_BATCH_SCHEMA_VERSION = (
+    "character-draft-actor-review-batch-v1"
+)
+_CHARACTER_DRAFT_ACTOR_REVIEW_PROMPT_VERSION = "character-draft-actor-review-prompt-v1"
+_CHARACTER_DRAFT_ACTOR_REVIEW_SIGNAL_PROMPT_VERSION = (
+    "character-draft-actor-signal-prompt-v1"
+)
+_CHARACTER_DRAFT_ACTOR_REVIEW_CLAUSE_INDEX_VERSION = "draft-actor-clause-index-v1"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY = "signal_support_trace_v1"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY = "signal_support_trace_version"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION = "support-trace-v1"
@@ -2991,6 +3019,90 @@ def _valid_character_history_semantic_review_limits(limits: dict[str, Any]) -> b
     )
 
 
+def _valid_character_draft_actor_review_limits(limits: dict[str, Any]) -> bool:
+    """Accept only the complete, source-indexed, one-attempt review identity."""
+
+    if not _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS <= set(limits):
+        return False
+    enabled = limits[_CHARACTER_DRAFT_ACTOR_REVIEW_KEY]
+    if (
+        type(enabled) is not bool
+        or (enabled and limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY) is not True)
+        or limits["draft_actor_review_schema_version"] != (
+            _CHARACTER_DRAFT_ACTOR_REVIEW_SCHEMA_VERSION if enabled else None
+        )
+        or limits["draft_actor_review_batch_schema_version"] != (
+            _CHARACTER_DRAFT_ACTOR_REVIEW_BATCH_SCHEMA_VERSION if enabled else None
+        )
+        or limits["draft_actor_review_prompt_version"] != (
+            _CHARACTER_DRAFT_ACTOR_REVIEW_PROMPT_VERSION if enabled else None
+        )
+        or limits["draft_actor_review_signal_prompt_version"] != (
+            _CHARACTER_DRAFT_ACTOR_REVIEW_SIGNAL_PROMPT_VERSION if enabled else None
+        )
+        or limits["draft_actor_review_clause_index_version"] != (
+            _CHARACTER_DRAFT_ACTOR_REVIEW_CLAUSE_INDEX_VERSION if enabled else None
+        )
+    ):
+        return False
+    integers = {
+        "draft_actor_review_token_reserve": (256, 20_000),
+        "draft_actor_review_completion_tokens": (64, 8_192),
+        "draft_actor_review_max_response_bytes": (1_024, 32_768),
+        "draft_actor_review_max_attempts": (1, 1),
+        "draft_actor_review_provider_max_completion_tokens": (1, 8_192),
+        "draft_actor_review_provider_max_response_bytes": (1, 32_768),
+        "draft_actor_review_provider_max_attempts": (1, 1),
+    }
+    for key, (minimum, maximum) in integers.items():
+        value = limits.get(key)
+        if type(value) is not int or not minimum <= value <= maximum:
+            return False
+    for key in (
+        "signal_provider_max_completion_tokens",
+        "signal_provider_max_response_bytes",
+        "signal_provider_max_attempts",
+    ):
+        if type(limits.get(key)) is not int:
+            return False
+    for key in (
+        "draft_actor_review_timeout_seconds",
+        "draft_actor_review_provider_timeout_seconds",
+        "draft_actor_review_provider_total_deadline_seconds",
+        "signal_total_deadline_seconds",
+        "signal_provider_timeout_seconds",
+    ):
+        value = limits.get(key)
+        if (
+            type(value) not in {int, float}
+            or not math.isfinite(float(value))
+            or not 0 < float(value) <= 120
+        ):
+            return False
+    timeout = limits["draft_actor_review_timeout_seconds"]
+    deadline = limits["draft_actor_review_provider_total_deadline_seconds"]
+    return not (
+        timeout > 30
+        or deadline != min(timeout, limits["signal_total_deadline_seconds"])
+        or limits["draft_actor_review_provider_timeout_seconds"] > min(
+            timeout, deadline, limits["signal_provider_timeout_seconds"]
+        )
+        or limits["draft_actor_review_provider_max_completion_tokens"] != min(
+            limits["draft_actor_review_completion_tokens"],
+            limits["signal_provider_max_completion_tokens"],
+        )
+        or limits["draft_actor_review_provider_max_response_bytes"] != min(
+            limits["draft_actor_review_max_response_bytes"],
+            limits["signal_provider_max_response_bytes"],
+        )
+        or limits["draft_actor_review_max_attempts"] != 1
+        or limits["draft_actor_review_provider_max_attempts"] != min(
+            limits["draft_actor_review_max_attempts"],
+            limits["signal_provider_max_attempts"],
+        )
+    )
+
+
 def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
     root = value if type(value) is dict else None
     if root is None or set(root) != {
@@ -3072,6 +3184,10 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         set(character_limits) & _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
         if type(character_limits) is dict else set()
     )
+    draft_actor_review_keys = (
+        set(character_limits) & _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
+        if type(character_limits) is dict else set()
+    )
     if (
         type(character_limits) is not dict
         or draft_trace_keys not in (set(), set(_CHARACTER_SIGNAL_DRAFT_TRACE_KEYS))
@@ -3081,10 +3197,14 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         or history_review_keys not in (
             set(), set(_CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS)
         )
+        or draft_actor_review_keys not in (
+            set(), set(_CHARACTER_DRAFT_ACTOR_REVIEW_KEYS)
+        )
         or set(character_limits) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
             | _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
+            | _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
@@ -3214,6 +3334,12 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             return None
         safe_character_limits.update({
             key: character_limits[key] for key in _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
+        })
+    if draft_actor_review_keys:
+        if not _valid_character_draft_actor_review_limits(character_limits):
+            return None
+        safe_character_limits.update({
+            key: character_limits[key] for key in _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
         })
     if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in character_limits:
         variant = character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY]
