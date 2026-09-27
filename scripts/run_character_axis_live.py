@@ -28,7 +28,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.character_scope_review import SCOPE_REVIEW_SLOT_CONFLICT_KINDS
+from app.character_scope_review import (
+    SCOPE_REVIEW_BASIS_INVALID_SUBTYPES,
+    SCOPE_REVIEW_SLOT_CONFLICT_KINDS,
+)
 from app.character_trait_extraction import SupportTraceV1, stable_trait_identity
 from scripts.run_character_consistency_live import (
     _baseline_admission,
@@ -711,6 +714,25 @@ def _safe_scope_review_slot_conflict_counts(
     return {key: raw[key] for key in sorted(raw)}
 
 
+def _safe_scope_review_basis_invalid_counts(
+    raw: object, reasons: object,
+) -> dict[str, int] | None:
+    """Project only fixed basis-rejection categories within the reason total."""
+    if type(raw) is not dict or type(reasons) is not dict:
+        return None
+    invalid_total = reasons.get("scope_review_basis_invalid", 0)
+    if (
+        type(invalid_total) is not int
+        or not 0 <= invalid_total <= 1_000_000
+        or not set(raw) <= SCOPE_REVIEW_BASIS_INVALID_SUBTYPES
+        or any(type(value) is not int or not 1 <= value <= invalid_total
+               for value in raw.values())
+        or sum(raw.values()) > invalid_total
+    ):
+        return None
+    return {key: raw[key] for key in sorted(raw)}
+
+
 def _safe_core_label_scope_diagnostics(
     stage: dict[str, Any], safe_reasons: dict[str, int],
     *, safe_signal_histogram: list[dict[str, str | int]] | None,
@@ -1149,6 +1171,9 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
     slot_conflict_counts = _safe_scope_review_slot_conflict_counts(
         stage.get("scope_review_slot_conflict_counts"), stage.get("reason_counts")
     )
+    basis_invalid_counts = _safe_scope_review_basis_invalid_counts(
+        stage.get("scope_review_basis_invalid_counts"), stage.get("reason_counts")
+    )
     accepted_draft_refs = _safe_accepted_draft_refs(
         stage, known_documents=known_documents
     )
@@ -1208,6 +1233,7 @@ def _run_summary(client: httpx.Client, run: dict[str, Any], *, known_documents: 
         "candidate_eligibility": candidate_eligibility,
         "evidence_mismatch_counts": mismatch_counts,
         "scope_review_slot_conflict_counts": slot_conflict_counts,
+        "scope_review_basis_invalid_counts": basis_invalid_counts,
         "evidence_mismatch_chunks": mismatch_chunks,
         "evidence_mismatch_chunks_omitted_count": mismatch_omitted,
         "core_label_scope_counts": core_scope_counts,
@@ -2308,6 +2334,7 @@ def _public_run(summary: dict[str, Any] | None) -> dict[str, Any] | None:
             "evidence_mismatch_counts", "evidence_mismatch_chunks",
             "evidence_mismatch_chunks_omitted_count",
             "scope_review_slot_conflict_counts",
+            "scope_review_basis_invalid_counts",
             "core_label_scope_counts",
             "accepted_model_core_without_literal_label_count",
             "stage_usage", "reason_counts", "unreported_reason_entries",
@@ -2336,6 +2363,12 @@ def _public_run(summary: dict[str, Any] | None) -> dict[str, Any] | None:
     public["scope_review_slot_conflict_counts"] = (
         _safe_scope_review_slot_conflict_counts(
             summary.get("scope_review_slot_conflict_counts"),
+            summary.get("reason_counts"),
+        )
+    )
+    public["scope_review_basis_invalid_counts"] = (
+        _safe_scope_review_basis_invalid_counts(
+            summary.get("scope_review_basis_invalid_counts"),
             summary.get("reason_counts"),
         )
     )
@@ -3088,6 +3121,11 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 "任何明确否决槽位，此时也计入含糊的槽位。仅有类别与计数，"
                 "不含模型原文、候选或来源 ID；"
                 "缺字段或计数不一致时为 unavailable"
+            ),
+            "scope_review_basis_invalid_counts": (
+                "复核引用不满足服务端证据路径要求时的固定类别计数；每项最多一类，"
+                "可能包含重试后结果，不代表独立剧情错误数；不含引用 ID、原文或模型输出；"
+                "旧报告缺字段或计数不一致时为 unavailable"
             ),
             "core_label_scope_counts": (
                 "正式角色设定抽取中，核心标签作用域拒收事件的固定类别计数；"

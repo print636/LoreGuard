@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from app.character_scope_review import (
     MAX_SCOPE_REVIEW_RESPONSE_BYTES,
     SCOPE_REVIEW_SCHEMA_V1,
-    SCOPE_REVIEW_PROMPT_V2,
+    SCOPE_REVIEW_PROMPT_V3,
     ScopeReviewClause,
     ScopeReviewItem,
     ScopeReviewLine,
@@ -142,7 +142,7 @@ def _evaluate(request: ScopeReviewRequest, identity: ScopeReviewSourceIdentity,
 
 def test_nonliteral_same_axis_and_situational_middle_clause_are_supported():
     request, identity, frozen_content = _request()
-    assert request.prompt_version == SCOPE_REVIEW_PROMPT_V2
+    assert request.prompt_version == SCOPE_REVIEW_PROMPT_V3
     result = _evaluate(request, identity, frozen_content, _item(request))
     assert result.decisions[0].verdict == "supported"
     assert result.decisions[0].reason == "supported"
@@ -359,6 +359,9 @@ def test_basis_invalid_subtype_is_fixed_and_agrees_with_acceptance_gate(
     assert classify_basis_invalid(request, request.proposals[0], item) == subtype
     result = _evaluate(request, identity, frozen_content, row)
     assert (result.decisions[0].reason == "basis_invalid") == (subtype is not None)
+    assert result.decisions[0].basis_invalid_subtype == subtype
+    serialized = result.decisions[0].model_dump(mode="json")
+    assert "basis_invalid_subtype" not in serialized
 
 
 def test_basis_invalid_subtype_distinguishes_cross_line_without_returning_ids():
@@ -419,6 +422,7 @@ def test_supported_basis_rejects_unrelated_same_line_clause_without_order_requir
     assert rejected.decisions[0].verdict == "uncertain"
     assert rejected.decisions[0].reason == "basis_invalid"
     assert rejected.decisions[0].basis_ids == ()
+    assert rejected.decisions[0].basis_invalid_subtype == "extra_unrelated"
 
 
 @pytest.mark.parametrize("wrong_slot, slot_name", (

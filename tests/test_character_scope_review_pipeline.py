@@ -281,6 +281,23 @@ def test_slot_conflict_counts_are_content_free_and_do_not_admit_candidate():
         assert private not in serialized
 
 
+def test_basis_invalid_counts_are_content_free_and_do_not_admit_candidate():
+    line = "桑衍喜欢蜜瓜。"
+    record = _record(line, support_id="L2:A1", statement="桑衍喜欢蜜瓜")
+    result, provider = _extract(
+        line, ReviewingProvider([record], [{"basis_ids": ["L2:A1", "L2:A1"]}]),
+    )
+    assert len(provider.calls) == 2
+    assert result.signals == result.pending_candidates == ()
+    assert result.diagnostics.outcome == "partial"
+    assert result.diagnostics.reason_counts == {"scope_review_basis_invalid": 1}
+    assert result.diagnostics.scope_review_basis_invalid_counts == {"duplicate": 1}
+    serialized = json.dumps(result.diagnostics.model_dump(mode="json"), ensure_ascii=False)
+    assert "scope_review_basis_invalid_counts" not in serialized
+    for private in (line, "桑衍", "蜜瓜", "frozen-input-1", "document-1", "L2:A1"):
+        assert private not in serialized
+
+
 def test_contradicted_statement_cannot_pass_even_with_correct_actor_and_object():
     line = "桑衍喜欢蜜瓜。"
     proposed = _record(line, support_id="L2:A1", statement="桑衍讨厌蜜瓜")
@@ -454,6 +471,40 @@ def test_stage_exports_only_slot_conflict_categories_and_counts():
     assert result.diagnostics["scope_review_slot_conflict_counts"] == {
         "actor": 1, "statement_relation": 1,
     }
+    serialized = json.dumps(result.diagnostics, ensure_ascii=False)
+    for private in (
+        line, "桑衍", "蜜瓜", "private-run-input-9", "private-run-1",
+        "private-project-1", "document-1", "L2:A1",
+    ):
+        assert private not in serialized
+
+
+def test_stage_exports_only_basis_invalid_categories_and_counts():
+    line = "桑衍喜欢蜜瓜。"
+    frozen = "## 桑衍\n" + line + "\n"
+    document = DocumentInput("document-1", "profile.md", frozen, role="character_profile")
+    provider = ReviewingProvider(
+        [_record(line, support_id="L2:A1", statement="桑衍喜欢蜜瓜")],
+        [{"basis_ids": ["L2:A1", "L2:A1"]}],
+    )
+    stage = CharacterConsistencyStage(settings=_settings(), provider=provider)
+    source = _FrozenDocument(
+        input_id="private-run-input-9", document=document, document_version=7,
+        content_sha256=hashlib.sha256(frozen.encode("utf-8")).hexdigest(),
+        ordinal=1, source_kind="formal_character_profile",
+        source_reason="formal_character_profile", scope=None,
+        resolution_state="confirmed", publication_status="published",
+        authority_tier="formal_character_profile",
+    )
+    stage._bind_frozen_documents = lambda *args, **kwargs: [source]
+    stage._load_confirmed_traits = lambda *args, **kwargs: []
+    result = stage.run(
+        None, run_id="private-run-1", project_id="private-project-1",
+        documents=[document], metadata=[], remaining_run_tokens=30_000,
+    )
+    assert result.diagnostics["reason_counts"]["scope_review_basis_invalid"] == 1
+    assert result.diagnostics["scope_review_basis_invalid_counts"] == {"duplicate": 1}
+    assert result.diagnostics["counts"]["pending_candidate_count"] == 0
     serialized = json.dumps(result.diagnostics, ensure_ascii=False)
     for private in (
         line, "桑衍", "蜜瓜", "private-run-input-9", "private-run-1",

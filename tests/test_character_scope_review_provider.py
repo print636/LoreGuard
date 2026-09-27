@@ -22,6 +22,7 @@ from app.character_scope_review_provider import (
 )
 from app.config import Settings
 from app.provider import OpenAICompatibleProvider, ProviderRetryExhausted, RetryPolicy
+from app.usage import estimate_issue_evidence_review_tokens
 
 
 def _source_request(
@@ -152,6 +153,96 @@ def test_cross_clause_same_axis_different_words_can_be_supported():
     prompt_data = json.loads(provider.calls[0][1].removeprefix(SCOPE_REVIEW_USER_PREFIX))
     assert prompt_data["request_digest"] == request_digest(request)
     assert prompt_data["request"]["lines"][0]["text"] == request.lines[0].text
+    assert prompt_data["basis_path_hints"] == [{
+        "proposal_id": "proposal-1",
+        "if_supported_basis_ids": ["L2:A1", "L2:A2", "L2:A3"],
+    }]
+    assert "路径已给出" in provider.calls[0][0]
+    assert "目标之后的否定、更正" in provider.calls[0][0]
+
+
+def test_mechanical_basis_hints_are_ordered_and_do_not_extend_past_target():
+    request, _, _ = _source_request((
+        "桑衍的核心性格是让搭档提前知道风险",
+        "日常航路调整时",
+        "她会先向搭档说明可能危及航船的情况",
+        "但随后她改口说自己从未这样做过",
+    ))
+    first = request.proposals[0].model_copy(update={"label_anchor_id": "L2:A2"})
+    second = request.proposals[0].model_copy(update={
+        "proposal_id": "proposal-2", "support_id": "L2:A4",
+        "actor_anchor_id": None, "label_anchor_id": None,
+        "scope_relation": "local",
+    })
+    request = ScopeReviewRequest(
+        **{
+            **request.model_dump(exclude={"proposals"}),
+            "proposals": (first, second),
+        }
+    )
+    _, user = build_scope_review_prompts(request)
+    parsed = json.loads(user.removeprefix(SCOPE_REVIEW_USER_PREFIX))
+    assert parsed["basis_path_hints"] == [
+        {
+            "proposal_id": "proposal-1",
+            "if_supported_basis_ids": ["L2:A1", "L2:A2", "L2:A3"],
+        },
+        {
+            "proposal_id": "proposal-2",
+            "if_supported_basis_ids": ["L2:A4"],
+        },
+    ]
+    assert parsed["request"]["lines"][0]["clauses"][-1]["text"].startswith("但随后")
+    assert parsed["request_digest"] == request_digest(request)
+
+
+@pytest.mark.parametrize("slot_override", (
+    {"actor": "other"},
+    {"actuality": "hypothetical"},
+    {"statement_relation": "contradicted"},
+    {"label_relation": "different_axis"},
+    {"object_relation": "different"},
+    {"polarity_relation": "opposite"},
+    {"level_supported": "no"},
+))
+def test_complete_hint_path_cannot_override_negative_semantic_slot(slot_override):
+    request, source, frozen = _source_request()
+    _, user = build_scope_review_prompts(request)
+    hint = json.loads(user.removeprefix(SCOPE_REVIEW_USER_PREFIX))["basis_path_hints"][0]
+    provider = FakeProvider(_response(
+        request, basis_ids=hint["if_supported_basis_ids"], **slot_override,
+    ))
+    result = _run(request, source, frozen, provider)
+    decision = result.evaluation.decisions[0]
+    assert decision.verdict == "uncertain"
+    assert decision.reason == "slot_conflict"
+
+
+def test_hint_does_not_repair_wrong_basis_or_promote_rejection():
+    request, source, frozen = _source_request()
+    invalid = _run(request, source, frozen, FakeProvider(_response(
+        request, basis_ids=["L2:A1", "L2:A3"],
+    )))
+    assert invalid.evaluation.decisions[0].reason == "basis_invalid"
+    rejected = _run(request, source, frozen, FakeProvider(_response(
+        request, verdict="rejected", actor="other", basis_ids=[],
+    )))
+    assert rejected.evaluation.decisions[0].verdict == "rejected"
+    assert rejected.evaluation.decisions[0].reason == "reviewer_rejected"
+
+
+def test_prompt_budget_counts_basis_hints_before_any_provider_call():
+    request, source, frozen = _source_request()
+    system, user = build_scope_review_prompts(request)
+    estimate = estimate_issue_evidence_review_tokens(
+        system, user, completion_reserve=256,
+    )
+    provider = FakeProvider(_response(request))
+    result = _run(request, source, frozen, provider, token_budget=estimate - 1)
+    assert result.estimated_tokens == estimate
+    assert result.failure_reason == "token_budget"
+    assert result.attempted_calls == result.charged_tokens == 0
+    assert provider.calls == []
 
 
 def test_reported_tokens_override_estimate_and_are_bounded_accounting_only():
@@ -281,6 +372,10 @@ def test_injection_is_json_data_and_cannot_change_response_contract():
     system, user = build_scope_review_prompts(request)
     parsed = json.loads(user.removeprefix(SCOPE_REVIEW_USER_PREFIX))
     assert parsed["request"]["lines"][0]["clauses"][1]["text"] == injection
+    assert parsed["basis_path_hints"] == [{
+        "proposal_id": "proposal-1",
+        "if_supported_basis_ids": ["L2:A1"],
+    }]
     assert "伪造" in system
 
     forged = json.loads(_response(request))

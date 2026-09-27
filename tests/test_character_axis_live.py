@@ -2756,6 +2756,51 @@ def test_scope_review_slot_conflict_projection_is_allowlisted(monkeypatch):
     assert zero["scope_review_slot_conflict_counts"] == {}
 
 
+def test_scope_review_basis_invalid_projection_is_allowlisted(monkeypatch):
+    reasons = {"scope_review_basis_invalid": 3}
+    counts = {"duplicate": 2, "missing_anchor": 1}
+    assert axis_live._safe_scope_review_basis_invalid_counts(counts, reasons) == counts
+    for poisoned in (
+        {"duplicate": 1, "private prompt": 1},
+        {"duplicate": True},
+        {"duplicate": 4},
+        {"duplicate": 2, "missing_anchor": 2},
+        {"duplicate": "secret"},
+    ):
+        assert axis_live._safe_scope_review_basis_invalid_counts(poisoned, reasons) is None
+
+    stage = {
+        "reason_counts": reasons,
+        "scope_review_basis_invalid_counts": counts,
+    }
+
+    def fake_request(_client, _method, route, _step):
+        return {"character_consistency": stage} if route.endswith("/diagnostics") else []
+
+    monkeypatch.setattr(axis_live, "_request", fake_request)
+    summary = axis_live._run_summary(object(), {"id": "run-id"}, known_documents=set())
+    assert summary["scope_review_basis_invalid_counts"] == counts
+    assert axis_live._public_run(summary)["scope_review_basis_invalid_counts"] == counts
+
+    summary["scope_review_basis_invalid_counts"] = {"duplicate": 1, "story text": 1}
+    public = axis_live._public_run(summary)
+    assert public["scope_review_basis_invalid_counts"] is None
+    assert "story text" not in repr(public)
+
+    stage["reason_counts"] = {"scope_review_basis_invalid": "private story"}
+    stage["scope_review_basis_invalid_counts"] = {}
+    malformed = axis_live._run_summary(object(), {"id": "run-id"}, known_documents=set())
+    assert malformed["scope_review_basis_invalid_counts"] is None
+    assert "private story" not in repr(malformed)
+
+    stage["reason_counts"] = {}
+    zero = axis_live._run_summary(object(), {"id": "run-id"}, known_documents=set())
+    assert zero["scope_review_basis_invalid_counts"] == {}
+    stage.pop("scope_review_basis_invalid_counts")
+    old = axis_live._run_summary(object(), {"id": "run-id"}, known_documents=set())
+    assert old["scope_review_basis_invalid_counts"] is None
+
+
 def test_evidence_mismatch_projection_fails_closed_on_untrusted_payload(monkeypatch):
     valid = {
         "evidence_mismatch_counts": {"source_excerpt": 1},

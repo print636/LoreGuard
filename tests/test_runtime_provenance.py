@@ -460,7 +460,7 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     limits = on["character_consistency_limits"]
     assert limits["signal_scope_review_v1"] is True
     assert limits["signal_scope_review_schema_version"] == "character-scope-review-v1"
-    assert limits["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v2"
+    assert limits["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v3"
     assert limits["signal_scope_review_token_reserve"] == 6_000
     assert limits["signal_scope_review_completion_tokens"] == 2_048
     assert limits["signal_scope_review_max_response_bytes"] == 32_768
@@ -476,34 +476,38 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     summary = axis_live._runtime_summary({"runtime_provenance": on})
     assert summary["signal_scope_review_v1"] is True
     assert summary["signal_scope_review_schema_version"] == "character-scope-review-v1"
-    assert summary["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v2"
+    assert summary["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v3"
     assert summary["signal_scope_review_limits"][
         "signal_scope_review_provider_max_completion_tokens"
     ] == 1_024
     assert "test-only-secret" not in json.dumps(summary)
     assert "https://" not in json.dumps(summary)
 
-    old_v1_report = json.loads(json.dumps(on))
-    old_v1_limits = old_v1_report["character_consistency_limits"]
-    old_v1_limits["signal_scope_review_prompt_version"] = "character-scope-review-prompt-v1"
-    assert live_runner._safe_runtime_provenance(old_v1_report) == old_v1_report
-    old_v1_axis = axis_live._safe_character_runtime_provenance(old_v1_report)
-    assert old_v1_axis is not None
-    assert old_v1_axis["character_consistency_limits"] == old_v1_limits
-    assert axis_live._runtime_summary({"runtime_provenance": old_v1_report})[
-        "signal_scope_review_prompt_version"
-    ] == "character-scope-review-prompt-v1"
-    assert not live_runner._valid_character_scope_review_limits(old_v1_limits)
-    assert live_runner._valid_character_scope_review_limits(
-        old_v1_limits, allow_legacy_prompt_version=True,
-    )
-    with pytest.raises(axis_live.SafeFailure) as exc:
-        axis_live._service_preflight_gate(
-            {"runtime_provenance": old_v1_report},
-            {"git_head": old_v1_report["build"]["git_revision"]},
-            old_v1_report["build"]["service_artifact_sha256"],
+    for old_prompt_version in (
+        "character-scope-review-prompt-v1",
+        "character-scope-review-prompt-v2",
+    ):
+        old_report = json.loads(json.dumps(on))
+        old_limits = old_report["character_consistency_limits"]
+        old_limits["signal_scope_review_prompt_version"] = old_prompt_version
+        assert live_runner._safe_runtime_provenance(old_report) == old_report
+        old_axis = axis_live._safe_character_runtime_provenance(old_report)
+        assert old_axis is not None
+        assert old_axis["character_consistency_limits"] == old_limits
+        assert axis_live._runtime_summary({"runtime_provenance": old_report})[
+            "signal_scope_review_prompt_version"
+        ] == old_prompt_version
+        assert not live_runner._valid_character_scope_review_limits(old_limits)
+        assert live_runner._valid_character_scope_review_limits(
+            old_limits, allow_legacy_prompt_version=True,
         )
-    assert exc.value.payload["code"] == "runtime_provenance_invalid"
+        with pytest.raises(axis_live.SafeFailure) as exc:
+            axis_live._service_preflight_gate(
+                {"runtime_provenance": old_report},
+                {"git_head": old_report["build"]["git_revision"]},
+                old_report["build"]["service_artifact_sha256"],
+            )
+        assert exc.value.payload["code"] == "runtime_provenance_invalid"
 
     legacy = json.loads(json.dumps(off))
     for key in live_runner._CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS:

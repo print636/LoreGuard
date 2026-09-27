@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 SCOPE_REVIEW_SCHEMA_V1 = "character-scope-review-v1"
 SCOPE_REVIEW_PROMPT_V1 = "character-scope-review-prompt-v1"
 SCOPE_REVIEW_PROMPT_V2 = "character-scope-review-prompt-v2"
+SCOPE_REVIEW_PROMPT_V3 = "character-scope-review-prompt-v3"
 ASSERTION_INDEX_V1 = "assertion-index-v1"
 MAX_SCOPE_REVIEW_REQUEST_BYTES = 131_072
 MAX_SCOPE_REVIEW_RESPONSE_BYTES = 32_768
@@ -38,6 +39,7 @@ BasisInvalidSubtype = Literal[
     "missing_intermediate",
     "extra_unrelated",
 ]
+SCOPE_REVIEW_BASIS_INVALID_SUBTYPES = frozenset(BasisInvalidSubtype.__args__)
 ReviewReason = Literal[
     "supported",
     "reviewer_rejected",
@@ -141,7 +143,7 @@ class ScopeReviewProposal(BaseModel):
 
 class ScopeReviewRequest(ScopeReviewSourceIdentity):
     schema_version: Literal["character-scope-review-v1"] = SCOPE_REVIEW_SCHEMA_V1
-    prompt_version: Literal["character-scope-review-prompt-v2"] = SCOPE_REVIEW_PROMPT_V2
+    prompt_version: Literal["character-scope-review-prompt-v3"] = SCOPE_REVIEW_PROMPT_V3
     assertion_index_version: Literal["assertion-index-v1"] = ASSERTION_INDEX_V1
     block_line_start: int = Field(ge=1, le=10_000_000)
     lines: tuple[ScopeReviewLine, ...] = Field(min_length=1, max_length=64)
@@ -239,6 +241,7 @@ class ScopeReviewDecision(BaseModel):
     basis_ids: tuple[str, ...] = ()
     # Internal-only fixed categories; never persist proposal/source identifiers.
     slot_conflicts: tuple[ScopeReviewSlotConflict, ...] = Field(default=(), exclude=True)
+    basis_invalid_subtype: BasisInvalidSubtype | None = Field(default=None, exclude=True)
 
 
 class ScopeReviewEvaluation(BaseModel):
@@ -528,9 +531,11 @@ def evaluate_scope_review(
     for proposal in request.proposals:
         item = by_id[proposal.proposal_id]
         slot_conflicts: tuple[ScopeReviewSlotConflict, ...] = ()
+        basis_invalid_subtype: BasisInvalidSubtype | None = None
         if not _basis_valid(request, proposal, item):
             verdict: ReviewVerdict = "uncertain"
             reason: ReviewReason = "basis_invalid"
+            basis_invalid_subtype = classify_basis_invalid(request, proposal, item)
         elif item.verdict == "supported":
             slot_conflicts = _support_slot_conflicts(proposal, item)
             verdict = "supported" if not slot_conflicts else "uncertain"
@@ -550,5 +555,6 @@ def evaluate_scope_review(
             reason=reason,
             basis_ids=item.basis_ids if reason not in {"basis_invalid", "slot_conflict"} else (),
             slot_conflicts=slot_conflicts,
+            basis_invalid_subtype=basis_invalid_subtype,
         ))
     return ScopeReviewEvaluation(request_digest=request_digest(request), decisions=tuple(decisions))

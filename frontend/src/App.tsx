@@ -1416,7 +1416,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      setExportStatus("报告已下载，包含本次全部问题及最新审阅状态。");
+      setExportStatus("报告已下载：包含本次正式问题、待澄清项及最新反馈；不包含待复核线索。");
     } catch (error) {
       setExportStatus(`导出失败：${error instanceof Error ? error.message : "请稍后重试"}`);
     } finally {

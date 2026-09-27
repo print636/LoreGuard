@@ -45,6 +45,7 @@ import {
   candidateDisplayStatement,
   candidateReviewState,
   candidateStatusNames,
+  candidateStatusExplanation,
   characterDriftReportPath,
   describeCoverage,
   describeReadiness,
@@ -487,6 +488,13 @@ test("stale and rules-only candidates fail closed while current candidates remai
     candidateReviewState(candidate({ origin: "unknown" })).allowed,
     false,
   );
+});
+
+test("candidate status text keeps model suggestions separate from author-approved canon", () => {
+  assert.match(candidateStatusExplanation("pending"), /模型建议.*作者核对确认.*不是已成立/);
+  assert.match(candidateStatusExplanation("confirmed"), /已由作者确认并写入角色档案/);
+  assert.match(candidateStatusExplanation("withdrawn"), /已由作者撤销.*不再作为正式角色设定/);
+  assert.match(candidateStatusExplanation("rejected"), /已由作者驳回.*不能作为正式角色设定/);
 });
 
 test("candidate heading hides only an exact duplicate internal trait key", () => {

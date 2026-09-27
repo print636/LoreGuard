@@ -22,6 +22,7 @@ from pydantic import (
 
 from .config import Settings, get_settings
 from .character_scope_review import (
+    BasisInvalidSubtype,
     ScopeReviewClause,
     ScopeReviewDecision,
     ScopeReviewLine,
@@ -1110,6 +1111,9 @@ class CharacterSignalDiagnostics(BaseModel):
     scope_review_slot_conflict_counts: dict[ScopeReviewSlotConflict, int] = Field(
         default_factory=dict, exclude=True
     )
+    scope_review_basis_invalid_counts: dict[BasisInvalidSubtype, int] = Field(
+        default_factory=dict, exclude=True
+    )
     core_label_scope_counts: dict[CoreLabelScopeKind, int] = Field(
         default_factory=dict
     )
@@ -1983,6 +1987,12 @@ class CharacterSignalExtractor:
                     if decision.reason == "slot_conflict"
                     for conflict in decision.slot_conflicts
                 )
+                basis_invalid_counts = Counter(
+                    decision.basis_invalid_subtype
+                    for decision in (review_outcome.decisions if review_outcome else ())
+                    if decision.reason == "basis_invalid"
+                    and decision.basis_invalid_subtype is not None
+                )
                 candidates = build_pending_trait_candidates(clean)
                 observations = tuple(
                     row for row in clean if row.source_kind == "draft"
@@ -2021,6 +2031,9 @@ class CharacterSignalExtractor:
                         evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
                         scope_review_slot_conflict_counts=dict(
                             sorted(slot_conflict_counts.items())
+                        ),
+                        scope_review_basis_invalid_counts=dict(
+                            sorted(basis_invalid_counts.items())
                         ),
                         core_label_scope_counts=dict(sorted(core_scope_counts.items())),
                         accepted_model_core_without_literal_label_count=sum(

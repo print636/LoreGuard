@@ -11,7 +11,7 @@ from .character_trait_extraction import (
     ASSERTION_INDEX_V1, DRAFT_SIGNAL_TRACE_V1,
     DRAFT_SOURCE_EXCERPT_REPAIR_V1, SUPPORT_TRACE_V1,
 )
-from .character_scope_review import SCOPE_REVIEW_PROMPT_V2, SCOPE_REVIEW_SCHEMA_V1
+from .character_scope_review import SCOPE_REVIEW_PROMPT_V3, SCOPE_REVIEW_SCHEMA_V1
 from .character_history_semantic_review import (
     HISTORY_REVIEW_PROMPT_V1, HISTORY_REVIEW_SCHEMA_V1,
     HISTORY_REVIEW_SEGMENTER_V1,
@@ -232,7 +232,7 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
                 SCOPE_REVIEW_SCHEMA_V1 if settings.character_signal_scope_review_v1 else None
             ),
             "signal_scope_review_prompt_version": (
-                SCOPE_REVIEW_PROMPT_V2 if settings.character_signal_scope_review_v1 else None
+                SCOPE_REVIEW_PROMPT_V3 if settings.character_signal_scope_review_v1 else None
             ),
             "signal_scope_review_token_reserve": (
                 settings.character_signal_scope_review_token_reserve

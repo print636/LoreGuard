@@ -380,8 +380,11 @@ _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS = frozenset({
     "signal_scope_review_provider_max_attempts",
 })
 _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION = "character-scope-review-v1"
-_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v2"
-_CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSION = "character-scope-review-prompt-v1"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v3"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSIONS = frozenset({
+    "character-scope-review-prompt-v1",
+    "character-scope-review-prompt-v2",
+})
 _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEY = "history_semantic_review_v1"
 _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS = frozenset({
     _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEY,
@@ -2842,7 +2845,7 @@ def _valid_character_scope_review_limits(
     prompt_version = limits.get("signal_scope_review_prompt_version")
     allowed_prompt_versions = {_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION}
     if allow_legacy_prompt_version:
-        allowed_prompt_versions.add(_CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSION)
+        allowed_prompt_versions.update(_CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSIONS)
     if (
         type(enabled) is not bool
         or (enabled and limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY) is not True)

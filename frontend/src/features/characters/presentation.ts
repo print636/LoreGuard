@@ -36,6 +36,21 @@ export const candidateStatusNames = {
   stale: "来源已变化",
 } as const;
 
+export function candidateStatusExplanation(status: ProfileCandidate["status"]): string {
+  switch (status) {
+    case "pending":
+      return "这条分类和表述由模型建议，仍需作者核对确认；当前不是已成立的角色设定。";
+    case "confirmed":
+      return "这条归纳已由作者确认并写入角色档案；下方保留原确认依据。";
+    case "withdrawn":
+      return "这条归纳后来已由作者撤销，当前不再作为正式角色设定。";
+    case "rejected":
+      return "这条模型归纳已由作者驳回，不能作为正式角色设定。";
+    case "stale":
+      return "来源资料已变化，这条旧归纳不能直接确认；请重新分析。";
+  }
+}
+
 export const feedbackStatusNames = {
   unreviewed: "未反馈",
   accepted: "已接受",

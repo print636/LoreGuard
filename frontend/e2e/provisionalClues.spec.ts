@@ -174,6 +174,7 @@ test("pending clues remain a separate reading section and do not become formal i
   await expect(formalIssues).toContainText("当前反馈：已接受");
   await formalIssues.getByRole("button", { name: "导出 Markdown 报告" }).click();
   await expect.poll(() => state.exportReads).toBe(1);
+  await expect(formalIssues.getByRole("status")).toContainText("不包含待复核线索");
   expect(state.feedbackPosts).toBe(1);
 
   if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
