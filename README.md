@@ -92,6 +92,8 @@ diagnostics endpoint does not expose their source text.
 
 角色审查结果分为“正式一致性问题”和“待复核线索”。角色漂移只有最终判为冲突、已确认设定与当前新稿均有可核对的原文证据时，才进入正式问题列表、数量统计和报告导出。单次反向行为，或虽定位到双方原文但情境、材料或复核结论不足的情况，进入待复核线索；无法核对原文的提案不展示为结论。`GET /api/v1/analysis-runs/{run_id}/issues` 只返回正式问题，`GET /api/v1/analysis-runs/{run_id}/review-clues` 单独返回角色审查线索；上文的 `provisional-clues` 仍是未通过完整抽取校验的模型提案，不参与问题计数。旧数据升级时，不满足旧版冲突格式的角色条目保守降为线索；旧线索若无法与冻结原文核对，不展示正文，接口通过 `unavailable_count` 提示。历史线索超过安全扫描上限时，`scan_limited` 提示还有未核对条目；这两种情况都建议重新分析。
 
+已发布历史中的价值观与行为边界记录可选择开启默认关闭的 `CHARACTER_HISTORY_SEMANTIC_REVIEW_V1`：仅当候选只因词面极性门失败、其余冻结证据绑定检查均通过时，才由受限 AI 阅读完整原文行，复核行为主体、对象、现实性、语义方向及后文更正。拒绝、不确定、模型或预算失败不会晋升该记录；该能力不能替代作者确认角色档案，也不能修正正式设定抽错比较对象的问题。真实模型 OOC 质量尚未完成验收，详见[角色一致性合同](docs/character-consistency-v1.md)。
+
 Context inference is single-document and limited to 30,000 characters and 2,000 lines; larger inputs require manual context assignment. It is not a story rewrite, bulk classifier, authority decision, or production-accuracy claim. See the [V1 workflow and API contract](docs/guided-review-batch-v1.md) and the [full Chinese guide](README.zh-CN.md).
 
 Relevant API entry points are:

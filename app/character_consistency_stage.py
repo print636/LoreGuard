@@ -28,6 +28,7 @@ from .character_scope_review import (
     SCOPE_REVIEW_SLOT_CONFLICT_KINDS,
     ScopeReviewSourceIdentity,
 )
+from .character_history_semantic_review import HistoryReviewSourceIdentity
 from .character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
@@ -879,11 +880,15 @@ class CharacterConsistencyStage:
                 settings.character_signal_scope_review_v1
                 and source.source_kind == "formal_character_profile"
             )
+            history_review_v1 = (
+                settings.character_history_semantic_review_v1
+                and source.source_kind == "published_history"
+            )
             # The formal review shares this logical signal allowance. Preserve
             # the stage's drift-review reserve before assigning that allowance.
             signal_available = (
                 max(0, remaining - targeted_reviewer_reserve_tokens)
-                if scope_review_v1 else remaining
+                if scope_review_v1 or history_review_v1 else remaining
             )
             call_settings = settings.model_copy(
                 update={
@@ -901,6 +906,16 @@ class CharacterConsistencyStage:
                 )
                 if scope_review_v1 else None
             )
+            history_source = (
+                HistoryReviewSourceIdentity(
+                    run_input_id=source.input_id,
+                    document_id=source.document.id,
+                    document_version=source.document_version,
+                    content_sha256=source.content_sha256,
+                    source_kind="published_history",
+                )
+                if history_review_v1 else None
+            )
             extraction = CharacterSignalExtractor(
                 self.provider, settings=call_settings
             ).extract(
@@ -912,8 +927,11 @@ class CharacterConsistencyStage:
                     source_kind=source.source_kind,  # type: ignore[arg-type]
                     server_context=server_contexts[source.document.id].payload,
                 ),
-                source_identity=scope_source,
-                frozen_content=source.document.content if scope_review_v1 else None,
+                source_identity=scope_source or history_source,
+                frozen_content=(
+                    source.document.content
+                    if scope_review_v1 or history_review_v1 else None
+                ),
             )
             if (
                 source.source_kind == "draft"
@@ -950,7 +968,8 @@ class CharacterConsistencyStage:
                 chunk_ordinal=chunk_ordinal,
                 stage_remaining_before=remaining,
                 reviewer_reserve=(
-                    targeted_reviewer_reserve_tokens if scope_review_v1 else 0
+                    targeted_reviewer_reserve_tokens
+                    if scope_review_v1 or history_review_v1 else 0
                 ),
             )
             usage.add(extraction.diagnostics)

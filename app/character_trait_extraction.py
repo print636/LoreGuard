@@ -31,6 +31,13 @@ from .character_scope_review import (
     ScopeReviewSourceIdentity,
 )
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT, run_scope_review
+from .character_history_semantic_review import (
+    HistoryReviewCandidate,
+    HistoryReviewSourceIdentity,
+    build_history_review_request,
+    run_history_semantic_review,
+    segment_history_line,
+)
 from .domain import EvidenceSpan
 from .provider import OpenAICompatibleProvider, ProviderError, RetryPolicy
 from .usage import estimate_issue_evidence_review_tokens
@@ -1174,10 +1181,21 @@ class _ValidatedSignalPackage:
     failures: tuple[_SignalValidationFailure, ...] = ()
     support_trace_attempt: SupportTraceAttemptV1 | None = None
     draft_trace_attempt: DraftSignalTraceAttemptV1 | None = None
+    # Model text and records remain local to one extraction call. They are
+    # never serialized, exposed as signals, or offered as trait candidates.
+    history_deferred: tuple[_HistorySemanticDeferred, ...] = ()
 
     @property
     def complete(self) -> bool:
         return not self.reason_counts
+
+
+@dataclass(frozen=True, slots=True)
+class _HistorySemanticDeferred:
+    record_index: int
+    record: _RawCharacterSignal
+    target_assertion_id: str
+    target_quote: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1189,6 +1207,31 @@ class _ScopeReviewOutcome:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     charged_tokens: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _HistorySemanticOutcome:
+    supported_indices: frozenset[int] = frozenset()
+    uncertain_indices: frozenset[int] = frozenset()
+    attempted_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    charged_tokens: int = 0
+
+
+def _history_debt_key(item: _HistorySemanticDeferred) -> tuple[object, ...]:
+    record = item.record
+    return (
+        record.source_line_start,
+        _compact(record.character),
+        record.dimension,
+        _compact(record.trait_key),
+        record.polarity,
+        _compact(record.key_object),
+        item.target_assertion_id,
+        item.target_quote,
+        record.statement,
+    )
 
 
 class _ChatProvider(Protocol):
@@ -1275,12 +1318,14 @@ def _validate_signal_prompt_variant_settings(settings: Settings) -> None:
     support_trace = settings.character_signal_support_trace_v1
     draft_trace = settings.character_signal_draft_trace_v1
     baseline_trace = settings.character_signal_baseline_trace_v1
+    history_review = settings.character_history_semantic_review_v1
     draft_excerpt_repair = settings.character_signal_draft_source_excerpt_repair_v1
     if any(
         type(flag) is not bool
         for flag in (
             full_line, core_scope, support_id, semantic_scope, scope_review,
             support_trace, draft_trace, baseline_trace, draft_excerpt_repair,
+            history_review,
         )
     ):
         raise RuntimeError("character signal prompt variant flags must be bool")
@@ -1294,6 +1339,8 @@ def _validate_signal_prompt_variant_settings(settings: Settings) -> None:
         raise RuntimeError("character signal scope review v1 requires semantic scope v5")
     if support_trace and not support_id:
         raise RuntimeError("character signal support trace v1 requires support id v4")
+    if history_review and not full_line:
+        raise RuntimeError("character history semantic review requires full line v2")
 
 
 CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4 = """
@@ -1370,7 +1417,9 @@ class CharacterSignalExtractor:
         self,
         chunk: CharacterSignalChunk,
         *,
-        source_identity: ScopeReviewSourceIdentity | None = None,
+        source_identity: (
+            ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None
+        ) = None,
         frozen_content: str | None = None,
     ) -> CharacterSignalExtractionResult:
         _validate_signal_prompt_variant_settings(self.settings)
@@ -1386,6 +1435,10 @@ class CharacterSignalExtractor:
         )
         scope_review_v1 = (
             self.settings.character_signal_scope_review_v1 and formal_scope_v5
+        )
+        history_review_v1 = (
+            self.settings.character_history_semantic_review_v1
+            and chunk.source_kind == "published_history"
         )
         support_index: AssertionIndexV1 | None = None
         support_prompt = ""
@@ -1425,6 +1478,7 @@ class CharacterSignalExtractor:
             full_line_prompt_v2=full_line_prompt_v2,
             support_index=support_index,
             scope_review_v1=scope_review_v1,
+            history_review_v1=history_review_v1,
             source_identity=source_identity,
             frozen_content=frozen_content,
         )
@@ -1553,7 +1607,10 @@ class CharacterSignalExtractor:
         full_line_prompt_v2: bool = False,
         support_index: AssertionIndexV1 | None = None,
         scope_review_v1: bool = False,
-        source_identity: ScopeReviewSourceIdentity | None = None,
+        history_review_v1: bool = False,
+        source_identity: (
+            ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None
+        ) = None,
         frozen_content: str | None = None,
     ) -> CharacterSignalExtractionResult:
         settings = self.settings
@@ -1604,22 +1661,60 @@ class CharacterSignalExtractor:
                     if baseline_trace_enabled else None
                 ),
             )
+        if history_review_v1 and not _history_review_source_matches_chunk(
+            source_identity, frozen_content, chunk
+        ):
+            return _empty_result(
+                "skipped",
+                reason_counts={"history_review_source_mismatch": 1},
+                baseline_trace=(
+                    _baseline_trace_for_result([], 0)
+                    if baseline_trace_enabled else None
+                ),
+            )
         review_reserve = (
             _estimated_scope_review_reserve(
                 chunk, support_index, source_identity, settings
             )
             if scope_review_v1 else 0
         )
+        if history_review_v1:
+            review_reserve = settings.character_history_semantic_review_token_reserve
         started = self._monotonic()
         total_deadline = _effective_signal_deadline(settings)
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_charged_tokens = 0
         attempted_calls = 0
+        history_attempted_calls = 0
         validation_attempts: list[_ValidatedSignalPackage] = []
         verified_before_clean: list[CharacterSignal] = []
+        history_coverage_debt: set[tuple[object, ...]] = set()
         retry_categories: tuple[str, ...] = ()
         retry_failures: tuple[_SignalValidationFailure, ...] = ()
+
+        def validate_response(
+            response_text: Any,
+            *,
+            history_supported: frozenset[int] = frozenset(),
+        ) -> _ValidatedSignalPackage:
+            return _validate_signal_package(
+                response_text,
+                chunk=chunk,
+                targets=targets,
+                allowed_targeted_evidence_ranges=allowed_targeted_evidence_ranges,
+                settings=settings,
+                support_index=support_index,
+                semantic_scope_v5=(
+                    settings.character_signal_semantic_scope_v5
+                    and support_index is not None
+                ),
+                scope_review_v1=scope_review_v1,
+                support_trace_enabled=trace_index is not None,
+                draft_trace_enabled=draft_trace_enabled,
+                history_review_v1=history_review_v1,
+                history_supported_record_indices=history_supported,
+            )
 
         for package_attempt in range(settings.character_signal_package_max_attempts):
             if package_attempt == 0:
@@ -1642,7 +1737,8 @@ class CharacterSignalExtractor:
                 except ValueError:
                     return _failed_package_result(
                         validation_attempts,
-                        attempted_calls=attempted_calls,
+                        attempted_calls=attempted_calls + history_attempted_calls,
+                        trace_attempted_calls=attempted_calls,
                         prompt_tokens=total_prompt_tokens,
                         completion_tokens=total_completion_tokens,
                         charged_tokens=total_charged_tokens,
@@ -1682,7 +1778,8 @@ class CharacterSignalExtractor:
                     )
                 return _failed_package_result(
                     validation_attempts,
-                    attempted_calls=attempted_calls,
+                    attempted_calls=attempted_calls + history_attempted_calls,
+                    trace_attempted_calls=attempted_calls,
                     prompt_tokens=total_prompt_tokens,
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
@@ -1697,7 +1794,8 @@ class CharacterSignalExtractor:
             if remaining_deadline <= 0:
                 return _failed_package_result(
                     validation_attempts,
-                    attempted_calls=attempted_calls,
+                    attempted_calls=attempted_calls + history_attempted_calls,
+                    trace_attempted_calls=attempted_calls,
                     prompt_tokens=total_prompt_tokens,
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
@@ -1729,7 +1827,8 @@ class CharacterSignalExtractor:
                 total_charged_tokens += estimate
                 return _failed_package_result(
                     validation_attempts,
-                    attempted_calls=attempted_calls,
+                    attempted_calls=attempted_calls + history_attempted_calls,
+                    trace_attempted_calls=attempted_calls,
                     prompt_tokens=total_prompt_tokens,
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
@@ -1742,7 +1841,8 @@ class CharacterSignalExtractor:
                 total_charged_tokens += estimate
                 return _failed_package_result(
                     validation_attempts,
-                    attempted_calls=attempted_calls,
+                    attempted_calls=attempted_calls + history_attempted_calls,
+                    trace_attempted_calls=attempted_calls,
                     prompt_tokens=total_prompt_tokens,
                     completion_tokens=total_completion_tokens,
                     charged_tokens=total_charged_tokens,
@@ -1761,23 +1861,49 @@ class CharacterSignalExtractor:
             total_charged_tokens += max(
                 estimate, prompt_tokens + completion_tokens
             )
-            validation = _validate_signal_package(
-                getattr(response, "text", ""),
-                chunk=chunk,
-                targets=targets,
-                allowed_targeted_evidence_ranges=(
-                    allowed_targeted_evidence_ranges
-                ),
-                settings=settings,
-                support_index=support_index,
-                semantic_scope_v5=(
-                    settings.character_signal_semantic_scope_v5
-                    and support_index is not None
-                ),
-                scope_review_v1=scope_review_v1,
-                support_trace_enabled=trace_index is not None,
-                draft_trace_enabled=draft_trace_enabled,
-            )
+            response_text = getattr(response, "text", "")
+            validation = validate_response(response_text)
+            if (
+                history_review_v1
+                and validation.history_deferred
+                and len(validation.failures) == len(validation.history_deferred)
+                and {row.record_index for row in validation.history_deferred}
+                == {row.record_index for row in validation.failures}
+            ):
+                history_review = _review_history_deferred(
+                    validation.history_deferred,
+                    chunk=chunk,
+                    source_identity=source_identity,
+                    frozen_content=frozen_content,
+                    provider=self._base_provider,
+                    settings=settings,
+                    token_budget=max(
+                        0, settings.character_signal_token_budget - total_charged_tokens
+                    ),
+                    remaining_deadline_seconds=(
+                        total_deadline - (self._monotonic() - started)
+                    ),
+                    monotonic=self._monotonic,
+                )
+                history_attempted_calls += history_review.attempted_calls
+                total_prompt_tokens += history_review.prompt_tokens
+                total_completion_tokens += history_review.completion_tokens
+                total_charged_tokens += history_review.charged_tokens
+                history_coverage_debt.difference_update(
+                    _history_debt_key(row)
+                    for row in validation.history_deferred
+                    if row.record_index in history_review.supported_indices
+                )
+                history_coverage_debt.update(
+                    _history_debt_key(row)
+                    for row in validation.history_deferred
+                    if row.record_index in history_review.uncertain_indices
+                )
+                if history_review.supported_indices:
+                    validation = validate_response(
+                        response_text,
+                        history_supported=history_review.supported_indices,
+                    )
             if validation.complete and verified_before_clean:
                 missing = _regeneration_coverage_regressions(
                     verified_before_clean,
@@ -1823,6 +1949,10 @@ class CharacterSignalExtractor:
                 for earlier in validation_attempts[:-1]:
                     for reason, count in (earlier.reason_counts or {}).items():
                         reasons[f"regenerated_from_{reason}"] += count
+                if history_coverage_debt:
+                    reasons["history_semantic_review_incomplete"] += len(
+                        history_coverage_debt
+                    )
                 review_outcome: _ScopeReviewOutcome | None = None
                 if scope_review_v1 and clean:
                     review_outcome = _review_clean_signals(
@@ -1864,12 +1994,14 @@ class CharacterSignalExtractor:
                     diagnostics=CharacterSignalDiagnostics(
                         outcome=(
                             "partial"
-                            if review_outcome is not None
+                            if history_coverage_debt
+                            or review_outcome is not None
                             and len(clean) < len(validation.signals)
                             else "completed"
                         ),
-                        attempted_calls=attempted_calls + (
-                            review_outcome.attempted_calls if review_outcome else 0
+                        attempted_calls=(
+                            attempted_calls + history_attempted_calls
+                            + (review_outcome.attempted_calls if review_outcome else 0)
                         ),
                         raw_records=sum(
                             attempt.raw_records for attempt in validation_attempts
@@ -1935,7 +2067,8 @@ class CharacterSignalExtractor:
 
         return _failed_package_result(
             validation_attempts,
-            attempted_calls=attempted_calls,
+            attempted_calls=attempted_calls + history_attempted_calls,
+            trace_attempted_calls=attempted_calls,
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             charged_tokens=total_charged_tokens,
@@ -1957,6 +2090,8 @@ def _validate_signal_package(
     scope_review_v1: bool = False,
     support_trace_enabled: bool = False,
     draft_trace_enabled: bool = False,
+    history_review_v1: bool = False,
+    history_supported_record_indices: frozenset[int] = frozenset(),
 ) -> _ValidatedSignalPackage:
     try:
         response_bytes = len(text.encode("utf-8")) if isinstance(text, str) else None
@@ -2025,6 +2160,7 @@ def _validate_signal_package(
     accepted_record_indices: list[int] = []
     duplicate_record_indices: list[int] = []
     failures: list[_SignalValidationFailure] = []
+    history_deferred: list[_HistorySemanticDeferred] = []
     targeted_evidence: dict[
         tuple[str, str, str], set[tuple[int, int]]
     ] = defaultdict(set)
@@ -2068,6 +2204,11 @@ def _validate_signal_package(
                 support_index=support_index,
                 semantic_scope_v5=semantic_scope_v5,
                 scope_review_v1=scope_review_v1,
+                skip_lexical_polarity=(
+                    history_review_v1
+                    and not targets
+                    and record_index in history_supported_record_indices
+                ),
             )
             if repair_probe is not None and (
                 signal.dimension != repair_probe.dimension
@@ -2089,6 +2230,17 @@ def _validate_signal_package(
                 or semantic_scope_v5 and reason in _V5_REJECTION_REASONS
                 else "record_validation"
             )
+            if (
+                history_review_v1
+                and not targets
+                and safe_reason == "statement_support"
+                and record_index not in history_supported_record_indices
+            ):
+                deferred = _history_lexical_only_deferred(
+                    record_index, record, chunk
+                )
+                if deferred is not None:
+                    history_deferred.append(deferred)
             reasons[safe_reason] += 1
             if safe_reason == "evidence_mismatch":
                 mismatch_counts[_classify_evidence_mismatch(record, chunk)] += 1
@@ -2221,6 +2373,7 @@ def _validate_signal_package(
             )
             if draft_trace_enabled else None
         ),
+        history_deferred=tuple(history_deferred),
     )
 
 
@@ -2886,6 +3039,7 @@ def _failed_package_result(
     attempts: list[_ValidatedSignalPackage],
     *,
     attempted_calls: int,
+    trace_attempted_calls: int | None = None,
     prompt_tokens: int,
     completion_tokens: int,
     charged_tokens: int,
@@ -2895,6 +3049,9 @@ def _failed_package_result(
     draft_trace_enabled: bool = False,
     baseline_trace_enabled: bool = False,
 ) -> CharacterSignalExtractionResult:
+    primary_attempted_calls = (
+        attempted_calls if trace_attempted_calls is None else trace_attempted_calls
+    )
     reasons: Counter[str] = Counter()
     mismatch_counts: Counter[EvidenceMismatchKind] = Counter()
     core_scope_counts: Counter[CoreLabelScopeKind] = Counter()
@@ -2955,14 +3112,14 @@ def _failed_package_result(
         core_label_scope_counts=dict(sorted(core_scope_counts.items())),
         token_admission=token_admission,
         support_trace=_support_trace_for_result(
-            support_index, attempts, attempted_calls
+            support_index, attempts, primary_attempted_calls
         ),
         draft_trace=(
-            _draft_trace_for_result(attempts, attempted_calls)
+            _draft_trace_for_result(attempts, primary_attempted_calls)
             if draft_trace_enabled else None
         ),
         baseline_trace=(
-            _baseline_trace_for_result(attempts, attempted_calls)
+            _baseline_trace_for_result(attempts, primary_attempted_calls)
             if baseline_trace_enabled else None
         ),
     )
@@ -3060,6 +3217,143 @@ def _scope_review_source_matches_chunk(
     chunk_lines = chunk.content.splitlines()
     first = chunk.global_line_start - 1
     return bool(chunk_lines) and source_lines[first:first + len(chunk_lines)] == chunk_lines
+
+
+def _history_review_source_matches_chunk(
+    source: ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None,
+    frozen_content: str | None,
+    chunk: CharacterSignalChunk,
+) -> bool:
+    if (
+        not isinstance(source, HistoryReviewSourceIdentity)
+        or source.source_kind != "published_history"
+        or chunk.source_kind != "published_history"
+        or not isinstance(frozen_content, str)
+        or source.document_id != chunk.document_id
+    ):
+        return False
+    try:
+        actual_hash = hashlib.sha256(frozen_content.encode("utf-8")).hexdigest()
+    except UnicodeError:
+        return False
+    if actual_hash != source.content_sha256:
+        return False
+    lines = frozen_content.splitlines()
+    chunk_lines = chunk.content.splitlines()
+    first = chunk.global_line_start - 1
+    return bool(chunk_lines) and lines[first:first + len(chunk_lines)] == chunk_lines
+
+
+def _history_adjacent_correction(
+    item: _HistorySemanticDeferred,
+    frozen_content: str,
+) -> bool:
+    """Catch an explicit next-line cancellation beyond the reviewer's line."""
+
+    lines = frozen_content.splitlines()
+    index = item.record.source_line_start
+    if index >= len(lines):
+        return False
+    following = lines[index].strip()
+    if not following or len(following) > 400:
+        return False
+    return re.search(
+        r"^(?:但|然而|其实|原来|后来(?:查明|证实))?\s*"
+        r"(?:上一幕|上一句|上一段|刚才那幕|刚才那段|前述情节)"
+        r".{0,24}(?:只是|仅是|原是|并非|不是)"
+        r".{0,16}(?:梦|排练|演练|假想|事实|真实发生)",
+        following,
+    ) is not None
+
+
+def _review_history_deferred(
+    deferred: tuple[_HistorySemanticDeferred, ...],
+    *,
+    chunk: CharacterSignalChunk,
+    source_identity: ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None,
+    frozen_content: str | None,
+    provider: _ChatProvider,
+    settings: Settings,
+    token_budget: int,
+    remaining_deadline_seconds: float,
+    monotonic: Any,
+) -> _HistorySemanticOutcome:
+    """Review only locally rebound lexical failures against one frozen input."""
+
+    if not _history_review_source_matches_chunk(
+        source_identity, frozen_content, chunk
+    ):
+        return _HistorySemanticOutcome(
+            uncertain_indices=frozenset(row.record_index for row in deferred)
+        )
+    assert isinstance(source_identity, HistoryReviewSourceIdentity)
+    assert isinstance(frozen_content, str)
+    started = monotonic()
+    accepted: set[int] = set()
+    uncertain: set[int] = set()
+    calls = prompt_tokens = completion_tokens = charged_tokens = 0
+    for index, item in enumerate(deferred):
+        try:
+            record = item.record
+            if _history_adjacent_correction(item, frozen_content):
+                uncertain.update(row.record_index for row in deferred[index:])
+                break
+            request = build_history_review_request(
+                source=source_identity,
+                frozen_content=frozen_content,
+                line_number=record.source_line_start,
+                target_assertion_id=item.target_assertion_id,
+                target_quote=item.target_quote,
+                candidate=HistoryReviewCandidate(
+                    character=record.character,
+                    dimension=record.dimension,
+                    trait_key=record.trait_key,
+                    statement=record.statement,
+                    polarity=record.polarity,
+                    key_object=record.key_object,
+                ),
+            )
+            review = run_history_semantic_review(
+                request,
+                expected_source=source_identity,
+                frozen_content=frozen_content,
+                provider=provider,
+                token_budget=max(0, token_budget - charged_tokens),
+                completion_reserve=(
+                    settings.character_history_semantic_review_completion_tokens
+                ),
+                timeout_seconds=(
+                    settings.character_history_semantic_review_timeout_seconds
+                ),
+                remaining_deadline_seconds=(
+                    remaining_deadline_seconds - (monotonic() - started)
+                ),
+                max_response_bytes=(
+                    settings.character_history_semantic_review_max_response_bytes
+                ),
+                max_attempts=1,
+                monotonic=monotonic,
+            )
+        except (TypeError, ValueError):
+            uncertain.update(row.record_index for row in deferred[index:])
+            break
+        calls += review.attempted_calls
+        prompt_tokens += review.prompt_tokens
+        completion_tokens += review.completion_tokens
+        charged_tokens += review.charged_tokens
+        if review.evaluation.decision.verdict == "uncertain":
+            uncertain.update(row.record_index for row in deferred[index:])
+            break
+        if review.evaluation.decision.verdict == "supported":
+            accepted.add(item.record_index)
+    return _HistorySemanticOutcome(
+        supported_indices=frozenset(accepted),
+        uncertain_indices=frozenset(uncertain),
+        attempted_calls=calls,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        charged_tokens=charged_tokens,
+    )
 
 
 def _scope_review_request(
@@ -4317,7 +4611,17 @@ def _bind_record(
     support_index: AssertionIndexV1 | None = None,
     semantic_scope_v5: bool = False,
     scope_review_v1: bool = False,
+    skip_lexical_polarity: bool = False,
 ) -> CharacterSignal:
+    if skip_lexical_polarity and (
+        chunk.source_kind != "published_history"
+        or record.dimension not in {"value", "behavior_boundary"}
+        or record.source_line_start != record.source_line_end
+        or support_index is not None
+        or semantic_scope_v5
+        or scope_review_v1
+    ):
+        raise ValueError("statement_support")
     v4_clause: SupportClauseV1 | None = None
     v4_scope: str | None = None
     v5_binding: _V5ScopeBinding | None = None
@@ -4466,7 +4770,8 @@ def _bind_record(
             if statement_claim is not None and statement_claim != direct_claim:
                 raise ValueError("statement_support")
     if not scope_review_v1 and not _statement_supported(
-        record, v4_clause.text if v4_clause is not None else evidence_text
+        record, v4_clause.text if v4_clause is not None else evidence_text,
+        skip_lexical_polarity=skip_lexical_polarity,
     ):
         raise ValueError("statement_support")
     if (
@@ -6407,10 +6712,15 @@ def trait_keys_compatible(
     return len(left_grams & right_grams) / len(left_grams | right_grams) >= 0.5
 
 
-def _statement_supported(record: _RawCharacterSignal, evidence: str) -> bool:
+def _statement_supported(
+    record: _RawCharacterSignal,
+    evidence: str,
+    *,
+    skip_lexical_polarity: bool = False,
+) -> bool:
     statement_compact = _compact(record.statement)
     evidence_compact = _compact(evidence)
-    if not _polarity_supported(
+    if not skip_lexical_polarity and not _polarity_supported(
         record.polarity,
         statement_compact,
         evidence_compact,
@@ -6442,6 +6752,173 @@ def _statement_supported(record: _RawCharacterSignal, evidence: str) -> bool:
         return statement_anchor in evidence_anchor
     hits = sum(gram in evidence_anchor for gram in grams)
     return hits >= 1 and hits / len(grams) >= 0.5
+
+
+def _history_target_anchor(
+    record: _RawCharacterSignal,
+    chunk: CharacterSignalChunk,
+) -> tuple[str, str] | None:
+    """Find one assertion by a verbatim statement span containing its object.
+
+    A unique object alone is insufficient: the quoted span must also contain
+    source words from the proposed action. No score picks between assertions.
+    The semantic reviewer still has to verify the entire frozen source line.
+    """
+
+    if record.source_line_start != record.source_line_end:
+        return None
+    line_index = record.source_line_start - chunk.global_line_start
+    lines = chunk.content.splitlines()
+    if not 0 <= line_index < len(lines):
+        return None
+    line = lines[line_index]
+    statement = record.statement
+    key_object = record.key_object.strip()
+    if not key_object or key_object not in statement:
+        return None
+    try:
+        assertions = segment_history_line(record.source_line_start, line)
+    except ValueError:
+        return None
+    matches: dict[str, list[str]] = defaultdict(list)
+    for assertion in assertions:
+        if key_object not in assertion.text:
+            continue
+        for statement_start in (
+            match.start() for match in re.finditer(re.escape(key_object), statement)
+        ):
+            for assertion_start in (
+                match.start()
+                for match in re.finditer(re.escape(key_object), assertion.text)
+            ):
+                left = 0
+                while (
+                    statement_start - left > 0
+                    and assertion_start - left > 0
+                    and statement[statement_start - left - 1]
+                    == assertion.text[assertion_start - left - 1]
+                ):
+                    left += 1
+                right = len(key_object)
+                while (
+                    statement_start + right < len(statement)
+                    and assertion_start + right < len(assertion.text)
+                    and statement[statement_start + right]
+                    == assertion.text[assertion_start + right]
+                ):
+                    right += 1
+                quote = statement[statement_start - left: statement_start + right]
+                extra = quote[:left] + quote[left + len(key_object):]
+                if (
+                    len(quote) <= 300
+                    and any(char.isalnum() for char in extra)
+                    and line.count(quote) == 1
+                ):
+                    matches[assertion.assertion_id].append(quote)
+    if len(matches) != 1:
+        return None
+    assertion_id, quotes = next(iter(matches.items()))
+    return assertion_id, max(quotes, key=len)
+
+
+def _history_obviously_unresolved(
+    record: _RawCharacterSignal,
+    line: str,
+    target_assertion_id: str,
+) -> bool:
+    """Block a few explicit attribution/actuality traps before model review.
+
+    This is a conservative veto, not a second inference engine. Ambiguous
+    cases still require the independent whole-line semantic reviewer.
+    """
+
+    assertions = segment_history_line(record.source_line_start, line)
+    target_index = next(
+        index for index, row in enumerate(assertions)
+        if row.assertion_id == target_assertion_id
+    )
+    target = assertions[target_index].text
+    prior = assertions[target_index - 1].text if target_index else ""
+    continuation = re.match(
+        r"^\s*(?:便|于是|随后|接着|然后|她|他|仍|又)", target
+    ) is not None
+    governed = target + (prior if continuation else "")
+    if re.search(r"梦见|梦到|梦中|梦里|原来.{0,12}梦|据说|据称|传闻|听说", governed):
+        return True
+    if re.search(r"本想|差点|险些|假如|假设|如果|若是", governed):
+        return True
+    next_text = (
+        assertions[target_index + 1].text
+        if target_index + 1 < len(assertions) else ""
+    )
+    if (
+        re.search(r"拒绝|不予|没有", target)
+        and re.match(r"^\s*(?:但|却)(?:最终|最后|实际上)", next_text)
+        and re.search(r"同意|允许|已经|实际", next_text)
+    ):
+        return True
+    if re.search(
+        re.escape(record.character)
+        + r"(?:看着|看见|看到|听见|听到|转述|说|表示)(?!自己)",
+        target,
+    ):
+        return True
+    leading_actor = (
+        None if continuation else re.match(
+            r"^\s*(?:【[^】]{1,24}】)?\s*"
+            r"(?P<actor>[\u4e00-\u9fff]{2,4}?)"
+            r"(?:又|仍|再|已|却|便)?"
+            r"(?=拒绝|公开|核对|发现|看着|看到|说|表示|对|把|将|写|拿|送)",
+            target,
+        )
+    )
+    if leading_actor and leading_actor.group("actor") != record.character:
+        return True
+    if record.character not in target:
+        if (
+            target_index == 0
+            or record.character not in assertions[target_index - 1].text
+            or not continuation
+        ):
+            return True
+    return False
+
+
+def _history_lexical_only_deferred(
+    record_index: int,
+    record: _RawCharacterSignal,
+    chunk: CharacterSignalChunk,
+) -> _HistorySemanticDeferred | None:
+    if (
+        chunk.source_kind != "published_history"
+        or record.dimension not in {"value", "behavior_boundary"}
+        or record.polarity not in {"positive", "negative"}
+        or record.source_line_start != record.source_line_end
+    ):
+        return None
+    line_index = record.source_line_start - chunk.global_line_start
+    lines = chunk.content.splitlines()
+    if not 0 <= line_index < len(lines):
+        return None
+    evidence = lines[line_index]
+    if _polarity_supported(
+        record.polarity,
+        _compact(record.statement),
+        _compact(evidence),
+        character=record.character,
+        key_object=record.key_object,
+    ) or not _statement_supported(record, evidence, skip_lexical_polarity=True):
+        return None
+    try:
+        _bind_record(record, chunk, skip_lexical_polarity=True)
+    except (ValidationError, ValueError):
+        return None
+    anchor = _history_target_anchor(record, chunk)
+    if anchor is None:
+        return None
+    if _history_obviously_unresolved(record, evidence, anchor[0]):
+        return None
+    return _HistorySemanticDeferred(record_index, record, *anchor)
 
 
 def _polarity_supported(

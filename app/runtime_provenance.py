@@ -12,6 +12,10 @@ from .character_trait_extraction import (
     DRAFT_SOURCE_EXCERPT_REPAIR_V1, SUPPORT_TRACE_V1,
 )
 from .character_scope_review import SCOPE_REVIEW_PROMPT_V2, SCOPE_REVIEW_SCHEMA_V1
+from .character_history_semantic_review import (
+    HISTORY_REVIEW_PROMPT_V1, HISTORY_REVIEW_SCHEMA_V1,
+    HISTORY_REVIEW_SEGMENTER_V1,
+)
 from .embeddings import EmbeddingNotConfiguredError, OpenAICompatibleEmbeddingProvider
 from .evidence_chunks import EvidenceChunker
 from .provider import safe_thinking_configuration
@@ -142,6 +146,29 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
         settings.character_signal_max_attempts,
         settings.provider_max_attempts,
     )
+    history_review_deadline = min(
+        float(settings.character_history_semantic_review_timeout_seconds),
+        signal_deadline,
+    )
+    history_review_provider_timeout = min(
+        float(settings.character_history_semantic_review_timeout_seconds),
+        float(settings.character_signal_timeout_seconds),
+        float(settings.provider_timeout_seconds),
+        history_review_deadline,
+    )
+    history_review_provider_completion = min(
+        settings.character_history_semantic_review_completion_tokens,
+        signal_provider_completion,
+    )
+    history_review_provider_response_bytes = min(
+        settings.character_history_semantic_review_max_response_bytes,
+        signal_provider_response_bytes,
+    )
+    history_review_provider_attempts = min(
+        settings.character_history_semantic_review_max_attempts,
+        settings.character_signal_max_attempts,
+        settings.provider_max_attempts,
+    )
     drift_provider_response_bytes = min(
         value
         for value in (
@@ -236,6 +263,51 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             ),
             "signal_scope_review_provider_max_attempts": (
                 scope_review_provider_attempts
+            ),
+            "history_semantic_review_v1": (
+                settings.character_history_semantic_review_v1
+            ),
+            "history_semantic_review_schema_version": (
+                HISTORY_REVIEW_SCHEMA_V1
+                if settings.character_history_semantic_review_v1 else None
+            ),
+            "history_semantic_review_prompt_version": (
+                HISTORY_REVIEW_PROMPT_V1
+                if settings.character_history_semantic_review_v1 else None
+            ),
+            "history_semantic_review_segmenter_version": (
+                HISTORY_REVIEW_SEGMENTER_V1
+                if settings.character_history_semantic_review_v1 else None
+            ),
+            "history_semantic_review_token_reserve": (
+                settings.character_history_semantic_review_token_reserve
+            ),
+            "history_semantic_review_completion_tokens": (
+                settings.character_history_semantic_review_completion_tokens
+            ),
+            "history_semantic_review_max_response_bytes": (
+                settings.character_history_semantic_review_max_response_bytes
+            ),
+            "history_semantic_review_timeout_seconds": float(
+                settings.character_history_semantic_review_timeout_seconds
+            ),
+            "history_semantic_review_max_attempts": (
+                settings.character_history_semantic_review_max_attempts
+            ),
+            "history_semantic_review_provider_timeout_seconds": (
+                history_review_provider_timeout
+            ),
+            "history_semantic_review_provider_total_deadline_seconds": (
+                history_review_deadline
+            ),
+            "history_semantic_review_provider_max_completion_tokens": (
+                history_review_provider_completion
+            ),
+            "history_semantic_review_provider_max_response_bytes": (
+                history_review_provider_response_bytes
+            ),
+            "history_semantic_review_provider_max_attempts": (
+                history_review_provider_attempts
             ),
             "signal_support_trace_v1": settings.character_signal_support_trace_v1,
             "signal_support_trace_version": (

@@ -61,6 +61,91 @@ def test_draft_source_excerpt_repair_is_default_off_and_versioned_in_provenance(
     assert off_limits != on_limits
 
 
+def test_history_semantic_review_is_default_off_and_records_bounded_protocol():
+    off = safe_runtime_provenance(configured_settings())
+    on = safe_runtime_provenance(configured_settings(
+        character_history_semantic_review_v1=True,
+        character_signal_timeout_seconds=10,
+        character_signal_total_deadline_seconds=35,
+        provider_timeout_seconds=7,
+        provider_total_deadline_seconds=20,
+        provider_max_response_bytes=8_192,
+    ))
+    off_limits = off["character_consistency_limits"]
+    limits = on["character_consistency_limits"]
+
+    assert off_limits["history_semantic_review_v1"] is False
+    assert off_limits["history_semantic_review_schema_version"] is None
+    assert off_limits["history_semantic_review_prompt_version"] is None
+    assert off_limits["history_semantic_review_segmenter_version"] is None
+    assert limits["history_semantic_review_v1"] is True
+    assert limits["history_semantic_review_schema_version"] == (
+        "character-history-semantic-review-v1"
+    )
+    assert limits["history_semantic_review_prompt_version"] == (
+        "character-history-semantic-review-prompt-v1"
+    )
+    assert limits["history_semantic_review_segmenter_version"] == (
+        "character-history-line-segmenter-v1"
+    )
+    assert limits["history_semantic_review_token_reserve"] == 6_000
+    assert limits["history_semantic_review_completion_tokens"] == 2_048
+    assert limits["history_semantic_review_max_response_bytes"] == 32_768
+    assert limits["history_semantic_review_timeout_seconds"] == 30.0
+    assert limits["history_semantic_review_max_attempts"] == 1
+    assert limits["history_semantic_review_provider_timeout_seconds"] == 7
+    assert limits["history_semantic_review_provider_total_deadline_seconds"] == 20
+    assert limits["history_semantic_review_provider_max_completion_tokens"] == 1_024
+    assert limits["history_semantic_review_provider_max_response_bytes"] == 8_192
+    assert limits["history_semantic_review_provider_max_attempts"] == 1
+
+
+@pytest.mark.parametrize("overrides", [
+    {"character_signal_full_line_prompt_v2": False},
+    {"character_signal_timeout_seconds": 5,
+     "character_signal_total_deadline_seconds": 10,
+     "character_history_semantic_review_timeout_seconds": 11},
+    {"character_history_semantic_review_token_reserve": 255},
+    {"character_history_semantic_review_completion_tokens": 8_193},
+    {"character_history_semantic_review_max_response_bytes": 32_769},
+    {"character_history_semantic_review_timeout_seconds": 0},
+    {"character_history_semantic_review_max_attempts": 2},
+])
+def test_history_semantic_review_rejects_invalid_configuration(overrides):
+    with pytest.raises(ValueError):
+        configured_settings(character_history_semantic_review_v1=True, **overrides)
+
+
+def test_history_semantic_review_runtime_identity_rejects_tampering():
+    provenance = safe_runtime_provenance(configured_settings(
+        character_history_semantic_review_v1=True,
+    ))
+    assert live_runner._safe_runtime_provenance(provenance) == provenance
+    assert axis_live._safe_character_runtime_provenance(provenance) is not None
+
+    for changes in (
+        {"history_semantic_review_v1": "true"},
+        {"history_semantic_review_schema_version": "unknown"},
+        {"history_semantic_review_prompt_version": "unknown"},
+        {"history_semantic_review_segmenter_version": "unknown"},
+        {"history_semantic_review_max_attempts": 2},
+        {"history_semantic_review_provider_max_attempts": 2},
+        {"history_semantic_review_provider_max_response_bytes": 32_769},
+        {"history_semantic_review_provider_total_deadline_seconds": 0},
+    ):
+        malformed = json.loads(json.dumps(provenance))
+        malformed["character_consistency_limits"].update(changes)
+        assert live_runner._safe_runtime_provenance(malformed) is None, changes
+        assert axis_live._safe_character_runtime_provenance(malformed) is None, changes
+
+    missing = json.loads(json.dumps(provenance))
+    missing["character_consistency_limits"].pop(
+        "history_semantic_review_segmenter_version"
+    )
+    assert live_runner._safe_runtime_provenance(missing) is None
+    assert axis_live._safe_character_runtime_provenance(missing) is None
+
+
 def test_runtime_provenance_is_content_free_and_records_effective_identity():
     result = safe_runtime_provenance(configured_settings())
     serialized = json.dumps(result, sort_keys=True)

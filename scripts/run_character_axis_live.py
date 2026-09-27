@@ -54,6 +54,9 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY,
     _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS,
     _valid_character_scope_review_limits,
+    _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEY,
+    _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS,
+    _valid_character_history_semantic_review_limits,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION,
@@ -802,6 +805,7 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     ):
         return None
     draft_excerpt_repair_keys = set(limits) & _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
+    history_review_keys = set(limits) & _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
     if (
         set(capabilities) != _CAPABILITY_KEYS
         or any(type(flag) is not bool for flag in capabilities.values())
@@ -811,9 +815,13 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or draft_excerpt_repair_keys not in (
             set(), set(_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS)
         )
+        or history_review_keys not in (
+            set(), set(_CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS)
+        )
         or set(limits) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
+            | _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
@@ -931,6 +939,8 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
             limits, allow_legacy_prompt_version=True,
         )
     ):
+        return None
+    if history_review_keys and not _valid_character_history_semantic_review_limits(limits):
         return None
     if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in limits and (
         type(limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY]) is not bool

@@ -302,6 +302,25 @@ class Settings(BaseSettings):
         default=30.0, gt=0, le=30.0
     )
     character_signal_scope_review_max_attempts: int = Field(default=1, ge=1, le=4)
+    # Optional semantic review of a published-history signal rejected only by
+    # the local lexical polarity check. A failed or uncertain review keeps the
+    # original rejection; the ordinary evidence gates remain authoritative.
+    character_history_semantic_review_v1: bool = False
+    character_history_semantic_review_token_reserve: int = Field(
+        default=6_000, ge=256, le=20_000
+    )
+    character_history_semantic_review_completion_tokens: int = Field(
+        default=2_048, ge=64, le=8_192
+    )
+    character_history_semantic_review_max_response_bytes: int = Field(
+        default=32_768, ge=1_024, le=32_768
+    )
+    character_history_semantic_review_timeout_seconds: float = Field(
+        default=30.0, gt=0, le=30.0
+    )
+    character_history_semantic_review_max_attempts: int = Field(
+        default=1, ge=1, le=1
+    )
     # Content-free observation of V4 support-slot submission/validation only.
     # It neither changes prompts nor accepts otherwise rejected records.
     character_signal_support_trace_v1: bool = False
@@ -591,6 +610,11 @@ class Settings(BaseSettings):
         ):
             raise ValueError("character signal scope review v1 requires semantic scope v5")
         if (
+            self.character_history_semantic_review_v1
+            and not self.character_signal_full_line_prompt_v2
+        ):
+            raise ValueError("character history semantic review v1 requires full line v2")
+        if (
             self.character_signal_support_trace_v1
             and not self.character_signal_support_id_v4
         ):
@@ -606,6 +630,12 @@ class Settings(BaseSettings):
             < self.character_signal_scope_review_timeout_seconds
         ):
             raise ValueError("character signal deadline is shorter than scope review timeout")
+        if (
+            self.character_history_semantic_review_v1
+            and self.character_signal_total_deadline_seconds
+            < self.character_history_semantic_review_timeout_seconds
+        ):
+            raise ValueError("character signal deadline is shorter than history semantic review timeout")
         if (
             self.character_drift_total_deadline_seconds
             < self.character_drift_timeout_seconds

@@ -382,6 +382,26 @@ _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS = frozenset({
 _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION = "character-scope-review-v1"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v2"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSION = "character-scope-review-prompt-v1"
+_CHARACTER_HISTORY_SEMANTIC_REVIEW_KEY = "history_semantic_review_v1"
+_CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS = frozenset({
+    _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEY,
+    "history_semantic_review_schema_version",
+    "history_semantic_review_prompt_version",
+    "history_semantic_review_segmenter_version",
+    "history_semantic_review_token_reserve",
+    "history_semantic_review_completion_tokens",
+    "history_semantic_review_max_response_bytes",
+    "history_semantic_review_timeout_seconds",
+    "history_semantic_review_max_attempts",
+    "history_semantic_review_provider_timeout_seconds",
+    "history_semantic_review_provider_total_deadline_seconds",
+    "history_semantic_review_provider_max_completion_tokens",
+    "history_semantic_review_provider_max_response_bytes",
+    "history_semantic_review_provider_max_attempts",
+})
+_CHARACTER_HISTORY_SEMANTIC_REVIEW_SCHEMA_VERSION = "character-history-semantic-review-v1"
+_CHARACTER_HISTORY_SEMANTIC_REVIEW_PROMPT_VERSION = "character-history-semantic-review-prompt-v1"
+_CHARACTER_HISTORY_SEMANTIC_REVIEW_SEGMENTER_VERSION = "character-history-line-segmenter-v1"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY = "signal_support_trace_v1"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY = "signal_support_trace_version"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION = "support-trace-v1"
@@ -2897,6 +2917,77 @@ def _valid_character_scope_review_limits(
     return True
 
 
+def _valid_character_history_semantic_review_limits(limits: dict[str, Any]) -> bool:
+    """Accept only complete, versioned and bounded history review identity."""
+
+    if not _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS <= set(limits):
+        return False
+    enabled = limits[_CHARACTER_HISTORY_SEMANTIC_REVIEW_KEY]
+    if (
+        type(enabled) is not bool
+        or (enabled and limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY) is not True)
+        or limits["history_semantic_review_schema_version"] != (
+            _CHARACTER_HISTORY_SEMANTIC_REVIEW_SCHEMA_VERSION if enabled else None
+        )
+        or limits["history_semantic_review_prompt_version"] != (
+            _CHARACTER_HISTORY_SEMANTIC_REVIEW_PROMPT_VERSION if enabled else None
+        )
+        or limits["history_semantic_review_segmenter_version"] != (
+            _CHARACTER_HISTORY_SEMANTIC_REVIEW_SEGMENTER_VERSION if enabled else None
+        )
+    ):
+        return False
+    integers = {
+        "history_semantic_review_token_reserve": (256, 20_000),
+        "history_semantic_review_completion_tokens": (64, 8_192),
+        "history_semantic_review_max_response_bytes": (1_024, 32_768),
+        "history_semantic_review_max_attempts": (1, 1),
+        "history_semantic_review_provider_max_completion_tokens": (1, 8_192),
+        "history_semantic_review_provider_max_response_bytes": (1, 32_768),
+        "history_semantic_review_provider_max_attempts": (1, 1),
+    }
+    for key, (minimum, maximum) in integers.items():
+        value = limits.get(key)
+        if type(value) is not int or not minimum <= value <= maximum:
+            return False
+    for key in (
+        "history_semantic_review_timeout_seconds",
+        "history_semantic_review_provider_timeout_seconds",
+        "history_semantic_review_provider_total_deadline_seconds",
+        "signal_total_deadline_seconds",
+        "signal_provider_timeout_seconds",
+    ):
+        value = limits.get(key)
+        if (
+            type(value) not in {int, float}
+            or not math.isfinite(float(value))
+            or not 0 < float(value) <= 120
+        ):
+            return False
+    timeout = limits["history_semantic_review_timeout_seconds"]
+    deadline = limits["history_semantic_review_provider_total_deadline_seconds"]
+    return not (
+        timeout > 30
+        or (enabled and limits["signal_total_deadline_seconds"] < timeout)
+        or deadline != min(timeout, limits["signal_total_deadline_seconds"])
+        or limits["history_semantic_review_provider_timeout_seconds"] > min(
+            timeout, deadline, limits["signal_provider_timeout_seconds"]
+        )
+        or limits["history_semantic_review_provider_max_completion_tokens"] != min(
+            limits["history_semantic_review_completion_tokens"],
+            limits["signal_provider_max_completion_tokens"],
+        )
+        or limits["history_semantic_review_provider_max_response_bytes"] != min(
+            limits["history_semantic_review_max_response_bytes"],
+            limits["signal_provider_max_response_bytes"],
+        )
+        or limits["history_semantic_review_provider_max_attempts"] > min(
+            limits["history_semantic_review_max_attempts"],
+            limits["signal_provider_max_attempts"],
+        )
+    )
+
+
 def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
     root = value if type(value) is dict else None
     if root is None or set(root) != {
@@ -2974,15 +3065,23 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         set(character_limits) & _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
         if type(character_limits) is dict else set()
     )
+    history_review_keys = (
+        set(character_limits) & _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
+        if type(character_limits) is dict else set()
+    )
     if (
         type(character_limits) is not dict
         or draft_trace_keys not in (set(), set(_CHARACTER_SIGNAL_DRAFT_TRACE_KEYS))
         or draft_excerpt_repair_keys not in (
             set(), set(_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS)
         )
+        or history_review_keys not in (
+            set(), set(_CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS)
+        )
         or set(character_limits) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
+            | _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
@@ -3106,6 +3205,12 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             return None
         safe_character_limits.update({
             key: character_limits[key] for key in _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS
+        })
+    if history_review_keys:
+        if not _valid_character_history_semantic_review_limits(character_limits):
+            return None
+        safe_character_limits.update({
+            key: character_limits[key] for key in _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
         })
     if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in character_limits:
         variant = character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY]
