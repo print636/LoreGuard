@@ -79,6 +79,7 @@ import {
   provisionalClueDimensionLabel,
   type ProvisionalClue,
 } from "./provisionalClues";
+import { fetchReviewClues, type ReviewClue } from "./reviewClues";
 import {
   ApiError,
   apiFetch,
@@ -133,6 +134,14 @@ type ProvisionalClueState = {
   status: "not_loaded" | "loading" | "ready" | "error";
   items: ProvisionalClue[];
   truncated: boolean;
+};
+type ReviewClueState = {
+  runId: string | null;
+  status: "not_loaded" | "loading" | "ready" | "error";
+  items: ReviewClue[];
+  truncated: boolean;
+  unavailable_count: number;
+  scan_limited: boolean;
 };
 type RecordRow = RecordView;
 type Doc = {
@@ -437,6 +446,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     items: [],
     truncated: false,
   });
+  const [reviewClues, setReviewClues] = useState<ReviewClueState>({
+    runId: null,
+    status: "not_loaded",
+    items: [],
+    truncated: false,
+    unavailable_count: 0,
+    scan_limited: false,
+  });
   const [records, setRecords] = useState<RecordRow[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [filter, setFilter] = useState("all");
@@ -486,6 +503,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const viewEpochRef = useRef(0);
   const provisionalClueRequestRef = useRef(0);
   const provisionalClueAbortRef = useRef<AbortController | null>(null);
+  const reviewClueRequestRef = useRef(0);
+  const reviewClueAbortRef = useRef<AbortController | null>(null);
   const loadedRouteRef = useRef("");
   const runMutationRef = useRef(false);
   const quickMutationRef = useRef(false);
@@ -515,13 +534,44 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const currentProvisionalClueCount = provisionalClues.status === "ready" && provisionalClues.runId === run
     ? provisionalClues.items.length
     : null;
+  const currentReviewClueCount = reviewClues.status === "ready" && reviewClues.runId === run
+    ? reviewClues.items.length
+    : null;
+  const unavailableReviewClueCount = reviewClues.status === "ready" && reviewClues.runId === run
+    ? reviewClues.unavailable_count
+    : 0;
+  const currentPendingClueCount = currentProvisionalClueCount !== null && currentReviewClueCount !== null
+    ? currentProvisionalClueCount + currentReviewClueCount
+    : null;
+  const currentPendingCluesTruncated = currentPendingClueCount !== null &&
+    (provisionalClues.truncated || reviewClues.truncated);
+  const pendingClueCountLabel = currentPendingClueCount === null
+    ? "—"
+    : `${currentPendingClueCount}${currentPendingCluesTruncated ? "+" : ""}`;
+  const reviewClueCountLabel = currentReviewClueCount === null
+    ? "—"
+    : `${currentReviewClueCount}${reviewClues.truncated ? "+" : ""}`;
+  const provisionalClueCountLabel = currentProvisionalClueCount === null
+    ? "—"
+    : `${currentProvisionalClueCount}${provisionalClues.truncated ? "+" : ""}`;
   let provisionalClueCaveat = "待复核线索的读取状态见下方；不能据此断定剧情无误。";
-  if (currentProvisionalClueCount === 0) {
+  if (currentPendingClueCount === 0) {
     provisionalClueCaveat = "本次没有可安全定位的待复核线索，但不代表剧情无误或审查完整。";
-  } else if (currentProvisionalClueCount !== null) {
-    provisionalClueCaveat = `另有 ${currentProvisionalClueCount} 条待复核线索列于下方，未计入正式问题，请人工核对。`;
-  } else if (provisionalClues.status === "error" && provisionalClues.runId === run) {
-    provisionalClueCaveat = "待复核线索读取失败，无法确认是否存在线索；请在下方重试。";
+  } else if (currentPendingClueCount !== null && currentPendingCluesTruncated) {
+    provisionalClueCaveat = `另有至少 ${currentPendingClueCount} 条待复核线索列于下方，部分未展示，未计入正式问题，请人工核对。`;
+  } else if (currentPendingClueCount !== null) {
+    provisionalClueCaveat = `另有 ${currentPendingClueCount} 条待复核线索列于下方，未计入正式问题，请人工核对。`;
+  } else if (
+    (provisionalClues.status === "error" && provisionalClues.runId === run) ||
+    (reviewClues.status === "error" && reviewClues.runId === run)
+  ) {
+    provisionalClueCaveat = "部分待复核线索读取失败，无法确认完整数量；请在下方重试。";
+  }
+  if (unavailableReviewClueCount > 0) {
+    provisionalClueCaveat += ` 另有 ${unavailableReviewClueCount} 条历史线索因证据不足无法展示，建议重新分析。`;
+  }
+  if (reviewClues.status === "ready" && reviewClues.runId === run && reviewClues.scan_limited) {
+    provisionalClueCaveat += " 历史线索数量超过单页安全扫描上限，后续条目尚未核对；建议重新分析。";
   }
   const formalIssueEmptyText = runInfo?.status === "completed"
     ? `本次未生成正式一致性问题。${provisionalClueCaveat}${modelStatus.emptyCaveat ? ` ${modelStatus.emptyCaveat}` : ""}`
@@ -579,11 +629,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   );
   const guidedState = useMemo(() => guidedDocumentState(docs), [docs]);
 
-  function clearProvisionalClues() {
+  function clearPendingClues() {
     ++provisionalClueRequestRef.current;
     provisionalClueAbortRef.current?.abort();
     provisionalClueAbortRef.current = null;
     setProvisionalClues({ runId: null, status: "not_loaded", items: [], truncated: false });
+    ++reviewClueRequestRef.current;
+    reviewClueAbortRef.current?.abort();
+    reviewClueAbortRef.current = null;
+    setReviewClues({ runId: null, status: "not_loaded", items: [], truncated: false, unavailable_count: 0, scan_limited: false });
   }
 
   function clearAnalysisView() {
@@ -596,7 +650,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setAcceptedModelExecution(null);
     setProgress(0);
     setIssues([]);
-    clearProvisionalClues();
+    clearPendingClues();
     setClarifications([]);
     setRecords([]);
     setWarnings([]);
@@ -843,8 +897,27 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       if (provisionalClueAbortRef.current === controller) provisionalClueAbortRef.current = null;
     }
   }
+  async function loadReviewClues(runId: string, epoch: number) {
+    if (epoch !== viewEpochRef.current) return;
+    reviewClueAbortRef.current?.abort();
+    const controller = new AbortController();
+    reviewClueAbortRef.current = controller;
+    const request = ++reviewClueRequestRef.current;
+    setReviewClues({ runId, status: "loading", items: [], truncated: false, unavailable_count: 0, scan_limited: false });
+    try {
+      const result = await fetchReviewClues(runId, controller.signal);
+      if (epoch !== viewEpochRef.current || request !== reviewClueRequestRef.current || controller.signal.aborted) return;
+      setReviewClues({ runId, status: "ready", ...result });
+    } catch {
+      if (epoch !== viewEpochRef.current || request !== reviewClueRequestRef.current || controller.signal.aborted) return;
+      setReviewClues({ runId, status: "error", items: [], truncated: false, unavailable_count: 0, scan_limited: false });
+    } finally {
+      if (reviewClueAbortRef.current === controller) reviewClueAbortRef.current = null;
+    }
+  }
   async function loadCompleted(runId: string, epoch = viewEpochRef.current) {
     void loadProvisionalClues(runId, epoch);
+    void loadReviewClues(runId, epoch);
     const paths = completedResultPaths(runId);
     const [loadedIssues, rec, status, diag, reviewItems] = await Promise.all([
       apiJson<Issue[]>(paths.issues),
@@ -978,7 +1051,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setProgress(info.status === "completed" ? 100 : 0);
     setMessage(info.error || `历史任务：${info.status}`);
     setIssues([]);
-    clearProvisionalClues();
+    clearPendingClues();
     setClarifications([]);
     setRecords([]);
     setWarnings([]);
@@ -1025,7 +1098,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setBusy(true);
     setRun("");
     setIssues([]);
-    clearProvisionalClues();
+    clearPendingClues();
     setClarifications([]);
     setRecords([]);
     setDiagnostics({});
@@ -1253,7 +1326,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       if (epoch !== viewEpochRef.current) return;
       setRun(created.id);
       setRunInfo(null);
-      clearProvisionalClues();
+      clearPendingClues();
       setAcceptedModelExecution(created.model_execution ?? null);
       setBusy(true);
       terminalHandledRef.current.delete(created.id);
@@ -1474,6 +1547,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       ++catalogRequestRef.current;
       ++selectedProjectRequestRef.current;
       provisionalClueAbortRef.current?.abort();
+      reviewClueAbortRef.current?.abort();
       if (catalogSearchTimerRef.current) clearTimeout(catalogSearchTimerRef.current);
     };
   }, []);
@@ -2373,7 +2447,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   <b>{records.length}</b>
                 </div>
                 <div>
-                  <small>一致性问题</small>
+                  <small>正式一致性问题</small>
                   <b>{issues.length}</b>
                 </div>
                 <div>
@@ -2798,7 +2872,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   </div>
                 </div>
                 <p className="formalIssueIntro">
-                  正式报告问题仍需作者核对，不等于已证实冲突；角色漂移条目应同时核对既有设定与当前新稿两侧证据。只有单侧材料或未通过完整校验的模型提案不能直接当作正式冲突；待复核线索另列在下方，不参与这里的数量、反馈和导出。
+                  正式报告问题仍需作者核对，不等于已证实冲突；角色漂移条目应同时核对既有设定与当前新稿两侧证据。单次反向行为、判断依据不足或未通过完整校验的模型提案留在下方的待复核区，不参与这里的数量、反馈和导出。
                 </p>
                 {issues.length === 0 && !busy && (
                   <div className="empty">
@@ -2922,64 +2996,137 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               <section
                 className="provisionalClues workspaceView"
                 aria-labelledby="provisional-clues-title"
-                aria-busy={provisionalClues.status === "loading" && provisionalClues.runId === run}
+                aria-busy={
+                  (provisionalClues.status === "loading" && provisionalClues.runId === run) ||
+                  (reviewClues.status === "loading" && reviewClues.runId === run)
+                }
               >
                 <div className="sectionHead">
                   <div>
-                    <p className="eyebrow">MODEL PROPOSALS</p>
+                    <p className="eyebrow">REVIEW LEADS</p>
                     <h2 id="provisional-clues-title">
-                      待复核线索 <em>{provisionalClues.status === "ready" && provisionalClues.runId === run ? provisionalClues.items.length : "—"}</em>
+                      待复核线索 <em>{pendingClueCountLabel}</em>
                     </h2>
                   </div>
                 </div>
                 <p className="provisionalClueIntro">
-                  这些是未经整包验证的模型提案，需要对照冻结原文人工核对；它们不构成事实或一致性问题，不计入正式问题数，也不能在此提交问题反馈。
+                  这里收录尚不能定为冲突的角色审查线索，以及未通过完整校验的模型提案。请对照原文复核；两类都不计入正式问题数、反馈或导出。
                 </p>
-                {provisionalClues.status === "loading" && provisionalClues.runId === run ? (
-                  <p className="provisionalClueNotice" role="status">正在读取待复核线索…</p>
-                ) : provisionalClues.status === "error" && provisionalClues.runId === run ? (
-                  <div className="provisionalClueError" role="alert">
-                    <p>待复核线索读取失败，当前无法确认本次是否有线索。正式一致性问题仍可查看。</p>
-                    <button type="button" onClick={() => void loadProvisionalClues(run, viewEpochRef.current)}>重试读取线索</button>
-                  </div>
-                ) : provisionalClues.status === "ready" && provisionalClues.runId === run ? (
-                  <>
-                    {provisionalClues.items.length === 0 ? (
-                      <p className="provisionalClueNotice">本次没有可安全定位的待复核线索；这不代表角色审查已完整通过。请查看运行覆盖状态。</p>
-                    ) : (
-                      <ol className="provisionalClueList">
-                        {provisionalClues.items.map((clue) => (
-                          <li key={clue.id}>
-                            <div className="provisionalClueMeta">
-                              <span>待人工核对</span>
-                              <span>角色：{clue.character}</span>
-                              <span>{provisionalClueDimensionLabel(clue.dimension)}</span>
-                            </div>
-                            <h3><small>模型提案（未验证）</small>{clue.proposed_statement}</h3>
-                            <p>待复核原因：同批模型输出未通过完整校验。本条只保留原文定位与模型提案，尚未验证为角色事实或冲突。</p>
-                            <blockquote>
-                              <b>冻结原文 · {clue.document_name} v{clue.document_version} · 第 {clue.line_start}{clue.line_end === clue.line_start ? "" : `–${clue.line_end}`} 行</b>
-                              <span>{clue.evidence}</span>
-                            </blockquote>
-                          </li>
-                        ))}
-                      </ol>
-                    )}
-                    {provisionalClues.truncated && (
-                      <p className="provisionalClueNotice" role="status">线索数量超过展示上限，本页仅显示前 64 条。</p>
-                    )}
-                  </>
-                ) : (
-                  <p className="provisionalClueNotice">
-                    {runInfo?.status === "completed"
-                      ? "待复核线索尚未加载。"
-                      : runInfo && ["queued", "running"].includes(runInfo.status)
-                        ? "本次运行尚未完成，待复核线索暂不可用。"
-                        : runInfo
-                          ? "本次运行未成功完成，待复核线索不可用。"
-                        : "完成一次分析后，这里会显示待复核线索。"}
-                  </p>
-                )}
+                <p className="srOnly" role="status" aria-atomic="true">
+                  {currentPendingClueCount !== null
+                    ? currentPendingCluesTruncated
+                      ? `待复核线索已展示 ${currentPendingClueCount} 条，实际更多：角色审查线索${reviewClues.truncated ? "至少" : ""}${currentReviewClueCount} 条，模型提案${provisionalClues.truncated ? "至少" : ""}${currentProvisionalClueCount} 条。`
+                      : `待复核线索共 ${currentPendingClueCount} 条：角色审查线索 ${currentReviewClueCount} 条，模型提案 ${currentProvisionalClueCount} 条。`
+                    : (reviewClues.status === "error" && reviewClues.runId === run) ||
+                      (provisionalClues.status === "error" && provisionalClues.runId === run)
+                      ? "部分待复核线索读取失败，请在对应分组重试。"
+                      : runInfo?.status === "completed"
+                        ? "正在读取待复核线索。"
+                        : "分析完成后可读取待复核线索。"}
+                </p>
+                <section className="pendingClueGroup" aria-labelledby="review-clue-group-title">
+                  <h3 id="review-clue-group-title">角色审查线索 <em>{reviewClueCountLabel}</em></h3>
+                  <p>已定位既有设定与当前新稿，但单次反向行为或判断依据不足，仍需结合上下文确认。</p>
+                  {reviewClues.status === "loading" && reviewClues.runId === run ? (
+                    <p className="provisionalClueNotice">正在读取角色审查线索…</p>
+                  ) : reviewClues.status === "error" && reviewClues.runId === run ? (
+                    <div className="provisionalClueError">
+                      <p>角色审查线索读取失败，当前无法确认数量。正式一致性问题仍可查看。</p>
+                      <button type="button" onClick={() => void loadReviewClues(run, viewEpochRef.current)}>重试读取角色审查线索</button>
+                    </div>
+                  ) : reviewClues.status === "ready" && reviewClues.runId === run ? (
+                    <>
+                      {reviewClues.unavailable_count > 0 && (
+                        <p className="provisionalClueNotice" role="alert">
+                          {reviewClues.unavailable_count} 条历史线索证据不足，无法展示；建议重新分析。它们未计入正式问题或上方可展示线索数量。
+                        </p>
+                      )}
+                      {reviewClues.scan_limited && (
+                        <p className="provisionalClueNotice" role="alert">
+                          历史线索超过单页安全扫描上限，后续条目尚未核对；当前数量只是已核对部分，建议重新分析。
+                        </p>
+                      )}
+                      {reviewClues.items.length === 0 ? (
+                        <p className="provisionalClueNotice">本次没有可展示的角色审查线索；这不代表角色审查已完整通过。</p>
+                      ) : (
+                        <ol className="provisionalClueList reviewClueList">
+                          {reviewClues.items.map((clue) => (
+                            <li key={clue.id}>
+                              <div className="provisionalClueMeta">
+                                <span>{clue.metadata.final_outcome === "needs_confirmation" ? "待作者确认" : "判断依据不足"}</span>
+                                <span>角色设定 / 表现</span>
+                              </div>
+                              <h4>{clue.title}</h4>
+                              <p>{clue.explanation}</p>
+                              <div className="reviewClueEvidence">
+                                {clue.evidence.map((evidence, evidenceIndex) => (
+                                  <blockquote key={`${evidence.document_id}:${evidence.line_start}:${evidenceIndex}`}>
+                                    <b>{evidenceIndex === 0 ? "既有设定" : evidenceIndex === 1 ? "当前新稿" : "补充证据"} · {evidence.document_name} · 第 {evidence.line_start}{evidence.line_end === evidence.line_start ? "" : `–${evidence.line_end}`} 行</b>
+                                    <span>{evidence.text}</span>
+                                  </blockquote>
+                                ))}
+                              </div>
+                            </li>
+                          ))}
+                        </ol>
+                      )}
+                      {reviewClues.truncated && (
+                        <p className="provisionalClueNotice">角色审查线索超过展示上限，本页仅显示前 64 条。</p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="provisionalClueNotice">{runInfo?.status === "completed" ? "角色审查线索尚未加载。" : "完成一次分析后，可查看角色审查线索。"}</p>
+                  )}
+                </section>
+                <section className="pendingClueGroup" aria-labelledby="model-proposal-group-title">
+                  <h3 id="model-proposal-group-title">模型提案（未验证） <em>{provisionalClueCountLabel}</em></h3>
+                  <p>模型输出未通过完整校验；这里仅提供一侧原文定位，尚未确认角色事实或冲突。</p>
+                  {provisionalClues.status === "loading" && provisionalClues.runId === run ? (
+                    <p className="provisionalClueNotice">正在读取模型提案…</p>
+                  ) : provisionalClues.status === "error" && provisionalClues.runId === run ? (
+                    <div className="provisionalClueError">
+                      <p>模型提案读取失败，当前无法确认本次是否有提案。正式一致性问题仍可查看。</p>
+                      <button type="button" onClick={() => void loadProvisionalClues(run, viewEpochRef.current)}>重试读取模型提案</button>
+                    </div>
+                  ) : provisionalClues.status === "ready" && provisionalClues.runId === run ? (
+                    <>
+                      {provisionalClues.items.length === 0 ? (
+                        <p className="provisionalClueNotice">本次没有可安全定位的模型提案；这不代表角色审查已完整通过。</p>
+                      ) : (
+                        <ol className="provisionalClueList">
+                          {provisionalClues.items.map((clue) => (
+                            <li key={clue.id}>
+                              <div className="provisionalClueMeta">
+                                <span>待人工核对</span>
+                                <span>角色：{clue.character}</span>
+                                <span>{provisionalClueDimensionLabel(clue.dimension)}</span>
+                              </div>
+                              <h4><small>模型提案（未验证）</small>{clue.proposed_statement}</h4>
+                              <p>待复核原因：同批模型输出未通过完整校验。本条只保留原文定位与模型提案，尚未验证为角色事实或冲突。</p>
+                              <blockquote>
+                                <b>冻结原文 · {clue.document_name} v{clue.document_version} · 第 {clue.line_start}{clue.line_end === clue.line_start ? "" : `–${clue.line_end}`} 行</b>
+                                <span>{clue.evidence}</span>
+                              </blockquote>
+                            </li>
+                          ))}
+                        </ol>
+                      )}
+                      {provisionalClues.truncated && (
+                        <p className="provisionalClueNotice">模型提案超过展示上限，本页仅显示前 64 条。</p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="provisionalClueNotice">
+                      {runInfo?.status === "completed"
+                        ? "模型提案尚未加载。"
+                        : runInfo && ["queued", "running"].includes(runInfo.status)
+                          ? "本次运行尚未完成，模型提案暂不可用。"
+                          : runInfo
+                            ? "本次运行未成功完成，模型提案不可用。"
+                          : "完成一次分析后，这里会显示模型提案。"}
+                    </p>
+                  )}
+                </section>
               </section>
             </>
           )}

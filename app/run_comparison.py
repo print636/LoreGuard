@@ -28,7 +28,7 @@ from .narrative_context import (
 from .time_utils import utc_now_naive
 
 
-MATCHER_VERSION = "issue-match-v1"
+MATCHER_VERSION = "issue-match-v2-formal"
 MAX_ISSUES_PER_SIDE = 1_000
 
 # These fields describe the deterministic rule instance rather than generated
@@ -463,14 +463,20 @@ def materialize_run_comparison(
     baseline_issues = list(
         db.scalars(
             select(IssueRow)
-            .where(IssueRow.run_id == comparison.baseline_run_id)
+            .where(
+                IssueRow.run_id == comparison.baseline_run_id,
+                IssueRow.report_class == "formal",
+            )
             .order_by(IssueRow.id)
         ).all()
     )
     target_issues = list(
         db.scalars(
             select(IssueRow)
-            .where(IssueRow.run_id == target_run_id)
+            .where(
+                IssueRow.run_id == target_run_id,
+                IssueRow.report_class == "formal",
+            )
             .order_by(IssueRow.id)
         ).all()
     )
@@ -697,11 +703,17 @@ def mark_comparison_unverifiable(
         return None
     baseline_issues = list(
         db.scalars(
-            select(IssueRow).where(IssueRow.run_id == comparison.baseline_run_id)
+            select(IssueRow).where(
+                IssueRow.run_id == comparison.baseline_run_id,
+                IssueRow.report_class == "formal",
+            )
         ).all()
     )
     target_issues = list(
-        db.scalars(select(IssueRow).where(IssueRow.run_id == target_run_id)).all()
+        db.scalars(select(IssueRow).where(
+            IssueRow.run_id == target_run_id,
+            IssueRow.report_class == "formal",
+        )).all()
     )
     db.execute(
         delete(IssueComparisonItemRow).where(
@@ -740,6 +752,7 @@ def mark_comparison_unverifiable(
         for issue_id in baseline_issue_ids
         if feedback_snapshots.get(issue_id, {}).get("label") == "false_positive"
     )
+    comparison.matcher_version = MATCHER_VERSION
     comparison.status = "ready"
     comparison.summary = {
         "no_longer_detected": 0,

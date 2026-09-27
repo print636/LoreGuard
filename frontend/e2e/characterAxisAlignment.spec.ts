@@ -138,6 +138,7 @@ async function mockApi(page: Page, state: MockState) {
     else if (path === "/api/v1/analysis-runs/run-axis/diagnostics") body = {};
     else if (path === "/api/v1/analysis-runs/run-axis/clarifications") body = [];
     else if (path === "/api/v1/analysis-runs/run-axis/provisional-clues") body = { items: [], truncated: false };
+    else if (path === "/api/v1/analysis-runs/run-axis/review-clues") body = { items: [], truncated: false, unavailable_count: 0 };
     else if (path === `${root}/characters`) body = {
       items: [{ id: characterId, canonical_name: characterId, aliases: [],
         confirmed_item_count: state.confirmed ? 1 : 0,

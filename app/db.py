@@ -475,8 +475,14 @@ class AnalysisRunExecutionRow(Base):
 
 class IssueRow(Base):
     __tablename__ = "issues"
+    __table_args__ = (
+        Index("ix_issues_run_report_class_id", "run_id", "report_class", "id"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     run_id: Mapped[str] = mapped_column(ForeignKey("analysis_runs.id"), index=True)
+    report_class: Mapped[str] = mapped_column(
+        String(20), default="formal", server_default="formal", nullable=False
+    )
     category: Mapped[str] = mapped_column(String(80))
     severity: Mapped[str] = mapped_column(String(20))
     confidence: Mapped[float] = mapped_column(Float)

@@ -90,6 +90,8 @@ partial. `GET /api/v1/analysis-runs/{run_id}/provisional-clues` returns at most
 64 workspace-authorized clues with an explicit truncation flag. The ordinary
 diagnostics endpoint does not expose their source text.
 
+角色审查结果分为“正式一致性问题”和“待复核线索”。角色漂移只有最终判为冲突、已确认设定与当前新稿均有可核对的原文证据时，才进入正式问题列表、数量统计和报告导出。单次反向行为，或虽定位到双方原文但情境、材料或复核结论不足的情况，进入待复核线索；无法核对原文的提案不展示为结论。`GET /api/v1/analysis-runs/{run_id}/issues` 只返回正式问题，`GET /api/v1/analysis-runs/{run_id}/review-clues` 单独返回角色审查线索；上文的 `provisional-clues` 仍是未通过完整抽取校验的模型提案，不参与问题计数。旧数据升级时，不满足旧版冲突格式的角色条目保守降为线索；旧线索若无法与冻结原文核对，不展示正文，接口通过 `unavailable_count` 提示。历史线索超过安全扫描上限时，`scan_limited` 提示还有未核对条目；这两种情况都建议重新分析。
+
 Context inference is single-document and limited to 30,000 characters and 2,000 lines; larger inputs require manual context assignment. It is not a story rewrite, bulk classifier, authority decision, or production-accuracy claim. See the [V1 workflow and API contract](docs/guided-review-batch-v1.md) and the [full Chinese guide](README.zh-CN.md).
 
 Relevant API entry points are:
@@ -98,6 +100,7 @@ Relevant API entry points are:
 - `POST /api/v1/projects/{project_id}/documents/{document_id}/narrative-context/revisions` for the human-reviewed revision;
 - `POST /api/v1/projects/{project_id}/analysis-runs` with `mode=baseline_build|draft_review|full_review`, optional draft targets and a sensitivity level;
 - `GET /api/v1/analysis-runs/{run_id}` to inspect `review_batch` coverage and frozen `input_documents[].batch_role`.
+- `GET /api/v1/analysis-runs/{run_id}/review-clues` to inspect source-checked character review leads separately from formal issues; the response includes `items`, `truncated`, `unavailable_count` and `scan_limited`.
 - `GET /api/v1/analysis-runs/{run_id}/export.md` to download a completed run's evidence-first Markdown report with current feedback labels. The export uses all issues, regardless of the browser's current filters, and is workspace-scoped.
 - `GET` / `POST /api/v1/projects/{project_id}/character-trait-axes` to list or create immutable project axes with a positive proposition; `GET /{axis_id}` reads one exact axis and `POST /{axis_id}/positive-proposition` authors the one-time definition for a legacy axis.
 - Core-personality confirmation with an axis additionally requires `axis_alignment=same|opposite` and the expected positive-proposition hash. A legacy confirmed candidate uses `POST /api/v1/projects/{project_id}/characters/{character_key}/profile-candidates/{candidate_id}/alignment` for a separately audited mapping; neither action changes an old run.

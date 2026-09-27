@@ -37,6 +37,21 @@ const issue = {
   suggestion: "核对正式设定。",
   evidence: [{ document_id: "draft-1", document_name: "新稿.md", line_start: 20, line_end: 20, text: "正式问题证据。" }],
 };
+const reviewClue = {
+  id: "71475dcc-1d0c-4dd2-a014-06941adf1bf3",
+  report_class: "review_clue",
+  category: "character_drift",
+  severity: "low",
+  confidence: 0.52,
+  title: "林澈的角色表现需要确认",
+  explanation: "当前只见一次不同表现，尚不能判定角色设定改变。",
+  suggestion: "核对角色设定与上下文。",
+  evidence: [
+    { document_id: "profile", document_name: "设定.md", line_start: 3, line_end: 3, text: "林澈在陌生人前沉默寡言。" },
+    { document_id: "draft", document_name: "新稿.md", line_start: 12, line_end: 12, text: "林澈主动在众人面前长谈。" },
+  ],
+  metadata: { final_outcome: "needs_confirmation", review_reason: "single_behavior_is_not_drift" },
+};
 
 type MockState = {
   clueFailures: number;
@@ -45,6 +60,8 @@ type MockState = {
   unexpected: string[];
   feedbackPosts: number;
   exportReads: number;
+  reviewClueResponse?: unknown;
+  reviewClueFailures?: number;
   secondClueResponse?: unknown;
   firstClueDelay?: Promise<void>;
   firstClueRequests?: number;
@@ -101,6 +118,17 @@ async function mockCompletedReport(page: Page, state: MockState) {
     else if (state.secondClueResponse && path === `/api/v1/analysis-runs/${secondRunId}/provisional-clues`) {
       body = state.secondClueResponse;
     }
+    else if (path === `/api/v1/analysis-runs/${runId}/review-clues`) {
+      if (state.reviewClueFailures) {
+        state.reviewClueFailures -= 1;
+        await route.fulfill({ status: 500, json: { detail: "temporarily unavailable" } });
+        return;
+      }
+      body = state.reviewClueResponse ?? { items: [], truncated: false };
+    }
+    else if (state.secondClueResponse && path === `/api/v1/analysis-runs/${secondRunId}/review-clues`) {
+      body = { items: [], truncated: false };
+    }
     else {
       state.unexpected.push(`${route.request().method()} ${path}`);
       await route.fulfill({ status: 404, json: { detail: "unexpected mocked endpoint" } });
@@ -136,11 +164,11 @@ test("pending clues remain a separate reading section and do not become formal i
   await expect(clues).toContainText("不计入正式问题数");
   await expect(clues.getByRole("button")).toHaveCount(0);
   await expect(clues.getByRole("link")).toHaveCount(0);
-  await expect(formalIssues.getByRole("heading", { name: /一致性问题 1/ })).toBeVisible();
+  await expect(formalIssues.getByRole("heading", { name: /正式一致性问题 1/ })).toBeVisible();
   await expect(formalIssues.locator("article")).toHaveCount(1);
   await expect(formalIssues).toContainText(issue.title);
   await expect(formalIssues).not.toContainText(clue.proposed_statement);
-  await expect(page.locator(".railSummary")).toContainText("一致性问题");
+  await expect(page.locator(".railSummary")).toContainText("正式一致性问题");
   await expect(page.locator(".railSummary")).not.toContainText("待复核线索");
   await formalIssues.getByRole("button", { name: "已接受" }).click();
   await expect(formalIssues).toContainText("当前反馈：已接受");
@@ -185,6 +213,134 @@ test("zero formal issues with an unverified clue never reads as a clean pass", a
   expect(state.unexpected).toEqual([]);
 });
 
+test("one contrary character action is a dual-evidence review clue, not a formal issue", async ({ page }) => {
+  const state: MockState = {
+    clueFailures: 0,
+    clueResponse: { items: [], truncated: false },
+    reviewClueResponse: { items: [reviewClue], truncated: false },
+    issueResponse: [], unexpected: [], feedbackPosts: 0, exportReads: 0,
+  };
+  await mockCompletedReport(page, state);
+  await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
+
+  const formalIssues = page.locator(".issues");
+  const clues = page.getByRole("region", { name: /待复核线索/ });
+  await expect(formalIssues.getByRole("heading", { name: "正式一致性问题 0" })).toBeVisible();
+  await expect(formalIssues).toContainText("另有 1 条待复核线索列于下方，未计入正式问题");
+  await expect(formalIssues).not.toContainText(reviewClue.title);
+  await expect(clues.getByRole("heading", { name: "待复核线索 1" })).toBeVisible();
+  await expect(clues.getByRole("heading", { name: "角色审查线索 1" })).toBeVisible();
+  await expect(clues.getByRole("heading", { name: "模型提案（未验证） 0" })).toBeVisible();
+  await expect(clues).toContainText("待作者确认");
+  await expect(clues).toContainText(reviewClue.title);
+  await expect(clues).toContainText(`既有设定 · ${reviewClue.evidence[0].document_name}`);
+  await expect(clues).toContainText(reviewClue.evidence[0].text);
+  await expect(clues).toContainText(`当前新稿 · ${reviewClue.evidence[1].document_name}`);
+  await expect(clues).toContainText(reviewClue.evidence[1].text);
+  await expect(clues.getByRole("button")).toHaveCount(0);
+  await expect(clues.getByRole("link")).toHaveCount(0);
+  await expect(page.locator(".railSummary")).toContainText("正式一致性问题");
+  await expect(page.locator(".railSummary")).not.toContainText(reviewClue.title);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await expect(clues).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(await page.locator(".mainCanvas").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(state.feedbackPosts).toBe(0);
+  expect(state.exportReads).toBe(0);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("legacy clues with unverifiable evidence are disclosed but never promoted or counted", async ({ page }) => {
+  const state: MockState = {
+    clueFailures: 0, clueResponse: { items: [], truncated: false },
+    reviewClueResponse: { items: [], truncated: false, unavailable_count: 2 },
+    issueResponse: [], unexpected: [], feedbackPosts: 0, exportReads: 0,
+  };
+  await mockCompletedReport(page, state);
+  await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
+
+  const formalIssues = page.locator(".issues");
+  const clues = page.getByRole("region", { name: /待复核线索/ });
+  await expect(formalIssues.getByRole("heading", { name: "正式一致性问题 0" })).toBeVisible();
+  await expect(formalIssues).toContainText("另有 2 条历史线索因证据不足无法展示，建议重新分析");
+  await expect(clues.getByRole("heading", { name: "待复核线索 0" })).toBeVisible();
+  await expect(clues.getByRole("alert")).toContainText("2 条历史线索证据不足，无法展示；建议重新分析");
+  await expect(clues.getByRole("button")).toHaveCount(0);
+  expect(state.feedbackPosts).toBe(0);
+  expect(state.exportReads).toBe(0);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("scan-limited legacy rows do not masquerade as a complete zero clue result", async ({ page }) => {
+  const state: MockState = {
+    clueFailures: 0, clueResponse: { items: [], truncated: false },
+    reviewClueResponse: { items: [], truncated: false, unavailable_count: 1025, scan_limited: true },
+    issueResponse: [], unexpected: [], feedbackPosts: 0, exportReads: 0,
+  };
+  await mockCompletedReport(page, state);
+  await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
+  const formalIssues = page.locator(".issues");
+  const clues = page.getByRole("region", { name: /待复核线索/ });
+  await expect(formalIssues).toContainText("历史线索数量超过单页安全扫描上限，后续条目尚未核对");
+  await expect(clues.getByRole("alert").last()).toContainText("后续条目尚未核对；当前数量只是已核对部分");
+  await expect(clues.getByRole("heading", { name: "待复核线索 0" })).toBeVisible();
+  expect(state.unexpected).toEqual([]);
+});
+
+test("review clue failure is unknown until retry, while model proposals and formal issues stay readable", async ({ page }) => {
+  const state: MockState = {
+    clueFailures: 0,
+    clueResponse: { items: [clue], truncated: false },
+    reviewClueResponse: { items: [reviewClue], truncated: false },
+    reviewClueFailures: 1,
+    issueResponse: [], unexpected: [], feedbackPosts: 0, exportReads: 0,
+  };
+  await mockCompletedReport(page, state);
+  await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
+
+  const clues = page.getByRole("region", { name: /待复核线索/ });
+  const formalIssues = page.locator(".issues");
+  await expect(clues).toContainText("角色审查线索读取失败，当前无法确认数量");
+  await expect(clues.getByRole("heading", { name: "待复核线索 —" })).toBeVisible();
+  await expect(clues).toContainText(clue.proposed_statement);
+  await expect(formalIssues).toContainText("部分待复核线索读取失败，无法确认完整数量");
+  await clues.getByRole("button", { name: "重试读取角色审查线索" }).click();
+  await expect(clues.getByRole("heading", { name: "待复核线索 2" })).toBeVisible();
+  await expect(clues).toContainText(reviewClue.evidence[1].text);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("truncated review clues and model proposals show lower bounds rather than exact totals", async ({ page }) => {
+  const state: MockState = {
+    clueFailures: 0,
+    clueResponse: {
+      items: Array.from({ length: 64 }, (_, index) => ({
+        ...clue, id: `pc_${index.toString(16).padStart(32, "0")}`,
+      })),
+      truncated: true,
+    },
+    reviewClueResponse: {
+      items: Array.from({ length: 64 }, (_, index) => ({
+        ...reviewClue, id: `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
+      })),
+      truncated: true,
+    },
+    issueResponse: [], unexpected: [], feedbackPosts: 0, exportReads: 0,
+  };
+  await mockCompletedReport(page, state);
+  await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
+
+  const clues = page.getByRole("region", { name: /待复核线索/ });
+  await expect(clues.getByRole("heading", { name: "待复核线索 128+" })).toBeVisible();
+  await expect(clues.getByRole("heading", { name: "角色审查线索 64+" })).toBeVisible();
+  await expect(clues.getByRole("heading", { name: "模型提案（未验证） 64+" })).toBeVisible();
+  await expect(clues).toContainText("角色审查线索超过展示上限");
+  await expect(clues).toContainText("模型提案超过展示上限");
+  await expect(page.locator(".issues")).toContainText("另有至少 128 条待复核线索列于下方，部分未展示");
+  await expect(page.locator(".issues")).not.toContainText("另有 128 条待复核线索");
+  expect(state.unexpected).toEqual([]);
+});
+
 test("clue loading failure is distinct from zero clues and does not hide formal issues", async ({ page }) => {
   const state: MockState = {
     clueFailures: 1, clueResponse: { items: [], truncated: false },
@@ -194,11 +350,11 @@ test("clue loading failure is distinct from zero clues and does not hide formal 
   await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
 
   const clues = page.getByRole("region", { name: /待复核线索/ });
-  await expect(clues.getByRole("alert")).toContainText("无法确认本次是否有线索");
+  await expect(clues).toContainText("模型提案读取失败，当前无法确认本次是否有提案");
   await expect(clues).not.toContainText("本次没有可安全定位的待复核线索");
   await expect(page.locator(".issues")).toContainText(issue.title);
-  await clues.getByRole("button", { name: "重试读取线索" }).click();
-  await expect(clues).toContainText("本次没有可安全定位的待复核线索");
+  await clues.getByRole("button", { name: "重试读取模型提案" }).click();
+  await expect(clues).toContainText("本次没有可安全定位的模型提案");
   await expect(clues.getByRole("heading", { name: /待复核线索 0/ })).toBeVisible();
   expect(state.unexpected).toEqual([]);
 });

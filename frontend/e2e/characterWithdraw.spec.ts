@@ -51,6 +51,7 @@ test("a confirmed trait remains accessible after source retirement and can be ex
     else if (path === "/api/v1/analysis-runs/run-old/diagnostics") body = {};
     else if (path === "/api/v1/analysis-runs/run-old/clarifications") body = [];
     else if (path === "/api/v1/analysis-runs/run-old/provisional-clues") body = { items: [], truncated: false };
+    else if (path === "/api/v1/analysis-runs/run-old/review-clues") body = { items: [], truncated: false, unavailable_count: 0 };
     else if (path === "/api/v1/projects/project-1/characters") body = {
       items: url.searchParams.has("query") ? [] : [{ character_key: "林澈", character_display_name: "林澈",
         confirmed_trait_count: withdrawn ? 0 : 1, pending_candidate_count: 0,

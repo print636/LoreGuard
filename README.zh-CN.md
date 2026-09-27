@@ -183,6 +183,8 @@ exactly-once 边界见 [分析运行创建可靠性](docs/run-creation-reliabili
 
 若新稿模型输出未能通过整包校验，报告页可单独展示少量“待复核线索”：只取同一次可解析响应中已定位到冻结原文、且与失败记录不冲突的模型提案；完整合格的重试结果优先。线索是只读提示，不是事实、正式一致性问题或角色 OOC 判断，不参与问题数、反馈、导出及关系图/时间线。页面将读取失败与确实没有线索分开显示；最多展示 64 条，超出会明确提示截断。`GET /api/v1/analysis-runs/{run_id}/provisional-clues` 只向所属工作区返回经过冻结输入再次核验的线索，原文不会混入通用诊断接口。部分覆盖仍表示有内容未评估，不能因显示线索就视为审查完成。
 
+报告页还将角色审查结果分成“正式一致性问题”和“待复核线索”：角色冲突须有已确认设定与新稿双方的原文证据，并最终判为冲突；单次反向行为或材料不足的判断，只有定位到双方原文后才作为线索供作者核对，不计入正式问题数、反馈或导出。`GET /api/v1/analysis-runs/{run_id}/review-clues` 单独返回这类角色线索，与上面的未通过完整抽取校验的模型提案分开。升级旧数据时，无法确认属于旧版冲突格式的角色条目会保守降为线索；旧线索若不能与冻结原文核对，接口以 `unavailable_count` 提示而不展示正文。`scan_limited=true` 表示还有超出安全扫描上限、尚未核对的历史条目；遇到这两种提示建议重新分析。
+
 SSE 客户端可用 `Last-Event-ID` 请求头或 `last_event_id` 查询参数从指定事件之后恢复。终态事件固定返回 `status` 和 `error`；失败任务不会被当成成功结果加载。
 
 ## 输入格式
@@ -321,7 +323,8 @@ python scripts/run_long_text_smoke.py
 | GET | `/api/v1/projects/{id}/analysis-runs` | 获取项目运行历史 |
 | GET | `/api/v1/analysis-runs/{id}` | 查询状态与成本 |
 | GET | `/api/v1/analysis-runs/{id}/events` | SSE 进度流 |
-| GET | `/api/v1/analysis-runs/{id}/issues` | 获取问题与证据 |
+| GET | `/api/v1/analysis-runs/{id}/issues` | 获取正式问题与证据 |
+| GET | `/api/v1/analysis-runs/{id}/review-clues` | 单独获取角色审查线索；返回 `items`、`truncated`、`unavailable_count`、`scan_limited` |
 | POST | `/api/v1/analysis-runs/{id}/rechecks` | 冻结当前文档版本并从已完成任务发起复检 |
 | GET | `/api/v1/analysis-runs/{id}/comparison` | 分页读取四态复检对比，可按 outcome 过滤 |
 | GET | `/api/v1/analysis-runs/{id}/clarifications` | 获取与确认问题隔离的待澄清/开放问题（仅完成态） |

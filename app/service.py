@@ -61,7 +61,7 @@ from .character_trait_extraction import (
     _validate_signal_prompt_variant_settings,
     _bounded_provider,
 )
-from .domain import AnalysisCancelled
+from .domain import AnalysisCancelled, ConsistencyIssue, IssueCategory
 from .evidence_investigator_runtime import (
     EvidenceInvestigatorRuntime,
     InvestigatorUsageAccumulator,
@@ -2452,6 +2452,71 @@ def _enforce_draft_issue_boundary(
     )
 
 
+def _character_review_source_index(
+    documents: list[DocumentInput],
+) -> tuple[dict[str, DocumentInput], dict[str, list[str]]]:
+    """Build the frozen source lookup once for a batch of clue checks."""
+
+    return (
+        {document.id: document for document in documents},
+        {document.id: document.content.splitlines() for document in documents},
+    )
+
+
+def _verified_character_review_clues(
+    clues: tuple[ConsistencyIssue, ...],
+    documents: list[DocumentInput],
+    *,
+    source_index: tuple[dict[str, DocumentInput], dict[str, list[str]]] | None = None,
+) -> tuple[tuple[ConsistencyIssue, ...], int]:
+    """Rebind both sides and every supporting citation to frozen run input."""
+
+    frozen, source_lines = source_index or _character_review_source_index(documents)
+    accepted: list[ConsistencyIssue] = []
+    rejected = 0
+    for clue in clues[:256]:
+        if (
+            type(clue) is not ConsistencyIssue
+            or clue.category != IssueCategory.character_drift
+            or clue.metadata.get("final_outcome") not in {
+                "needs_confirmation", "unverifiable"
+            }
+            or not 2 <= len(clue.evidence) <= 12
+        ):
+            rejected += 1
+            continue
+        valid = True
+        for span in clue.evidence:
+            document = frozen.get(span.document_id)
+            lines = source_lines.get(span.document_id, ())
+            if (
+                document is None
+                or document.name != span.document_name
+                or not 1 <= span.line_start <= span.line_end <= len(lines)
+            ):
+                valid = False
+                break
+            literal = "\n".join(lines[span.line_start - 1:span.line_end])
+            if span.text not in {literal, literal.strip()}:
+                valid = False
+                break
+        if valid and (
+            clue.evidence[0].document_id,
+            clue.evidence[0].line_start,
+            clue.evidence[0].line_end,
+        ) == (
+            clue.evidence[1].document_id,
+            clue.evidence[1].line_start,
+            clue.evidence[1].line_end,
+        ):
+            valid = False
+        if valid:
+            accepted.append(clue)
+        else:
+            rejected += 1
+    return tuple(accepted), rejected + max(0, len(clues) - 256)
+
+
 def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
     """Create an immutable per-run sensitivity view without mutating globals."""
 
@@ -2573,6 +2638,7 @@ def execute_analysis(
                 settings, run
             )
             character_stage_result = None
+            character_review_clues = ()
             character_stage_db = CharacterConsistencyDatabase(
                 SessionLocal,
                 run_id=run_id,
@@ -2649,6 +2715,9 @@ def execute_analysis(
                 character_stage_result.diagnostics
             )
             if settings.enable_character_consistency:
+                # Clues never enter the formal issue pipeline, investigator,
+                # evidence reviewer, report provenance, or report statistics.
+                character_review_clues = character_stage_result.review_clues
                 if character_stage_result.issues:
                     try:
                         combined_issues = [
@@ -2872,6 +2941,28 @@ def execute_analysis(
                 input_metadata=input_metadata,
                 documents=documents,
             )
+            if run is not None and run.batch_mode == "draft_review":
+                draft_target_ids = {
+                    str(row.get("document_id"))
+                    for row in input_metadata
+                    if row.get("batch_role") == "target"
+                }
+                character_review_clues = tuple(
+                    clue for clue in character_review_clues
+                    if any(
+                        span.document_id in draft_target_ids
+                        for span in clue.evidence
+                    )
+                )
+            character_review_clues, rejected_review_clues = (
+                _verified_character_review_clues(
+                    character_review_clues, documents
+                )
+            )
+            result.diagnostics["character_review_clues"] = {
+                "stored": len(character_review_clues),
+                "rejected_unbound": rejected_review_clues,
+            }
 
             if settings.enable_issue_evidence_review:
                 _checkpoint(run_id, token, heartbeat)
@@ -2998,6 +3089,7 @@ def execute_analysis(
                 db.add(
                     IssueRow(
                         run_id=run_id,
+                        report_class="formal",
                         category=issue.category.value,
                         severity=issue.severity.value,
                         confidence=issue.confidence,
@@ -3006,6 +3098,21 @@ def execute_analysis(
                         evidence=[span.model_dump() for span in issue.evidence],
                         suggestion=issue.suggestion,
                         extra=extra,
+                    )
+                )
+            for clue in character_review_clues:
+                db.add(
+                    IssueRow(
+                        run_id=run_id,
+                        report_class="review_clue",
+                        category=clue.category.value,
+                        severity=clue.severity.value,
+                        confidence=clue.confidence,
+                        title=clue.title,
+                        explanation=clue.explanation,
+                        evidence=[span.model_dump() for span in clue.evidence],
+                        suggestion=clue.suggestion,
+                        extra=dict(clue.metadata),
                     )
                 )
 

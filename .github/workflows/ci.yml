@@ -62,6 +62,7 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q tests/test_pg_axis_direction_migration.py
       - run: python -m pytest -q tests/test_value_boundary_axis_foundation.py -k postgres_upgrade
+      - run: python -m pytest -q tests/test_issue_report_class_migration.py -k postgres_old_character_rows
   system-e2e:
     needs: test
     runs-on: ubuntu-latest

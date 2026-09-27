@@ -232,7 +232,9 @@ class ProvisionalCluesUnavailable(ValueError):
 class CharacterConsistencyStageResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # Only a final, evidence-bound conflict enters the formal issue pipeline.
     issues: tuple[ConsistencyIssue, ...] = ()
+    review_clues: tuple[ConsistencyIssue, ...] = Field(default=(), exclude=True)
     diagnostics: dict[str, Any]
     # Contentful review suggestions are persisted separately from diagnostics.
     provisional_draft_clues: tuple[ProvisionalDraftClue, ...] = Field(
@@ -1427,6 +1429,7 @@ class CharacterConsistencyStage:
             partial = True
 
         issues: list[ConsistencyIssue] = []
+        review_clues: list[ConsistencyIssue] = []
         drift_considered = 0
         drift_reviewed = 0
         drift_unverifiable = 0
@@ -1613,6 +1616,32 @@ class CharacterConsistencyStage:
                 review,
                 sensitivity=settings.character_consistency_sensitivity,
             )
+            baseline_spans = prepared.case.baseline.evidence
+            current_spans = prepared.matching_observations
+            evidence_pair_reason = None
+            if not baseline_spans or not current_spans:
+                evidence_pair_reason = "drift_evidence_pair_missing"
+            else:
+                baseline_ref = baseline_spans[0]
+                current_ref = current_spans[0].evidence
+                if (
+                    baseline_ref.document_id,
+                    baseline_ref.line_start,
+                    baseline_ref.line_end,
+                ) == (
+                    current_ref.document_id,
+                    current_ref.line_start,
+                    current_ref.line_end,
+                ):
+                    evidence_pair_reason = "drift_evidence_pair_not_distinct"
+            scoped_review_clue = (
+                promoted.outcome == "unverifiable"
+                and promoted.reason in {
+                    "scoped_axis_applicability_not_proven",
+                    "scoped_axis_applicability_unclear",
+                    "scoped_axis_event_independence_unproven",
+                }
+            )
             case_trace.append(
                 _safe_case_trace(
                     character_key=character_key,
@@ -1624,37 +1653,53 @@ class CharacterConsistencyStage:
                     prepare_reason=prepared.reason,
                     review=review,
                     final_outcome=promoted.outcome,
-                    visible=promoted.visible,
-                    promote_reason=promoted.reason,
+                    visible=(
+                        promoted.visible
+                        or promoted.outcome == "needs_confirmation"
+                        or scoped_review_clue
+                    ) and evidence_pair_reason is None,
+                    promote_reason=evidence_pair_reason or promoted.reason,
                 )
             )
             if promoted.outcome == "unverifiable":
                 drift_unverifiable += 1
                 partial = True
                 reason_counts[f"drift_{promoted.reason}"] += 1
-                continue
             if promoted.outcome == "no_issue":
                 drift_no_issue += 1
                 continue
-            if not promoted.visible:
-                reason_counts["below_sensitivity_threshold"] += 1
+            if (
+                promoted.outcome == "unverifiable"
+                and not promoted.visible
+                and not scoped_review_clue
+            ):
                 continue
-            issues.append(
-                _to_issue(
-                    promoted=promoted,
-                    prepared=prepared,
-                    confirmed_candidate_id=baseline_row.candidate_id,
-                    judgement=(
-                        review.decision.verdict
-                        if review is not None and review.decision is not None
-                        else (
-                            "deterministic_conflict"
-                            if prepared.deterministic_conflict
-                            else promoted.outcome
-                        )
-                    ),
-                )
+            if promoted.outcome not in {"conflict", "needs_confirmation", "unverifiable"}:
+                continue
+            if promoted.outcome != "conflict" and not promoted.visible:
+                reason_counts["review_clue_formal_threshold_not_met"] += 1
+            if evidence_pair_reason is not None:
+                partial = True
+                reason_counts[evidence_pair_reason] += 1
+                continue
+            finding = _to_issue(
+                promoted=promoted,
+                prepared=prepared,
+                confirmed_candidate_id=baseline_row.candidate_id,
+                judgement=(
+                    review.decision.verdict
+                    if review is not None and review.decision is not None
+                    else (
+                        "deterministic_conflict"
+                        if prepared.deterministic_conflict
+                        else promoted.outcome
+                    )
+                ),
             )
+            if promoted.outcome == "conflict":
+                issues.append(finding)
+            else:
+                review_clues.append(finding)
 
         if len(review_baselines) > settings.character_consistency_max_candidates_per_run:
             partial = True
@@ -1754,6 +1799,7 @@ class CharacterConsistencyStage:
             drift_no_issue=drift_no_issue,
             drift_scope_skipped=drift_scope_skipped,
             issue_count=len(issues),
+            review_clue_count=len(review_clues),
             stage_token_budget=stage_budget,
             configured_stage_token_budget=(
                 settings.character_consistency_stage_token_budget
@@ -1795,6 +1841,7 @@ class CharacterConsistencyStage:
         )
         return CharacterConsistencyStageResult(
             issues=tuple(issues),
+            review_clues=tuple(review_clues),
             diagnostics=diagnostics,
             provisional_draft_clues=provisional_clues,
             provisional_draft_clues_truncated=provisional_truncated,
@@ -3717,6 +3764,8 @@ def _to_issue(
             "confirmed_candidate_id": confirmed_candidate_id,
             "subtype": promoted.subtype,
             "judgement": judgement,
+            "final_outcome": promoted.outcome,
+            "review_reason": promoted.reason,
             "checker_version": CHARACTER_CONSISTENCY_CHECKER_VERSION,
             "scope_relation": prepared.case.scope_compatibility,
             "sensitivity": promoted.sensitivity,

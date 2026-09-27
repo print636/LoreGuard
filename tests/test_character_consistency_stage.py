@@ -1662,7 +1662,8 @@ def test_positive_state_does_not_suppress_targeted_recall_of_opposed_speech():
         assert counts["targeted_verification_signal_added_count"] == 1
         assert counts["draft_observation_count"] == 3
         assert result.diagnostics["outcome"] == "completed"
-        assert len(result.issues) == 1
+        assert not result.issues
+        assert len(result.review_clues) == 1
         assert len(provider.calls) == 5
         targeted_prompt = provider.calls[2][1]
         assert '"requested_polarity":"negative"' in targeted_prompt
@@ -1738,7 +1739,8 @@ def test_two_independent_primary_speech_samples_suppress_targeted_recall():
         assert counts["targeted_pass_scheduled_count"] == 0
         assert counts["draft_observation_count"] == 2
         assert result.diagnostics["outcome"] == "completed"
-        assert len(result.issues) == 1
+        assert not result.issues
+        assert len(result.review_clues) == 1
         assert len(provider.calls) == 3
 
 
@@ -3241,7 +3243,7 @@ def test_confirmed_key_context_limit_degrades_stage_coverage_to_partial():
         assert counts["context_truncated_document_count"] == 1
 
 
-def test_single_personality_behavior_is_hidden_but_two_behaviors_can_need_confirmation():
+def test_single_personality_behavior_is_clue_and_two_behaviors_can_need_confirmation():
     with TestClient(app) as client:
         project = client.post(
             "/api/v1/projects", json={"name": f"人格阶段-{uuid4().hex}"}
@@ -3305,6 +3307,8 @@ def test_single_personality_behavior_is_hidden_but_two_behaviors_can_need_confir
             ),
         )
         assert not one.issues
+        assert len(one.review_clues) == 1
+        assert one.review_clues[0].metadata["final_outcome"] == "needs_confirmation"
 
         two_run = _new_run(client, project["id"])
         two = _run_stage(
@@ -3347,9 +3351,71 @@ def test_single_personality_behavior_is_hidden_but_two_behaviors_can_need_confir
                 ),
             ),
         )
-        assert len(two.issues) == 1
-        assert two.issues[0].severity.value == "medium"
-        assert two.issues[0].metadata["judgement"] == "needs_confirmation"
+        assert not two.issues
+        assert len(two.review_clues) == 1
+        assert two.review_clues[0].severity.value == "medium"
+        assert two.review_clues[0].metadata["judgement"] == "needs_confirmation"
+
+
+def test_provider_review_failure_keeps_bound_clue_and_partial_diagnostic():
+    profile_line = "林澈在陌生人面前从不主动交谈。"
+    first_line = "林澈主动向陌生人问候。"
+    second_line = "林澈主动邀请陌生人同行。"
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"复核失败-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="profile.md", role="character_profile",
+            content=profile_line,
+            narrative_context=_context(publication="published"),
+        )
+        seed = _new_run(client, project["id"])
+        _run_stage(seed, QueueProvider(_response(_record(
+            evidence=profile_line, polarity="negative",
+            kind="explicit_declaration", dimension="core_personality",
+            trait_key="社交主动性",
+        ))))
+        _confirm_only_candidate(client, project["id"], seed)
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content=f"{first_line}\n{second_line}",
+            narrative_context=_context(publication="draft"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(
+                _response(_record(
+                    evidence=profile_line, polarity="negative",
+                    kind="explicit_declaration", dimension="core_personality",
+                    trait_key="社交主动性",
+                )),
+                _response(
+                    _record(
+                        evidence=first_line, polarity="positive", kind="action",
+                        dimension="core_personality", trait_key="社交主动性",
+                        line=1,
+                    ),
+                    _record(
+                        evidence=second_line, polarity="positive", kind="action",
+                        dimension="core_personality", trait_key="社交主动性",
+                        line=2,
+                    ),
+                ),
+                RuntimeError("upstream failed"),
+            ),
+        )
+    assert not result.issues
+    assert len(result.review_clues) == 1
+    clue = result.review_clues[0]
+    assert clue.metadata["final_outcome"] == "unverifiable"
+    assert clue.metadata["review_reason"] == "provider_error"
+    assert [span.document_name for span in clue.evidence[:2]] == [
+        "profile.md", "draft.md",
+    ]
+    assert result.diagnostics["outcome"] == "partial"
+    assert result.diagnostics["reason_counts"]["review_provider_error"] == 1
+    assert result.diagnostics["reason_counts"]["drift_provider_error"] == 1
 
 
 def test_support_keyword_requires_affirmative_clause():
@@ -3956,7 +4022,7 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
             "citation_refs": [],
             "citation_refs_incomplete": False,
             "final_outcome": "needs_confirmation",
-            "visible": False,
+            "visible": True,
             "promote_reason": "single_behavior_is_not_drift",
         }
         assert by_character["苏弦"]["prepare_reason"] == "no_opposition"
@@ -5131,6 +5197,7 @@ def test_scoped_axis_different_situation_is_not_a_formal_issue():
         situation_match="different",
     )
     assert result.issues == ()
+    assert result.review_clues == ()
     assert result.diagnostics["counts"]["drift_reviewed"] == 1
     assert result.diagnostics["counts"]["drift_no_issue"] == 1
     assert result.diagnostics["case_trace"][0]["promote_reason"] == (
@@ -5176,9 +5243,31 @@ def test_scoped_axis_same_event_repeated_on_two_lines_cannot_be_conflict():
         situation_match="same", independent_events="no",
     )
     assert result.issues == ()
+    assert len(result.review_clues) == 1
+    assert result.review_clues[0].metadata["final_outcome"] == "unverifiable"
+    assert result.review_clues[0].metadata["review_reason"] == (
+        "scoped_axis_event_independence_unproven"
+    )
+    assert result.diagnostics["outcome"] == "partial"
+    assert result.diagnostics["case_trace"][0]["visible"] is True
     assert result.diagnostics["case_trace"][0]["promote_reason"] == (
         "scoped_axis_event_independence_unproven"
     )
+
+
+def test_scoped_axis_unclear_situation_is_review_clue_not_formal_issue():
+    result, _ = _run_scoped_axis_stage(
+        ("林澈抛下家人独自离开，但家人当时是否遇险未写明。",),
+        situation_match="unclear",
+    )
+    assert result.issues == ()
+    assert len(result.review_clues) == 1
+    clue = result.review_clues[0]
+    assert clue.metadata["final_outcome"] == "unverifiable"
+    assert clue.metadata["review_reason"] == "scoped_axis_applicability_unclear"
+    assert len(clue.evidence) >= 2
+    assert clue.evidence[0].document_id != clue.evidence[1].document_id
+    assert result.diagnostics["outcome"] == "partial"
 
 
 def test_scoped_axis_review_is_default_off_with_explicit_partial_coverage():

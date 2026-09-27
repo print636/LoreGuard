@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Thread
 from typing import Annotated, Literal
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -93,7 +94,7 @@ from .character_consistency_stage import (
 )
 from .document_diff import build_document_diff
 from .docx_import import DocxImportError, extract_docx_text
-from .domain import CertaintyLevel, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
+from .domain import CertaintyLevel, ConsistencyIssue, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
 from .evaluation import run_evaluation
 from .observability import AnalysisMetricsUnavailable, render_analysis_metrics
 from .narrative_context import (
@@ -145,6 +146,9 @@ from .service import (
     current_project_source_signature,
     document_content_sha256,
     execute_analysis,
+    _character_review_source_index,
+    _load_verified_snapshot,
+    _verified_character_review_clues,
     run_input_metadata,
     run_narrative_context_fingerprint,
     run_trait_snapshot_metadata,
@@ -5648,6 +5652,7 @@ def list_character_drift_issues(
         filters = [
             AnalysisRunRow.project_id == project_id,
             IssueRow.category == "character_drift",
+            IssueRow.report_class == "formal",
         ]
         if normalized_character_key is not None:
             filters.append(
@@ -6178,6 +6183,7 @@ def _serialize_issue(row: IssueRow | None) -> dict | None:
         return None
     return {
         "id": row.id,
+        "report_class": row.report_class,
         "category": row.category,
         "severity": row.severity,
         "confidence": row.confidence,
@@ -6187,6 +6193,78 @@ def _serialize_issue(row: IssueRow | None) -> dict | None:
         "suggestion": row.suggestion,
         "metadata": row.extra,
     }
+
+
+def _safe_review_clue_payload(
+    row: IssueRow,
+    *,
+    legacy_frozen_documents=None,
+    legacy_source_index=None,
+) -> dict | None:
+    """Reject malformed old rows individually before returning contentful clues."""
+
+    if row.report_class != "review_clue" or row.category != "character_drift":
+        return None
+    try:
+        if str(UUID(row.id)) != row.id.lower():
+            return None
+    except (TypeError, ValueError, AttributeError):
+        return None
+    metadata = row.extra
+    if not isinstance(metadata, dict) or (
+        metadata.get("final_outcome")
+        not in {"needs_confirmation", "unverifiable"}
+    ):
+        return None
+    reason = metadata.get("review_reason")
+    if not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 128:
+        return None
+    if (
+        not isinstance(row.title, str) or not 1 <= len(row.title.strip()) <= 300
+        or not isinstance(row.explanation, str)
+        or not 1 <= len(row.explanation.strip()) <= 4_000
+        or not isinstance(row.evidence, list)
+        or not 2 <= len(row.evidence) <= 12
+    ):
+        return None
+    refs: list[tuple[str, int, int]] = []
+    for span in row.evidence:
+        if not isinstance(span, dict):
+            return None
+        document_id = span.get("document_id")
+        document_name = span.get("document_name")
+        text = span.get("text")
+        line_start = span.get("line_start")
+        line_end = span.get("line_end")
+        if (
+            not isinstance(document_id, str)
+            or not 1 <= len(document_id.strip()) <= 200
+            or not isinstance(document_name, str)
+            or not 1 <= len(document_name.strip()) <= 255
+            or not isinstance(text, str)
+            or not 1 <= len(text.strip()) <= 20_000
+            or type(line_start) is not int or type(line_end) is not int
+            or not 1 <= line_start <= line_end <= 10_000_000
+        ):
+            return None
+        refs.append((document_id, line_start, line_end))
+    if refs[0] == refs[1]:
+        return None
+    payload = _serialize_issue(row)
+    if metadata.get("legacy_report_reclassified") is True:
+        if legacy_frozen_documents is None:
+            return None
+        try:
+            parsed = ConsistencyIssue.model_validate(payload)
+            verified, rejected = _verified_character_review_clues(
+                (parsed,), legacy_frozen_documents,
+                source_index=legacy_source_index,
+            )
+        except (TypeError, ValueError):
+            return None
+        if rejected or len(verified) != 1:
+            return None
+    return payload
 
 
 def _comparison_feedback_snapshot(provenance: object) -> dict | None:
@@ -6244,7 +6322,10 @@ def get_run_comparison(
             # Fail closed if persisted lineage was corrupted or manually
             # inserted across projects; never follow it into another workspace.
             raise HTTPException(404, "复检谱系不存在")
-        if target.status == "completed" and comparison.status != "ready":
+        if target.status == "completed" and (
+            comparison.status != "ready"
+            or comparison.matcher_version != MATCHER_VERSION
+        ):
             try:
                 with db.begin_nested():
                     comparison = materialize_run_comparison(db, target_run_id)
@@ -6315,6 +6396,7 @@ def get_run_comparison(
                 for row in db.scalars(
                     select(IssueRow).where(
                         IssueRow.id.in_(issue_ids),
+                        IssueRow.report_class == "formal",
                         IssueRow.run_id.in_(
                             (comparison.baseline_run_id, comparison.target_run_id)
                         ),
@@ -6367,8 +6449,74 @@ def get_issues(
     with SessionLocal() as db:
         if not _run_in_workspace(db, run_id, context.workspace_id):
             raise HTTPException(404, "分析任务不存在")
-        rows = db.scalars(select(IssueRow).where(IssueRow.run_id == run_id)).all()
+        rows = db.scalars(select(IssueRow).where(
+            IssueRow.run_id == run_id,
+            IssueRow.report_class == "formal",
+        )).all()
         return [_serialize_issue(row) for row in rows]
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/review-clues")
+def get_review_clues(
+    run_id: str,
+    response: Response,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    with SessionLocal() as db:
+        if not _run_in_workspace(db, run_id, context.workspace_id):
+            raise HTTPException(404, "分析任务不存在")
+        clue_filter = (
+            IssueRow.run_id == run_id,
+            IssueRow.report_class == "review_clue",
+        )
+        total = db.scalar(
+            select(func.count()).select_from(IssueRow).where(*clue_filter)
+        ) or 0
+        rows = db.scalars(
+            select(IssueRow)
+            .where(*clue_filter)
+            .order_by(IssueRow.id)
+            .limit(1025)
+        ).all()
+        scan_limited = total > len(rows)
+        legacy_documents = None
+        legacy_source_index = None
+        if any(
+            isinstance(row.extra, dict)
+            and row.extra.get("legacy_report_reclassified") is True
+            for row in rows
+        ):
+            try:
+                legacy_documents, _ = _load_verified_snapshot(db, run_id)
+                legacy_source_index = _character_review_source_index(
+                    legacy_documents
+                )
+            except Exception:
+                # A legacy run without verifiable frozen inputs cannot prove
+                # the displayed source lines. Keep its row, but omit content.
+                legacy_documents = None
+        items: list[dict] = []
+        valid_count = 0
+        unavailable_count = 0
+        for row in rows:
+            payload = _safe_review_clue_payload(
+                row,
+                legacy_frozen_documents=legacy_documents,
+                legacy_source_index=legacy_source_index,
+            )
+            if payload is None:
+                unavailable_count += 1
+                continue
+            valid_count += 1
+            if len(items) < 64:
+                items.append(payload)
+        response.headers["Cache-Control"] = "private, no-store"
+        return {
+            "items": items,
+            "truncated": valid_count > 64,
+            "unavailable_count": unavailable_count,
+            "scan_limited": scan_limited,
+        }
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/export.md")
@@ -6386,7 +6534,10 @@ def export_markdown_report(
         issues = [
             _serialize_issue(row)
             for row in db.scalars(
-                select(IssueRow).where(IssueRow.run_id == run_id).order_by(IssueRow.id)
+                select(IssueRow).where(
+                    IssueRow.run_id == run_id,
+                    IssueRow.report_class == "formal",
+                ).order_by(IssueRow.id)
             ).all()
         ]
         issue_ids = [issue["id"] for issue in issues]
@@ -6530,7 +6681,10 @@ def _completed_visualization_rows(db, run_id: str, workspace_id: str):
         select(AnalysisRecordRow).where(AnalysisRecordRow.run_id == run_id)
     ).all())
     issues = list(db.scalars(
-        select(IssueRow).where(IssueRow.run_id == run_id)
+        select(IssueRow).where(
+            IssueRow.run_id == run_id,
+            IssueRow.report_class == "formal",
+        )
     ).all())
     return records, issues
 
@@ -6663,8 +6817,11 @@ def feedback(
     if payload.label not in {"accepted", "false_positive", "resolved"}:
         raise HTTPException(422, "label 必须是 accepted、false_positive 或 resolved")
     with SessionLocal() as db:
-        if not _issue_in_workspace(db, issue_id, context.workspace_id):
+        issue = _issue_in_workspace(db, issue_id, context.workspace_id)
+        if issue is None:
             raise HTTPException(404, "问题不存在")
+        if issue.report_class != "formal":
+            raise HTTPException(409, "待复核线索不支持问题反馈")
         latest = db.scalar(
             select(FeedbackRow)
             .where(FeedbackRow.issue_id == issue_id)

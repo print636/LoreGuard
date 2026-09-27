@@ -50,6 +50,7 @@ async function mockCompletedRun(page: Page, state: { character: CharacterDiagnos
     };
     else if (path === `/api/v1/analysis-runs/${runId}/clarifications`) response = [];
     else if (path === `/api/v1/analysis-runs/${runId}/provisional-clues`) response = { items: [], truncated: false };
+    else if (path === `/api/v1/analysis-runs/${runId}/review-clues`) response = { items: [], truncated: false, unavailable_count: 0 };
     else {
       state.unexpected.push(`${route.request().method()} ${path}`);
       await route.fulfill({ status: 404, json: { detail: "unexpected mocked endpoint" } });

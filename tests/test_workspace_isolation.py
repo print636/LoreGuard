@@ -177,6 +177,7 @@ class WorkspaceIsolationTests(unittest.TestCase):
                 f"/api/v1/projects/{project_id}/analysis-runs",
                 f"/api/v1/analysis-runs/{completed_id}",
                 f"/api/v1/analysis-runs/{completed_id}/issues",
+                f"/api/v1/analysis-runs/{completed_id}/review-clues",
                 f"/api/v1/analysis-runs/{completed_id}/export.md",
                 f"/api/v1/analysis-runs/{completed_id}/records",
                 f"/api/v1/analysis-runs/{completed_id}/clarifications",
