@@ -145,20 +145,6 @@ body {
   color: var(--muted);
 }
 
-.reportShortcut span,
-.railReportButton span {
-  display: inline-grid;
-  min-width: 20px;
-  height: 20px;
-  place-items: center;
-  margin-left: 5px;
-  padding: 0 5px;
-  color: var(--danger);
-  border-radius: 999px;
-  background: rgba(255, 127, 173, .12);
-  font-size: 10px;
-}
-
 .appShell {
   display: grid;
   grid-template-columns: 220px minmax(600px, 1fr) minmax(360px, 400px);
@@ -528,6 +514,31 @@ body {
 .mainCanvas .issues { margin: 0 0 18px; }
 .mainCanvas .issues article,
 .mainCanvas .clarifications article { grid-template-columns: 54px minmax(0, 1fr); }
+.mainCanvas .provisionalClues {
+  margin: 0 0 18px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(29, 23, 57, .56);
+}
+.provisionalClues .sectionHead h2 { margin-bottom: 0; }
+.provisionalClues h2 em { color: var(--warning); font-style: normal; }
+.provisionalClueIntro { max-width: 76ch; margin: 12px 0 18px; color: var(--text-2); line-height: 1.7; }
+.provisionalClueNotice { margin: 0; padding: 16px; color: var(--text-2); border: 1px dashed var(--line-strong); line-height: 1.65; }
+.provisionalClueError { padding: 14px 16px; border: 1px solid var(--line-strong); border-left: 3px solid var(--warning); background: rgba(255, 189, 130, .06); }
+.provisionalClueError p { margin: 0 0 12px; color: var(--text-2); line-height: 1.65; }
+.provisionalClueError button { min-height: 44px; }
+.provisionalClueList { margin: 0; padding: 0; list-style: none; }
+.provisionalClueList li { min-width: 0; padding: 18px 0; border-top: 1px solid var(--line); }
+.provisionalClueMeta { display: flex; flex-wrap: wrap; gap: 5px 13px; color: var(--text-2); font-size: 13px; }
+.provisionalClueMeta span:first-child { color: var(--warning); font-weight: 700; }
+.provisionalClueList h3 { display: grid; gap: 5px; margin: 10px 0; color: var(--text); font-size: 18px; line-height: 1.55; overflow-wrap: anywhere; }
+.provisionalClueList h3 small { color: var(--warning); font-size: 12px; font-weight: 700; }
+.provisionalClueList li > p { margin: 0 0 12px; color: var(--text-2); font-size: 14px; line-height: 1.6; }
+.provisionalClueList blockquote { min-width: 0; margin: 0; padding: 13px 15px; color: var(--text-2); border-left: 3px solid var(--warning); background: var(--field); line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+.provisionalClueList blockquote b { display: block; margin-bottom: 7px; color: var(--warning); font-size: 12px; }
+.provisionalClueList blockquote span { display: block; }
+.provisionalClueList + .provisionalClueNotice { margin-top: 14px; }
 .mainCanvas .status { margin-top: 0; }
 
 .mobileRunStrip { display: none; }
@@ -782,7 +793,8 @@ footer {
   .routeProblem > div { display: grid; }
   .mainCanvas .visualization .graphCanvas { height: 420px; min-height: 420px; }
   .mainCanvas .clarifications,
-  .mainCanvas .issues { padding: 14px; }
+  .mainCanvas .issues,
+  .mainCanvas .provisionalClues { padding: 14px; }
   .mainCanvas .issues article,
   .mainCanvas .clarifications article { grid-template-columns: 1fr; }
 }

@@ -75,6 +75,11 @@ import {
   type IssueEvidenceReviewDiagnosticView,
 } from "./issueEvidenceReview";
 import {
+  fetchProvisionalClues,
+  provisionalClueDimensionLabel,
+  type ProvisionalClue,
+} from "./provisionalClues";
+import {
   ApiError,
   apiFetch,
   apiJson,
@@ -122,6 +127,12 @@ type Issue = {
   suggestion: string;
   evidence: Evidence[];
   metadata?: unknown;
+};
+type ProvisionalClueState = {
+  runId: string | null;
+  status: "not_loaded" | "loading" | "ready" | "error";
+  items: ProvisionalClue[];
+  truncated: boolean;
 };
 type RecordRow = RecordView;
 type Doc = {
@@ -420,6 +431,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState("准备就绪");
   const [issues, setIssues] = useState<Issue[]>([]);
+  const [provisionalClues, setProvisionalClues] = useState<ProvisionalClueState>({
+    runId: null,
+    status: "not_loaded",
+    items: [],
+    truncated: false,
+  });
   const [records, setRecords] = useState<RecordRow[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [filter, setFilter] = useState("all");
@@ -467,6 +484,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const streamRef = useRef<EventSource | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const viewEpochRef = useRef(0);
+  const provisionalClueRequestRef = useRef(0);
+  const provisionalClueAbortRef = useRef<AbortController | null>(null);
   const loadedRouteRef = useRef("");
   const runMutationRef = useRef(false);
   const quickMutationRef = useRef(false);
@@ -546,6 +565,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   );
   const guidedState = useMemo(() => guidedDocumentState(docs), [docs]);
 
+  function clearProvisionalClues() {
+    ++provisionalClueRequestRef.current;
+    provisionalClueAbortRef.current?.abort();
+    provisionalClueAbortRef.current = null;
+    setProvisionalClues({ runId: null, status: "not_loaded", items: [], truncated: false });
+  }
+
   function clearAnalysisView() {
     streamRef.current?.close();
     streamRef.current = null;
@@ -556,6 +582,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setAcceptedModelExecution(null);
     setProgress(0);
     setIssues([]);
+    clearProvisionalClues();
     setClarifications([]);
     setRecords([]);
     setWarnings([]);
@@ -784,7 +811,26 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     );
     if (epoch === viewEpochRef.current) setFeedbacks(Object.fromEntries(pairs));
   }
+  async function loadProvisionalClues(runId: string, epoch: number) {
+    if (epoch !== viewEpochRef.current) return;
+    provisionalClueAbortRef.current?.abort();
+    const controller = new AbortController();
+    provisionalClueAbortRef.current = controller;
+    const request = ++provisionalClueRequestRef.current;
+    setProvisionalClues({ runId, status: "loading", items: [], truncated: false });
+    try {
+      const result = await fetchProvisionalClues(runId, controller.signal);
+      if (epoch !== viewEpochRef.current || request !== provisionalClueRequestRef.current || controller.signal.aborted) return;
+      setProvisionalClues({ runId, status: "ready", ...result });
+    } catch {
+      if (epoch !== viewEpochRef.current || request !== provisionalClueRequestRef.current || controller.signal.aborted) return;
+      setProvisionalClues({ runId, status: "error", items: [], truncated: false });
+    } finally {
+      if (provisionalClueAbortRef.current === controller) provisionalClueAbortRef.current = null;
+    }
+  }
   async function loadCompleted(runId: string, epoch = viewEpochRef.current) {
+    void loadProvisionalClues(runId, epoch);
     const paths = completedResultPaths(runId);
     const [loadedIssues, rec, status, diag, reviewItems] = await Promise.all([
       apiJson<Issue[]>(paths.issues),
@@ -918,6 +964,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setProgress(info.status === "completed" ? 100 : 0);
     setMessage(info.error || `历史任务：${info.status}`);
     setIssues([]);
+    clearProvisionalClues();
     setClarifications([]);
     setRecords([]);
     setWarnings([]);
@@ -964,6 +1011,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setBusy(true);
     setRun("");
     setIssues([]);
+    clearProvisionalClues();
     setClarifications([]);
     setRecords([]);
     setDiagnostics({});
@@ -1191,6 +1239,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       if (epoch !== viewEpochRef.current) return;
       setRun(created.id);
       setRunInfo(null);
+      clearProvisionalClues();
       setAcceptedModelExecution(created.model_execution ?? null);
       setBusy(true);
       terminalHandledRef.current.delete(created.id);
@@ -1410,6 +1459,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       streamRef.current?.close();
       ++catalogRequestRef.current;
       ++selectedProjectRequestRef.current;
+      provisionalClueAbortRef.current?.abort();
       if (catalogSearchTimerRef.current) clearTimeout(catalogSearchTimerRef.current);
     };
   }, []);
@@ -1534,7 +1584,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             className="reportShortcut workspaceSecondaryAction"
             onClick={() => navigateWorkspace("report")}
           >
-            查看报告 <span>{issues.length + clarifications.length}</span>
+            查看报告
           </button>
         </div>
       </header>
@@ -1568,7 +1618,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   "report",
                   "RP",
                   "完整报告",
-                  String(issues.length + clarifications.length || ""),
+                  "",
                 ],
               ] as Array<[WorkspaceView, string, string, string]>
             ).map(([view, glyph, label, badge]) => (
@@ -2309,7 +2359,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   <b>{records.length}</b>
                 </div>
                 <div>
-                  <small>问题线索</small>
+                  <small>一致性问题</small>
                   <b>{issues.length}</b>
                 </div>
                 <div>
@@ -2657,7 +2707,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   <div>
                     <p className="eyebrow">EVIDENCE REPORT</p>
                     <h2>
-                      一致性问题线索 <em>{visibleIssues.length}</em>
+                      一致性问题 <em>{visibleIssues.length}</em>
                     </h2>
                   </div>
                   <div className="reportFilters" aria-label="报告筛选">
@@ -2854,6 +2904,68 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   );
                 })}
               </section>
+              <section
+                className="provisionalClues workspaceView"
+                aria-labelledby="provisional-clues-title"
+                aria-busy={provisionalClues.status === "loading" && provisionalClues.runId === run}
+              >
+                <div className="sectionHead">
+                  <div>
+                    <p className="eyebrow">MODEL PROPOSALS</p>
+                    <h2 id="provisional-clues-title">
+                      待复核线索 <em>{provisionalClues.status === "ready" && provisionalClues.runId === run ? provisionalClues.items.length : "—"}</em>
+                    </h2>
+                  </div>
+                </div>
+                <p className="provisionalClueIntro">
+                  这些是未经整包验证的模型提案，需要对照冻结原文人工核对；它们不构成事实或一致性问题，不计入正式问题数，也不能在此提交问题反馈。
+                </p>
+                {provisionalClues.status === "loading" && provisionalClues.runId === run ? (
+                  <p className="provisionalClueNotice" role="status">正在读取待复核线索…</p>
+                ) : provisionalClues.status === "error" && provisionalClues.runId === run ? (
+                  <div className="provisionalClueError" role="alert">
+                    <p>待复核线索读取失败，当前无法确认本次是否有线索。正式一致性问题仍可查看。</p>
+                    <button type="button" onClick={() => void loadProvisionalClues(run, viewEpochRef.current)}>重试读取线索</button>
+                  </div>
+                ) : provisionalClues.status === "ready" && provisionalClues.runId === run ? (
+                  <>
+                    {provisionalClues.items.length === 0 ? (
+                      <p className="provisionalClueNotice">本次没有可安全定位的待复核线索；这不代表角色审查已完整通过。请查看运行覆盖状态。</p>
+                    ) : (
+                      <ol className="provisionalClueList">
+                        {provisionalClues.items.map((clue) => (
+                          <li key={clue.id}>
+                            <div className="provisionalClueMeta">
+                              <span>待人工核对</span>
+                              <span>角色：{clue.character}</span>
+                              <span>{provisionalClueDimensionLabel(clue.dimension)}</span>
+                            </div>
+                            <h3><small>模型提案（未验证）</small>{clue.proposed_statement}</h3>
+                            <p>待复核原因：模型输出未通过整包校验。</p>
+                            <blockquote>
+                              <b>冻结原文 · {clue.document_name} v{clue.document_version} · 第 {clue.line_start}{clue.line_end === clue.line_start ? "" : `–${clue.line_end}`} 行</b>
+                              <span>{clue.evidence}</span>
+                            </blockquote>
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                    {provisionalClues.truncated && (
+                      <p className="provisionalClueNotice" role="status">线索数量超过展示上限，本页仅显示前 64 条。</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="provisionalClueNotice">
+                    {runInfo?.status === "completed"
+                      ? "待复核线索尚未加载。"
+                      : runInfo && ["queued", "running"].includes(runInfo.status)
+                        ? "本次运行尚未完成，待复核线索暂不可用。"
+                        : runInfo
+                          ? "本次运行未成功完成，待复核线索不可用。"
+                        : "完成一次分析后，这里会显示待复核线索。"}
+                  </p>
+                )}
+              </section>
             </>
           )}
         </div>
@@ -2924,7 +3036,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </section>
           <section className="railSummary" aria-label="运行摘要">
             <div>
-              <small>问题线索</small>
+              <small>一致性问题</small>
               <b>{issues.length}</b>
             </div>
             <div>
@@ -3008,7 +3120,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             className="railReportButton"
             onClick={() => navigateWorkspace("report")}
           >
-            查看完整报告 <span>{issues.length + clarifications.length}</span>
+            查看完整报告
           </button>
         </aside>
         )}

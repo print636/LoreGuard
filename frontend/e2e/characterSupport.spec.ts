@@ -83,6 +83,7 @@ test("precise character evidence keeps the original line, distinction and fail-c
     else if (path === "/api/v1/analysis-runs/run-1/records") body = { records: [], warnings: [] };
     else if (path === "/api/v1/analysis-runs/run-1/diagnostics") body = {};
     else if (path === "/api/v1/analysis-runs/run-1/clarifications") body = [];
+    else if (path === "/api/v1/analysis-runs/run-1/provisional-clues") body = { items: [], truncated: false };
     else if (path === "/api/v1/projects/project-1/characters") body = {
       items: [{ id: "林澈", canonical_name: "林澈", aliases: [], confirmed_item_count: 0,
         pending_candidate_count: 1, drift_issue_count: 0, profile_revision: 0 }],

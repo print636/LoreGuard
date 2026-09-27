@@ -69,6 +69,15 @@ line independently pass the existing binding checks; it never relaxes formal
 baseline evidence requirements. Incomplete model packages still yield partial
 coverage rather than silently recycling a provisional record into OOC issues.
 
+An incomplete, parseable primary draft response may also produce a separate,
+read-only list of provisional clues. Each clue is rechecked against the run's
+frozen source and is visibly labeled as an unverified model proposal. A later
+clean package supersedes it. These clues never enter facts, OOC issues, issue
+counts, feedback, Markdown exports, or visualizations; partial coverage remains
+partial. `GET /api/v1/analysis-runs/{run_id}/provisional-clues` returns at most
+64 workspace-authorized clues with an explicit truncation flag. The ordinary
+diagnostics endpoint does not expose their source text.
+
 Context inference is single-document and limited to 30,000 characters and 2,000 lines; larger inputs require manual context assignment. It is not a story rewrite, bulk classifier, authority decision, or production-accuracy claim. See the [V1 workflow and API contract](docs/guided-review-batch-v1.md) and the [full Chinese guide](README.zh-CN.md).
 
 Relevant API entry points are:

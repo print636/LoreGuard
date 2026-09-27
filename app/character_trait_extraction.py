@@ -961,6 +961,11 @@ class CharacterSignalExtractionResult(BaseModel):
     signals: tuple[CharacterSignal, ...] = ()
     pending_candidates: tuple[PendingTraitCandidate, ...] = ()
     draft_observations: tuple[CharacterSignal, ...] = ()
+    # Only a locally bound subset of one incomplete primary draft package.
+    # This is deliberately absent from normal serialization and admission.
+    provisional_draft_clues: tuple[CharacterSignal, ...] = Field(
+        default=(), exclude=True
+    )
     diagnostics: CharacterSignalDiagnostics
 
 
@@ -988,6 +993,8 @@ class _SignalValidationFailure:
 @dataclass(frozen=True, slots=True)
 class _ValidatedSignalPackage:
     signals: tuple[CharacterSignal, ...] = ()
+    parsed: bool = False
+    provisional_draft_clues: tuple[CharacterSignal, ...] = ()
     raw_records: int = 0
     rejected_records: int = 0
     ignored_duplicate_records: int = 0
@@ -1582,6 +1589,7 @@ class CharacterSignalExtractor:
                 if missing:
                     validation = _ValidatedSignalPackage(
                         signals=validation.signals,
+                        parsed=validation.parsed,
                         raw_records=validation.raw_records,
                         rejected_records=validation.rejected_records + missing,
                         ignored_duplicate_records=(
@@ -1782,6 +1790,7 @@ def _validate_signal_package(
         )
     if len(envelope.records) > settings.character_signal_max_records:
         return _ValidatedSignalPackage(
+            parsed=True,
             raw_records=len(envelope.records),
             rejected_records=len(envelope.records),
             reason_counts={"record_limit": len(envelope.records)},
@@ -1962,6 +1971,17 @@ def _validate_signal_package(
 
     return _ValidatedSignalPackage(
         signals=tuple(signals),
+        parsed=True,
+        provisional_draft_clues=(
+            _provisional_draft_subset(
+                chunk=chunk,
+                raw_records=envelope.records,
+                accepted_signals=tuple(signals),
+                failures=tuple(failures),
+                reason_counts=reasons,
+            )
+            if chunk.source_kind == "draft" and not targets and reasons else ()
+        ),
         raw_records=len(envelope.records),
         rejected_records=sum(reasons.values()),
         ignored_duplicate_records=ignored_duplicate_records,
@@ -1997,6 +2017,113 @@ def _validate_signal_package(
             )
             if draft_trace_enabled else None
         ),
+    )
+
+
+_PROVISIONAL_DRAFT_LOCAL_REJECTIONS = frozenset({
+    "evidence_mismatch", "character_support", "directional_trait_key",
+    "key_object_required", "key_object_support", "statement_support",
+    "core_label_scope",
+})
+_PROVISIONAL_DRAFT_GLOBAL_PROVIDER_FAILURES = frozenset({
+    "response_too_large", "unsupported_content_encoding",
+    "response_decompression", "body_json", "response_shape",
+    "empty_content", "usage_shape", "truncated", "content_json",
+})
+
+
+def _provisional_draft_subset(
+    *,
+    chunk: CharacterSignalChunk,
+    raw_records: list[Any],
+    accepted_signals: tuple[CharacterSignal, ...],
+    failures: tuple[_SignalValidationFailure, ...],
+    reason_counts: Counter[str],
+) -> tuple[CharacterSignal, ...]:
+    """Keep only source-bound siblings isolated from every rejected record.
+
+    Unknown structure, coordinates or failure scope invalidates the whole
+    provisional view. The ordinary package result remains rejected either way.
+    """
+
+    if (
+        not accepted_signals or not failures
+        or len(failures) != sum(reason_counts.values())
+        or any(
+            failure.record_index is None
+            or failure.reason not in _PROVISIONAL_DRAFT_LOCAL_REJECTIONS
+            for failure in failures
+        )
+    ):
+        return ()
+    rejected: list[_RawCharacterSignal] = []
+    for failure in failures:
+        assert failure.record_index is not None
+        try:
+            record = _RECORD_ADAPTER.validate_python(
+                raw_records[failure.record_index]
+            )
+        except (IndexError, ValidationError, TypeError, ValueError):
+            return ()
+        if not (
+            chunk.global_line_start <= record.source_line_start
+            <= record.source_line_end <= chunk.global_line_end
+        ):
+            return ()
+        rejected.append(record)
+
+    safe: list[CharacterSignal] = []
+    for signal in accepted_signals:
+        evidence = signal.evidence
+        if any(
+            record.source_line_start <= evidence.line_end
+            and evidence.line_start <= record.source_line_end
+            or _draft_axes_may_match(signal, record)
+            for record in rejected
+        ):
+            continue
+        # An incomplete package can contradict itself even when the rejected
+        # record is elsewhere. Do not present either side as a clue.
+        if any(
+            other.id != signal.id
+            and other.polarity != signal.polarity
+            and _draft_axes_may_match(signal, other)
+            for other in accepted_signals
+        ):
+            continue
+        safe.append(signal)
+    return tuple(safe)
+
+
+def _draft_axes_may_match(
+    left: CharacterSignal,
+    right: _RawCharacterSignal | CharacterSignal,
+) -> bool:
+    if (
+        _compact(left.character) != _compact(right.character)
+        or left.dimension != right.dimension
+    ):
+        return False
+    if left.dimension in _OBJECT_REQUIRED_DIMENSIONS and (
+        not left.key_object.strip() or not right.key_object.strip()
+    ):
+        return True
+    if stable_trait_identity(
+        left.dimension, left.trait_key, left.key_object
+    ) == stable_trait_identity(
+        right.dimension, right.trait_key, right.key_object
+    ):
+        return True
+    return trait_keys_compatible(
+        dimension=left.dimension,
+        baseline_key=left.trait_key,
+        observation_key=right.trait_key,
+        observation_object=right.key_object,
+    ) or trait_keys_compatible(
+        dimension=right.dimension,
+        baseline_key=right.trait_key,
+        observation_key=left.trait_key,
+        observation_object=left.key_object,
     )
 
 
@@ -2518,8 +2645,43 @@ def _failed_package_result(
         core_scope_counts.update(attempt.core_label_scope_counts or {})
     if extra_reason:
         reasons[extra_reason] += 1
+    # Select one incomplete parsed package. More independently safe clues win;
+    # ties retain the earlier package. Never union records across attempts.
+    global_failure = extra_reason in _PROVISIONAL_DRAFT_GLOBAL_PROVIDER_FAILURES or any(
+        failure.record_index is None
+        or failure.reason not in _PROVISIONAL_DRAFT_LOCAL_REJECTIONS
+        for attempt in attempts for failure in attempt.failures
+    )
+    best_package = (
+        max(
+            (attempt for attempt in attempts if attempt.parsed),
+            key=lambda attempt: len(attempt.provisional_draft_clues),
+            default=None,
+        )
+        if not global_failure else None
+    )
+    provisional = (
+        tuple(
+            clue for clue in best_package.provisional_draft_clues
+            if not any(
+                other is not best_package
+                and any(
+                    clue.evidence.document_id == signal.evidence.document_id
+                    and clue.evidence.line_start <= signal.evidence.line_end
+                    and signal.evidence.line_start <= clue.evidence.line_end
+                    and _draft_axes_may_match(clue, signal)
+                    and {clue.polarity, signal.polarity}
+                    == {"positive", "negative"}
+                    for signal in other.signals
+                )
+                for other in attempts
+            )
+        )
+        if best_package else ()
+    )
     return _empty_result(
         "degraded",
+        provisional_draft_clues=provisional,
         attempted_calls=attempted_calls,
         raw_records=sum(attempt.raw_records for attempt in attempts),
         rejected_records=sum(attempt.rejected_records for attempt in attempts),
@@ -6087,8 +6249,10 @@ def _empty_result(
     token_admission: CharacterSignalTokenAdmission | None = None,
     support_trace: SupportTraceV1 | None = None,
     draft_trace: DraftSignalTraceV1 | None = None,
+    provisional_draft_clues: tuple[CharacterSignal, ...] = (),
 ) -> CharacterSignalExtractionResult:
     return CharacterSignalExtractionResult(
+        provisional_draft_clues=provisional_draft_clues,
         diagnostics=CharacterSignalDiagnostics(
             outcome=outcome,
             attempted_calls=attempted_calls,

@@ -49,6 +49,7 @@ async function mockCompletedRun(page: Page, state: { character: CharacterDiagnos
       model: completeModel, character_consistency: state.character,
     };
     else if (path === `/api/v1/analysis-runs/${runId}/clarifications`) response = [];
+    else if (path === `/api/v1/analysis-runs/${runId}/provisional-clues`) response = { items: [], truncated: false };
     else {
       state.unexpected.push(`${route.request().method()} ${path}`);
       await route.fulfill({ status: 404, json: { detail: "unexpected mocked endpoint" } });

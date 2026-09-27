@@ -115,6 +115,7 @@ async function mockApi(page: Page, state: MockState) {
     else if (path === `/api/v1/analysis-runs/${baselineRun.id}/records`) body = { records: [], warnings: [] };
     else if (path === `/api/v1/analysis-runs/${baselineRun.id}/diagnostics`) body = {};
     else if (path === `/api/v1/analysis-runs/${baselineRun.id}/clarifications`) body = [];
+    else if (path === `/api/v1/analysis-runs/${baselineRun.id}/provisional-clues`) body = { items: [], truncated: false };
     else if (path === `${root}/analysis-runs` && method === "POST") {
       state.posts.push(route.request().postDataJSON());
       await route.fulfill({ status: 503, json: { detail: "mocked run submit; request captured" } });

@@ -86,7 +86,10 @@ from .character_trait_extraction import stable_trait_identity, trait_keys_compat
 from .character_support_bindings import verify_stored_support_bindings
 from .character_consistency_stage import (
     CHARACTER_CONSISTENCY_CHECKER_VERSION,
+    PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY,
+    ProvisionalCluesUnavailable,
     _safe_context_label as _safe_axis_author_text,
+    project_provisional_draft_clues,
 )
 from .document_diff import build_document_diff
 from .docx_import import DocxImportError, extract_docx_text
@@ -6425,7 +6428,10 @@ def export_markdown_report(
             issues=issues,
             latest_feedback=latest_feedback,
             clarifications=clarifications,
-            diagnostics=diagnostic.payload if diagnostic else None,
+            diagnostics=(
+                _public_diagnostics_payload(diagnostic.payload)
+                if diagnostic else None
+            ),
         )
     return Response(
         content=markdown,
@@ -6562,11 +6568,52 @@ def get_diagnostics(
         if not _run_in_workspace(db, run_id, context.workspace_id):
             raise HTTPException(404, "分析任务不存在")
         row = db.get(AnalysisDiagnosticRow, run_id)
-        return row.payload if row else {
+        return _public_diagnostics_payload(row.payload) if row else {
             "chunking": {"total_chunks": 0, "documents": []},
             "aliases": {"declaration_count": 0, "trace_count": 0, "traces": []},
             "retrieval": {"candidate_count": 0, "consumed_count": 0, "traces": []},
         }
+
+
+def _public_diagnostics_payload(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        key: value for key, value in payload.items()
+        if key != PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY
+    }
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/provisional-clues")
+def get_provisional_clues(
+    run_id: str,
+    response: Response,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    response.headers["Cache-Control"] = "private, no-store"
+    with SessionLocal() as db:
+        run = _run_in_workspace(db, run_id, context.workspace_id)
+        if run is None:
+            raise HTTPException(404, "分析任务不存在")
+        if run.status != "completed":
+            raise HTTPException(409, "analysis_run_not_completed")
+        diagnostic = db.get(AnalysisDiagnosticRow, run_id)
+        if diagnostic is None:
+            return {"items": [], "truncated": False}
+        if not isinstance(diagnostic.payload, dict):
+            raise HTTPException(409, "待复核线索数据无法核验")
+        if PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY not in diagnostic.payload:
+            return {"items": [], "truncated": False}
+        payload = diagnostic.payload[PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY]
+        frozen_inputs = list(db.scalars(
+            select(AnalysisRunInputRow)
+            .where(AnalysisRunInputRow.run_id == run_id)
+            .order_by(AnalysisRunInputRow.ordinal, AnalysisRunInputRow.id)
+        ).all())
+        try:
+            return project_provisional_draft_clues(payload, frozen_inputs)
+        except ProvisionalCluesUnavailable:
+            raise HTTPException(409, "待复核线索数据无法核验") from None
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/events")

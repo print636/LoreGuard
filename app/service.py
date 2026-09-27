@@ -42,6 +42,7 @@ from .character_traits import (
 )
 from .character_consistency_stage import (
     CharacterConsistencyStage,
+    PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY,
     _safe_context_label,
     failed_character_consistency_stage,
 )
@@ -3048,7 +3049,26 @@ def execute_analysis(
             result.diagnostics["runtime_provenance"] = safe_runtime_provenance(
                 settings
             )
-            db.add(AnalysisDiagnosticRow(run_id=run_id, payload=result.diagnostics))
+            persisted_diagnostics = dict(result.diagnostics)
+            character_diagnostics = persisted_diagnostics.get("character_consistency")
+            if (
+                character_diagnostics is character_stage_result.diagnostics
+                and character_diagnostics.get("outcome") in {"partial", "degraded"}
+                and character_diagnostics.get("material_coverage") == "partial"
+                and character_stage_result.provisional_draft_clues
+            ):
+                persisted_diagnostics[PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY] = {
+                    "items": [
+                        clue.model_dump(mode="json")
+                        for clue in character_stage_result.provisional_draft_clues
+                    ],
+                    "truncated": (
+                        character_stage_result.provisional_draft_clues_truncated
+                    ),
+                }
+            db.add(AnalysisDiagnosticRow(
+                run_id=run_id, payload=persisted_diagnostics
+            ))
             cost = configured_cost_usd(
                 result.prompt_tokens, result.completion_tokens, get_settings()
             )

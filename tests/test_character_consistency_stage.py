@@ -650,6 +650,53 @@ def _response(*records: dict) -> str:
     return json.dumps({"records": list(records)}, ensure_ascii=False)
 
 
+def test_partial_primary_draft_clue_does_not_complete_coverage_or_create_issue():
+    source_line = "林澈一直喜欢蜜瓜。"
+    rejected_line = "周尧站在门口。"
+    valid = _record(
+        evidence=source_line, polarity="positive",
+        kind="explicit_declaration", line=1,
+    )
+    invalid = _record(
+        evidence="错误回显", polarity="positive", kind="action",
+        character="周尧", dimension="contextual_behavior",
+        trait_key="standing", line=2, statement="周尧站在门口",
+    )
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": f"部分包线索-{uuid4().hex}"}
+        ).json()
+        _create_document(
+            client, project["id"], name="draft.md", role="chapter",
+            content=f"{source_line}\n{rejected_line}",
+            narrative_context=_context(publication="draft"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            QueueProvider(_response(valid, invalid), _response(invalid)),
+            character_signal_draft_trace_v1=True,
+        )
+
+    assert result.issues == ()
+    assert len(result.provisional_draft_clues) == 1
+    assert result.provisional_draft_clues[0].evidence == source_line
+    assert "provisional_draft_clues" not in result.model_dump()
+    diagnostics = result.diagnostics
+    assert diagnostics["outcome"] in {"partial", "degraded"}
+    assert diagnostics["material_coverage"] == "partial"
+    assert diagnostics["counts"]["model_completed_chunks"] == 0
+    assert diagnostics["counts"]["draft_observation_count"] == 0
+    assert diagnostics["counts"]["pending_candidate_count"] == 0
+    assert diagnostics["counts"]["issue_count"] == 0
+    assert diagnostics["draft_trace_chunks"][0]["trace"]["final_state"] == (
+        "no_clean_package"
+    )
+    assert diagnostics["draft_trace_chunks"][0]["trace"][
+        "final_accepted_record_ordinals"
+    ] == []
+    assert source_line not in json.dumps(diagnostics, ensure_ascii=False)
+
+
 @pytest.mark.parametrize("recover", (False, True))
 def test_stage_core_label_scope_counts_survive_safe_serialization(recover: bool):
     line = "甲的核心性格是谨慎核对。甲喜欢热茶。"

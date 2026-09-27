@@ -4,9 +4,10 @@ import hashlib
 import json
 import re
 import unicodedata
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,11 +34,13 @@ from .character_trait_extraction import (
     MAX_TARGETED_CHARACTER_SIGNAL_CANDIDATE_LINES,
     CharacterSignal,
     CharacterSignalChunk,
+    CharacterDimension,
     CharacterSignalExtractor,
     CharacterSignalTarget,
     DraftSignalTraceV1,
     PendingTraitCandidate,
     SupportTraceV1,
+    _draft_axes_may_match,
     _draft_preference_proves_direct,
     build_pending_trait_candidates,
     draft_preference_context_is_relevant,
@@ -71,6 +74,7 @@ from .pipeline import DocumentInput
 
 
 CHARACTER_CONSISTENCY_CHECKER_VERSION = "character-consistency-stage-v1"
+PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY = "_provisional_draft_clues_v1"
 _SUGGESTION = "请核对是否存在尚未记录的成长、伪装或情境依据"
 _BRIDGE_PATTERN = re.compile(
     r"成长|训练|逐渐|渐渐|变得|学会|克服|改变|转变|经历.{0,24}(?:后|之后)|"
@@ -154,6 +158,9 @@ _MAX_CASE_TRACE_CITATION_REFS = 8
 _MAX_CASE_TRACE_LINE = 10_000_000
 _CASE_TRACE_CITATION_HANDLE = re.compile(r"^[BCGX][0-9]{2}$")
 _MAX_ACCEPTED_DRAFT_OBSERVATION_REFS = 64
+_MAX_PROVISIONAL_DRAFT_CLUES = 64
+_MAX_PROVISIONAL_CLUE_SPAN_LINES = 32
+_MAX_PROVISIONAL_LINE_PEERS = 64
 _MAX_TOKEN_ADMISSION_EVENTS = 24
 _MAX_EVIDENCE_MISMATCH_CHUNKS = 128
 _MAX_SUPPORT_TRACE_CHUNKS = 128
@@ -195,11 +202,40 @@ class _ChatProvider(Protocol):
     def complete(self, system: str, user: str): ...
 
 
+class ProvisionalDraftClue(BaseModel):
+    """A bounded source-bound suggestion, never an accepted observation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    id: str = Field(pattern=r"^pc_[a-f0-9]{32}$")
+    input_id: str = Field(min_length=1, max_length=200)
+    content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    document_id: str = Field(min_length=1, max_length=200)
+    document_version: int = Field(ge=1, strict=True)
+    document_name: str = Field(min_length=1, max_length=255)
+    line_start: int = Field(ge=1, le=10_000_000, strict=True)
+    line_end: int = Field(ge=1, le=10_000_000, strict=True)
+    evidence: str = Field(min_length=1, max_length=2_000)
+    character: str = Field(min_length=1, max_length=64)
+    dimension: CharacterDimension
+    proposed_statement: str = Field(min_length=2, max_length=300)
+    reason: Literal["partial_model_package"]
+
+
+class ProvisionalCluesUnavailable(ValueError):
+    """The saved clue set no longer matches the immutable run input."""
+
+
 class CharacterConsistencyStageResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     issues: tuple[ConsistencyIssue, ...] = ()
     diagnostics: dict[str, Any]
+    # Contentful review suggestions are persisted separately from diagnostics.
+    provisional_draft_clues: tuple[ProvisionalDraftClue, ...] = Field(
+        default=(), exclude=True
+    )
+    provisional_draft_clues_truncated: bool = Field(default=False, exclude=True)
     prompt_tokens: int = Field(default=0, ge=0)
     completion_tokens: int = Field(default=0, ge=0)
     charged_tokens: int = Field(default=0, ge=0)
@@ -356,6 +392,9 @@ class CharacterConsistencyStage:
         support_trace_chunks_omitted = 0
         draft_trace_chunks: list[dict[str, Any]] = []
         draft_trace_chunks_omitted = 0
+        provisional_draft_candidates: list[
+            tuple[_FrozenDocument, CharacterSignal]
+        ] = []
         frozen = self._bind_frozen_documents(
             db,
             run_id=run_id,
@@ -804,6 +843,18 @@ class CharacterConsistencyStage:
                 source_identity=scope_source,
                 frozen_content=source.document.content if scope_review_v1 else None,
             )
+            if (
+                source.source_kind == "draft"
+                and extraction.diagnostics.outcome == "degraded"
+                and extraction.diagnostics.attempted_calls > 0
+                and not extraction.signals
+                and not extraction.draft_observations
+                and not extraction.pending_candidates
+            ):
+                provisional_draft_candidates.extend(
+                    (source, signal)
+                    for signal in extraction.provisional_draft_clues
+                )
             processed_chunks += 1
             primary_called = extraction.diagnostics.attempted_calls > 0
             if primary_called:
@@ -1662,9 +1713,14 @@ class CharacterConsistencyStage:
             draft_trace_chunks=draft_trace_chunks,
             draft_trace_chunks_omitted_count=draft_trace_chunks_omitted,
         )
+        provisional_clues, provisional_truncated = _safe_provisional_draft_clues(
+            provisional_draft_candidates, accepted_signals=signals
+        )
         return CharacterConsistencyStageResult(
             issues=tuple(issues),
             diagnostics=diagnostics,
+            provisional_draft_clues=provisional_clues,
+            provisional_draft_clues_truncated=provisional_truncated,
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
             charged_tokens=usage.charged_tokens,
@@ -3566,6 +3622,188 @@ def _safe_accepted_draft_observation_refs(
             }
         )
     return refs, len(draft_signals), len(refs) < len(draft_signals)
+
+
+def _provisional_clue_id(clue: ProvisionalDraftClue) -> str:
+    identity = json.dumps(
+        [
+            clue.input_id, clue.content_sha256, clue.document_id,
+            clue.document_version, clue.line_start, clue.line_end,
+            clue.evidence, clue.character, clue.dimension,
+            clue.proposed_statement,
+        ],
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    return "pc_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
+def _source_bound_provisional_clue(
+    source: _FrozenDocument, signal: CharacterSignal,
+) -> ProvisionalDraftClue | None:
+    if (
+        source.source_kind != "draft"
+        or signal.source_kind != "draft"
+        or signal.evidence.document_id != source.document.id
+        or signal.evidence.document_name != source.document.name
+        or hashlib.sha256(source.document.content.encode("utf-8")).hexdigest()
+        != source.content_sha256
+    ):
+        return None
+    evidence = signal.evidence
+    lines = source.document.content.splitlines()
+    if (
+        type(evidence.line_start) is not int
+        or type(evidence.line_end) is not int
+        or not 1 <= evidence.line_start <= evidence.line_end
+        <= min(len(lines), _MAX_CASE_TRACE_LINE)
+        or evidence.line_end - evidence.line_start + 1
+        > _MAX_PROVISIONAL_CLUE_SPAN_LINES
+        or "\n".join(lines[evidence.line_start - 1:evidence.line_end]).strip()
+        != evidence.text
+    ):
+        return None
+    try:
+        clue = ProvisionalDraftClue(
+            id="pc_" + "0" * 32,
+            input_id=source.input_id,
+            content_sha256=source.content_sha256,
+            document_id=source.document.id,
+            document_version=source.document_version,
+            document_name=source.document.name,
+            line_start=evidence.line_start,
+            line_end=evidence.line_end,
+            evidence=evidence.text,
+            character=signal.character,
+            dimension=signal.dimension,
+            proposed_statement=signal.statement,
+            reason="partial_model_package",
+        )
+        return clue.model_copy(update={"id": _provisional_clue_id(clue)})
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_provisional_draft_clues(
+    candidates: list[tuple[_FrozenDocument, CharacterSignal]],
+    *,
+    accepted_signals: tuple[CharacterSignal, ...] = (),
+) -> tuple[tuple[ProvisionalDraftClue, ...], bool]:
+    """Bind each suggestion to frozen input and suppress ambiguous peers."""
+
+    bound: list[tuple[ProvisionalDraftClue, CharacterSignal]] = []
+    line_peers: dict[tuple[str, str, int], list[int]] = defaultdict(list)
+    for source, signal in candidates:
+        clue = _source_bound_provisional_clue(source, signal)
+        if clue is None:
+            continue
+        index = len(bound)
+        bound.append((clue, signal))
+        for line in range(clue.line_start, clue.line_end + 1):
+            line_peers[(clue.document_id, _key(clue.character), line)].append(index)
+
+    blocked: set[int] = set()
+    for peers in line_peers.values():
+        if len(peers) > _MAX_PROVISIONAL_LINE_PEERS:
+            blocked.update(peers)
+            continue
+        for offset, left_index in enumerate(peers):
+            left_signal = bound[left_index][1]
+            for right_index in peers[offset + 1:]:
+                right_signal = bound[right_index][1]
+                if not _draft_axes_may_match(left_signal, right_signal) or {
+                    left_signal.polarity, right_signal.polarity
+                } == {"positive", "negative"}:
+                    blocked.update((left_index, right_index))
+
+    # Accepted observations on overlapping source lines either cover the
+    # clue's axis or make that actor/line ambiguous. Merge intervals so long
+    # accepted spans do not require expanding every line.
+    accepted_ranges: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
+    for accepted in accepted_signals:
+        if accepted.source_kind != "draft":
+            continue
+        owner = (accepted.evidence.document_id, _key(accepted.character))
+        accepted_ranges[owner].append((
+            accepted.evidence.line_start, accepted.evidence.line_end
+        ))
+    accepted_intervals: dict[
+        tuple[str, str], tuple[list[int], list[tuple[int, int]]]
+    ] = {}
+    for owner, ranges in accepted_ranges.items():
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(ranges):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        accepted_intervals[owner] = ([start for start, _ in merged], merged)
+
+    unique: dict[str, ProvisionalDraftClue] = {}
+    for index, (clue, _signal) in enumerate(bound):
+        if index in blocked:
+            continue
+        actor = _key(clue.character)
+        intervals = accepted_intervals.get((clue.document_id, actor))
+        if intervals is not None:
+            starts, merged = intervals
+            position = bisect_right(starts, clue.line_end) - 1
+            if position >= 0 and merged[position][1] >= clue.line_start:
+                continue
+        unique.setdefault(clue.id, clue)
+    return (
+        tuple(list(unique.values())[:_MAX_PROVISIONAL_DRAFT_CLUES]),
+        len(unique) > _MAX_PROVISIONAL_DRAFT_CLUES,
+    )
+
+
+def project_provisional_draft_clues(
+    payload: object, frozen_inputs: list[AnalysisRunInputRow],
+) -> dict[str, Any]:
+    """Strict public projection of the private, source-bound run payload."""
+
+    if not isinstance(payload, dict) or set(payload) != {"items", "truncated"}:
+        raise ProvisionalCluesUnavailable("invalid provisional clue envelope")
+    raw_items, truncated = payload["items"], payload["truncated"]
+    if (
+        not isinstance(raw_items, list)
+        or len(raw_items) > _MAX_PROVISIONAL_DRAFT_CLUES
+        or type(truncated) is not bool
+        or truncated and len(raw_items) != _MAX_PROVISIONAL_DRAFT_CLUES
+    ):
+        raise ProvisionalCluesUnavailable("invalid provisional clue count")
+    by_input = {row.id: row for row in frozen_inputs}
+    projected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        try:
+            clue = ProvisionalDraftClue.model_validate(raw)
+            source = by_input[clue.input_id]
+            lines = source.content.splitlines()
+            if (
+                clue.id != _provisional_clue_id(clue)
+                or clue.id in seen
+                or source.document_id != clue.document_id
+                or source.document_version != clue.document_version
+                or source.document_name != clue.document_name
+                or source.content_sha256 != clue.content_sha256
+                or hashlib.sha256(source.content.encode("utf-8")).hexdigest()
+                != clue.content_sha256
+                or not clue.line_start <= clue.line_end <= len(lines)
+                or clue.line_end - clue.line_start + 1
+                > _MAX_PROVISIONAL_CLUE_SPAN_LINES
+                or "\n".join(lines[clue.line_start - 1:clue.line_end]).strip()
+                != clue.evidence
+            ):
+                raise ProvisionalCluesUnavailable("provisional clue source mismatch")
+            seen.add(clue.id)
+            projected.append(clue.model_dump(
+                mode="json", exclude={"input_id", "content_sha256"}
+            ))
+        except (AttributeError, KeyError, TypeError, UnicodeError, ValueError) as exc:
+            raise ProvisionalCluesUnavailable(
+                "provisional clue cannot be verified"
+            ) from exc
+    return {"items": projected, "truncated": truncated}
 
 
 def _safe_citation_refs(

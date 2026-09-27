@@ -98,6 +98,7 @@ async function mockApi(page: Page, state: MockState) {
     else if (state.completedRun && path === `/api/v1/analysis-runs/${completedRunId}/records`) body = { records: [], warnings: [] };
     else if (state.completedRun && path === `/api/v1/analysis-runs/${completedRunId}/diagnostics`) body = {};
     else if (state.completedRun && path === `/api/v1/analysis-runs/${completedRunId}/clarifications`) body = [];
+    else if (state.completedRun && path === `/api/v1/analysis-runs/${completedRunId}/provisional-clues`) body = { items: [], truncated: false };
     else {
       state.unexpected.push(`${method} ${path}`);
       await route.fulfill({ status: 404, json: { detail: "unexpected mocked endpoint" } });
@@ -287,9 +288,9 @@ test("完成的仅新稿报告明确写出 1 份目标、0 份背景及 OOC 限�
   await expect(scope).toContainText("仅新稿自检");
   await expect(scope).toContainText("1 份目标章节、0 份正式背景");
   await expect(scope).toContainText("不能据零问题断言角色 OOC 已通过");
-  await expect(page.getByRole("heading", { name: /一致性问题线索/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /一致性问题/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: /已确认的一致性问题/ })).toHaveCount(0);
-  await expect(page.locator(".railSummary")).toContainText("问题线索");
+  await expect(page.locator(".railSummary")).toContainText("一致性问题");
   if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
     await scope.screenshot({ path: testInfo.outputPath("draft-only-report-desktop.png") });
   }
