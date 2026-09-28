@@ -96,6 +96,8 @@ test('character coverage fails closed on contradictory or missing completion pro
     {...base, material_coverage:'partial'},
     {...base, material_coverage:undefined},
     {...base, material_coverage:'full'},
+    {...base, explanation_coverage:'not_run'},
+    {...base, explanation_coverage:'partial'},
     {...base, snapshot_bound:false},
     {...base, enabled:false},
     {...base, counts:{...completeCounts, model_completed_chunks:1,
@@ -146,6 +148,15 @@ test('partial character stage reports model-call coverage and only names budget 
   const invalidBudget = describeCharacterReviewStage({...partial,
     reason_counts:{token_budget:'1'}});
   assert.doesNotMatch(invalidBudget.detail, /Token 预算门控/);
+
+  const explanationNotRun = describeCharacterReviewStage({
+    ...partial,
+    material_coverage:'complete',
+    explanation_coverage:'not_run',
+    reason_counts:{explanation_review_not_run:1},
+  });
+  assert.equal(explanationNotRun.coverage, 'partial');
+  assert.doesNotMatch(explanationNotRun.label, /完整/);
 });
 
 test('completed task status does not erase a partial character outcome', () => {

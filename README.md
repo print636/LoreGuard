@@ -55,7 +55,7 @@ actor attribution, model judgments, and incomplete coverage can still miss
 valid cases, so authors must inspect both evidence spans and coverage status.
 
 Character-review evidence is now projected from the reviewer's validated
-`B/C/G/X` handles back to the exact frozen spans used in that call. A completed
+`B/C/G/X/P` handles back to the exact frozen spans used in that call. A completed
 review whose handles cannot be resolved to both baseline and current evidence
 fails closed and cannot become a formal issue; the report never substitutes
 the first available scene. Repeated-behaviour OOC review sends a bounded pool
@@ -75,6 +75,30 @@ A repeated description of one event therefore
 stays in review instead of being counted twice. These are evidence-integrity
 contracts, not an open-story accuracy result; see the
 [v2 development checkpoint](docs/character-ooc-evidence-binding-v2-20260927.md).
+
+An additional default-off `CHARACTER_EXPLANATION_REVIEW_V1` path reviews
+bounded candidate windows from the run's exact frozen sources for growth,
+disguise/role, temporary state/pressure, and possible foreshadowing. Eligible
+source text is exhaustively segmented while it fits the stage bound; lexical,
+axis, actor, and locality signals only rank candidates after that bound is
+exceeded, and the case then becomes partial. This is **not** embedding RAG.
+The reviewer can emit `G` (growth/causal bridge), `X`
+(applicable exception), or `P` (possible explanation) evidence. Explicit
+same-draft disguise or temporary-state evidence may become `X`, but a draft
+cannot certify its own growth into `G`; ambiguous or foreshadowing material
+stays `P`, as does non-explicit bounded inference. Every semantic support row
+is bound server-side to the stable current-observation IDs selected from its
+strict `C` allowlist. A `P` bound to a `C` used by the final contradiction,
+incomplete discovery, provider/validation failure, or a
+disagreement between semantic `G/X` support and the final contradiction
+verdict keeps the case in review rather than promoting a formal issue. Formal
+issues and review clues remain separate in counts, export, and feedback. See
+the [explanation-review V1 contract](docs/character-ooc-explanation-review-v1.md).
+This path is default-off and has no published open-text accuracy result or
+completed sealed real-model holdout. While it is off, any eligible character
+drift candidate remains a review clue with `explanation_coverage=not_run`;
+the run cannot publish that candidate as a formal character issue or claim
+complete character-review coverage.
 
 An author-confirmed character trait remains active even if its source document
 is later retired or reclassified as reference material. The character workbench
@@ -174,13 +198,15 @@ Every remote model path is independently opt-in. `ENABLE_MODEL_EXTRACTION`
 enables chat-based record extraction; `ENABLE_REVIEW_AGENT` additionally enables
 the older LangGraph repair stage inside that extraction path and does not work as
 a standalone caller; `ENABLE_CHARACTER_CONSISTENCY` enables frozen-source
-character-profile candidate extraction and draft-drift review;
+character-profile candidate extraction and draft-drift review; the nested
+`CHARACTER_EXPLANATION_REVIEW_V1` gate additionally enables bounded semantic
+explanation discovery inside that stage;
 `ENABLE_ISSUE_EVIDENCE_REVIEW` enables the post-rule chat annotation; and
 `ENABLE_EVIDENCE_INVESTIGATOR` enables the separate
 provider-native function-calling loop. `ENABLE_EMBEDDINGS` enables only the
 embedding client and does not enable chat by itself. The Reviewer and Investigator
-also require their documented embedding/PostgreSQL configuration, and all six
-switches default to false. The UI connection test is a separate explicit user
+also require their documented embedding/PostgreSQL configuration. All six top-level
+switches and the nested explanation-review gate default to false. The UI connection test is a separate explicit user
 action that makes one minimal chat request; merely loading the page never calls a
 model.
 
@@ -207,8 +233,8 @@ signal limit, in that order. These small, developer-visible observations do
 not prove that a larger budget resolves every failure. The partial draft in
 the latest 22k set had rejected model records; its new, content-free
 token-admission events were empty. A different frozen OOC story stopped at
-baseline candidate selection on a preceding build. Product defaults remain
-100k per run, 100k daily, 60k
+baseline candidate selection on a preceding build. Product defaults are now
+200k per run, 600k daily, 150k
 for the character stage and 22k per signal; the character stage defaults off.
 The latest runs in that checkpoint used a locally raised 10m daily limit.
 The [author-approved axis v1](docs/character-approved-axis-rfc.md) was

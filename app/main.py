@@ -3839,6 +3839,8 @@ def _character_coverage_for_run(
         return "unknown", "该次分析没有可核对的角色一致性执行记录"
     outcome = stage.get("outcome")
     if outcome == "completed":
+        if stage.get("explanation_coverage") in {"partial", "not_run"}:
+            return "unknown", "角色解释复核未执行或覆盖不足，无法确认角色 OOC 范围"
         if stage.get("material_coverage") == "partial":
             return "partial", "仅完成部分材料审查；未覆盖内容不能视为没有问题"
         primary_coverage = _character_primary_chunk_coverage(stage)

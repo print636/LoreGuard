@@ -44,6 +44,44 @@ def configured_settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+def test_character_explanation_runtime_identity_is_strict_and_legacy_safe():
+    disabled = safe_runtime_provenance(configured_settings())
+    enabled = safe_runtime_provenance(configured_settings(
+        character_explanation_review_v1=True,
+        character_explanation_token_budget=32_000,
+    ))
+    disabled_limits = disabled["character_consistency_limits"]
+    enabled_limits = enabled["character_consistency_limits"]
+    assert disabled_limits["explanation_review_v1"] is False
+    assert disabled_limits["explanation_token_budget"] == 24_000
+    assert enabled_limits["explanation_review_v1"] is True
+    assert enabled_limits["explanation_token_budget"] == 32_000
+    assert live_runner._safe_runtime_provenance(enabled) == enabled
+    assert axis_live._safe_character_runtime_provenance(enabled) is not None
+
+    for changes in (
+        {"explanation_review_v1": "true"},
+        {"explanation_token_budget": 511},
+        {"explanation_token_budget": 60_001},
+    ):
+        malformed = json.loads(json.dumps(enabled))
+        malformed["character_consistency_limits"].update(changes)
+        assert live_runner._safe_runtime_provenance(malformed) is None
+        assert axis_live._safe_character_runtime_provenance(malformed) is None
+
+    for missing in ("explanation_review_v1", "explanation_token_budget"):
+        malformed = json.loads(json.dumps(enabled))
+        del malformed["character_consistency_limits"][missing]
+        assert live_runner._safe_runtime_provenance(malformed) is None
+        assert axis_live._safe_character_runtime_provenance(malformed) is None
+
+    legacy = json.loads(json.dumps(enabled))
+    del legacy["character_consistency_limits"]["explanation_review_v1"]
+    del legacy["character_consistency_limits"]["explanation_token_budget"]
+    assert live_runner._safe_runtime_provenance(legacy) == legacy
+    assert axis_live._safe_character_runtime_provenance(legacy) is not None
+
+
 def test_draft_source_excerpt_repair_is_default_off_and_versioned_in_provenance():
     off = safe_runtime_provenance(configured_settings())
     on = safe_runtime_provenance(configured_settings(

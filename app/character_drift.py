@@ -5,7 +5,7 @@ import json
 import re
 import time
 import unicodedata
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
@@ -225,19 +225,48 @@ class SupportEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str = Field(pattern=r"^se_[A-Za-z0-9_-]{1,80}$")
-    kind: Literal["causal_bridge", "exception"]
+    kind: Literal["causal_bridge", "exception", "possible_explanation"]
     summary: str = Field(min_length=2, max_length=300)
     explicit: bool
     evidence: EvidenceSpan
     # Set only by the server from frozen document context. Older support rows
     # remain valid for ordinary review, but cannot open either single-behavior
     # explanation-only path without this complete provenance.
-    source_kind: Literal["formal_character_profile", "published_history"] | None = None
-    publication_status: Literal["published"] | None = None
-    authority_tier: Literal["core_canon", "formal_record"] | None = None
+    source_kind: Literal[
+        "formal_character_profile", "published_history", "draft"
+    ] | None = None
+    publication_status: Literal[
+        "published", "unknown", "draft", "in_review"
+    ] | None = None
+    authority_tier: Literal["core_canon", "formal_record", "draft"] | None = None
     resolution_state: Literal["confirmed"] | None = None
     source_ordinal: int | None = Field(default=None, ge=0, strict=True)
     eligible_draft_document_ids: tuple[str, ...] = ()
+    selection_basis: Literal[
+        "deterministic_explicit_v1", "semantic_relation_v1"
+    ] = "deterministic_explicit_v1"
+    # Semantic-review rows bind their conclusion to stable frozen signal ids.
+    # The default keeps legacy persisted rows readable; an empty semantic
+    # binding cannot certify an explanation for any observation.
+    applicable_observation_ids: tuple[str, ...] = Field(
+        default=(), max_length=24
+    )
+
+    @model_validator(mode="after")
+    def validate_applicable_observation_ids(self):
+        observation_ids = self.applicable_observation_ids
+        if (
+            len(observation_ids) != len(set(observation_ids))
+            or any(
+                not isinstance(observation_id, str)
+                or re.fullmatch(
+                    r"cs_[A-Za-z0-9_-]{1,80}", observation_id
+                ) is None
+                for observation_id in observation_ids
+            )
+        ):
+            raise ValueError("support observation ids are invalid")
+        return self
 
 
 class CharacterDriftCase(BaseModel):
@@ -249,6 +278,10 @@ class CharacterDriftCase(BaseModel):
     support_evidence: tuple[SupportEvidence, ...] = Field(default=(), max_length=16)
     scope_compatibility: ScopeCompatibility
     material_coverage: Literal["complete", "partial", "unknown"] = "unknown"
+    # This is independent from signal/material coverage.  A formal conflict
+    # is allowed only after the eligible explanation sources for this exact
+    # case were searched and every semantic candidate batch was reviewed.
+    explanation_coverage: Literal["complete", "partial", "not_run"] = "not_run"
     # Filled only by the server from a validated, one-target model call; it
     # is not taken from the model's JSON or inferred from a model trait_key.
     approved_axis_bound_observation_ids: tuple[str, ...] = ()
@@ -280,6 +313,13 @@ class CharacterDriftCase(BaseModel):
             or (mapped_ids and not self.baseline.axis_direction_verified)
         ):
             raise ValueError("approved axis observation direction is invalid")
+        current_observation_ids = {row.id for row in self.observations}
+        if any(
+            not set(support.applicable_observation_ids)
+            <= current_observation_ids
+            for support in self.support_evidence
+        ):
+            raise ValueError("support observation does not belong to case")
         return self
 
     def axis_observation_polarity(self, signal_id: str) -> str | None:
@@ -402,13 +442,15 @@ CHARACTER_REVIEW_SYSTEM_PROMPT = """你是 LoreGuard 的角色一致性证据审
 - verdict 只能是 contradicts、explained、needs_confirmation、insufficient_evidence；
 - 每一种 verdict 的 citations 都必须至少包含一个 B 编号基线和一个 C 编号当前观察；材料不足也必须指出正在比较的双侧原文，不能只引用单侧；
 - contradicts 必须同时引用至少一个 B 编号基线和一个 C 编号当前观察；
-- explained 必须同时引用至少一个 B 编号基线、一个 C 编号当前观察，以及至少一个 G 编号成长/因果证据或 X 编号例外证据；
+- explained 必须同时引用至少一个 B 编号基线、一个 C 编号当前观察，以及至少一个 G 编号成长/因果证据或 X 编号例外证据；P 编号只表示可能相关但不足以确证的伏笔或解释线索，不能支持 explained；
+- 每条 G/X/P 的 applicable_observation_citations 是服务端冻结的适用 C 范围。explained 必须引用本案每一条参与门槛的 C，且所引用 G/X 的适用范围并集必须覆盖这些 C；只解释其中一条行为不能把整个多行为 case 判为 explained。P 的范围不计入覆盖；
 - G/X 必须与该候选的同一角色、同一特征（trait）及 C 所示当前观察语义直接相关，并明确表示成长/因果事件、伪装或临时状态已经实际发生；
+- 若 P 编号确实与当前变化相关，只能选择 needs_confirmation 或 insufficient_evidence 并引用它；不得一边引用 P 一边选择 contradicts；
 - 规则说明、条件句、假设、可能性、未发生的事件，以及只涉及其他特征或能力的训练，即使被编为 G/X 也不得选择 explained；
 - citations 只能引用输入给出的编号；
 - explanation 只解释一致性判断，不得生成改写文本、替换台词或创作建议。
 
-单次反常行为不能证明核心人格改变；情境、临时状态、伪装和正式成长事件必须按已给证据处理。若材料不足或只找到可能相关事件，选择 needs_confirmation 或 insufficient_evidence，不得把“未检索到”写成“不存在”。
+单次反常行为不能证明核心人格改变；情境、临时状态、伪装和正式成长事件必须按已给证据处理。若 explanation_coverage 不是 complete、材料不足或只找到可能相关事件，选择 needs_confirmation 或 insufficient_evidence，不得把“未检索到”写成“不存在”。
 偏好基线若限定了“冰镇”等制作方式、当前证据只称未限定的对象，须核对当前表述是否明确覆盖该限定对象；只有普遍且直接对立的偏好声明才可判 contradicts，局部体验、不同食品或范围不清时选择 needs_confirmation，不得把一次拒食外推为长期偏好改变。
 """
 
@@ -442,6 +484,12 @@ def _is_scoped_approved_axis(baseline: ConfirmedTraitSnapshot) -> bool:
         baseline.approved_axis_identity is not None
         and baseline.dimension in {"value", "behavior_boundary"}
     )
+
+
+def _normalized_evidence_text(text: str) -> str:
+    """Return the server-owned identity used to reject copied C evidence."""
+
+    return " ".join(unicodedata.normalize("NFKC", text).split())
 
 
 def prepare_character_drift(case: CharacterDriftCase) -> PreparedCharacterDrift:
@@ -574,6 +622,10 @@ def prepare_character_drift(case: CharacterDriftCase) -> PreparedCharacterDrift:
         if row.observation_kind
         in {"action", "decision", "interaction", "dialogue", "speech_sample"}
     }
+    text_distinct_count = len({
+        _normalized_evidence_text(row.evidence.text)
+        for row in coordinate_distinct.values()
+    })
     context_ok = _contexts_compatible(baseline.contexts, opposed)
     if baseline.dimension == "contextual_behavior" and not context_ok:
         return PreparedCharacterDrift(
@@ -586,12 +638,13 @@ def prepare_character_drift(case: CharacterDriftCase) -> PreparedCharacterDrift:
             deterministic_conflict=False,
             reason="context_not_confirmed",
         )
-    if explicit or len(coordinate_distinct) >= 2:
+    if explicit or text_distinct_count >= 2:
         # An explicit statement needs at least one C. Repeated behaviour first
-        # produces only coordinate-distinct candidates; coordinates alone do
-        # not prove that they describe independent story events. Scoped axes
-        # therefore receive one diverse pair, while ordinary OOC review gets a
-        # bounded pool and must select its exact pair in structured output.
+        # requires two coordinate- and text-distinct candidates. Different
+        # document ids do not make copied source text a second behaviour.
+        # Neither distinction proves separate story events: scoped axes receive
+        # one diverse pair, while ordinary OOC review gets a bounded pool and
+        # must select its exact pair in structured output.
         if explicit:
             selected = explicit[:_MAX_DIRECT_REVIEW_OBSERVATIONS]
         elif _is_scoped_approved_axis(baseline):
@@ -806,10 +859,14 @@ class CharacterConsistencyReviewer:
         provider: _ChatProvider | None = None,
         *,
         settings: Settings | None = None,
+        checkpoint: Callable[[], None] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         base_provider = provider or OpenAICompatibleProvider(self.settings)
         self.provider = _bounded_provider(base_provider, self.settings, stage="drift")
+        if checkpoint is not None and not callable(checkpoint):
+            raise TypeError("character consistency checkpoint is invalid")
+        self.checkpoint = checkpoint if checkpoint is not None else (lambda: None)
         self._monotonic = time.monotonic
 
     def review(self, candidate: PreparedCharacterDrift) -> CharacterReviewResult:
@@ -847,6 +904,7 @@ class CharacterConsistencyReviewer:
                     "trait_key": candidate.case.baseline.trait_key,
                     "baseline_statement": candidate.case.baseline.statement,
                     "material_coverage": candidate.case.material_coverage,
+                    "explanation_coverage": candidate.case.explanation_coverage,
                     **(
                         {
                             "approved_axis_definition": (
@@ -925,6 +983,10 @@ class CharacterConsistencyReviewer:
                     "skipped", "event_identity_combined_token_budget"
                 )
         started_at = self._monotonic()
+        # Cooperative cancellation is a caller-owned control signal.  Keep it
+        # outside the provider failure boundary so its exact exception object
+        # propagates instead of degrading into a review result.
+        self.checkpoint()
         try:
             response = self.provider.complete(system_prompt, user_prompt)
         except ProviderError as exc:
@@ -961,6 +1023,9 @@ class CharacterConsistencyReviewer:
                 scoped_axis=scoped_axis,
                 current_count=len(candidate.matching_observations),
                 require_independent_events=multi_event_review,
+                support_observation_bindings=(
+                    _support_observation_bindings(candidate)
+                ),
             )
             if candidate.reason in {_MEDICAL_REVIEW_ONLY, _GROWTH_REVIEW_ONLY}:
                 labels = _explanation_only_labels(candidate)
@@ -1029,6 +1094,10 @@ class CharacterConsistencyReviewer:
                 stage="drift",
                 remaining_deadline_seconds=remaining_deadline,
             )
+            # The first review call is already chargeable at its provider
+            # boundary.  Check again before the independent second call so a
+            # cancellation cannot launch more model work.
+            self.checkpoint()
             try:
                 verification_response = verification_provider.complete(
                     CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
@@ -1152,6 +1221,27 @@ def _event_identity_verification_labels(
     return labels[0], labels[1]
 
 
+def _selected_pair_repeats_evidence_text(
+    candidate: PreparedCharacterDrift,
+    citations: tuple[str, ...],
+) -> bool:
+    """Reject two C handles that are copied views of the same frozen text."""
+
+    selected: list[CharacterSignal] = []
+    for citation in citations:
+        if not citation.startswith("C") or not citation[1:].isdigit():
+            return False
+        index = int(citation[1:]) - 1
+        if index < 0 or index >= len(candidate.matching_observations):
+            return False
+        selected.append(candidate.matching_observations[index])
+    return (
+        len(selected) == 2
+        and _normalized_evidence_text(selected[0].evidence.text)
+        == _normalized_evidence_text(selected[1].evidence.text)
+    )
+
+
 def _adjacent_pair_lacks_explicit_source_boundary(
     candidate: PreparedCharacterDrift,
     citations: tuple[str, ...],
@@ -1183,6 +1273,12 @@ def _adjacent_pair_lacks_explicit_source_boundary(
         key=lambda row: (row.evidence.line_start, row.evidence.line_end),
     )
     source_gap = later.evidence.line_start - earlier.evidence.line_end
+    # Distinct coordinate tuples do not prove distinct source material.  Two
+    # windows that share even one line can be duplicate views of the same
+    # event, and a time phrase inside that shared line must not legitimize the
+    # pair as two independent C records.
+    if source_gap <= 0:
+        return True
     if source_gap > 3:
         return False
     boundary = _EXPLICIT_EVENT_BOUNDARY_AT_LINE_START.match(later.evidence.text)
@@ -1312,6 +1408,30 @@ def promote_character_drift(
             evidence,
             sensitivity,
             "event_independence_not_proven",
+        )
+    selected_event_pair = _event_identity_verification_labels(
+        candidate,
+        decision,
+        scoped_axis=_is_scoped_approved_axis(candidate.case.baseline),
+    )
+    if (
+        selected_event_pair is not None
+        and _selected_pair_repeats_evidence_text(candidate, selected_event_pair)
+    ):
+        # Document metadata is not event evidence. A copied span remains one
+        # observation even if both untrusted model passes call it two events.
+        return _consistency_result(
+            candidate,
+            "needs_confirmation",
+            True,
+            "medium",
+            (
+                "模型选中的两条当前证据在文本规范化后是同一段原文；"
+                "文档编号不同也不能证明行为发生了两次，因此只能作为待复核线索。"
+            ),
+            evidence,
+            sensitivity,
+            "event_identity_duplicate_evidence",
         )
     if (
         candidate.reason == "two_independent_behaviors"
@@ -1517,6 +1637,23 @@ def promote_character_drift(
                     "growth_bridge_citation_mismatch"
                 ),
             )
+    if (
+        decision.verdict == "explained"
+        and not _explanation_covers_current_observations(candidate, decision)
+    ):
+        return _consistency_result(
+            candidate,
+            "needs_confirmation",
+            True,
+            "medium",
+            (
+                "现有成长、因果或例外证据只解释了部分当前表现；"
+                "仍有参与本案门槛的行为未被有效解释，需要人工复核。"
+            ),
+            evidence,
+            sensitivity,
+            "explanation_observation_coverage_incomplete",
+        )
     if decision.verdict == "explained":
         return _consistency_result(
             candidate,
@@ -1551,6 +1688,77 @@ def promote_character_drift(
             sensitivity,
             "model_needs_confirmation",
         )
+    decision_current_citations = frozenset(
+        citation for citation in decision.citations if citation.startswith("C")
+    )
+    if decision.verdict == "contradicts" and any(
+        support.kind == "possible_explanation"
+        and _support_applies_to_decision_citations(
+            candidate, support, decision_current_citations
+        )
+        for support in candidate.case.support_evidence
+    ):
+        # P rows are deliberately weaker than G/X rows, but their presence
+        # still proves that explanation discovery found a semantically related
+        # lead.  A final reviewer cannot turn silence about that lead into proof
+        # that no explanation exists.
+        return _consistency_result(
+            candidate,
+            "needs_confirmation",
+            True,
+            "medium",
+            (
+                "已发现可能相关的解释线索，但最终语义审查仍判定为冲突，且未能消解该线索；"
+                "在确认其与当前变化的关系前，只能作为待复核线索。"
+            ),
+            evidence,
+            sensitivity,
+            "possible_explanation_unresolved",
+        )
+    if decision.verdict == "contradicts" and any(
+        support.kind in {"causal_bridge", "exception"}
+        and support.selection_basis == "semantic_relation_v1"
+        and _support_applies_to_decision_citations(
+            candidate, support, decision_current_citations
+        )
+        for support in candidate.case.support_evidence
+    ):
+        # The discovery reviewer already classified this row as a definitive
+        # bridge/exception for the bounded comparison.  A contradictory final
+        # verdict is therefore a disagreement between two semantic passes, not
+        # enough consensus for a formal conflict.
+        return _consistency_result(
+            candidate,
+            "needs_confirmation",
+            True,
+            "medium",
+            (
+                "解释证据复核已将相关材料认定为明确的成长、因果或例外依据，"
+                "但最终语义审查仍判定为冲突；两次语义复核结论不一致，需要人工确认。"
+            ),
+            evidence,
+            sensitivity,
+            "semantic_explanation_review_disagreement",
+        )
+    if candidate.case.explanation_coverage != "complete":
+        # A conflict means more than "the supplied G/X rows did not explain
+        # it".  It is safe to publish formally only when every eligible
+        # explanation candidate batch for this case was actually reviewed.
+        # Timeouts, candidate truncation and disabled discovery therefore
+        # remain visible author-review clues rather than false certainty.
+        return _consistency_result(
+            candidate,
+            "needs_confirmation",
+            True,
+            "medium",
+            (
+                "当前证据呈现反向表现，但成长、伪装或临时情境的解释证据检索未完整完成；"
+                "本轮只能作为待复核线索。"
+            ),
+            evidence,
+            sensitivity,
+            "explanation_search_incomplete",
+        )
     if candidate.case.material_coverage != "complete":
         # Apparent opposition cannot prove that no bridge exists outside an
         # incomplete snapshot, even when the model otherwise votes conflict.
@@ -1566,6 +1774,27 @@ def promote_character_drift(
             evidence,
             sensitivity,
             "material_coverage_incomplete",
+        )
+    if candidate.reason != "two_independent_behaviors":
+        # Product rule: one opposed declaration, state description or action
+        # is an author-review lead, never proof of stable character drift.  At
+        # present only the two-behaviour path invokes both the bounded pair
+        # selection contract and the independent-event second pass.  Keeping
+        # every other path out of formal conflict also prevents two clauses
+        # from one scene (or a model citing only one of them) from bypassing
+        # that proof obligation.
+        return _consistency_result(
+            candidate,
+            "needs_confirmation",
+            True,
+            "medium",
+            (
+                "当前只形成了一次可核对的反向表现，或尚未完成两次独立事件的证明；"
+                "它可作为待复核线索，但不能据此确认角色设定冲突。"
+            ),
+            evidence,
+            sensitivity,
+            "single_opposition_not_repeated",
         )
     # Only a validated decision with baseline + current citations reaches here.
     return _consistency_result(
@@ -1861,6 +2090,11 @@ def _medical_exception_labels(
         exception_index += 1
         span = support.evidence
         if (
+            (
+                support.selection_basis == "semantic_relation_v1"
+                and observation.id not in support.applicable_observation_ids
+            )
+            or
             support.explicit is not True
             or support.source_kind not in {"formal_character_profile", "published_history"}
             or support.publication_status != "published"
@@ -1964,6 +2198,11 @@ def _growth_bridge_labels(
         bridge_index += 1
         span = support.evidence
         if (
+            (
+                support.selection_basis == "semantic_relation_v1"
+                and observation.id not in support.applicable_observation_ids
+            )
+            or
             support.explicit is not True
             or support.source_kind not in {"formal_character_profile", "published_history"}
             or support.publication_status != "published"
@@ -2012,34 +2251,155 @@ def _evidence_rows(
     rows: list[dict[str, Any]] = []
     labels: set[str] = set()
 
-    def append(prefix: str, index: int, role: str, evidence: EvidenceSpan, summary: str) -> None:
+    def append(
+        prefix: str,
+        index: int,
+        role: str,
+        evidence: EvidenceSpan,
+        summary: str,
+        applicable_observation_citations: tuple[str, ...] | None = None,
+    ) -> None:
         label = f"{prefix}{index:02d}"
         labels.add(label)
-        rows.append(
-            {
-                "id": label,
-                "role": role,
-                "document": evidence.document_name,
-                "line_start": evidence.line_start,
-                "line_end": evidence.line_end,
-                "summary": summary,
-                "text": evidence.text,
-            }
-        )
+        row: dict[str, Any] = {
+            "id": label,
+            "role": role,
+            "document": evidence.document_name,
+            "line_start": evidence.line_start,
+            "line_end": evidence.line_end,
+            "summary": summary,
+            "text": evidence.text,
+        }
+        if applicable_observation_citations is not None:
+            row["applicable_observation_citations"] = list(
+                applicable_observation_citations
+            )
+        rows.append(row)
 
     for index, evidence in enumerate(candidate.case.baseline.evidence, start=1):
         append("B", index, "baseline", evidence, candidate.case.baseline.statement)
     for index, observation in enumerate(candidate.matching_observations, start=1):
         append("C", index, "current", observation.evidence, observation.statement)
+    current_citation_by_id = {
+        observation.id: f"C{index:02d}"
+        for index, observation in enumerate(
+            candidate.matching_observations, start=1
+        )
+    }
+    bridge_index = exception_index = possible_index = 0
+    for support in candidate.case.support_evidence:
+        applicable_citations = tuple(
+            current_citation_by_id[observation_id]
+            for observation_id in support.applicable_observation_ids
+            if observation_id in current_citation_by_id
+        )
+        if (
+            not applicable_citations
+            and support.selection_basis == "deterministic_explicit_v1"
+        ):
+            applicable_citations = tuple(current_citation_by_id.values())
+        if support.kind == "causal_bridge":
+            bridge_index += 1
+            append(
+                "G", bridge_index, "bridge", support.evidence, support.summary,
+                applicable_citations,
+            )
+        elif support.kind == "exception":
+            exception_index += 1
+            append(
+                "X", exception_index, "exception", support.evidence, support.summary,
+                applicable_citations,
+            )
+        else:
+            possible_index += 1
+            append(
+                "P", possible_index, "possible_explanation",
+                support.evidence, support.summary,
+                applicable_citations,
+            )
+    return rows, frozenset(labels)
+
+
+def _support_observation_bindings(
+    candidate: PreparedCharacterDrift,
+) -> dict[str, frozenset[str]]:
+    """Return the effective per-G/X bindings for this exact prepared case."""
+
+    current = frozenset(
+        f"C{index:02d}"
+        for index in range(1, len(candidate.matching_observations) + 1)
+    )
+    citation_by_observation_id = {
+        observation.id: f"C{index:02d}"
+        for index, observation in enumerate(
+            candidate.matching_observations, start=1
+        )
+    }
+    result: dict[str, frozenset[str]] = {}
     bridge_index = exception_index = 0
     for support in candidate.case.support_evidence:
         if support.kind == "causal_bridge":
             bridge_index += 1
-            append("G", bridge_index, "bridge", support.evidence, support.summary)
-        else:
+            label = f"G{bridge_index:02d}"
+        elif support.kind == "exception":
             exception_index += 1
-            append("X", exception_index, "exception", support.evidence, support.summary)
-    return rows, frozenset(labels)
+            label = f"X{exception_index:02d}"
+        else:
+            continue
+        bindings = frozenset(
+            citation_by_observation_id[observation_id]
+            for observation_id in support.applicable_observation_ids
+            if observation_id in citation_by_observation_id
+        )
+        if not bindings and support.selection_basis == "deterministic_explicit_v1":
+            # Legacy deterministic rows predate explicit C binding. They were
+            # selected by server rules for the whole case and remain readable.
+            bindings = current
+        if not bindings <= current:
+            bindings = frozenset()
+        result[label] = bindings
+    return result
+
+
+def _explanation_covers_current_observations(
+    candidate: PreparedCharacterDrift,
+    decision: ModelDriftDecision,
+) -> bool:
+    current = frozenset(
+        f"C{index:02d}"
+        for index in range(1, len(candidate.matching_observations) + 1)
+    )
+    citations = frozenset(decision.citations)
+    cited_current = frozenset(
+        citation for citation in citations if citation.startswith("C")
+    )
+    if not cited_current or not cited_current <= current:
+        return False
+    required = cited_current
+    bindings = _support_observation_bindings(candidate)
+    covered: set[str] = set()
+    for label in citations:
+        covered.update(bindings.get(label, ()))
+    return bool(required) and required <= citations and required <= covered
+
+
+def _support_applies_to_decision_citations(
+    candidate: PreparedCharacterDrift,
+    support: SupportEvidence,
+    decision_current_citations: frozenset[str],
+) -> bool:
+    citation_by_observation_id = {
+        observation.id: f"C{index:02d}"
+        for index, observation in enumerate(
+            candidate.matching_observations, start=1
+        )
+    }
+    bindings = frozenset(
+        citation_by_observation_id[observation_id]
+        for observation_id in support.applicable_observation_ids
+        if observation_id in citation_by_observation_id
+    )
+    return bool(bindings & decision_current_citations)
 
 
 def _validate_decision(
@@ -2049,6 +2409,7 @@ def _validate_decision(
     scoped_axis: bool = False,
     current_count: int = 0,
     require_independent_events: bool = False,
+    support_observation_bindings: dict[str, frozenset[str]] | None = None,
 ) -> None:
     citations = set(decision.citations)
     if len(citations) != len(decision.citations) or not citations <= allowed:
@@ -2121,6 +2482,17 @@ def _validate_decision(
         and any(value.startswith(("G", "X")) for value in citations)
     ):
         raise ValueError("explanation_requires_baseline_current_and_support")
+    if decision.verdict in {"contradicts", "explained"} and any(
+        value.startswith("P") for value in citations
+    ):
+        raise ValueError("possible_explanation_cannot_prove_final_verdict")
+    if decision.verdict == "explained" and support_observation_bindings is not None:
+        covered: set[str] = set()
+        for label in citations:
+            covered.update(support_observation_bindings.get(label, ()))
+        required_current = current_labels & citations
+        if not required_current or not required_current <= covered:
+            raise ValueError("explanation_current_coverage_incomplete")
 
 
 def _result_evidence(candidate: PreparedCharacterDrift) -> tuple[EvidenceSpan, ...]:

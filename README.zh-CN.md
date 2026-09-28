@@ -123,6 +123,7 @@ set DAILY_TOKEN_BUDGET=600000
 |---|---|
 | 主模型抽取 | `ENABLE_MODEL_EXTRACTION=true` 后调用聊天模型抽取记录；失败时保留确定性基线。 |
 | 角色一致性 | `ENABLE_CHARACTER_CONSISTENCY=true` 后从冻结设定/历史归纳待确认角色档案，并以已确认档案复核新稿；部分覆盖、模型降级或角色无法对齐会明确显示为未完成审查，不会显示成“没有问题”。 |
+| 角色变化解释复核 | `CHARACTER_EXPLANATION_REVIEW_V1=true` 后，角色一致性阶段才会在冻结证据窗口中受限复核成长、伪装、临时状态与伏笔候选；默认关闭，另受 `CHARACTER_EXPLANATION_TOKEN_BUDGET` 约束。它不是 embedding RAG。 |
 | 旧受限修复 Agent | `ENABLE_REVIEW_AGENT=true` 只在主模型抽取路径内追加 LangGraph 修复阶段，因此还需启用 `ENABLE_MODEL_EXTRACTION`；它使用应用层 JSON 动作，不是原生 function calls。 |
 | Evidence Investigator | `ENABLE_EVIDENCE_INVESTIGATOR=true` 后使用 Provider 原生 function calls；还需完整配置 chat Provider、embedding、PostgreSQL/pgvector 与 RAG，默认要求 hybrid 检索。 |
 | Issue Evidence Reviewer | `ENABLE_ISSUE_EVIDENCE_REVIEW=true` 后调用聊天模型生成规则问题的独立证据注释；还需 embedding、PostgreSQL 与对应 RAG 配置。 |
@@ -184,6 +185,8 @@ exactly-once 边界见 [分析运行创建可靠性](docs/run-creation-reliabili
 若新稿模型输出未能通过整包校验，报告页可单独展示少量“待复核线索”：只取同一次可解析响应中已定位到冻结原文、且与失败记录不冲突的模型提案；完整合格的重试结果优先。线索是只读提示，不是事实、正式一致性问题或角色 OOC 判断，不参与问题数、反馈、导出及关系图/时间线。页面将读取失败与确实没有线索分开显示；最多展示 64 条，超出会明确提示截断。`GET /api/v1/analysis-runs/{run_id}/provisional-clues` 只向所属工作区返回经过冻结输入再次核验的线索，原文不会混入通用诊断接口。部分覆盖仍表示有内容未评估，不能因显示线索就视为审查完成。
 
 报告页还将角色审查结果分成“正式一致性问题”和“待复核线索”：角色冲突须有已确认设定与新稿双方的原文证据，并最终判为冲突；单次反向行为或材料不足的判断，只有定位到双方原文后才作为线索供作者核对，不计入正式问题数、反馈或导出。`GET /api/v1/analysis-runs/{run_id}/review-clues` 单独返回这类角色线索，与上面的未通过完整抽取校验的模型提案分开。升级旧数据时，无法确认属于旧版冲突格式的角色条目会保守降为线索；旧线索若不能与冻结原文核对，接口以 `unavailable_count` 提示而不展示正文。`scan_limited=true` 表示还有超出安全扫描上限、尚未核对的历史条目；遇到这两种提示建议重新分析。
+
+另有默认关闭的 `CHARACTER_EXPLANATION_REVIEW_V1`，用于从本次运行的冻结原文窗口中有界发现并语义复核成长/恢复、伪装/身份、临时状态/压力与伏笔候选；这不是 embedding RAG。在单行不超过 16000 字符且仍处于阶段窗口上限时，系统会完整分段授权来源；超长单行、窗口超限或最终语义支持超过角色复核容量都会把覆盖标为部分，词面、语义轴、角色和局部性信号只负责超限后的候选排序。复核后的 `G` 表示成长因果桥，`X` 表示适用例外，`P` 只表示可能解释。同稿中明示的伪装或临时状态可以成为 `X`，但新稿不能用自身的成长描述把人格变化自证为 `G`；非明示的有限推断也只保留为 `P`。同稿中写在当前行为之前、与其同角色同轴的未来计划可保留为 `P`，写在当前行为之后的计划不能反向绑定。每条语义支持还会由服务端绑定到其实际适用的稳定新稿观察，不能用只解释一个行为的证据消掉整组 OOC。只有与最终冲突裁决所引用行为相交的 `P` 才会阻止晋升；候选发现/模型/校验失败、候选覆盖不完整，或与最终所引用行为相交的 `G/X` 和最终冲突结论不一致时，也都只能进入待复核线索。该能力关闭时，只要存在角色漂移候选，解释覆盖即保持 `not_run`，候选只能进入待复核线索，角色阶段也不得显示完整覆盖。正式问题与线索继续严格分开计数、导出和反馈。完整合同与当前评测边界见[角色 OOC 语义解释复核 V1](docs/character-ooc-explanation-review-v1.md)：仓库已提供离线评测契约和评分器，但尚未为这份新契约建立真实人工封闭 holdout 或开放文本准确率结果。
 
 SSE 客户端可用 `Last-Event-ID` 请求头或 `last_event_id` 查询参数从指定事件之后恢复。终态事件固定返回 `status` 和 `error`；失败任务不会被当成成功结果加载。
 

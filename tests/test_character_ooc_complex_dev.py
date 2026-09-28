@@ -135,6 +135,7 @@ def _growth_case(support: SupportEvidence) -> CharacterDriftCase:
         support_evidence=(support,),
         scope_compatibility="compatible",
         material_coverage="complete",
+        explanation_coverage="complete",
         approved_axis_bound_observation_ids=(observation.id,),
         approved_axis_observation_polarities=((observation.id, "positive"),),
     )
@@ -164,6 +165,7 @@ def _medical_case(support: SupportEvidence) -> CharacterDriftCase:
         support_evidence=(support,),
         scope_compatibility="compatible",
         material_coverage="complete",
+        explanation_coverage="complete",
     )
 
 

@@ -76,6 +76,7 @@ export type CharacterConsistencyDiagnostics = {
   reason_code?: string;
   snapshot_bound?: boolean;
   material_coverage?: string;
+  explanation_coverage?: string;
   counts?: {
     planned_chunks?: number;
     model_called_chunks?: number;
@@ -706,6 +707,7 @@ export function describeCharacterReviewStage(
   if (diagnostics.outcome === 'completed') {
     if (!frozen || diagnostics.enabled === false ||
         diagnostics.material_coverage !== 'complete' ||
+        ['partial', 'not_run'].includes(diagnostics.explanation_coverage ?? '') ||
         (chunks.known && (diagnostics.counts!.planned_chunks === 0 || chunks.incomplete !== 0))) {
       return {
         coverage: 'unknown', label: '角色审查覆盖无法核对',
@@ -721,7 +723,12 @@ export function describeCharacterReviewStage(
     };
   }
   if (diagnostics.outcome === 'partial') {
-    if (!frozen || diagnostics.material_coverage !== 'partial' || diagnostics.enabled === false) {
+    const explanationIncomplete = ['partial', 'not_run'].includes(
+      diagnostics.explanation_coverage ?? '',
+    );
+    if (!frozen ||
+        (diagnostics.material_coverage !== 'partial' && !explanationIncomplete) ||
+        diagnostics.enabled === false) {
       return {
         coverage: 'unknown', label: '角色审查覆盖无法核对',
         detail: '阶段状态与冻结输入或材料覆盖记录不一致，不能确定实际审查范围。请核对本次运行诊断。',
@@ -732,7 +739,7 @@ export function describeCharacterReviewStage(
       ? '审查中发生 Token 预算门控；部分内容可能未调用模型。请核对预算后重新发起校验。'
       : `${reason || '部分角色审查未完成'}；请检查本次运行诊断，处理原因后重新发起校验。`;
     return {
-      coverage: 'partial', label: '角色审查覆盖不完整',
+      coverage: 'partial', label: '角色审查仅覆盖部分内容',
       detail: `${explanation} 未覆盖内容不能视为没有问题。`,
       counts: chunks.text,
       emptyCaveat: '角色审查仅部分完成，当前结果不能证明没有角色设定或行为漂移问题。',

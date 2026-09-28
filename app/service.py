@@ -48,6 +48,7 @@ from .character_consistency_stage import (
     _safe_context_label,
     failed_character_consistency_stage,
 )
+from .character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from .character_history_semantic_review import HISTORY_REVIEW_SYSTEM_PROMPT
 from .character_draft_actor_review_provider import DRAFT_ACTOR_REVIEW_SYSTEM_PROMPT
@@ -138,7 +139,7 @@ _SAFE_INTERRUPTED_PROVIDER_CATEGORIES = {
     "transport",
 }
 _SIGNED_64_MAX = (1 << 63) - 1
-_CHARACTER_REVIEW_CITATION_HANDLE = re.compile(r"^[BCGX][0-9]{2}$")
+_CHARACTER_REVIEW_CITATION_HANDLE = re.compile(r"^[BCGXP][0-9]{2}$")
 
 
 class WorkerLeaseLost(RuntimeError):
@@ -931,6 +932,7 @@ class _CharacterConsistencyAccountingProvider:
             CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
             CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT,
             CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT,
+            EXPLANATION_REVIEW_SYSTEM_PROMPT,
         }:
             provider = self.drift_provider
             completion_reserve = self.settings.character_drift_max_completion_tokens
@@ -2939,7 +2941,7 @@ def _character_review_clue_roles(
             not isinstance(handle, str)
             or _CHARACTER_REVIEW_CITATION_HANDLE.fullmatch(handle) is None
             or handle in seen_handles
-            or role not in {"B", "C", "G", "X"}
+            or role not in {"B", "C", "G", "X", "P"}
             or not handle.startswith(role)
             or type(evidence_index) is not int
             or not 0 <= evidence_index < len(clue.evidence)
@@ -3038,7 +3040,7 @@ def _verified_character_review_clues(
                     if (
                         ("B" in evidence_roles and not baseline_match)
                         or (
-                            evidence_roles & {"C", "G", "X"}
+                            evidence_roles & {"C", "G", "X", "P"}
                             and not document_match
                         )
                     ):

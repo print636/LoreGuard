@@ -74,6 +74,7 @@ def _case(
         id="cdc_scoped-review", baseline=baseline,
         observations=observations, scope_compatibility="compatible",
         material_coverage=coverage,
+        explanation_coverage="complete",
         approved_axis_bound_observation_ids=tuple(row.id for row in observations),
         approved_axis_observation_polarities=tuple(
             (row.id, "negative") for row in observations

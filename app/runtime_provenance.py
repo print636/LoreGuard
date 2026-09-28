@@ -450,6 +450,10 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             ),
             "drift_provider_max_completion_tokens": drift_provider_completion,
             "drift_provider_max_response_bytes": drift_provider_response_bytes,
+            "explanation_review_v1": settings.character_explanation_review_v1,
+            "explanation_token_budget": (
+                settings.character_explanation_token_budget
+            ),
         },
         "investigator_limits": {
             "max_seeds": settings.evidence_investigator_max_seeds,

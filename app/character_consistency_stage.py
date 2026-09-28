@@ -25,6 +25,12 @@ from .character_drift import (
     prepare_character_drift,
     promote_character_drift,
 )
+from .character_explanation_review import (
+    ExplanationBaselineSummary,
+    ExplanationCandidate,
+    ExplanationObservationSummary,
+    run_character_explanation_review,
+)
 from .character_scope_review import (
     SCOPE_REVIEW_BASIS_INVALID_SUBTYPES,
     SCOPE_REVIEW_SLOT_CONFLICT_KINDS,
@@ -79,7 +85,7 @@ from .narrative_context import (
 from .pipeline import DocumentInput
 
 
-CHARACTER_CONSISTENCY_CHECKER_VERSION = "character-consistency-stage-v2"
+CHARACTER_CONSISTENCY_CHECKER_VERSION = "character-consistency-stage-v3"
 PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY = "_provisional_draft_clues_v1"
 _SUGGESTION = "请核对是否存在尚未记录的成长、伪装或情境依据"
 _BRIDGE_PATTERN = re.compile(
@@ -162,7 +168,7 @@ _MAX_CONFIRMED_TRAITS_IN_SERVER_CONTEXT = 12
 _MAX_CASE_TRACE_OBSERVATION_REFS = 12
 _MAX_CASE_TRACE_CITATION_REFS = 8
 _MAX_CASE_TRACE_LINE = 10_000_000
-_CASE_TRACE_CITATION_HANDLE = re.compile(r"^[BCGX][0-9]{2}$")
+_CASE_TRACE_CITATION_HANDLE = re.compile(r"^[BCGXP][0-9]{2}$")
 _MAX_ACCEPTED_DRAFT_OBSERVATION_REFS = 64
 _MAX_PROVISIONAL_DRAFT_CLUES = 64
 _MAX_PROVISIONAL_CLUE_SPAN_LINES = 32
@@ -283,6 +289,19 @@ class _FrozenDocument:
     resolution_state: str
     publication_status: str
     authority_tier: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ExplanationWindowSpec:
+    """Server-owned frozen source window offered to semantic relation review."""
+
+    source_kind: str
+    publication_status: str
+    authority_tier: str
+    resolution_state: str
+    source_ordinal: int
+    eligible_draft_document_ids: tuple[str, ...]
+    evidence: EvidenceSpan
 
 
 BaselineEntry = tuple[
@@ -1537,6 +1556,19 @@ class CharacterConsistencyStage:
         drift_unverifiable = 0
         drift_no_issue = 0
         drift_scope_skipped = 0
+        explanation_review_candidate_count = 0
+        explanation_review_attempted_calls = 0
+        explanation_review_completed_batches = 0
+        explanation_review_failed_batches = 0
+        explanation_review_emitted_support = 0
+        explanation_review_partial_cases = 0
+        explanation_review_truncated_cases = 0
+        explanation_review_required_cases = 0
+        explanation_review_complete_cases = 0
+        explanation_stage_partial = False
+        explanation_segment_cache: dict[
+            tuple[str, str], tuple[tuple[EvidenceSpan, ...], bool]
+        ] = {}
         case_trace: list[dict[str, Any]] = []
         for baseline_row, baseline, baseline_scope, character_key in review_baselines[
             : settings.character_consistency_max_candidates_per_run
@@ -1651,7 +1683,7 @@ class CharacterConsistencyStage:
                 draft_ordinals = draft_ordinals[:24]
                 draft_document_ids = draft_document_ids[:24]
                 partial = True
-            support = _find_support_evidence(
+            legacy_support = _find_support_evidence(
                 baseline=baseline,
                 baseline_scope=baseline_scope,
                 draft_scopes=tuple(draft_scopes),
@@ -1671,9 +1703,10 @@ class CharacterConsistencyStage:
                 id=case_id,
                 baseline=baseline,
                 observations=tuple(matches),
-                support_evidence=support,
+                support_evidence=legacy_support,
                 scope_compatibility="compatible",
                 material_coverage="partial" if partial else "complete",
+                explanation_coverage="not_run",
                 approved_axis_bound_observation_ids=(
                     tuple(row.id for row in matches)
                     if baseline.approved_axis_identity is not None else ()
@@ -1684,6 +1717,218 @@ class CharacterConsistencyStage:
                 ),
             )
             prepared = prepare_character_drift(case)
+            if prepared.matching_observations:
+                explanation_review_required_cases += 1
+                if not settings.character_explanation_review_v1:
+                    # A disabled semantic explanation pass is an explicit
+                    # coverage gap, not proof that no growth, disguise or
+                    # temporary-state explanation exists. The case remains a
+                    # review clue and the stage cannot claim full coverage.
+                    explanation_stage_partial = True
+                    explanation_review_partial_cases += 1
+                    reason_counts["explanation_review_not_run"] += 1
+            if (
+                settings.character_explanation_review_v1
+                and prepared.matching_observations
+            ):
+                # The legacy regex path is useful as a default-off fallback,
+                # but it must not certify explanations once semantic review is
+                # enabled.  The new path exhaustively segments eligible frozen
+                # sources when bounded, then returns only relation-reviewed
+                # G/X/P evidence.  Ranking never upgrades partial coverage.
+                explanation_coverage: Literal["complete", "partial"] = "complete"
+                semantic_support: tuple[SupportEvidence, ...] = ()
+                selected_sources = tuple(
+                    frozen_by_document.get(row.evidence.document_id)
+                    for row in prepared.matching_observations
+                )
+                if any(source is None or source.scope is None for source in selected_sources):
+                    explanation_coverage = "partial"
+                    explanation_stage_partial = True
+                    reason_counts["explanation_source_unavailable"] += 1
+                else:
+                    explanation_specs, explanation_windows_truncated = (
+                        _explanation_window_specs(
+                            baseline=baseline,
+                            baseline_scope=baseline_scope,
+                            observations=prepared.matching_observations,
+                            draft_scopes=tuple(
+                                source.scope  # type: ignore[union-attr]
+                                for source in selected_sources
+                            ),
+                            draft_ordinals=tuple(
+                                source.ordinal  # type: ignore[union-attr]
+                                for source in selected_sources
+                            ),
+                            draft_document_ids=tuple(
+                                source.document.id  # type: ignore[union-attr]
+                                for source in selected_sources
+                            ),
+                            documents=frozen,
+                            segment_cache=explanation_segment_cache,
+                        )
+                    )
+                    if explanation_windows_truncated:
+                        explanation_coverage = "partial"
+                        explanation_stage_partial = True
+                        explanation_review_truncated_cases += 1
+                        reason_counts["explanation_candidate_window_truncated"] += 1
+                    explanation_review_candidate_count += len(explanation_specs)
+                    if explanation_specs:
+                        remaining = stage_budget - usage.charged_tokens
+                        final_review_reserve = (
+                            settings.character_drift_token_budget
+                            if prepared.reviewer_eligible else 0
+                        )
+                        explanation_available = max(
+                            0, remaining - final_review_reserve
+                        )
+                        if explanation_available < 512:
+                            explanation_coverage = "partial"
+                            explanation_stage_partial = True
+                            reason_counts["explanation_token_budget"] += 1
+                        else:
+                            explanation_settings = settings.model_copy(
+                                update={
+                                    "character_explanation_token_budget": min(
+                                        settings.character_explanation_token_budget,
+                                        explanation_available,
+                                    )
+                                }
+                            )
+                            explanation_candidates = tuple(
+                                ExplanationCandidate(
+                                    citation=f"E{index:02d}",
+                                    source_kind=spec.source_kind,  # type: ignore[arg-type]
+                                    publication_status=spec.publication_status,  # type: ignore[arg-type]
+                                    authority_tier=spec.authority_tier,  # type: ignore[arg-type]
+                                    resolution_state="confirmed",
+                                    source_ordinal=spec.source_ordinal,
+                                    eligible_draft_document_ids=(
+                                        spec.eligible_draft_document_ids
+                                    ),
+                                    evidence=spec.evidence.model_copy(deep=True),
+                                )
+                                for index, spec in enumerate(
+                                    explanation_specs, start=1
+                                )
+                            )
+                            explanation_observations = tuple(
+                                ExplanationObservationSummary(
+                                    citation=f"C{index:02d}",
+                                    observation_id=observation.id,
+                                    statement=observation.statement,
+                                    document_id=observation.evidence.document_id,
+                                    source_ordinal=(
+                                        selected_sources[index - 1].ordinal  # type: ignore[union-attr]
+                                    ),
+                                    evidence=observation.evidence.model_copy(
+                                        deep=True
+                                    ),
+                                )
+                                for index, observation in enumerate(
+                                    prepared.matching_observations, start=1
+                                )
+                            )
+                            self.checkpoint()
+                            checkpoint_failure: BaseException | None = None
+
+                            def explanation_checkpoint() -> None:
+                                """Tag only failures raised by the checkpoint channel."""
+
+                                nonlocal checkpoint_failure
+                                try:
+                                    self.checkpoint()
+                                except BaseException as exc:
+                                    checkpoint_failure = exc
+                                    raise
+
+                            try:
+                                explanation_result = (
+                                    run_character_explanation_review(
+                                        explanation_candidates,
+                                        baseline=ExplanationBaselineSummary(
+                                            character=baseline.character,
+                                            dimension=baseline.dimension,
+                                            trait_key=baseline.trait_key,
+                                            statement=baseline.statement,
+                                            approved_axis_definition=(
+                                                baseline.approved_axis_definition
+                                            ),
+                                            axis_positive_proposition=(
+                                                baseline.axis_positive_proposition
+                                            ),
+                                        ),
+                                        observations=explanation_observations,
+                                        provider=self.provider,
+                                        settings=explanation_settings,
+                                        checkpoint=explanation_checkpoint,
+                                    )
+                                )
+                            except Exception as exc:
+                                # The semantic reviewer is fail-closed for its
+                                # own provider/response failures.  An exception
+                                # that came specifically from the supplied
+                                # checkpoint is different: it is the caller's
+                                # cooperative stop signal and must retain both
+                                # its type and object identity on propagation.
+                                if exc is checkpoint_failure:
+                                    raise
+                                explanation_coverage = "partial"
+                                explanation_stage_partial = True
+                                reason_counts["explanation_internal_failure"] += 1
+                            else:
+                                usage.add(explanation_result.diagnostics)
+                                explanation_review_attempted_calls += (
+                                    explanation_result.diagnostics.attempted_calls
+                                )
+                                explanation_review_completed_batches += (
+                                    explanation_result.diagnostics.completed_batches
+                                )
+                                explanation_review_failed_batches += (
+                                    explanation_result.diagnostics.failed_batches
+                                )
+                                successful_model_calls += (
+                                    explanation_result.diagnostics.completed_batches
+                                )
+                                for failure_reason in (
+                                    explanation_result.diagnostics.failure_reasons
+                                ):
+                                    reason_counts[
+                                        f"explanation_{failure_reason}"
+                                    ] += 1
+                                semantic_support, support_truncated = (
+                                    _select_semantic_explanation_support(
+                                        explanation_result.support_evidence,
+                                        limit=(
+                                            settings.character_drift_max_support_evidence
+                                        ),
+                                    )
+                                )
+                                explanation_review_emitted_support += len(
+                                    semantic_support
+                                )
+                                if (
+                                    explanation_result.coverage != "complete"
+                                    or support_truncated
+                                ):
+                                    explanation_coverage = "partial"
+                                    explanation_stage_partial = True
+                                    if support_truncated:
+                                        reason_counts[
+                                            "explanation_support_limit"
+                                        ] += 1
+                if explanation_coverage != "complete":
+                    explanation_review_partial_cases += 1
+                else:
+                    explanation_review_complete_cases += 1
+                case = case.model_copy(
+                    update={
+                        "support_evidence": semantic_support,
+                        "explanation_coverage": explanation_coverage,
+                    }
+                )
+                prepared = prepare_character_drift(case)
             drift_considered += 1
             review: CharacterReviewResult | None = None
             if prepared.reviewer_eligible:
@@ -1698,7 +1943,9 @@ class CharacterConsistencyStage:
                         }
                     )
                     review = CharacterConsistencyReviewer(
-                        self.provider, settings=review_settings
+                        self.provider,
+                        settings=review_settings,
+                        checkpoint=self.checkpoint,
                     ).review(prepared)
                     usage.add(review.diagnostics)
                     drift_reviewed += review.diagnostics.attempted_calls
@@ -1834,12 +2081,24 @@ class CharacterConsistencyStage:
                 settings.character_consistency_max_candidates_per_run
             )
 
+        stage_partial = partial or explanation_stage_partial
+        if explanation_review_required_cases == 0:
+            explanation_coverage_summary = "not_applicable"
+        elif (
+            explanation_review_complete_cases
+            == explanation_review_required_cases
+        ):
+            explanation_coverage_summary = "complete"
+        elif not settings.character_explanation_review_v1:
+            explanation_coverage_summary = "not_run"
+        else:
+            explanation_coverage_summary = "partial"
         if usage.attempted_calls and successful_model_calls == 0:
             outcome = "degraded"
             reason_code = "model_stage_unavailable"
         else:
-            outcome = "partial" if partial else "completed"
-            reason_code = "bounded_partial" if partial else "completed"
+            outcome = "partial" if stage_partial else "completed"
+            reason_code = "bounded_partial" if stage_partial else "completed"
         diagnostics = _diagnostics(
             outcome=outcome,
             reason_code=reason_code,
@@ -1925,6 +2184,36 @@ class CharacterConsistencyStage:
             drift_unverifiable=drift_unverifiable,
             drift_no_issue=drift_no_issue,
             drift_scope_skipped=drift_scope_skipped,
+            explanation_review_enabled=(
+                settings.character_explanation_review_v1
+            ),
+            explanation_review_candidate_count=(
+                explanation_review_candidate_count
+            ),
+            explanation_review_attempted_call_count=(
+                explanation_review_attempted_calls
+            ),
+            explanation_review_completed_batch_count=(
+                explanation_review_completed_batches
+            ),
+            explanation_review_failed_batch_count=(
+                explanation_review_failed_batches
+            ),
+            explanation_review_emitted_support_count=(
+                explanation_review_emitted_support
+            ),
+            explanation_review_partial_case_count=(
+                explanation_review_partial_cases
+            ),
+            explanation_review_truncated_case_count=(
+                explanation_review_truncated_cases
+            ),
+            explanation_review_required_case_count=(
+                explanation_review_required_cases
+            ),
+            explanation_review_complete_case_count=(
+                explanation_review_complete_cases
+            ),
             issue_count=len(issues),
             review_clue_count=len(review_clues),
             stage_token_budget=stage_budget,
@@ -1934,6 +2223,7 @@ class CharacterConsistencyStage:
             remaining_run_tokens_at_stage_start=remaining_run_tokens,
             sensitivity=settings.character_consistency_sensitivity,
             material_coverage="partial" if partial else "complete",
+            explanation_coverage=explanation_coverage_summary,
             case_trace=case_trace,
             accepted_signal_histogram=accepted_signal_histogram,
             candidate_eligibility=candidate_eligibility,
@@ -3414,6 +3704,395 @@ def _unique_alias_map(
     return {alias: tuple(sorted(keys)) for alias, keys in values.items()}
 
 
+_EXPLANATION_RETRIEVAL_CUE = re.compile(
+    r"成长|改变|转变|克服|康复|恢复|治疗|训练|学会|意识到|得知|"
+    r"伪装|假装|佯装|潜伏|卧底|扮演|身份|被迫|胁迫|压力|"
+    r"暂时|临时|当时|失忆|受伤|生病|药物|操控|控制|梦境|幻觉|"
+    r"伏笔|暗示|承诺|约定|逐渐|开始"
+)
+_EXPLANATION_WINDOW_MAX_CHARS = 2_000
+_EXPLANATION_WINDOW_MAX_EVIDENCE_CHARS = 16_000
+_EXPLANATION_WINDOW_MAX_LINES = 12
+_EXPLANATION_WINDOW_OVERLAP_LINES = 2
+
+
+def _segment_explanation_source(
+    document: DocumentInput,
+) -> tuple[tuple[EvidenceSpan, ...], bool]:
+    """Cover one frozen document with exact, bounded overlapping spans."""
+
+    lines = document.content.splitlines()
+    if not lines:
+        return (), False
+    windows: list[EvidenceSpan] = []
+    incomplete = False
+    cursor = 0
+    while cursor < len(lines):
+        first_line = lines[cursor]
+        if len(first_line) > _EXPLANATION_WINDOW_MAX_EVIDENCE_CHARS:
+            # Evidence coordinates must continue to identify the exact frozen
+            # line. Cropping it would create a convincing but unverifiable
+            # citation, so omit it and fail coverage closed.
+            incomplete = True
+            cursor += 1
+            continue
+
+        end = cursor
+        char_count = 0
+        while end < len(lines) and end - cursor < _EXPLANATION_WINDOW_MAX_LINES:
+            line = lines[end]
+            added = len(line) + (1 if end > cursor else 0)
+            if end > cursor and char_count + added > _EXPLANATION_WINDOW_MAX_CHARS:
+                break
+            if end == cursor and len(line) > _EXPLANATION_WINDOW_MAX_CHARS:
+                # Preserve one long line whole up to the evidence schema's
+                # hard ceiling. Admission control may still decline the
+                # resulting prompt, which also leaves coverage partial.
+                char_count = len(line)
+                end += 1
+                break
+            char_count += added
+            end += 1
+
+        if end <= cursor:
+            incomplete = True
+            cursor += 1
+            continue
+        text = "\n".join(lines[cursor:end])
+        if text.strip():
+            windows.append(
+                EvidenceSpan(
+                    document_id=document.id,
+                    document_name=document.name,
+                    line_start=cursor + 1,
+                    line_end=end,
+                    text=text,
+                )
+            )
+        if end == len(lines):
+            break
+        width = end - cursor
+        cursor = (
+            end
+            if width <= _EXPLANATION_WINDOW_OVERLAP_LINES
+            else end - _EXPLANATION_WINDOW_OVERLAP_LINES
+        )
+    return tuple(windows), incomplete
+
+
+def _explanation_window_specs(
+    *,
+    baseline: ConfirmedTraitSnapshot,
+    baseline_scope: NarrativeScopeV1,
+    observations: tuple[CharacterSignal, ...],
+    draft_scopes: tuple[NarrativeScopeV1, ...],
+    draft_ordinals: tuple[int, ...],
+    draft_document_ids: tuple[str, ...],
+    documents: list[_FrozenDocument],
+    limit: int = 24,
+    segment_cache: dict[
+        tuple[str, str], tuple[tuple[EvidenceSpan, ...], bool]
+    ] | None = None,
+) -> tuple[tuple[_ExplanationWindowSpec, ...], bool]:
+    """Exhaustively segment eligible frozen sources without deciding meaning.
+
+    Every non-empty source line is included in at least one candidate whenever
+    ``truncated`` is false.  This distinction is important: lexical actor-name
+    windows are useful for ranking, but cannot prove that aliases, pronouns or
+    a later retrospective explanation were absent.  Therefore only complete
+    source segmentation may open the formal-conflict path; a candidate cap or
+    an overlong source line makes the case partial and keeps it review-only.
+
+    The lexical channels below rank already-segmented evidence only.  They
+    never certify that a span is a growth event or an exception; the separate
+    semantic relation reviewer must do that from exact frozen text.
+    """
+
+    if (
+        type(limit) is not int
+        or not 1 <= limit <= 64
+        or not observations
+        or not draft_scopes
+        or len(draft_scopes) != len(draft_ordinals)
+        or len(draft_scopes) != len(draft_document_ids)
+        or any(type(value) is not int or value < 0 for value in draft_ordinals)
+    ):
+        return (), True
+    actor = unicodedata.normalize("NFKC", baseline.character).strip()
+    if not actor:
+        return (), True
+    observation_ranges: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for observation in observations:
+        observation_ranges[observation.evidence.document_id].append(
+            (observation.evidence.line_start, observation.evidence.line_end)
+        )
+
+    raw: list[_ExplanationWindowSpec] = []
+    incomplete = False
+    for source in sorted(documents, key=lambda row: row.ordinal):
+        eligible_source_draft_ids: tuple[str, ...] = ()
+        is_current_draft = (
+            source.source_kind == "draft"
+            and source.document.id in observation_ranges
+            and source.publication_status in {"draft", "in_review"}
+            and source.authority_tier == "draft"
+            and source.resolution_state == "confirmed"
+        )
+        is_other_target_draft = (
+            source.source_kind == "draft"
+            and source.document.id not in observation_ranges
+            and source.publication_status in {"draft", "in_review"}
+            and source.authority_tier == "draft"
+            and source.resolution_state == "confirmed"
+        )
+        if is_other_target_draft and source.document.content.strip():
+            # A separate target draft can contain a cross-chapter explanation,
+            # but draft import order is not narrative chronology and there is
+            # no safe C binding for this case yet. Do not silently omit it and
+            # still claim exhaustive explanation coverage: keep this case
+            # review-only until a release/sequence contract can prove order.
+            incomplete = True
+        prior_metadata_eligible = (
+            (
+                source.source_kind == "formal_character_profile"
+                and source.publication_status in {"published", "unknown"}
+                or source.source_kind == "published_history"
+                and source.publication_status == "published"
+            )
+            and source.authority_tier in {"core_canon", "formal_record"}
+            and source.resolution_state == "confirmed"
+            and source.scope is not None
+        )
+        if (
+            source.document.content.strip()
+            and source.source_kind
+            in {"formal_character_profile", "published_history", "draft"}
+            and source.resolution_state == "confirmed"
+            and not (
+                is_current_draft
+                or is_other_target_draft
+                or prior_metadata_eligible
+            )
+        ):
+            # The stage classifier said this is a usable character source,
+            # but its frozen metadata cannot be represented safely by the
+            # explanation-review protocol. Never turn that omission into a
+            # false claim of exhaustive explanation coverage.
+            incomplete = True
+        baseline_relation = (
+            scope_relation(
+                baseline_scope,
+                source.scope,
+                first_resolution="confirmed",
+                second_resolution=source.resolution_state,
+            )
+            if prior_metadata_eligible else "incompatible"
+        )
+        compatible_draft_ids: list[str] = []
+        source_scope_uncertain = baseline_relation == "unknown"
+        if prior_metadata_eligible and baseline_relation == "compatible":
+            for draft_scope, draft_document_id in zip(
+                draft_scopes, draft_document_ids, strict=True
+            ):
+                if source.scope.release is None:  # type: ignore[union-attr]
+                    release_applicable: bool | None = True
+                elif draft_scope.release is None:
+                    release_applicable = None
+                else:
+                    release_applicable = (
+                        source.scope.release.ordinal  # type: ignore[union-attr]
+                        <= draft_scope.release.ordinal
+                    )
+                relation = scope_relation(
+                    draft_scope,
+                    source.scope,
+                    first_resolution="confirmed",
+                    second_resolution=source.resolution_state,
+                )
+                if release_applicable is None or relation == "unknown":
+                    source_scope_uncertain = True
+                if release_applicable is True and relation == "compatible":
+                    compatible_draft_ids.append(draft_document_id)
+        if source_scope_uncertain:
+            # An unresolved release/scope relation means the source may be an
+            # explanation for an observation we cannot safely bind. Keep any
+            # proven-compatible rows, but formal conflict coverage is partial.
+            incomplete = True
+        is_prior_authority = bool(compatible_draft_ids)
+        if is_current_draft:
+            eligible_source_draft_ids = (source.document.id,)
+        elif is_prior_authority:
+            eligible_source_draft_ids = tuple(sorted(set(compatible_draft_ids)))
+        if not (is_current_draft or is_prior_authority):
+            continue
+        if not eligible_source_draft_ids:
+            incomplete = True
+            continue
+        cache_key = (source.document.id, source.content_sha256)
+        cached = segment_cache.get(cache_key) if segment_cache is not None else None
+        if cached is None:
+            cached = _segment_explanation_source(source.document)
+            if segment_cache is not None:
+                segment_cache[cache_key] = cached
+        spans, source_incomplete = cached
+        incomplete = incomplete or source_incomplete
+        raw.extend(
+            _ExplanationWindowSpec(
+                source_kind=source.source_kind,
+                publication_status=source.publication_status,
+                authority_tier=source.authority_tier,
+                resolution_state=source.resolution_state,
+                source_ordinal=source.ordinal,
+                eligible_draft_document_ids=eligible_source_draft_ids,
+                evidence=span.model_copy(deep=True),
+            )
+            for span in spans
+        )
+
+    unique: dict[tuple[str, int, int, str], _ExplanationWindowSpec] = {}
+    for row in raw:
+        span = row.evidence
+        unique.setdefault(
+            (span.document_id, span.line_start, span.line_end, span.text), row
+        )
+    candidates = tuple(unique.values())
+    if len(candidates) <= limit:
+        return candidates, incomplete
+
+    query_text = " ".join(
+        value
+        for value in (
+            baseline.statement,
+            baseline.approved_axis_definition or "",
+            baseline.axis_positive_proposition or "",
+            *(row.statement for row in observations),
+        )
+        if value
+    )
+
+    def bigrams(value: str) -> set[str]:
+        normalized = unicodedata.normalize("NFKC", value)
+        return {
+            run[index:index + 2]
+            for run in re.findall(r"[\u4e00-\u9fff]{2,}", normalized)
+            for index in range(len(run) - 1)
+        }
+
+    query_terms = bigrams(query_text)
+    axis_rank = sorted(
+        range(len(candidates)),
+        key=lambda index: (
+            -len(query_terms & bigrams(candidates[index].evidence.text)),
+            -candidates[index].source_ordinal,
+            candidates[index].evidence.document_id,
+            candidates[index].evidence.line_start,
+        ),
+    )
+    cue_rank = sorted(
+        range(len(candidates)),
+        key=lambda index: (
+            -len(_EXPLANATION_RETRIEVAL_CUE.findall(candidates[index].evidence.text)),
+            -candidates[index].source_ordinal,
+            candidates[index].evidence.document_id,
+            candidates[index].evidence.line_start,
+        ),
+    )
+    actor_rank = sorted(
+        range(len(candidates)),
+        key=lambda index: (
+            -unicodedata.normalize("NFKC", candidates[index].evidence.text).count(actor),
+            -candidates[index].source_ordinal,
+            candidates[index].evidence.document_id,
+            candidates[index].evidence.line_start,
+        ),
+    )
+    local_rank = sorted(
+        range(len(candidates)),
+        key=lambda index: (
+            candidates[index].source_kind != "draft",
+            -candidates[index].source_ordinal,
+            candidates[index].evidence.document_id,
+            candidates[index].evidence.line_start,
+        ),
+    )
+    scores: dict[int, float] = defaultdict(float)
+    for ranking in (axis_rank, cue_rank, actor_rank, local_rank):
+        for rank, index in enumerate(ranking, start=1):
+            scores[index] += 1.0 / (60 + rank)
+    ranked = sorted(
+        range(len(candidates)),
+        key=lambda index: (
+            -scores[index],
+            candidates[index].evidence.document_id,
+            candidates[index].evidence.line_start,
+        ),
+    )
+    selected: list[int] = []
+    seen_documents: set[str] = set()
+    for index in ranked:
+        document_id = candidates[index].evidence.document_id
+        if document_id in seen_documents:
+            continue
+        selected.append(index)
+        seen_documents.add(document_id)
+        if len(selected) == limit:
+            break
+    if len(selected) < limit:
+        selected_set = set(selected)
+        selected.extend(
+            index for index in ranked
+            if index not in selected_set
+        )
+    return tuple(candidates[index] for index in selected[:limit]), True
+
+
+def _select_semantic_explanation_support(
+    values: tuple[SupportEvidence, ...], *, limit: int
+) -> tuple[tuple[SupportEvidence, ...], bool]:
+    """Keep the strongest exact semantic rows and report every omission.
+
+    A possible explanation is deliberately lower priority than a reviewed
+    causal bridge or exception, but dropping even a P row makes explanation
+    coverage partial: otherwise the final reviewer could publish a conflict
+    without seeing an ambiguity that the first semantic pass found.
+    """
+
+    if type(limit) is not int or limit < 0:
+        return (), bool(values)
+    unique: dict[tuple[object, ...], SupportEvidence] = {}
+    order: list[tuple[object, ...]] = []
+    for row in values:
+        span = row.evidence
+        identity = (
+            span.document_id,
+            span.line_start,
+            span.line_end,
+            span.text,
+            row.kind,
+            row.applicable_observation_ids,
+        )
+        existing = unique.get(identity)
+        if existing is None:
+            unique[identity] = row
+            order.append(identity)
+    position = {identity: index for index, identity in enumerate(order)}
+    ranked = sorted(
+        unique.items(),
+        key=lambda item: (
+            item[1].kind == "possible_explanation",
+            not item[1].explicit,
+            item[1].source_kind == "draft",
+            -(
+                item[1].source_ordinal
+                if item[1].source_ordinal is not None else -1
+            ),
+            position[item[0]],
+        ),
+    )
+    selected = tuple(row for _, row in ranked[:limit])
+    return selected, len(ranked) > len(selected)
+
+
 def _find_support_evidence(
     *,
     baseline: ConfirmedTraitSnapshot,
@@ -4006,6 +4685,11 @@ def _to_issue(
             ),
             "checker_version": CHARACTER_CONSISTENCY_CHECKER_VERSION,
             "scope_relation": prepared.case.scope_compatibility,
+            "material_coverage": prepared.case.material_coverage,
+            "explanation_coverage": prepared.case.explanation_coverage,
+            "explanation_review_executed": (
+                prepared.case.explanation_coverage == "complete"
+            ),
             "sensitivity": promoted.sensitivity,
         },
     )
@@ -4046,24 +4730,27 @@ def _resolve_review_citations(
         by_handle[f"B{index:02d}"] = evidence
     for index, observation in enumerate(prepared.matching_observations, start=1):
         by_handle[f"C{index:02d}"] = observation.evidence
-    bridge_index = exception_index = 0
+    bridge_index = exception_index = possible_index = 0
     for support in prepared.case.support_evidence:
         if support.kind == "causal_bridge":
             bridge_index += 1
             by_handle[f"G{bridge_index:02d}"] = support.evidence
-        else:
+        elif support.kind == "exception":
             exception_index += 1
             by_handle[f"X{exception_index:02d}"] = support.evidence
+        else:
+            possible_index += 1
+            by_handle[f"P{possible_index:02d}"] = support.evidence
 
     resolved: list[EvidenceSpan] = []
     seen: set[tuple[str, str, int, int, str]] = set()
     ordered_handles = sorted(
         citations,
         key=lambda handle: (
-            "BCGX".index(handle[0])
+            "BCGXP".index(handle[0])
             if isinstance(handle, str)
             and handle
-            and handle[0] in "BCGX"
+            and handle[0] in "BCGXP"
             else 99,
             int(handle[1:])
             if isinstance(handle, str) and handle[1:].isdigit()
@@ -4597,7 +5284,7 @@ def _safe_citation_refs(
     """Resolve reviewed handles against the *same* bounded evidence table.
 
     Never derive a coordinate from a model explanation or from a guessed handle.
-    The reviewer builds B/C/G/X labels through ``_evidence_rows``; this trace
+    The reviewer builds B/C/G/X/P labels through ``_evidence_rows``; this trace
     copies only the citation handle, role, safe file label, and line numbers.
     """
 
@@ -4627,6 +5314,7 @@ def _safe_citation_refs(
                 "C": "current",
                 "G": "bridge",
                 "X": "exception",
+                "P": "possible_explanation",
             }[handle[0]]:
                 return [], True
             document_name = row.get("document")
@@ -4710,9 +5398,9 @@ def _safe_case_trace(
             {
                 citation[0]
                 for citation in decision.citations
-                if citation and citation[0] in {"B", "C", "G", "X"}
+                if citation and citation[0] in {"B", "C", "G", "X", "P"}
             },
-            key="BCGX".index,
+            key="BCGXP".index,
         )
         if decision is not None
         else []
@@ -4789,6 +5477,14 @@ def _safe_case_trace(
             len(matched_observations) > _MAX_CASE_TRACE_OBSERVATION_REFS
         ),
         "prepare_reason": prepare_reason,
+        "explanation_coverage": (
+            prepared.case.explanation_coverage
+            if prepared is not None else "not_run"
+        ),
+        "support_count": (
+            len(prepared.case.support_evidence)
+            if prepared is not None else 0
+        ),
         "review_outcome": (
             review.diagnostics.outcome if review is not None else "not_run"
         ),
@@ -4876,6 +5572,7 @@ def _diagnostics(
     usage: _Usage,
     reasons: Counter[str],
     material_coverage: str = "unknown",
+    explanation_coverage: str = "unknown",
     case_trace: list[dict[str, Any]] | None = None,
     accepted_signal_histogram: list[dict[str, str | int]] | None = None,
     candidate_eligibility: dict[str, int] | None = None,
@@ -4908,6 +5605,7 @@ def _diagnostics(
         "checker_version": CHARACTER_CONSISTENCY_CHECKER_VERSION,
         "snapshot_bound": True,
         "material_coverage": material_coverage,
+        "explanation_coverage": explanation_coverage,
         "counts": counts,
         "case_trace": list(case_trace or ()),
         "accepted_signal_histogram": list(accepted_signal_histogram or ()),
@@ -4980,6 +5678,7 @@ def _empty_stage_result(
         "checker_version": CHARACTER_CONSISTENCY_CHECKER_VERSION,
         "snapshot_bound": True,
         "material_coverage": "unknown",
+        "explanation_coverage": "unknown",
         "counts": {},
         "case_trace": [],
         "accepted_signal_histogram": [],

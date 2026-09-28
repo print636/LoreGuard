@@ -113,6 +113,7 @@ def _case(
         support_evidence=(support,),
         scope_compatibility="compatible",
         material_coverage="complete",
+        explanation_coverage="complete",
     )
 
 

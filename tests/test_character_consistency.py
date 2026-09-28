@@ -205,6 +205,7 @@ def drift_case(
         support_evidence=support,
         scope_compatibility=scope,
         material_coverage="complete",
+        explanation_coverage="complete",
     )
 
 
@@ -4917,6 +4918,50 @@ def test_two_independent_core_behaviors_reach_reviewer_but_not_direct_conflict()
     assert not prepared.deterministic_conflict
 
 
+def test_cross_document_copied_text_does_not_prepare_as_two_behaviors():
+    first = signal(
+        identifier="copied-prepare-a",
+        statement="林澈主动向陌生人发言",
+        polarity="positive",
+        observation_kind="action",
+        line=4,
+    )
+    second = signal(
+        identifier="copied-prepare-b",
+        statement="林澈再次主动向陌生人发言",
+        polarity="positive",
+        observation_kind="action",
+        line=80,
+    )
+    observations = (
+        first.model_copy(
+            update={
+                "evidence": first.evidence.model_copy(
+                    update={
+                        "document_id": "copied-a",
+                        "text": "林澈　主动向陌生人发言",
+                    }
+                )
+            }
+        ),
+        second.model_copy(
+            update={
+                "evidence": second.evidence.model_copy(
+                    update={
+                        "document_id": "copied-b",
+                        "text": " \t林澈  \n 主动向陌生人发言 ",
+                    }
+                )
+            }
+        ),
+    )
+
+    prepared = prepare_character_drift(drift_case(*observations))
+
+    assert prepared.reason == "single_behavior_is_not_drift"
+    assert not prepared.reviewer_eligible
+
+
 def test_trait_alignment_accepts_stable_cross_wording_identity():
     prepared = prepare_character_drift(
         drift_case(
@@ -4974,6 +5019,137 @@ def test_repeated_behavior_conflict_requires_model_confirmed_event_independence(
     result = promote_character_drift(prepared, review)
     assert result.outcome == "needs_confirmation"
     assert result.reason == "event_independence_not_proven"
+
+
+def test_cross_document_duplicate_selected_pair_stays_clue_after_both_model_passes():
+    first = signal(
+        identifier="copied-selected-a",
+        statement="林澈主动向陌生人发言",
+        polarity="positive",
+        observation_kind="action",
+        line=4,
+    )
+    second = signal(
+        identifier="copied-selected-b",
+        statement="林澈再次主动向陌生人发言",
+        polarity="positive",
+        observation_kind="interaction",
+        line=80,
+    )
+    third = signal(
+        identifier="distinct-unselected",
+        statement="三周后，林澈主动主持陌生人的会议",
+        polarity="positive",
+        observation_kind="interaction",
+        line=160,
+    )
+    observations = (
+        first.model_copy(
+            update={
+                "evidence": first.evidence.model_copy(
+                    update={
+                        "document_id": "copied-selected-a",
+                        "text": "林澈　主动向陌生人发言",
+                    }
+                )
+            }
+        ),
+        second.model_copy(
+            update={
+                "evidence": second.evidence.model_copy(
+                    update={
+                        "document_id": "copied-selected-b",
+                        "text": " \t林澈  \n 主动向陌生人发言 ",
+                    }
+                )
+            }
+        ),
+        third.model_copy(
+            update={
+                "evidence": third.evidence.model_copy(
+                    update={"document_id": "distinct-unselected"}
+                )
+            }
+        ),
+    )
+    prepared = prepare_character_drift(drift_case(*observations))
+    provider = SequenceProvider(
+        json.dumps(
+            {
+                "verdict": "contradicts",
+                "explanation": "前两条被判断为两次独立行为。",
+                "citations": ["B01", "C01", "C02"],
+                "event_independence": "yes",
+                "independent_event_citations": ["C01", "C02"],
+            },
+            ensure_ascii=False,
+        ),
+        event_identity_payload("different_events", ("C01", "C02")),
+    )
+
+    review = CharacterConsistencyReviewer(provider, settings=settings()).review(
+        prepared
+    )
+    result = promote_character_drift(prepared, review)
+
+    assert review.diagnostics.outcome == "completed"
+    assert review.diagnostics.attempted_calls == 2
+    assert result.outcome == "needs_confirmation"
+    assert result.reason == "event_identity_duplicate_evidence"
+
+
+def test_cross_document_distinct_text_pair_can_still_be_formal():
+    first = signal(
+        identifier="distinct-doc-a",
+        statement="林澈主动向陌生记者介绍自己",
+        polarity="positive",
+        observation_kind="interaction",
+        line=4,
+    )
+    second = signal(
+        identifier="distinct-doc-b",
+        statement="数周后，林澈主动主持陌生人的会议",
+        polarity="positive",
+        observation_kind="interaction",
+        line=80,
+    )
+    observations = (
+        first.model_copy(
+            update={
+                "evidence": first.evidence.model_copy(
+                    update={"document_id": "distinct-doc-a"}
+                )
+            }
+        ),
+        second.model_copy(
+            update={
+                "evidence": second.evidence.model_copy(
+                    update={"document_id": "distinct-doc-b"}
+                )
+            }
+        ),
+    )
+    prepared = prepare_character_drift(drift_case(*observations))
+    provider = SequenceProvider(
+        json.dumps(
+            {
+                "verdict": "contradicts",
+                "explanation": "两份文档中的不同原文描述了两次独立行为。",
+                "citations": ["B01", "C01", "C02"],
+                "event_independence": "yes",
+                "independent_event_citations": ["C01", "C02"],
+            },
+            ensure_ascii=False,
+        ),
+        event_identity_payload("different_events", ("C01", "C02")),
+    )
+
+    review = CharacterConsistencyReviewer(provider, settings=settings()).review(
+        prepared
+    )
+
+    assert review.diagnostics.outcome == "completed"
+    assert promote_character_drift(prepared, review).outcome == "conflict"
 
 
 @pytest.mark.parametrize(
@@ -5088,6 +5264,72 @@ def test_adjacent_pair_with_explicit_later_time_boundary_can_be_formal():
     assert [row["id"] for row in verification_input["evidence"]] == ["C01", "C02"]
     assert "candidate" not in verification_input
     assert promote_character_drift(prepared, review).outcome == "conflict"
+
+
+def test_overlapping_source_spans_cannot_be_formal_even_with_time_boundary():
+    first = signal(
+        identifier="overlap-a",
+        statement="争执中，林澈主动与陌生记者攀谈",
+        polarity="positive",
+        observation_kind="interaction",
+        line=1,
+    )
+    second = signal(
+        identifier="overlap-b",
+        statement="三天后，林澈又主动邀请陌生船长用餐",
+        polarity="positive",
+        observation_kind="interaction",
+        line=2,
+    )
+    observations = (
+        first.model_copy(
+            update={
+                "evidence": first.evidence.model_copy(
+                    update={
+                        "document_id": "overlapping-windows",
+                        "document_name": "draft.md",
+                        "line_start": 1,
+                        "line_end": 2,
+                        "text": "争执中，林澈主动与陌生记者攀谈\n三天后，林澈又主动邀请陌生船长用餐",
+                    }
+                )
+            }
+        ),
+        second.model_copy(
+            update={
+                "evidence": second.evidence.model_copy(
+                    update={
+                        "document_id": "overlapping-windows",
+                        "document_name": "draft.md",
+                        "line_start": 2,
+                        "line_end": 3,
+                        "text": "三天后，林澈又主动邀请陌生船长用餐\n众人退开",
+                    }
+                )
+            }
+        ),
+    )
+    prepared = prepare_character_drift(drift_case(*observations))
+    review = CharacterConsistencyReviewer(
+        SequenceProvider(
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "两处行为与基线相反。",
+                    "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            ),
+            event_identity_payload("different_events"),
+        ),
+        settings=settings(),
+    ).review(prepared)
+
+    result = promote_character_drift(prepared, review)
+    assert result.outcome == "needs_confirmation"
+    assert result.reason == "event_identity_source_boundary_unproven"
 
 
 def test_negated_time_phrase_is_not_accepted_as_event_boundary():
@@ -5473,7 +5715,7 @@ def test_preference_alignment_rejects_different_key_and_object():
     )
 
 
-def test_explicit_opposed_preference_requires_validated_model_review():
+def test_single_explicit_opposed_preference_remains_review_clue_after_model_review():
     base = baseline(
         dimension="preference", trait_key="食物偏好:蜜瓜", polarity="positive"
     )
@@ -5503,8 +5745,9 @@ def test_explicit_opposed_preference_requires_validated_model_review():
         settings=settings(),
     ).review(prepared)
     result = promote_character_drift(prepared, review)
-    assert result.outcome == "conflict"
-    assert result.confidence_band == "high"
+    assert result.outcome == "needs_confirmation"
+    assert result.reason == "single_opposition_not_repeated"
+    assert result.confidence_band == "medium"
 
 
 def test_reported_preference_opposition_requires_review():
@@ -6241,6 +6484,77 @@ def test_multi_event_reviewer_routes_both_logical_calls_through_accounting():
     ]
     assert usage.logical_calls == 2
     assert promote_character_drift(prepared, review).outcome == "conflict"
+
+
+def test_event_identity_checkpoint_propagates_after_accounted_first_review_call():
+    from app.service import (
+        CharacterConsistencyUsageAccumulator,
+        _CharacterConsistencyAccountingProvider,
+    )
+
+    class DriftReviewCancelled(RuntimeError):
+        pass
+
+    cancellation = DriftReviewCancelled("cancel before event identity review")
+    configured = settings()
+    first = json.dumps(
+        {
+            "verdict": "contradicts",
+            "explanation": "两次行为与基线相反。",
+            "citations": ["B01", "C01", "C02"],
+            "event_independence": "yes",
+            "independent_event_citations": ["C01", "C02"],
+        },
+        ensure_ascii=False,
+    )
+    drift = SequenceProvider(first, event_identity_payload())
+    usage = CharacterConsistencyUsageAccumulator()
+    accounting = _CharacterConsistencyAccountingProvider(
+        configured,
+        usage,
+        signal_provider=FakeProvider('{"records":[]}'),
+        drift_provider=drift,
+    )
+    prepared = prepare_character_drift(
+        drift_case(
+            signal(
+                identifier="checkpoint-event-a",
+                statement="林澈主动向陌生人发言",
+                polarity="positive",
+                observation_kind="action",
+                line=4,
+            ),
+            signal(
+                identifier="checkpoint-event-b",
+                statement="三周后，林澈主动主持陌生人的会议",
+                polarity="positive",
+                observation_kind="interaction",
+                line=80,
+            ),
+        )
+    )
+
+    def checkpoint():
+        if drift.calls:
+            raise cancellation
+
+    with pytest.raises(DriftReviewCancelled) as raised:
+        CharacterConsistencyReviewer(
+            accounting,
+            settings=configured,
+            checkpoint=checkpoint,
+        ).review(prepared)
+
+    assert raised.value is cancellation
+    assert [system for system, _ in drift.calls] == [
+        CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT,
+    ]
+    assert len(drift.responses) == 1
+    assert usage.logical_calls == 1
+    assert usage.successful_calls == 1
+    interrupted = usage.safe_dict(terminal_status="cancelled")
+    assert interrupted is not None
+    assert interrupted["charged_tokens"] > 0
 
 
 def test_default_signal_budget_admits_two_maximum_prompt_packages_without_retry_metadata():

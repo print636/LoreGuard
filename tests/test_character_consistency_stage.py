@@ -50,6 +50,7 @@ from app.character_drift import (
     prepare_character_drift,
     promote_character_drift,
 )
+from app.character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
 from app.character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
@@ -85,6 +86,8 @@ from app.narrative_context import (
 )
 from app.pipeline import DocumentInput
 from app.service import (
+    CharacterConsistencyUsageAccumulator,
+    _CharacterConsistencyAccountingProvider,
     _load_verified_snapshot,
     document_content_sha256,
     execute_analysis,
@@ -1813,7 +1816,8 @@ def test_positive_state_does_not_suppress_targeted_recall_of_opposed_speech():
         assert counts["targeted_verification_completed_count"] == 1
         assert counts["targeted_verification_signal_added_count"] == 1
         assert counts["draft_observation_count"] == 3
-        assert result.diagnostics["outcome"] == "completed"
+        assert result.diagnostics["outcome"] == "partial"
+        assert result.diagnostics["explanation_coverage"] == "not_run"
         assert not result.issues
         assert len(result.review_clues) == 1
         assert len(provider.calls) == 5
@@ -1892,10 +1896,441 @@ def test_two_independent_primary_speech_samples_suppress_targeted_recall():
         counts = result.diagnostics["counts"]
         assert counts["targeted_pass_scheduled_count"] == 0
         assert counts["draft_observation_count"] == 2
-        assert result.diagnostics["outcome"] == "completed"
+        assert result.diagnostics["outcome"] == "partial"
+        assert result.diagnostics["explanation_coverage"] == "not_run"
         assert not result.issues
         assert len(result.review_clues) == 1
         assert len(provider.calls) == 3
+
+
+def _explanation_review_response(*, draft_relation: str) -> str:
+    return json.dumps(
+        {
+            "items": [
+                {
+                    "citation": "E01",
+                    "explanation_type": "foreshadowing_or_ambiguous",
+                    "actuality": "actual",
+                    "actor_relation": "same",
+                    "axis_relation": "same",
+                    "temporal_relation": "prior_or_active",
+                    "causal_relation": "none",
+                    "applicable_observation_citations": [],
+                },
+                {
+                    "citation": "E02",
+                    "explanation_type": "disguise_or_role",
+                    "actuality": "actual",
+                    "actor_relation": "same",
+                    "axis_relation": "same",
+                    "temporal_relation": "prior_or_active",
+                    "causal_relation": draft_relation,
+                    "applicable_observation_citations": ["C01", "C02"],
+                },
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def _disguised_speech_records(lines: tuple[str, str]) -> tuple[dict, dict]:
+    return tuple(
+        _record(
+            character="祁雾",
+            evidence=line,
+            polarity="negative",
+            kind="speech_sample",
+            dimension="speech_pattern",
+            trait_key="concise_speech",
+            line=index + 1,
+        )
+        for index, line in enumerate(lines)
+    )
+
+
+def test_semantic_explanation_stage_accepts_same_draft_explicit_disguise():
+    profile_line = "祁雾说话始终简短，这是她稳定的说话方式。"
+    action_lines = (
+        "祁雾一口气说了很长一段话。",
+        "次日，祁雾又连续讲了很久。",
+    )
+    with TestClient(app) as client:
+        project = _confirmed_speech_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content=(
+                "\n".join(action_lines)
+                + "\n祁雾这样健谈，是因为她正在伪装成商人潜入敌营。"
+            ),
+            narrative_context=_context(publication="draft"),
+        )
+        records = _disguised_speech_records(action_lines)
+        provider = QueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence=profile_line,
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="speech_pattern",
+                    trait_key="concise_speech",
+                    statement="说话始终简短",
+                )
+            ),
+            _response(*records),
+            _explanation_review_response(draft_relation="explicit_causal"),
+            json.dumps(
+                {
+                    "verdict": "explained",
+                    "explanation": "两次健谈表现均发生在已明示的潜入伪装期间。",
+                    "citations": ["B01", "C01", "C02", "X01"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            provider,
+            character_explanation_review_v1=True,
+            character_consistency_stage_token_budget=60_000,
+            remaining_run_tokens=60_000,
+        )
+
+    assert result.issues == ()
+    assert result.review_clues == ()
+    assert result.diagnostics["case_trace"][0]["final_outcome"] == "no_issue"
+    counts = result.diagnostics["counts"]
+    assert counts["explanation_review_attempted_call_count"] == 1
+    assert counts["explanation_review_completed_batch_count"] == 1
+    assert counts["explanation_review_emitted_support_count"] == 1
+    assert len(provider.calls) == 4
+    assert '"citation":"E02"' in provider.calls[2][1]
+    assert '"role":"exception"' in provider.calls[3][1]
+
+
+def test_explanation_checkpoint_cancellation_propagates_before_provider_call():
+    class ExplanationCancelled(RuntimeError):
+        pass
+
+    profile_line = "祁雾说话始终简短，这是她稳定的说话方式。"
+    action_lines = (
+        "祁雾一口气说了很长一段话。",
+        "次日，祁雾又连续讲了很久。",
+    )
+    with TestClient(app) as client:
+        project = _confirmed_speech_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content="\n".join(action_lines),
+            narrative_context=_context(publication="draft"),
+        )
+        provider = QueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence=profile_line,
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="speech_pattern",
+                    trait_key="concise_speech",
+                    statement="说话始终简短",
+                )
+            ),
+            _response(*_disguised_speech_records(action_lines)),
+            _explanation_review_response(draft_relation="explicit_causal"),
+        )
+
+        def checkpoint():
+            if len(provider.calls) >= 2:
+                raise ExplanationCancelled("cancel before explanation provider")
+
+        with pytest.raises(
+            ExplanationCancelled, match="before explanation provider"
+        ):
+            _run_stage(
+                _new_run(client, project["id"]),
+                provider,
+                checkpoint=checkpoint,
+                character_explanation_review_v1=True,
+                character_consistency_stage_token_budget=60_000,
+                remaining_run_tokens=60_000,
+            )
+
+    assert len(provider.calls) == 2
+
+
+def test_checkpoint_after_last_explanation_batch_stops_final_drift_review():
+    class ExplanationCancelled(RuntimeError):
+        pass
+
+    cancellation = ExplanationCancelled("cancel after final explanation batch")
+    profile_line = "祁雾说话始终简短，这是她稳定的说话方式。"
+    action_lines = (
+        "祁雾一口气说了很长一段话。",
+        "次日，祁雾又连续讲了很久。",
+    )
+    with TestClient(app) as client:
+        project = _confirmed_speech_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content=(
+                "\n".join(action_lines)
+                + "\n祁雾这样健谈，是因为她正在伪装成商人潜入敌营。"
+            ),
+            narrative_context=_context(publication="draft"),
+        )
+        underlying = QueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence=profile_line,
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="speech_pattern",
+                    trait_key="concise_speech",
+                    statement="说话始终简短",
+                )
+            ),
+            _response(*_disguised_speech_records(action_lines)),
+            _explanation_review_response(draft_relation="explicit_causal"),
+            json.dumps(
+                {
+                    "verdict": "needs_confirmation",
+                    "explanation": "两次反向表现仍需确认。",
+                    "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        configured = _settings(
+            character_explanation_review_v1=True,
+            character_consistency_stage_token_budget=60_000,
+        )
+        usage = CharacterConsistencyUsageAccumulator()
+        provider = _CharacterConsistencyAccountingProvider(
+            configured,
+            usage,
+            signal_provider=underlying,
+            drift_provider=underlying,
+        )
+
+        def checkpoint():
+            if any(
+                system == EXPLANATION_REVIEW_SYSTEM_PROMPT
+                for system, _ in underlying.calls
+            ):
+                raise cancellation
+
+        with pytest.raises(ExplanationCancelled) as raised:
+            _run_stage(
+                _new_run(client, project["id"]),
+                provider,
+                checkpoint=checkpoint,
+                remaining_run_tokens=60_000,
+                character_explanation_review_v1=True,
+                character_consistency_stage_token_budget=60_000,
+            )
+
+    assert raised.value is cancellation
+    assert len(underlying.calls) == 3
+    assert underlying.calls[-1][0] == EXPLANATION_REVIEW_SYSTEM_PROMPT
+    assert len(underlying.responses) == 1
+    assert usage.logical_calls == 3
+    assert usage.successful_calls == 3
+    interrupted = usage.safe_dict(terminal_status="cancelled")
+    assert interrupted is not None
+    assert interrupted["charged_tokens"] > 0
+
+
+def test_explanation_checkpoint_after_first_batch_stops_all_later_model_calls():
+    class ExplanationCancelled(RuntimeError):
+        pass
+
+    cancellation = ExplanationCancelled("cancel after first explanation batch")
+    profile_line = "祁雾说话始终简短，这是她稳定的说话方式。"
+    action_lines = (
+        "祁雾一口气说了很长一段话。",
+        "次日，祁雾又连续讲了很久。",
+    )
+    # Twelve-line windows overlap by two lines.  This source therefore yields
+    # more than one eight-candidate explanation batch without creating another
+    # signal-extraction chunk.
+    draft_content = "\n".join(
+        (*action_lines, *(f"第{index}段场景背景。" for index in range(1, 91)))
+    )
+    first_batch = json.dumps(
+        {
+            "items": [
+                {
+                    "citation": f"E{index:02d}",
+                    "explanation_type": "foreshadowing_or_ambiguous",
+                    "actuality": "ambiguous",
+                    "actor_relation": "ambiguous",
+                    "axis_relation": "ambiguous",
+                    "temporal_relation": "ambiguous",
+                    "causal_relation": "ambiguous",
+                    "applicable_observation_citations": [],
+                }
+                for index in range(1, 9)
+            ]
+        },
+        ensure_ascii=False,
+    )
+    setting_overrides = {
+        "character_explanation_review_v1": True,
+        "character_consistency_stage_token_budget": 60_000,
+    }
+
+    with TestClient(app) as client:
+        project = _confirmed_speech_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content=draft_content,
+            narrative_context=_context(publication="draft"),
+        )
+        underlying = QueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence=profile_line,
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="speech_pattern",
+                    trait_key="concise_speech",
+                    statement="说话始终简短",
+                )
+            ),
+            _response(*_disguised_speech_records(action_lines)),
+            first_batch,
+        )
+        configured = _settings(**setting_overrides)
+        usage = CharacterConsistencyUsageAccumulator()
+        provider = _CharacterConsistencyAccountingProvider(
+            configured,
+            usage,
+            signal_provider=underlying,
+            drift_provider=underlying,
+        )
+
+        def checkpoint():
+            if any(
+                system == EXPLANATION_REVIEW_SYSTEM_PROMPT
+                for system, _ in underlying.calls
+            ):
+                raise cancellation
+
+        with pytest.raises(ExplanationCancelled) as raised:
+            _run_stage(
+                _new_run(client, project["id"]),
+                provider,
+                checkpoint=checkpoint,
+                remaining_run_tokens=60_000,
+                **setting_overrides,
+            )
+
+    assert raised.value is cancellation
+    assert len(underlying.calls) == 3
+    assert sum(
+        system == EXPLANATION_REVIEW_SYSTEM_PROMPT
+        for system, _ in underlying.calls
+    ) == 1
+    assert all(
+        system != CHARACTER_REVIEW_SYSTEM_PROMPT
+        for system, _ in underlying.calls
+    )
+    # The completed first batch remains chargeable at the provider boundary
+    # even though stage-local aggregate diagnostics cannot be returned while
+    # the original cancellation exception is propagating.
+    assert usage.logical_calls == 3
+    assert usage.successful_calls == 3
+    interrupted = usage.safe_dict(terminal_status="cancelled")
+    assert interrupted is not None
+    assert interrupted["charged_tokens"] > 0
+
+
+def test_failed_explanation_search_keeps_model_conflict_as_review_clue():
+    profile_line = "祁雾说话始终简短，这是她稳定的说话方式。"
+    action_lines = (
+        "祁雾一口气说了很长一段话。",
+        "次日，祁雾又连续讲了很久。",
+    )
+    with TestClient(app) as client:
+        project = _confirmed_speech_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content="\n".join(action_lines),
+            narrative_context=_context(publication="draft"),
+        )
+        records = _disguised_speech_records(action_lines)
+        provider = QueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence=profile_line,
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="speech_pattern",
+                    trait_key="concise_speech",
+                    statement="说话始终简短",
+                )
+            ),
+            _response(*records),
+            RuntimeError("semantic reviewer unavailable"),
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "两次独立的冗长表达与稳定基线相反。",
+                    "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "relation": "different_events",
+                    "explanation": "第二段以次日明确开始另一事件。",
+                    "citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            provider,
+            character_explanation_review_v1=True,
+            character_consistency_stage_token_budget=60_000,
+            remaining_run_tokens=60_000,
+        )
+
+    assert result.issues == ()
+    assert len(result.review_clues) == 1
+    trace = result.diagnostics["case_trace"][0]
+    assert trace["final_outcome"] == "needs_confirmation"
+    assert trace["promote_reason"] == "explanation_search_incomplete"
+    assert result.diagnostics["outcome"] == "partial"
+    assert result.diagnostics["material_coverage"] == "complete"
+    assert result.diagnostics["reason_counts"]["explanation_provider_error"] == 1
+    assert len(provider.calls) == 5
 
 
 def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
@@ -1970,10 +2405,13 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
             second_result.diagnostics["counts"]["targeted_pass_scheduled_count"]
             == 0
         )
-        assert len(second_result.issues) == 1
-        issue = second_result.issues[0]
+        assert second_result.issues == ()
+        assert len(second_result.review_clues) == 1
+        assert second_result.diagnostics["outcome"] == "partial"
+        assert second_result.diagnostics["explanation_coverage"] == "not_run"
+        issue = second_result.review_clues[0]
         assert issue.category.value == "character_drift"
-        assert issue.severity.value == "high"
+        assert issue.severity.value == "medium"
         assert issue.metadata["confirmed_candidate_id"] == candidate_id
         assert issue.metadata["character_key"] == "林澈"
         assert len(issue.evidence) >= 2
@@ -2009,6 +2447,8 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
                 }],
                 "matched_observation_refs_truncated": False,
                 "prepare_reason": "reported_opposed_preference",
+                "explanation_coverage": "not_run",
+                "support_count": 0,
                 "review_outcome": "completed",
                 "review_verdict": "contradicts",
                 "citation_roles": ["B", "C"],
@@ -2017,9 +2457,9 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
                     {"handle": "C01", "role": "C", "document_name": "draft.md", "line_start": 1, "line_end": 1},
                 ],
                 "citation_refs_incomplete": False,
-                "final_outcome": "conflict",
+                "final_outcome": "needs_confirmation",
                 "visible": True,
-                "promote_reason": "model_contradicts",
+                "promote_reason": "explanation_search_incomplete",
             }
         ]
 
@@ -2089,16 +2529,20 @@ def test_qualified_preference_from_confirmed_profile_reaches_review_without_iden
 
         result = _run_stage(_new_run(client, project["id"]), provider)
 
-    assert result.diagnostics["outcome"] == "completed"
+    assert result.diagnostics["outcome"] == "partial"
+    assert result.diagnostics["explanation_coverage"] == "not_run"
     assert result.diagnostics["counts"]["targeted_pass_scheduled_count"] == 0
     assert len(provider.calls) == 3
     assert "局部体验、不同食品或范围不清" in CHARACTER_REVIEW_SYSTEM_PROMPT
     trace = result.diagnostics["case_trace"][0]
     assert '"comparison_key":"preference:冰镇蜜瓜"' in provider.calls[1][1]
     assert trace["matched_observation_count"] == 1
+    assert trace["explanation_coverage"] == "not_run"
     assert trace["review_verdict"] == "contradicts"
-    assert trace["final_outcome"] == "conflict"
-    assert len(result.issues) == 1
+    assert trace["final_outcome"] == "needs_confirmation"
+    assert trace["promote_reason"] == "explanation_search_incomplete"
+    assert result.issues == ()
+    assert len(result.review_clues) == 1
 
 
 def test_nonempty_preference_behavior_gets_one_excluding_verification_pass():
@@ -2193,7 +2637,8 @@ def test_nonempty_preference_behavior_gets_one_excluding_verification_pass():
         assert counts["targeted_verification_scheduled_count"] == 1
         assert counts["targeted_verification_signal_added_count"] == 1
         assert counts["draft_observation_count"] == 2
-        assert len(result.issues) == 1
+        assert result.issues == ()
+        assert len(result.review_clues) == 1
         verification_prompt = provider.calls[3][1]
         assert f"1: {first_line}" not in verification_prompt
         assert f"2: {second_line}" in verification_prompt
@@ -2290,8 +2735,12 @@ def test_draft_extractor_receives_exact_confirmed_key_and_enters_drift_compariso
         assert counts["targeted_verification_no_candidate_target_count"] == 1
         assert counts["targeted_verification_scheduled_count"] == 0
         assert counts["draft_observation_count"] == 1
-        assert result.diagnostics["outcome"] == "completed"
+        assert result.diagnostics["outcome"] == "partial"
         assert result.diagnostics["material_coverage"] == "complete"
+        assert result.diagnostics["explanation_coverage"] == "not_run"
+        assert result.diagnostics["case_trace"][0][
+            "explanation_coverage"
+        ] == "not_run"
         assert result.issues == ()
         targeted_prompt = provider.calls[2][1]
         assert '"requested_polarity":"negative"' in targeted_prompt
@@ -4174,6 +4623,8 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
             }],
             "matched_observation_refs_truncated": False,
             "prepare_reason": "single_behavior_is_not_drift",
+            "explanation_coverage": "not_run",
+            "support_count": 0,
             "review_outcome": "not_run",
             "review_verdict": None,
             "citation_roles": [],
@@ -4414,6 +4865,7 @@ def _citation_trace_case(
             support_evidence=support,
             scope_compatibility="compatible",
             material_coverage="complete",
+            explanation_coverage="complete",
         )
     )
 
@@ -4532,7 +4984,26 @@ def test_server_only_character_clue_labels_evidence_as_non_model_selected():
 
 
 def test_degraded_event_identity_clue_binds_validated_first_pass_pair_only():
-    prepared = _citation_trace_case(observation_count=3).model_copy(
+    case = _citation_trace_case(observation_count=3).case
+    case = case.model_copy(
+        update={
+            "observations": tuple(
+                observation.model_copy(
+                    update={
+                        "evidence": observation.evidence.model_copy(
+                            update={
+                                "text": (
+                                    f"机密草稿原文：事件{index}中林澈说讨厌蜜瓜。"
+                                )
+                            }
+                        )
+                    }
+                )
+                for index, observation in enumerate(case.observations, start=1)
+            )
+        }
+    )
+    prepared = prepare_character_drift(case).model_copy(
         update={"reason": "two_independent_behaviors"}
     )
     review = CharacterReviewResult(
@@ -5654,16 +6125,31 @@ def test_scoped_axis_same_scope_two_actions_make_one_issue_for_two_confirmed_lab
         situation_match="same", duplicate_baseline=True,
         independent_events="yes",
     )
-    assert len(result.issues) == 1
-    assert result.issues[0].category.value == "character_drift"
-    assert result.issues[0].metadata["event_identity_verification"] == (
+    assert result.issues == ()
+    assert len(result.review_clues) == 1
+    assert result.review_clues[0].category.value == "character_drift"
+    assert result.review_clues[0].metadata["final_outcome"] == (
+        "needs_confirmation"
+    )
+    assert result.review_clues[0].metadata["review_reason"] == (
+        "explanation_search_incomplete"
+    )
+    assert result.review_clues[0].metadata["event_identity_verification"] == (
         "different_events"
     )
+    assert result.review_clues[0].metadata["explanation_coverage"] == "not_run"
     assert result.diagnostics["counts"]["drift_reviewed"] == 2
     assert result.diagnostics["reason_counts"][
         "equivalent_approved_axis_baseline_collapsed"
     ] == 1
-    assert result.diagnostics["case_trace"][0]["final_outcome"] == "conflict"
+    assert result.diagnostics["outcome"] == "partial"
+    assert result.diagnostics["explanation_coverage"] == "not_run"
+    assert result.diagnostics["case_trace"][0]["final_outcome"] == (
+        "needs_confirmation"
+    )
+    assert result.diagnostics["case_trace"][0]["promote_reason"] == (
+        "explanation_search_incomplete"
+    )
     assert result.diagnostics["case_trace"][0]["scoped_axis_review"][
         "independent_events"
     ] == "yes"

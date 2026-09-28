@@ -73,6 +73,9 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION_KEY,
     _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION,
     _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS,
+    _CHARACTER_EXPLANATION_REVIEW_KEY,
+    _CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY,
+    _CHARACTER_EXPLANATION_REVIEW_KEYS,
     _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
     _local_service_artifact_sha256,
 )
@@ -831,6 +834,7 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     draft_excerpt_repair_keys = set(limits) & _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
     history_review_keys = set(limits) & _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
     draft_actor_review_keys = set(limits) & _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
+    explanation_review_keys = set(limits) & _CHARACTER_EXPLANATION_REVIEW_KEYS
     if (
         set(capabilities) != _CAPABILITY_KEYS
         or any(type(flag) is not bool for flag in capabilities.values())
@@ -846,11 +850,15 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or draft_actor_review_keys not in (
             set(), set(_CHARACTER_DRAFT_ACTOR_REVIEW_KEYS)
         )
+        or explanation_review_keys not in (
+            set(), set(_CHARACTER_EXPLANATION_REVIEW_KEYS)
+        )
         or set(limits) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
             | _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
             | _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
+            | _CHARACTER_EXPLANATION_REVIEW_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
@@ -972,6 +980,14 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     if history_review_keys and not _valid_character_history_semantic_review_limits(limits):
         return None
     if draft_actor_review_keys and not _valid_character_draft_actor_review_limits(limits):
+        return None
+    if explanation_review_keys and (
+        type(limits[_CHARACTER_EXPLANATION_REVIEW_KEY]) is not bool
+        or type(limits[_CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY]) is not int
+        or not 512
+        <= limits[_CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY]
+        <= 60_000
+    ):
         return None
     if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in limits and (
         type(limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY]) is not bool

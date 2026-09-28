@@ -799,7 +799,7 @@ def _build_provenance(
                     role = raw_ref.get("role")
                     evidence_index = raw_ref.get("evidence_index")
                     if (
-                        role not in {"B", "C", "G", "X"}
+                        role not in {"B", "C", "G", "X", "P"}
                         or type(evidence_index) is not int
                         or not 0 <= evidence_index < len(issue.evidence)
                     ):

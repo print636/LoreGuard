@@ -403,6 +403,15 @@ class Settings(BaseSettings):
     character_drift_max_response_bytes: int = Field(
         default=32_000, ge=1_024, le=64_000
     )
+    # Semantic discovery of growth, disguise, temporary-state and
+    # foreshadowing evidence for one frozen character-drift case.  Keep the
+    # rollout explicit until real-model quality gates have been measured.
+    character_explanation_review_v1: bool = False
+    # Shared admission budget across every explanation-candidate batch for
+    # one OOC case.  It is separate from the final drift verdict budget.
+    character_explanation_token_budget: int = Field(
+        default=24_000, ge=512, le=60_000
+    )
     # Evidence Investigator is an independent, default-off capability.  These
     # values are server-owned safety ceilings, not model-selected tuning knobs.
     # The token budget is an internal admission/quota budget; it is not a hard

@@ -120,6 +120,7 @@ def _case(
         support_evidence=(SupportEvidence(**support_payload),),
         scope_compatibility="compatible",
         material_coverage=coverage,
+        explanation_coverage="complete",
         approved_axis_bound_observation_ids=(observation.id,) if bound else (),
         approved_axis_observation_polarities=(
             ((observation.id, observation.polarity),) if bound else ()

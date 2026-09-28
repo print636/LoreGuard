@@ -150,6 +150,7 @@ def test_draft_actual_self_assertion_survives_to_review(source: str):
         observations=result.signals,
         scope_compatibility="compatible",
         material_coverage="complete",
+        explanation_coverage="complete",
     )
     prepared = prepare_character_drift(case)
     assert prepared.reviewer_eligible
@@ -162,7 +163,9 @@ def test_draft_actual_self_assertion_survives_to_review(source: str):
         settings=_settings(),
     )
     review = reviewer.review(prepared)
-    assert promote_character_drift(prepared, review).outcome == "conflict"
+    promoted = promote_character_drift(prepared, review)
+    assert promoted.outcome == "needs_confirmation"
+    assert promoted.reason == "single_opposition_not_repeated"
 
 
 def test_same_line_other_speech_does_not_poison_later_own_assertion():

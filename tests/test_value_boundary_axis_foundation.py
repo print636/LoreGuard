@@ -348,6 +348,7 @@ def test_scoped_axis_snapshot_requires_object_and_situation_and_single_behavior_
     case = CharacterDriftCase(
         id="cdc_scoped", baseline=baseline, observations=(observation,),
         scope_compatibility="compatible", material_coverage="complete",
+        explanation_coverage="complete",
         approved_axis_bound_observation_ids=(observation.id,),
         approved_axis_observation_polarities=((observation.id, "negative"),),
     )

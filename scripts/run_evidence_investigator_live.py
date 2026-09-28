@@ -450,6 +450,12 @@ _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS = frozenset({
     _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEY,
     _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_VERSION_KEY,
 })
+_CHARACTER_EXPLANATION_REVIEW_KEY = "explanation_review_v1"
+_CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY = "explanation_token_budget"
+_CHARACTER_EXPLANATION_REVIEW_KEYS = frozenset({
+    _CHARACTER_EXPLANATION_REVIEW_KEY,
+    _CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY,
+})
 _INVESTIGATOR_INTEGER_LIMIT_KEYS = frozenset(
     {
         "max_seeds",
@@ -3188,6 +3194,10 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         set(character_limits) & _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
         if type(character_limits) is dict else set()
     )
+    explanation_review_keys = (
+        set(character_limits) & _CHARACTER_EXPLANATION_REVIEW_KEYS
+        if type(character_limits) is dict else set()
+    )
     if (
         type(character_limits) is not dict
         or draft_trace_keys not in (set(), set(_CHARACTER_SIGNAL_DRAFT_TRACE_KEYS))
@@ -3200,11 +3210,15 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         or draft_actor_review_keys not in (
             set(), set(_CHARACTER_DRAFT_ACTOR_REVIEW_KEYS)
         )
+        or explanation_review_keys not in (
+            set(), set(_CHARACTER_EXPLANATION_REVIEW_KEYS)
+        )
         or set(character_limits) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
             | _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
             | _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
+            | _CHARACTER_EXPLANATION_REVIEW_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
@@ -3341,6 +3355,21 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         safe_character_limits.update({
             key: character_limits[key] for key in _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
         })
+    if explanation_review_keys:
+        enabled = character_limits[_CHARACTER_EXPLANATION_REVIEW_KEY]
+        token_budget = _safe_int(
+            character_limits[_CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY]
+        )
+        if (
+            type(enabled) is not bool
+            or token_budget is None
+            or not 512 <= token_budget <= 60_000
+        ):
+            return None
+        safe_character_limits[_CHARACTER_EXPLANATION_REVIEW_KEY] = enabled
+        safe_character_limits[_CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY] = (
+            token_budget
+        )
     if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in character_limits:
         variant = character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY]
         trace_version = character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY]
