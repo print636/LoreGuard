@@ -23,6 +23,17 @@ For a project that has only draft chapters and no active formal setting or publi
 
 Publishing a draft chapter as history is a separate, explicit author action in the document-context workbench; finishing an analysis never publishes it. The confirmation explains that a report is not a publication license, and the author may publish despite absent or partial review coverage. Publication affects future runs only; earlier input snapshots and reports stay frozen. After the first chapter is published, a new draft can still receive a limited review against confirmed formal background without a complete character baseline. Such a run must not be described as a completed character-OOC review.
 
+The current OOC foundation covers six major capability families: core
+personality, stable preference, speech pattern, value or behaviour boundary,
+relationship attitude toward a concrete person or group, and commitment to a
+concrete long-term goal. Formal promotion requires source-bound baseline and
+draft evidence; repeated-behaviour dimensions require two independently
+verified contrary events. Relationship and goal traits bind both a neutral
+axis and a concrete object so different attitudes, people, or goals cannot be
+collapsed by a shared label. Confirmed formal character profiles may also
+authorize explicit aliases; drafts cannot grant themselves aliases, and
+ambiguous, cyclic, or main-name-conflicting aliases fail closed.
+
 For new `core_personality` candidates, the character workbench now lets the author
 choose or create a project-scoped, immutable v1 comparison axis before confirming
 the candidate. Each axis has an author-written positive proposition; the author
@@ -82,6 +93,10 @@ disguise/role, temporary state/pressure, and possible foreshadowing. Eligible
 source text is exhaustively segmented while it fits the stage bound; lexical,
 axis, actor, and locality signals only rank candidates after that bound is
 exceeded, and the case then becomes partial. This is **not** embedding RAG.
+The current response contract is `character-explanation-review-v2` with
+`character-explanation-review-prompt-v2`: every response echoes the schema and
+a server-generated digest of the frozen request. An explicit `irrelevant`
+result emits no `G`, `X`, or `P`; malformed irrelevant slots fail closed.
 The reviewer can emit `G` (growth/causal bridge), `X`
 (applicable exception), or `P` (possible explanation) evidence. Explicit
 same-draft disguise or temporary-state evidence may become `X`, but a draft
@@ -93,7 +108,7 @@ incomplete discovery, provider/validation failure, or a
 disagreement between semantic `G/X` support and the final contradiction
 verdict keeps the case in review rather than promoting a formal issue. Formal
 issues and review clues remain separate in counts, export, and feedback. See
-the [explanation-review V1 contract](docs/character-ooc-explanation-review-v1.md).
+the [explanation-review contract](docs/character-ooc-explanation-review-v1.md).
 This path is default-off and has no published open-text accuracy result or
 completed sealed real-model holdout. While it is off, any eligible character
 drift candidate remains a review clue with `explanation_coverage=not_run`;
@@ -128,6 +143,8 @@ baseline evidence requirements. Incomplete model packages still yield partial
 coverage rather than silently recycling a provisional record into OOC issues.
 
 `CHARACTER_DRAFT_ACTOR_REVIEW_V1` 是另一个默认关闭的实验门，只复核待审新稿中其余绑定检查均已通过、仅主体归属仍待判断的候选。服务端先作结构预筛并绑定冻结原文窗口；每个信号抽取逻辑周期至多使用一次批量调用要求严格 JSON，一次分析含多个分块或 targeted 周期时总调用可多于一次。模型返回 `supported` 后仍须通过服务端的来源复核和 `source_context_veto`。安全、来源完整的 `uncertain`／`source_context_veto` 最多进入 provisional 待复核线索，不进入正式问题、计数、反馈或导出；有效的显式 `rejected` 保持拒收，协议、预算、deadline 或传输失败则 fail closed、保留部分覆盖且不产生 provisional 线索。该门不审查正式基线，也不把一次行为证明为 OOC；真实模型目前只有一次 7-window 的已知 DEV smoke，不是盲测或准确率结果，详见[开发检查点](docs/guided-review-ooc-dev-checkpoint-20260927.md)。
+
+`CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3` 是与旧 V2 互斥、默认关闭的受限语义发现开关；为兼容现有部署保留了开关名，当前主链使用 request/response/batch V4 与 prompt-v8。定向抽取没有留下可用记录时，服务端只从冻结新稿中白名单化普通显式主语、旁白明确归属和严格相邻的零主语分句，再交给独立模型逐项判断主体、事实性、语义轴、对象关系、目标方向及后续更正；模型不能自由搜索全文或回写事实。V4 会为每个 proposal 投影 `object_binding_mode`：若未规范化的 `target.key_object` 在该事实分句中按原始 Unicode 码点恰好出现一次，`matches_target` 必须返回 null offset，服务端只在主体、事实性、statement、axis、方向、更正、basis 和来源等其他门全部通过后绑定这一个冻结字面量；这只是坐标绑定，不是语义证明。`broader`/`narrower`、零次或多次出现仍必须返回合法的事实分句区间，且显式区间在存在字面量时必须完整覆盖至少一次出现；服务端不会修正错误的非空区间，也不会为 V4 的 object-span 失败重放同一模型请求。作者批准的 value / behavior-boundary scoped axis 仍严格使用 `object_relation=not_applicable` 和 null offset。扁平响应、自造枚举、错误坐标、超时、拒绝服务、`uncertain`、结构错误、来源或摘要不匹配一律失败关闭并保留部分覆盖。该协议扩大常见场景召回，不是开放文本质量或生产可用性声明。
 
 An incomplete, parseable primary draft response may also produce a separate,
 read-only list of provisional clues. Each clue is rechecked against the run's
@@ -234,13 +251,26 @@ not prove that a larger budget resolves every failure. The partial draft in
 the latest 22k set had rejected model records; its new, content-free
 token-admission events were empty. A different frozen OOC story stopped at
 baseline candidate selection on a preceding build. Product defaults are now
-200k per run, 600k daily, 150k
-for the character stage and 22k per signal; the character stage defaults off.
+finite, quality-first admission ceilings of 400k per run, 2m daily, 300k for
+the character stage and 26k per signal; the character stage defaults off.
+Explicitly lower or exhausted budgets remain `partial` rather than being
+presented as an absence of problems. These ceilings are not usage targets and
+do not guarantee complete processing for arbitrary long stories.
 The latest runs in that checkpoint used a locally raised 10m daily limit.
 The [author-approved axis v1](docs/character-approved-axis-rfc.md) was
 implemented afterward; it does not retroactively change the frozen transfer
 Oracle or those runs. None of these results establishes cross-story or
 production OOC quality. See the checkpoint for the full chronology.
+A separate [`character-ooc-alpha-v1`](data/character-ooc-alpha-v1/README.md)
+fixture and [strict acceptance contract](docs/character-ooc-alpha-acceptance.md)
+cover the current six capability families and report-layer separation. They
+are developer-visible synthetic DEV material that may be used for prompt,
+retrieval, extraction, rule, and model-configuration changes—not a human-sealed
+test, production-quality result, or evidence of open-text generalization.
+The [sanitized Alpha v20 checkpoint](docs/character-ooc-alpha-v20-checkpoint-20260929.md)
+records one V4 / Prompt V8 real-model workflow: all eight known DEV cases and
+20/20 required gates matched, with no independent repeat trial. It remains a
+developer-visible synthetic result, not blind, production, or open-text evidence.
 The later [fixed DEV v2 prompt A/B checkpoint](docs/character-axis-v2-dev-checkpoint-20260924.md)
 records six independent, developer-visible trials. Fewer evidence-excerpt
 rejections did not complete the review workflow: all 30 case evaluations
@@ -259,9 +289,13 @@ accuracy results. The guard's current direct-actor contract would reject all
 five target clauses if submitted; their cross-clause subject and label scope
 still need independent author confirmation, not automatic inheritance.
 
-An opt-in [V5 semantic scope review](docs/semantic-scope-review-rfc-20260925.md)
+An opt-in [semantic scope review](docs/semantic-scope-review-rfc-20260925.md)
 now lets a bounded model reviewer assess same-line subject and label carryover
-against frozen source clauses. Its [precise support binding](docs/character-support-binding-v1.md)
+against frozen source clauses. The existing default-off environment flag names
+are retained for deployment compatibility, while enabled runs report the
+`semantic-scope-v6` / `character-scope-review-v2` /
+`character-scope-review-prompt-v4` identity. Its
+[precise support binding](docs/character-support-binding-v1.md)
 keeps separately supported clauses on one line as independently reviewable
 author decisions and distinguishes the target clause from carryover context in
 the UI. Invalid new bindings block review; legacy candidates retain the older

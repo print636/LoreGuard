@@ -15,11 +15,13 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 
 from app.character_traits import (
+    candidate_snapshot_payload,
     upsert_character_trait_candidate,
     verified_character_trait_review_chain,
 )
 from app.character_support_bindings import support_bindings_sha256
 from app.character_consistency_stage import CHARACTER_CONSISTENCY_CHECKER_VERSION
+from app.character_trait_extraction import stable_trait_identity
 from app.auth import AuthContext, get_auth_context
 from app.db import (
     AnalysisDiagnosticRow,
@@ -104,6 +106,7 @@ def _candidate(
     trait_key: str = "食物偏好:蜜瓜",
     trait_type: str = "preference",
     comparison_key: str | None = None,
+    key_object: str = "",
     value: str = "喜欢蜜瓜",
     polarity: str = "positive",
     authority_tier: str = "formal_record",
@@ -146,6 +149,7 @@ def _candidate(
                 "trait_type": trait_type,
                 "trait_key": trait_key,
                 "comparison_key": comparison_key,
+                "key_object": key_object,
                 "value": value,
                 "polarity": polarity,
                 "stability": "stable",
@@ -1116,6 +1120,99 @@ def test_same_object_different_value_axes_have_distinct_rows_and_can_coexist():
             second_row = db.get(CharacterTraitCandidateRow, protect)
             assert first_row.candidate_fingerprint != second_row.candidate_fingerprint
             assert first_row.review_state == second_row.review_state == "confirmed"
+
+
+def test_major_ooc_dimensions_round_trip_structured_objects_through_api():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(
+            client,
+            content="林澈长期信任周尧，也承诺保护周尧，并坚持重建北境。",
+        )
+        run = _completed_run(client, project["id"])
+        rows = (
+            (
+                "relationship_attitude",
+                "trust_orientation",
+                "周尧",
+                "林澈长期信任周尧",
+            ),
+            (
+                "relationship_attitude",
+                "protection_commitment",
+                "周尧",
+                "林澈承诺保护周尧",
+            ),
+            (
+                "motivation_goal",
+                "pursuit_commitment",
+                "重建北境",
+                "林澈长期坚持重建北境",
+            ),
+        )
+        candidate_ids: list[str] = []
+        for trait_type, trait_key, key_object, value in rows:
+            candidate_id = _candidate(
+                project["id"],
+                run["id"],
+                trait_type=trait_type,
+                trait_key=trait_key,
+                comparison_key=stable_trait_identity(
+                    trait_type, trait_key, key_object
+                ),
+                key_object=key_object,
+                value=value,
+            )
+            detail = client.get(_candidate_path(project["id"], candidate_id))
+            assert detail.status_code == 200, detail.text
+            assert detail.json()["trait_type"] == trait_type
+            assert detail.json()["key_object"] == key_object
+            assert detail.json()["comparison_key"] == stable_trait_identity(
+                trait_type, trait_key, key_object
+            )
+            assert _confirm(client, project["id"], candidate_id).status_code == 201
+            candidate_ids.append(candidate_id)
+
+        profile = client.get(
+            f"/api/v1/projects/{project['id']}/characters/{quote('林澈', safe='')}"
+        )
+        assert profile.status_code == 200, profile.text
+        confirmed = {
+            row["id"]: (row["trait_type"], row["key_object"])
+            for row in profile.json()["confirmed_traits"]
+        }
+        assert confirmed == {
+            candidate_ids[0]: ("relationship_attitude", "周尧"),
+            candidate_ids[1]: ("relationship_attitude", "周尧"),
+            candidate_ids[2]: ("motivation_goal", "重建北境"),
+        }
+        with SessionLocal() as db:
+            for candidate_id, (_, _, key_object, _) in zip(candidate_ids, rows):
+                candidate_row = db.get(CharacterTraitCandidateRow, candidate_id)
+                review = db.scalar(
+                    select(CharacterTraitReviewRow)
+                    .where(
+                        CharacterTraitReviewRow.candidate_id == candidate_id,
+                        CharacterTraitReviewRow.decision == "confirm",
+                    )
+                    .order_by(CharacterTraitReviewRow.created_at.desc())
+                )
+                snapshot = candidate_snapshot_payload(candidate_row, review)
+                assert snapshot["schema_version"] == 1
+                assert snapshot["key_object"] == key_object
+                assert snapshot["comparison_key"] == candidate_row.comparison_key
+
+        with pytest.raises(ValueError, match="key_object"):
+            _candidate(
+                project["id"],
+                run["id"],
+                trait_type="relationship_attitude",
+                trait_key="trust_orientation",
+                comparison_key=stable_trait_identity(
+                    "relationship_attitude", "trust_orientation", "周尧"
+                ),
+                key_object="顾岚",
+                value="林澈长期信任周尧",
+            )
 
 
 @pytest.mark.parametrize("migrated_null_key", (False, True))

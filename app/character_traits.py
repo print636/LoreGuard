@@ -8,7 +8,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 
-from .character_trait_extraction import stable_trait_identity
+from .character_trait_extraction import (
+    axis_object_key_object_from_identity,
+    canonical_axis_object_key_object,
+    stable_trait_identity,
+)
 from .character_support_bindings import (
     TraitSupportRef,
     bind_support_refs,
@@ -35,7 +39,17 @@ CHARACTER_TRAIT_SCHEMA_VERSION = 1
 MAX_CONFIRMED_TRAITS_PER_RUN = 5_000
 MAX_CANDIDATES_PER_SOURCE_RUN = 500
 _OBJECT_BEARING_TRAIT_DIMENSIONS = frozenset(
-    {"preference", "value", "behavior_boundary", "current_state"}
+    {
+        "preference",
+        "value",
+        "relationship_attitude",
+        "motivation_goal",
+        "behavior_boundary",
+        "current_state",
+    }
+)
+_AXIS_AND_OBJECT_TRAIT_DIMENSIONS = frozenset(
+    {"relationship_attitude", "motivation_goal"}
 )
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _FORBIDDEN_PROVENANCE_KEY_FRAGMENTS = (
@@ -81,6 +95,8 @@ class TraitCandidateInput(BaseModel):
         "core_personality",
         "preference",
         "value",
+        "relationship_attitude",
+        "motivation_goal",
         "speech_pattern",
         "behavior_boundary",
         "contextual_behavior",
@@ -88,6 +104,7 @@ class TraitCandidateInput(BaseModel):
     ]
     trait_key: str = Field(min_length=1, max_length=160)
     comparison_key: str | None = Field(default=None, min_length=1, max_length=200)
+    key_object: str = Field(default="", max_length=80)
     value: str = Field(min_length=1, max_length=2_000)
     polarity: Literal["positive", "negative", "neutral", "unclear"] = "unclear"
     stability: Literal["core", "stable", "temporary", "situational", "unknown"]
@@ -135,6 +152,25 @@ class TraitCandidateInput(BaseModel):
             raise ValueError("history inference requires independent evidence")
         if self.stability not in {"core", "stable"}:
             raise ValueError("temporary or situational signals cannot become stable traits")
+        if self.trait_type in _AXIS_AND_OBJECT_TRAIT_DIMENSIONS:
+            restored = axis_object_key_object_from_identity(
+                self.trait_type, self.comparison_key
+            )
+            if restored is None:
+                raise ValueError(
+                    "relationship and motivation traits require an object-bound key"
+                )
+            if self.key_object:
+                display_object = re.sub(
+                    r"\s+", " ", unicodedata.normalize("NFKC", self.key_object)
+                ).strip()
+                if canonical_axis_object_key_object(display_object) != restored:
+                    raise ValueError("trait key_object does not match comparison key")
+                self.key_object = display_object
+            else:
+                # Legacy stage callers can safely recover the canonical object
+                # from the reversible server identity; no prose inference is used.
+                self.key_object = restored
         return self
 
 
@@ -162,6 +198,8 @@ def _clean_text(value: str, *, maximum: int, label: str) -> str:
 
 
 def _validated_comparison_key(value: str | None, *, trait_type: str) -> str | None:
+    if value is None and trait_type in _AXIS_AND_OBJECT_TRAIT_DIMENSIONS:
+        raise ValueError("relationship and motivation traits require comparison key")
     if value is None:
         return None
     if (
@@ -178,6 +216,8 @@ def _validated_comparison_key(value: str | None, *, trait_type: str) -> str | No
         or ":" in anchor
         or re.search(r"\s", anchor)
         or unicodedata.normalize("NFKC", anchor).casefold() != anchor
+        or trait_type in _AXIS_AND_OBJECT_TRAIT_DIMENSIONS
+        and axis_object_key_object_from_identity(trait_type, value) is None
     ):
         raise ValueError("comparison key is invalid")
     return value
@@ -201,6 +241,23 @@ def candidate_snapshot_comparison_key(
         candidate.comparison_key, trait_type=candidate.trait_type
     )
     return {"comparison_key": key} if key is not None else {}
+
+
+def candidate_snapshot_key_object(
+    candidate: CharacterTraitCandidateRow,
+) -> dict[str, str]:
+    if candidate.trait_type not in _AXIS_AND_OBJECT_TRAIT_DIMENSIONS:
+        return {}
+    restored = axis_object_key_object_from_identity(
+        candidate.trait_type, candidate.comparison_key
+    )
+    if (
+        restored is None
+        or not isinstance(candidate.key_object, str)
+        or canonical_axis_object_key_object(candidate.key_object) != restored
+    ):
+        raise ValueError("candidate key_object is not bound to comparison key")
+    return {"key_object": candidate.key_object}
 
 
 def _validate_safe_provenance(value: object, *, depth: int = 0) -> None:
@@ -966,6 +1023,8 @@ def upsert_character_trait_candidate(
         .order_by(CharacterTraitCandidateRow.created_at, CharacterTraitCandidateRow.id)
     ).all()
     for existing in possible_existing:
+        if parsed.trait_type in _AXIS_AND_OBJECT_TRAIT_DIMENSIONS:
+            candidate_snapshot_key_object(existing)
         prior_contexts = _validate_reused_candidate_identity(
             db, existing,
             comparison_key_override=(comparison_key if support_bindings is None else None),
@@ -1050,6 +1109,11 @@ def upsert_character_trait_candidate(
         trait_type=parsed.trait_type,
         trait_key=trait_key,
         comparison_key=comparison_key,
+        key_object=(
+            parsed.key_object
+            if parsed.trait_type in _AXIS_AND_OBJECT_TRAIT_DIMENSIONS
+            else None
+        ),
         value=trait_value,
         polarity=parsed.polarity,
         stability=parsed.stability,
@@ -1099,6 +1163,7 @@ def candidate_snapshot_payload(
         "trait_type": candidate.trait_type,
         "trait_key": candidate.trait_key,
         **candidate_snapshot_comparison_key(candidate),
+        **candidate_snapshot_key_object(candidate),
         "value": candidate.value,
         "polarity": candidate.polarity,
         "stability": candidate.stability,

@@ -104,6 +104,46 @@ def test_context_chain_is_server_recomputed_not_extra_reviewer_basis():
     ]
 
 
+def test_postposed_summary_binding_recomputes_target_to_label_context():
+    line = "黎音长期内向谨慎，面对陌生人时会先观察，这是她稳定的核心性格。"
+    snapshot, evidence = _source(line)
+    payload = bind_support_refs([
+        TraitSupportRef(
+            evidence_index=0,
+            support_id="L1:A1",
+            label_anchor_id="L1:A3",
+            scope_relation="postposed_label_summary",
+        )
+    ], evidence=evidence, frozen_by_id={snapshot.id: snapshot})
+    binding = payload["bindings"][0]
+    assert binding["target"]["support_id"] == "L1:A1"
+    assert [part["support_id"] for part in binding["context"]] == [
+        "L1:A2", "L1:A3",
+    ]
+    assert [part["role"] for part in binding["context"]] == [
+        "bridge", "label_anchor",
+    ]
+    assert verify_stored_support_bindings(
+        payload,
+        support_bindings_sha256(payload),
+        evidence=evidence,
+        frozen_by_id={snapshot.id: snapshot},
+    ) == payload
+
+
+def test_postposed_summary_binding_rejects_non_later_label():
+    snapshot, evidence = _source()
+    with pytest.raises(ValueError, match="label must follow target"):
+        bind_support_refs([
+            TraitSupportRef(
+                evidence_index=0,
+                support_id="L1:A2",
+                label_anchor_id="L1:A1",
+                scope_relation="postposed_label_summary",
+            )
+        ], evidence=evidence, frozen_by_id={snapshot.id: snapshot})
+
+
 def test_offsets_are_unicode_codepoints_after_supplementary_character():
     line = "😀林澈先观察。随后他才行动。"
     snapshot, evidence = _source(line)
@@ -113,6 +153,20 @@ def test_offsets_are_unicode_codepoints_after_supplementary_character():
     target = payload["bindings"][0]["target"]
     assert target["start_offset"] == line.index("随后")
     assert line[target["start_offset"]:target["end_offset"]] == "随后他才行动"
+
+
+def test_postposed_summary_binding_rejects_non_final_label():
+    line = "黎音长期内向谨慎，这是她稳定的核心性格，但她随后否认这一点。"
+    snapshot, evidence = _source(line)
+    with pytest.raises(ValueError, match="label must be final"):
+        bind_support_refs([
+            TraitSupportRef(
+                evidence_index=0,
+                support_id="L1:A1",
+                label_anchor_id="L1:A2",
+                scope_relation="postposed_label_summary",
+            )
+        ], evidence=evidence, frozen_by_id={snapshot.id: snapshot})
 
 
 @pytest.mark.parametrize("mutation", [

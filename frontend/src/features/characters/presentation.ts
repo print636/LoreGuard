@@ -10,6 +10,8 @@ export const characterDimensionNames: Record<CharacterDimension, string> = {
   core_personality: "核心人格",
   preference: "稳定偏好",
   value: "价值观",
+  relationship_attitude: "关系态度",
+  motivation_goal: "长期动机/目标",
   speech_pattern: "语言表现",
   behavior_boundary: "行为边界",
   contextual_behavior: "情境表现",

@@ -50,7 +50,11 @@ from app.character_drift import (
     prepare_character_drift,
     promote_character_drift,
 )
-from app.character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
+from app.character_explanation_review import (
+    EXPLANATION_REVIEW_SCHEMA_V2,
+    EXPLANATION_REVIEW_SYSTEM_PROMPT,
+    EXPLANATION_REVIEW_USER_PREFIX,
+)
 from app.character_trait_extraction import (
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
@@ -64,7 +68,10 @@ from app.character_trait_extraction import (
     SupportTraceEventV1,
     SupportTraceV1,
     _targeted_chunk_prompt,
+    _target_bound_review_target,
+    stable_trait_identity,
 )
+from app.character_draft_actor_review import target_bound_draft_target_digest
 from app.config import Settings
 from app.db import (
     AnalysisDiagnosticRow,
@@ -106,6 +113,18 @@ class QueueProvider:
         value = self.responses.pop(0)
         if isinstance(value, Exception):
             raise value
+        if system == EXPLANATION_REVIEW_SYSTEM_PROMPT:
+            response_payload = json.loads(value)
+            if set(response_payload) == {"items"}:
+                request_payload = json.loads(
+                    user.removeprefix(EXPLANATION_REVIEW_USER_PREFIX)
+                )
+                response_payload = {
+                    "schema_version": EXPLANATION_REVIEW_SCHEMA_V2,
+                    "request_digest": request_payload["request_digest"],
+                    "items": response_payload["items"],
+                }
+                value = json.dumps(response_payload, ensure_ascii=False)
         return SimpleNamespace(text=value, prompt_tokens=17, completion_tokens=9)
 
 
@@ -145,7 +164,7 @@ def _settings(**overrides) -> Settings:
         "openai_model": "mock-model",
         "enable_character_consistency": True,
         "provider_max_attempts": 1,
-        "character_consistency_stage_token_budget": 20_000,
+        "character_consistency_stage_token_budget": 60_000,
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
@@ -610,7 +629,7 @@ def _run_stage(
     provider: QueueProvider,
     *,
     checkpoint=None,
-    remaining_run_tokens: int = 20_000,
+    remaining_run_tokens: int = 60_000,
     **setting_overrides,
 ):
     with SessionLocal() as db:
@@ -1903,22 +1922,250 @@ def test_two_independent_primary_speech_samples_suppress_targeted_recall():
         assert len(provider.calls) == 3
 
 
+def test_unrelated_formal_package_failure_does_not_poison_complete_ooc_case():
+    profile_line = "祁雾说话始终简短，这是她稳定的说话方式。"
+    action_lines = (
+        "祁雾一口气说了很长一段话。",
+        "次日，祁雾又连续讲了很久。",
+    )
+    with TestClient(app) as client:
+        project = _confirmed_speech_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="unrelated-profile.md",
+            role="character_profile",
+            content="周尧一贯谨慎核对账目。",
+            narrative_context=_context(publication="published"),
+        )
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content="\n".join(action_lines),
+            narrative_context=_context(publication="draft"),
+        )
+        provider = QueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence=profile_line,
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="speech_pattern",
+                    trait_key="concise_speech",
+                    statement="说话始终简短",
+                )
+            ),
+            RuntimeError("unrelated formal provider failure"),
+            _response(*_disguised_speech_records(action_lines)),
+            json.dumps(
+                {
+                    "verdict": "needs_confirmation",
+                    "explanation": "两次反向说话表现需要进一步确认。",
+                    "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            provider,
+            character_signal_max_attempts=1,
+            character_signal_package_max_attempts=1,
+        )
+
+    diagnostics = result.diagnostics
+    assert diagnostics["material_coverage"] == "partial"
+    assert diagnostics["counts"]["case_material_complete_count"] == 1
+    assert diagnostics["counts"]["case_material_partial_count"] == 0
+    assert diagnostics["case_material_partial_reason_counts"] == {}
+    assert diagnostics["case_trace"][0]["prepare_reason"] == (
+        "two_independent_behaviors"
+    )
+    assert diagnostics["case_trace"][0]["promote_reason"] != (
+        "material_coverage_incomplete"
+    )
+
+
+def test_related_targeted_draft_package_failure_keeps_case_material_partial():
+    profile_line = "祁雾说话始终简短，这是她稳定的说话方式。"
+    action_line = "祁雾一口气说了很长一段话。"
+    with TestClient(app) as client:
+        project = _confirmed_speech_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content=action_line,
+            narrative_context=_context(publication="draft"),
+        )
+        provider = QueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence=profile_line,
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="speech_pattern",
+                    trait_key="concise_speech",
+                    statement="说话始终简短",
+                )
+            ),
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence=action_line,
+                    polarity="negative",
+                    kind="speech_sample",
+                    dimension="speech_pattern",
+                    trait_key="concise_speech",
+                )
+            ),
+            RuntimeError("related targeted provider failure"),
+        )
+
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            provider,
+            character_signal_max_attempts=1,
+            character_signal_package_max_attempts=1,
+        )
+
+    diagnostics = result.diagnostics
+    assert diagnostics["counts"]["case_material_complete_count"] == 0
+    assert diagnostics["counts"]["case_material_partial_count"] == 1
+    assert diagnostics["case_material_partial_reason_counts"] == {
+        "targeted_package_incomplete": 1
+    }
+    assert diagnostics["case_trace"][0]["review_outcome"] == "not_run"
+
+
+def test_case_coverage_includes_other_applicable_draft_where_axis_was_missed():
+    other_line = "祁雾明确表示今后只用奉承话术迂回交流。"
+
+    def completed(*signals: CharacterSignal) -> CharacterSignalExtractionResult:
+        return CharacterSignalExtractionResult(
+            signals=signals,
+            draft_observations=signals,
+            diagnostics=CharacterSignalDiagnostics(
+                outcome="completed",
+                attempted_calls=1,
+                raw_records=len(signals),
+                accepted_records=len(signals),
+                rejected_records=0,
+            ),
+        )
+
+    degraded = CharacterSignalExtractionResult(
+        diagnostics=CharacterSignalDiagnostics(
+            outcome="degraded",
+            attempted_calls=1,
+            raw_records=0,
+            accepted_records=0,
+            rejected_records=0,
+            reason_counts={"provider_error": 1},
+        )
+    )
+    with TestClient(app) as client:
+        project, _ = _confirmed_two_target_project(client)
+        other = _create_document(
+            client,
+            project["id"],
+            name="other-draft.md",
+            role="chapter",
+            content=other_line,
+            narrative_context=_context(publication="draft"),
+        )
+        other_signal = CharacterSignal(
+            id="cs_" + "f" * 32,
+            character="祁雾",
+            dimension="core_personality",
+            trait_key="z_directness",
+            statement=other_line.rstrip("。"),
+            polarity="negative",
+            stability="core",
+            observation_kind="explicit_declaration",
+            source_kind="draft",
+            evidence=EvidenceSpan(
+                document_id=other["id"],
+                document_name="other-draft.md",
+                line_start=1,
+                line_end=1,
+                text=other_line,
+            ),
+        )
+
+        def fake_extract(_extractor, chunk, **_kwargs):
+            if chunk.document_id == other["id"]:
+                return completed(other_signal)
+            return completed()
+
+        def fake_targeted(_extractor, chunk, targets, **_kwargs):
+            target = targets[0]
+            if (
+                chunk.document_id == other["id"]
+                and target.trait_key == "a_companion_interaction"
+            ):
+                return degraded
+            return completed()
+
+        review_unavailable = CharacterReviewResult(
+            diagnostics=CharacterReviewDiagnostics(
+                outcome="degraded", reason="provider_error", attempted_calls=1
+            )
+        )
+        with (
+            patch(
+                "app.character_consistency_stage.CharacterSignalExtractor.extract",
+                new=fake_extract,
+            ),
+            patch(
+                "app.character_consistency_stage.CharacterSignalExtractor.extract_targeted",
+                new=fake_targeted,
+            ),
+            patch(
+                "app.character_consistency_stage.CharacterConsistencyReviewer.review",
+                return_value=review_unavailable,
+            ),
+        ):
+            result = _run_stage(
+                _new_run(client, project["id"]), QueueProvider()
+            )
+
+    diagnostics = result.diagnostics
+    assert diagnostics["counts"]["case_material_complete_count"] == 1
+    assert diagnostics["counts"]["case_material_partial_count"] == 1
+    assert diagnostics["case_material_partial_reason_counts"] == {
+        "targeted_package_incomplete": 1
+    }
+    missed_trace = next(
+        row
+        for row in diagnostics["case_trace"]
+        if row["matched_observation_count"] == 0
+    )
+    assert missed_trace["matched_observation_count"] == 0
+    assert missed_trace["prepare_reason"] == "no_matching_observation"
+    assert missed_trace["material_coverage"] == "partial"
+    assert missed_trace["material_coverage_reasons"] == [
+        "targeted_package_incomplete"
+    ]
+
+
 def _explanation_review_response(*, draft_relation: str) -> str:
     return json.dumps(
         {
             "items": [
                 {
+                    # The frozen profile row is already B01 and is no longer
+                    # duplicated into the explanation candidate pool.  The
+                    # same-draft disguise window is therefore the first E row.
                     "citation": "E01",
-                    "explanation_type": "foreshadowing_or_ambiguous",
-                    "actuality": "actual",
-                    "actor_relation": "same",
-                    "axis_relation": "same",
-                    "temporal_relation": "prior_or_active",
-                    "causal_relation": "none",
-                    "applicable_observation_citations": [],
-                },
-                {
-                    "citation": "E02",
                     "explanation_type": "disguise_or_role",
                     "actuality": "actual",
                     "actor_relation": "same",
@@ -1942,17 +2189,89 @@ def _disguised_speech_records(lines: tuple[str, str]) -> tuple[dict, dict]:
             kind="speech_sample",
             dimension="speech_pattern",
             trait_key="concise_speech",
+            statement=line.split("；", 1)[0].split(";", 1)[0].split("。", 1)[0],
             line=index + 1,
         )
         for index, line in enumerate(lines)
     )
 
 
+def test_current_behaviour_purpose_cannot_self_explain_formal_speech_conflict():
+    profile_line = "祁雾说话始终简短，这是她稳定的说话方式。"
+    action_lines = (
+        "上午，祁雾对守卫连续说了许多奉承话，以换取通行。",
+        "次日，祁雾又长篇称赞档案员，为了获准查阅记录。",
+    )
+    with TestClient(app) as client:
+        project = _confirmed_speech_project(client)
+        _create_document(
+            client,
+            project["id"],
+            name="draft.md",
+            role="chapter",
+            content="\n".join(action_lines),
+            narrative_context=_context(publication="draft"),
+        )
+        provider = QueueProvider(
+            _response(
+                _record(
+                    character="祁雾",
+                    evidence=profile_line,
+                    polarity="positive",
+                    kind="explicit_declaration",
+                    dimension="speech_pattern",
+                    trait_key="concise_speech",
+                    statement="说话始终简短",
+                )
+            ),
+            _response(*_disguised_speech_records(action_lines)),
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "两次独立的冗长奉承表达与稳定说话方式相反。",
+                    "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "relation": "different_events",
+                    "explanation": "原文以次日明确区分第二次事件。",
+                    "citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]),
+            provider,
+            character_explanation_review_v1=True,
+            character_consistency_stage_token_budget=60_000,
+            remaining_run_tokens=60_000,
+        )
+
+    assert len(result.issues) == 1
+    assert result.review_clues == ()
+    trace = result.diagnostics["case_trace"][0]
+    assert trace["final_outcome"] == "conflict"
+    assert trace["promote_reason"] == "model_contradicts"
+    assert trace["explanation_coverage"] == "complete"
+    assert result.diagnostics["counts"][
+        "explanation_review_attempted_call_count"
+    ] == 0
+    assert all(
+        system != EXPLANATION_REVIEW_SYSTEM_PROMPT
+        for system, _ in provider.calls
+    )
+
+
 def test_semantic_explanation_stage_accepts_same_draft_explicit_disguise():
     profile_line = "祁雾说话始终简短，这是她稳定的说话方式。"
     action_lines = (
-        "祁雾一口气说了很长一段话。",
-        "次日，祁雾又连续讲了很久。",
+        "祁雾一口气说了很长一段话；守卫记下了她的名字。",
+        "次日，祁雾又连续讲了很久；档案员随后关闭侧门。",
     )
     with TestClient(app) as client:
         project = _confirmed_speech_project(client)
@@ -1968,6 +2287,22 @@ def test_semantic_explanation_stage_accepts_same_draft_explicit_disguise():
             narrative_context=_context(publication="draft"),
         )
         records = _disguised_speech_records(action_lines)
+        explanation_response = json.loads(
+            _explanation_review_response(draft_relation="explicit_causal")
+        )
+        explanation_response["items"].extend(
+            {
+                "citation": citation,
+                "explanation_type": "irrelevant",
+                "actuality": "actual",
+                "actor_relation": "same",
+                "axis_relation": "same",
+                "temporal_relation": "prior_or_active",
+                "causal_relation": "none",
+                "applicable_observation_citations": [],
+            }
+            for citation in ("E02", "E03")
+        )
         provider = QueueProvider(
             _response(
                 _record(
@@ -1981,7 +2316,7 @@ def test_semantic_explanation_stage_accepts_same_draft_explicit_disguise():
                 )
             ),
             _response(*records),
-            _explanation_review_response(draft_relation="explicit_causal"),
+            json.dumps(explanation_response, ensure_ascii=False),
             json.dumps(
                 {
                     "verdict": "explained",
@@ -2003,13 +2338,27 @@ def test_semantic_explanation_stage_accepts_same_draft_explicit_disguise():
 
     assert result.issues == ()
     assert result.review_clues == ()
-    assert result.diagnostics["case_trace"][0]["final_outcome"] == "no_issue"
+    trace = result.diagnostics["case_trace"][0]
+    assert trace["final_outcome"] == "no_issue"
+    assert trace["explanation_coverage"] == "complete"
+    assert "explanation_compound_line_unresolved" not in (
+        result.diagnostics["reason_counts"]
+    )
     counts = result.diagnostics["counts"]
     assert counts["explanation_review_attempted_call_count"] == 1
     assert counts["explanation_review_completed_batch_count"] == 1
     assert counts["explanation_review_emitted_support_count"] == 1
+    assert counts[
+        "explanation_contract_regeneration_attempted_call_count"
+    ] == 0
+    assert counts[
+        "explanation_contract_regeneration_recovered_batch_count"
+    ] == 0
+    assert counts[
+        "explanation_citation_order_normalized_batch_count"
+    ] == 0
     assert len(provider.calls) == 4
-    assert '"citation":"E02"' in provider.calls[2][1]
+    assert '"citation":"E01"' in provider.calls[2][1]
     assert '"role":"exception"' in provider.calls[3][1]
 
 
@@ -2184,7 +2533,7 @@ def test_explanation_checkpoint_after_first_batch_stops_all_later_model_calls():
                     "causal_relation": "ambiguous",
                     "applicable_observation_citations": [],
                 }
-                for index in range(1, 9)
+                for index in range(1, 5)
             ]
         },
         ensure_ascii=False,
@@ -2277,7 +2626,11 @@ def test_failed_explanation_search_keeps_model_conflict_as_review_clue():
             project["id"],
             name="draft.md",
             role="chapter",
-            content="\n".join(action_lines),
+            # C01/C02 are excluded from explanation candidates. Keep one
+            # separate, non-observation line so this test still exercises an
+            # actual explanation-review provider failure rather than an empty
+            # candidate set.
+            content="\n".join((*action_lines, "同伴随后收起了会场记录。")),
             narrative_context=_context(publication="draft"),
         )
         records = _disguised_speech_records(action_lines)
@@ -2447,6 +2800,8 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
                 }],
                 "matched_observation_refs_truncated": False,
                 "prepare_reason": "reported_opposed_preference",
+                "material_coverage": "complete",
+                "material_coverage_reasons": [],
                 "explanation_coverage": "not_run",
                 "support_count": 0,
                 "review_outcome": "completed",
@@ -3021,7 +3376,7 @@ def test_zero_primary_observations_trigger_one_targeted_batch_and_recover_signal
                 _record(
                     character="祁雾",
                     evidence="祁雾说话直来直往，这是他的核心性格。",
-                    polarity="negative",
+                    polarity="positive",
                     kind="explicit_declaration",
                     dimension="core_personality",
                     trait_key="directness",
@@ -3338,9 +3693,9 @@ def test_focused_target_empty_does_not_suppress_another_legal_target():
         assert counts["targeted_verification_completed_count"] == 1
         assert counts["targeted_verification_empty_count"] == 1
         assert counts["targeted_signal_added_count"] == 1
-        assert counts["configured_stage_token_budget"] == 20_000
-        assert counts["remaining_run_tokens_at_stage_start"] == 20_000
-        assert counts["stage_token_budget"] == 20_000
+        assert counts["configured_stage_token_budget"] == 60_000
+        assert counts["remaining_run_tokens_at_stage_start"] == 60_000
+        assert counts["stage_token_budget"] == 60_000
         assert result.diagnostics["material_coverage"] == "complete"
         targeted_calls = [
             user
@@ -4622,6 +4977,8 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
                 "key_object_sha256": None,
             }],
             "matched_observation_refs_truncated": False,
+            "material_coverage": "partial",
+            "material_coverage_reasons": ["targeted_package_incomplete"],
             "prepare_reason": "single_behavior_is_not_drift",
             "explanation_coverage": "not_run",
             "support_count": 0,
@@ -4776,12 +5133,14 @@ def _confirmed_trait(
     character: str = "林澈",
     dimension: str = "preference",
     trait_key: str = "食物偏好:蜜瓜",
+    key_object: str = "",
 ) -> ConfirmedTraitSnapshot:
     return ConfirmedTraitSnapshot(
         id=f"ct_{authority}_{sum(ord(char) for char in trait_key)}",
         character=character,
         dimension=dimension,
         trait_key=trait_key,
+        key_object=key_object,
         statement="林澈喜欢蜜瓜",
         polarity="positive",
         stability="stable",
@@ -4979,6 +5338,7 @@ def test_server_only_character_clue_labels_evidence_as_non_model_selected():
     )
 
     assert issue.metadata["evidence_binding"] == "server_evidence_pair_v1"
+    assert "key_object" not in issue.metadata
     assert "review_citation_refs" not in issue.metadata
     assert [row.document_id for row in issue.evidence] == ["profile", "draft-0"]
 
@@ -6546,6 +6906,158 @@ def test_object_bearing_baselines_require_an_explicit_same_object_axis():
     assert _observation_matches_baseline(legacy_history, melon) is None
 
 
+@pytest.mark.parametrize(
+    ("dimension", "trait_key", "key_object", "other_object"),
+    (
+        ("relationship_attitude", "trust_orientation", "周尧", "顾岚"),
+        ("motivation_goal", "pursuit_commitment", "重建北境", "寻找钥匙"),
+    ),
+)
+def test_major_ooc_stage_matches_same_axis_only_for_same_object(
+    dimension: str,
+    trait_key: str,
+    key_object: str,
+    other_object: str,
+):
+    scope = NarrativeScopeV1()
+    comparison_key = stable_trait_identity(dimension, trait_key, key_object)
+    entry = (
+        _snapshot_stub(f"{dimension}-baseline", comparison_key),
+        _confirmed_trait(
+            dimension=dimension,
+            trait_key=trait_key,
+            key_object=key_object,
+        ),
+        scope,
+        "林澈",
+    )
+    draft = _FrozenDocument(
+        input_id="draft-input",
+        document=DocumentInput(
+            "draft", "draft.md", f"林澈明确反对{key_object}。", "chapter"
+        ),
+        document_version=1,
+        content_sha256="0" * 64,
+        ordinal=0,
+        source_kind="draft",
+        source_reason="draft",
+        scope=scope,
+        resolution_state="confirmed",
+        publication_status="draft",
+        authority_tier="draft",
+    )
+    hint = _safe_server_context(draft, baselines=[entry])
+    assert len(hint.targets) == 1
+    target = hint.targets[0]
+    assert target.comparison_key == comparison_key
+    assert target.key_object == key_object
+
+    same = CharacterSignal(
+        id="cs_" + "a" * 32,
+        character="林澈",
+        dimension=dimension,
+        trait_key=trait_key,
+        statement=f"林澈明确反对{key_object}",
+        polarity="negative",
+        stability="stable",
+        observation_kind="explicit_declaration",
+        key_object=key_object,
+        source_kind="draft",
+        evidence=EvidenceSpan(
+            document_id="draft",
+            document_name="draft.md",
+            line_start=1,
+            line_end=1,
+            text=f"林澈明确反对{key_object}。",
+        ),
+    )
+    different = same.model_copy(
+        update={
+            "id": "cs_" + "b" * 32,
+            "statement": f"林澈明确反对{other_object}",
+            "key_object": other_object,
+            "evidence": same.evidence.model_copy(
+                update={"text": f"林澈明确反对{other_object}。"}
+            ),
+        }
+    )
+
+    assert _signal_matches_target(same, target)
+    assert not _signal_matches_target(different, target)
+    assert _observation_matches_baseline(entry, same) is True
+    assert _observation_matches_baseline(entry, different) is False
+    assert not _target_has_sufficient_recall_evidence(target, (same,))
+    assert _target_with_existing_evidence_ranges(
+        target, (same,)
+    ).existing_evidence_ranges == ((1, 1),)
+
+    copied = same.model_copy(
+        update={
+            "id": "cs_" + "c" * 32,
+            "evidence": same.evidence.model_copy(
+                update={
+                    "line_start": 2,
+                    "line_end": 2,
+                    "text": f"\u3000林澈明确反对{key_object}。  ",
+                }
+            ),
+        }
+    )
+    assert not _target_has_sufficient_recall_evidence(target, (same, copied))
+    assert _target_with_existing_evidence_ranges(
+        target, (same, copied)
+    ).existing_evidence_ranges == ((1, 1), (2, 2))
+
+    same_coordinate = same.model_copy(
+        update={
+            "id": "cs_" + "d" * 32,
+            "statement": f"林澈以行动再次反对{key_object}",
+            "observation_kind": "action",
+            "evidence": same.evidence.model_copy(
+                update={"text": f"林澈以行动再次反对{key_object}。"}
+            ),
+        }
+    )
+    assert not _target_has_sufficient_recall_evidence(
+        target, (same, same_coordinate)
+    )
+
+    later = same_coordinate.model_copy(
+        update={
+            "id": "cs_" + "e" * 32,
+            "statement": f"三周后，林澈以行动反对{key_object}",
+            "evidence": same_coordinate.evidence.model_copy(
+                update={
+                    "line_start": 8,
+                    "line_end": 8,
+                    "text": f"三周后，林澈以行动反对{key_object}。",
+                }
+            ),
+        }
+    )
+    assert _target_has_sufficient_recall_evidence(target, (same, later))
+
+    prepared = prepare_character_drift(
+        CharacterDriftCase(
+            id=f"cdc_{dimension}_metadata",
+            baseline=entry[1],
+            observations=(same,),
+            scope_compatibility="compatible",
+            material_coverage="complete",
+            explanation_coverage="complete",
+        )
+    )
+    promoted = promote_character_drift(prepared, None)
+    issue = _to_issue(
+        promoted=promoted,
+        prepared=prepared,
+        review=None,
+        confirmed_candidate_id=f"{dimension}-baseline",
+        judgement="needs_confirmation",
+    )
+    assert issue.metadata["key_object"] == key_object
+
+
 def test_qualified_preference_bridge_is_only_for_opposed_draft_review_gates():
     scope = NarrativeScopeV1()
     frozen = (
@@ -7486,6 +7998,65 @@ def test_preference_coverage_is_per_source_line_not_any_chunk_observation():
         (target,), (observation,),
     )
     assert gaps == {"draft_preference_semantic_coverage_uncertain": 1}
+
+
+def test_preference_coverage_accepts_only_exact_line_target_bound_certificate():
+    target = CharacterSignalTarget(
+        character="林澈", dimension="preference",
+        trait_key="melon_preference", comparison_key="preference:蜜瓜",
+        baseline_polarity="positive", requested_polarity="negative",
+        baseline_hint="喜欢蜜瓜",
+    )
+    review_target = _target_bound_review_target(target, target_ordinal=1)
+    line = "旁白明确说明林澈现在讨厌蜜瓜；这不是引语或排练。"
+    base = {
+        "id": "cs_" + "b" * 32,
+        "character": "林澈",
+        "dimension": "preference",
+        "trait_key": "melon_preference",
+        "statement": "林澈现在讨厌蜜瓜",
+        "polarity": "negative",
+        "stability": "temporary",
+        "observation_kind": "preference_expression",
+        "source_kind": "draft",
+        "key_object": "蜜瓜",
+        "evidence": EvidenceSpan(
+            document_id="draft-1", document_name="draft.md",
+            line_start=1, line_end=1, text=line,
+        ),
+        "target_bound_target_digest": target_bound_draft_target_digest(
+            review_target
+        ),
+        "target_bound_target": review_target,
+        "target_bound_target_ordinal": 1,
+        "target_bound_object_relation": "matches_target",
+        "target_bound_object_basis_id": "L1:A1",
+    }
+    certified = CharacterSignal(**base)
+    chunk = CharacterSignalChunk(
+        document_id="draft-1", document_name="draft.md", content=line,
+        global_line_start=1, source_kind="draft",
+    )
+    assert _draft_preference_coverage_gaps(
+        chunk, (target,), (certified,)
+    ) == {}
+
+    cross_line = CharacterSignal(**{
+        **base,
+        "id": "cs_" + "c" * 32,
+        "target_bound_object_basis_id": "L2:A1",
+    })
+    assert _draft_preference_coverage_gaps(
+        chunk, (target,), (cross_line,)
+    ) == {"draft_preference_semantic_coverage_uncertain": 1}
+
+    plain = CharacterSignal(**{
+        key: value for key, value in base.items()
+        if not key.startswith("target_bound_")
+    })
+    assert _draft_preference_coverage_gaps(
+        chunk, (target,), (plain,)
+    ) == {"draft_preference_semantic_coverage_uncertain": 1}
 
 
 def test_service_internal_character_stage_failure_still_completes_baseline_run():

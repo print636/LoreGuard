@@ -46,6 +46,7 @@ import {
   candidateReviewState,
   candidateStatusNames,
   candidateStatusExplanation,
+  characterDimensionNames,
   characterDriftReportPath,
   describeCoverage,
   describeReadiness,
@@ -145,6 +146,55 @@ test("verified support renders the exact indented Unicode line with distinct con
   }]);
   assert.deepEqual(verifiedTargetExcerpts({ ...parsed, source_verified: false }), []);
   assert.deepEqual(verifiedTargetExcerpts({ ...parsed, support_bindings_status: "legacy" }), []);
+});
+
+test("reviewed postposed summary keeps target and later label as distinct verified spans", () => {
+  const base = verifiedSupportCandidate();
+  const targetText = "黎音长期内向谨慎";
+  const bridgeText = "面对陌生人时会先观察";
+  const labelText = "这是她稳定的核心性格";
+  const line = `${targetText}，${bridgeText}，${labelText}。`;
+  const targetEnd = Array.from(targetText).length;
+  const bridgeStart = targetEnd + 1;
+  const bridgeEnd = bridgeStart + Array.from(bridgeText).length;
+  const labelStart = bridgeEnd + 1;
+  const labelEnd = labelStart + Array.from(labelText).length;
+  const binding = {
+    evidence_index: 0,
+    support_id: "L1:A1",
+    target: { support_id: "L1:A1", start_offset: 0, end_offset: targetEnd, role: "target" },
+    actor_anchor_id: null,
+    label_anchor_id: "L1:A3",
+    scope_relation: "postposed_label_summary",
+    context: [
+      { support_id: "L1:A2", start_offset: bridgeStart, end_offset: bridgeEnd, role: "bridge" },
+      { support_id: "L1:A3", start_offset: labelStart, end_offset: labelEnd, role: "label_anchor" },
+    ],
+  };
+  const raw = {
+    ...base,
+    evidence: [{ ...base.evidence[0], text: line }],
+    support_bindings_v1: { ...base.support_bindings_v1, bindings: [binding] },
+  };
+  const parsed = normalizeProfileCandidate(raw, { requireExactEvidence: true });
+  assert.equal(parsed.support_bindings_status, "verified");
+  assert.deepEqual(verifiedTargetExcerpts(parsed), [{
+    location: "角色.md · 第 1 行",
+    target: targetText,
+    context: [
+      { label: "承接上下文", text: bridgeText },
+      { label: "特征线索", text: labelText },
+    ],
+  }]);
+
+  const wrongRelation = normalizeProfileCandidate({
+    ...raw,
+    support_bindings_v1: {
+      ...raw.support_bindings_v1,
+      bindings: [{ ...binding, scope_relation: "labelled_elaboration" }],
+    },
+  }, { requireExactEvidence: true });
+  assert.equal(wrongRelation.support_bindings_status, "invalid");
 });
 
 test("Unicode combining characters use codepoint offsets rather than UTF-16 indices", () => {
@@ -534,6 +584,25 @@ test("confirmed axis meaning requires the same proposition, version, and frozen 
 
 test("frozen character dimensions include current state and fail unknown values closed", () => {
   assert.equal(normalizeCharacterDimension("current_state"), "current_state");
+  assert.equal(
+    normalizeCharacterDimension("relationship_attitude"),
+    "relationship_attitude",
+  );
+  assert.equal(normalizeCharacterDimension("motivation_goal"), "motivation_goal");
+  assert.equal(characterDimensionNames.relationship_attitude, "关系态度");
+  assert.equal(characterDimensionNames.motivation_goal, "长期动机/目标");
+  const relationship = normalizeProfileCandidate(candidate({
+    dimension: "relationship_attitude",
+    key_object: "周尧",
+    comparison_key: `relationship_attitude:${"a".repeat(64)}.周尧`,
+  }));
+  assert.equal(relationship.key_object, "周尧");
+  assert.equal(relationship.reviewable, true);
+  const missingObject = normalizeProfileCandidate(candidate({
+    dimension: "motivation_goal",
+  }));
+  assert.equal(missingObject.reviewable, false);
+  assert.match(missingObject.unreviewable_reason, /缺少可核对的对象/);
   assert.equal(normalizeCharacterDimension("future_dimension"), "unknown");
 
   const normalized = normalizeProfileCandidate({

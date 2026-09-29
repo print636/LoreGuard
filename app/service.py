@@ -37,6 +37,7 @@ from .character_traits import (
     MAX_CONFIRMED_TRAITS_PER_RUN,
     TraitEvidenceInput,
     candidate_snapshot_comparison_key,
+    candidate_snapshot_key_object,
     candidate_snapshot_payload,
     _validated_comparison_key,
     latest_confirm_reviews,
@@ -51,7 +52,12 @@ from .character_consistency_stage import (
 from .character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from .character_history_semantic_review import HISTORY_REVIEW_SYSTEM_PROMPT
-from .character_draft_actor_review_provider import DRAFT_ACTOR_REVIEW_SYSTEM_PROMPT
+from .character_draft_actor_review_provider import (
+    DRAFT_ACTOR_REVIEW_SYSTEM_PROMPT,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8,
+)
 from .character_drift import (
     CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
     CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT,
@@ -903,6 +909,15 @@ class _CharacterConsistencyAccountingProvider:
         elif (
             system == DRAFT_ACTOR_REVIEW_SYSTEM_PROMPT
             and self.settings.character_draft_actor_review_v1
+        ) or (
+            system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT
+            and self.settings.character_target_bound_draft_review_v2
+        ) or (
+            system in {
+                TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7,
+                TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8,
+            }
+            and self.settings.character_target_bound_draft_review_v3
         ):
             if self.draft_actor_review_provider is None:
                 bounded = self.fork_for_character_draft_actor_review(
@@ -1313,6 +1328,7 @@ def _historical_trait_snapshot_payload(candidate, review, db=None) -> dict[str, 
         "trait_type": candidate.trait_type,
         "trait_key": candidate.trait_key,
         **candidate_snapshot_comparison_key(candidate),
+        **candidate_snapshot_key_object(candidate),
         "value": candidate.value,
         "polarity": candidate.polarity,
         "stability": candidate.stability,

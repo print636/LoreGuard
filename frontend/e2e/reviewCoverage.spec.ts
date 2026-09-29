@@ -76,7 +76,7 @@ test("completed task with one uncalled character chunk stays visibly partial", a
   await mockCompletedRun(page, state);
   await page.goto(`/app/projects/${projectId}/runs/${runId}`);
   const coverage = page.locator(".reviewCoverage");
-  await expect(coverage).toContainText("角色审查覆盖不完整");
+  await expect(coverage).toContainText("角色审查仅覆盖部分内容");
   await expect(coverage).toContainText("调用模型 6 · 完成 6 · 未完成 1（其中未调用 1）");
   await expect(coverage).toContainText("Token 预算门控");
   await expect(coverage).not.toContainText("bounded_partial");

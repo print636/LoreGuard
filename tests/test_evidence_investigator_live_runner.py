@@ -1503,7 +1503,7 @@ def test_runtime_provenance_draft_excerpt_repair_requires_fixed_pair_and_version
 @pytest.mark.parametrize(
     ("key", "valid_maximum"),
     [
-        ("stage_token_budget", 150_000),
+        ("stage_token_budget", 500_000),
         ("signal_token_budget", 40_000),
     ],
 )

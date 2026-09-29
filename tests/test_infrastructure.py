@@ -99,18 +99,66 @@ class TokenBudgetTests(unittest.TestCase):
             (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         )
         expected = {
-            "CHARACTER_CONSISTENCY_STAGE_TOKEN_BUDGET": "${CHARACTER_CONSISTENCY_STAGE_TOKEN_BUDGET:-150000}",
-            "PER_RUN_TOKEN_BUDGET": "${PER_RUN_TOKEN_BUDGET:-200000}",
-            "DAILY_TOKEN_BUDGET": "${DAILY_TOKEN_BUDGET:-600000}",
+            "CHARACTER_CONSISTENCY_STAGE_TOKEN_BUDGET": "${CHARACTER_CONSISTENCY_STAGE_TOKEN_BUDGET:-300000}",
+            "PER_RUN_TOKEN_BUDGET": "${PER_RUN_TOKEN_BUDGET:-400000}",
+            "DAILY_TOKEN_BUDGET": "${DAILY_TOKEN_BUDGET:-2000000}",
         }
         for service_name in ("api", "worker"):
             environment = compose["services"][service_name]["environment"]
             self.assertEqual(expected, {key: environment.get(key) for key in expected})
 
         example = (ROOT / ".env.example").read_text(encoding="utf-8")
-        self.assertIn("CHARACTER_CONSISTENCY_STAGE_TOKEN_BUDGET=150000", example)
-        self.assertIn("DAILY_TOKEN_BUDGET=600000", example)
-        self.assertIn("PER_RUN_TOKEN_BUDGET=200000", example)
+        self.assertIn("CHARACTER_CONSISTENCY_STAGE_TOKEN_BUDGET=300000", example)
+        self.assertIn("DAILY_TOKEN_BUDGET=2000000", example)
+        self.assertIn("PER_RUN_TOKEN_BUDGET=400000", example)
+
+    def test_alpha_support_binding_chain_is_explicit_and_default_off(self):
+        compose = yaml.safe_load(
+            (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        )
+        expected = {
+            "CHARACTER_SIGNAL_SUPPORT_ID_V4": (
+                "${CHARACTER_SIGNAL_SUPPORT_ID_V4:-false}"
+            ),
+            "CHARACTER_SIGNAL_SEMANTIC_SCOPE_V5": (
+                "${CHARACTER_SIGNAL_SEMANTIC_SCOPE_V5:-false}"
+            ),
+            "CHARACTER_SIGNAL_SCOPE_REVIEW_V1": (
+                "${CHARACTER_SIGNAL_SCOPE_REVIEW_V1:-false}"
+            ),
+        }
+        for service_name in ("api", "worker"):
+            environment = compose["services"][service_name]["environment"]
+            self.assertEqual(
+                expected, {key: environment.get(key) for key in expected}
+            )
+
+        example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        for key in expected:
+            self.assertIn(f"{key}=false", example)
+
+    def test_compose_passes_independent_character_explanation_completion_limit(self):
+        compose = yaml.safe_load(
+            (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        )
+        interpolation = (
+            "${CHARACTER_EXPLANATION_MAX_COMPLETION_TOKENS:-2048}"
+        )
+        for service_name in ("api", "worker"):
+            self.assertEqual(
+                compose["services"][service_name]["environment"].get(
+                    "CHARACTER_EXPLANATION_MAX_COMPLETION_TOKENS"
+                ),
+                interpolation,
+            )
+        example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn(
+            "CHARACTER_EXPLANATION_MAX_COMPLETION_TOKENS=2048", example
+        )
+        self.assertEqual(
+            Settings(_env_file=None).character_explanation_max_completion_tokens,
+            2_048,
+        )
 
     def test_compose_passes_authentication_boundary_to_api_and_worker(self):
         compose = yaml.safe_load(

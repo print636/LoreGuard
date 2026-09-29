@@ -17,6 +17,7 @@ from app.character_scope_review import (
 )
 from app.character_scope_review_provider import (
     SCOPE_REVIEW_USER_PREFIX,
+    _build_scope_review_contract_regeneration_prompts,
     build_scope_review_prompts,
     run_scope_review,
 )
@@ -117,6 +118,29 @@ class FakeProvider:
         )
 
 
+class SequencedProvider:
+    def __init__(self, responses: list[SimpleNamespace | Exception]):
+        self.responses = list(responses)
+        self.calls: list[tuple[str, str]] = []
+
+    def complete(self, system: str, user: str):
+        self.calls.append((system, user))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _provider_response(
+    text: str, *, prompt_tokens: int = 0, completion_tokens: int = 0,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        text=text,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+
 def _run(request, source, frozen, provider, **overrides):
     kwargs = {
         "token_budget": 100_000,
@@ -145,10 +169,14 @@ def test_cross_clause_same_axis_different_words_can_be_supported():
     assert len(provider.calls) == 1
     assert "同一语义轴" in provider.calls[0][0]
     assert "statement_relation 为 supported/contradicted/ambiguous" in provider.calls[0][0]
-    assert "不得借同一行其他分句的事实补足 statement" in provider.calls[0][0]
+    assert "不得借标签或同一行其他分句的事实补足 statement" in provider.calls[0][0]
+    assert "postposed_label_summary" in provider.calls[0][0]
+    assert "label_anchor 必须是该行最后一个断言" in provider.calls[0][0]
+    assert "同轴事实本身使用“不/不会”等负向措辞不等于否认目标" in provider.calls[0][0]
     assert "对每个非空的 actor_anchor_id 和 label_anchor_id" in provider.calls[0][0]
     assert "包括纯情境分句" in provider.calls[0][0]
     assert "每个分句 ID 只列一次" in provider.calls[0][0]
+    assert "从目标一直覆盖到后置 label_anchor" in provider.calls[0][0]
     assert "不得为了凑齐路径而把不支持或拿不准的候选改判 supported" in provider.calls[0][0]
     prompt_data = json.loads(provider.calls[0][1].removeprefix(SCOPE_REVIEW_USER_PREFIX))
     assert prompt_data["request_digest"] == request_digest(request)
@@ -309,7 +337,7 @@ def test_elapsed_provider_timeout_overrides_otherwise_supported_reply():
 
 @pytest.mark.parametrize("response_text,reason", [
     ("{broken", "response_invalid"),
-    (json.dumps({"schema_version": "character-scope-review-v1", "request_digest": "0" * 64,
+    (json.dumps({"schema_version": "character-scope-review-v2", "request_digest": "0" * 64,
                  "items": []}), "response_mismatch"),
 ])
 def test_bad_json_or_partial_response_fails_closed(response_text, reason):
@@ -323,8 +351,206 @@ def test_bad_json_or_partial_response_fails_closed(response_text, reason):
     result = _run(request, source, frozen, FakeProvider(response_text))
     assert result.failure_reason == reason
     assert result.evaluation.decisions[0].verdict == "uncertain"
-    assert result.attempted_calls == 1
+    assert result.attempted_calls == 2
     assert result.charged_tokens == result.estimated_tokens
+
+
+def test_contract_regeneration_rebuilds_frozen_batch_without_prior_output():
+    request, source, frozen = _source_request()
+    prior_output_marker = "private-invalid-output-marker"
+    rejected = _response(
+        request,
+        verdict="rejected",
+        actor="other",
+        basis_ids=[],
+    )
+    provider = SequencedProvider([
+        _provider_response(
+            "{broken-" + prior_output_marker, prompt_tokens=7,
+            completion_tokens=3,
+        ),
+        _provider_response(rejected, prompt_tokens=11, completion_tokens=5),
+    ])
+
+    result = _run(request, source, frozen, provider)
+
+    assert result.failure_reason is None
+    assert result.attempted_calls == len(provider.calls) == 2
+    assert (result.prompt_tokens, result.completion_tokens) == (18, 8)
+    assert result.evaluation.decisions[0].verdict == "rejected"
+    assert result.evaluation.decisions[0].reason == "reviewer_rejected"
+    assert provider.calls[0][0] == provider.calls[1][0]
+    first_payload = json.loads(
+        provider.calls[0][1].removeprefix(SCOPE_REVIEW_USER_PREFIX)
+    )
+    retry_payload = json.loads(
+        provider.calls[1][1].removeprefix(SCOPE_REVIEW_USER_PREFIX)
+    )
+    assert retry_payload["request"] == first_payload["request"]
+    assert retry_payload["basis_path_hints"] == first_payload["basis_path_hints"]
+    assert retry_payload["request_digest"] == request_digest(request)
+    assert retry_payload["validation_retry"] == {
+        "mode": "whole_batch_contract_regeneration",
+        "failure_code": "response_invalid",
+        "ignore_prior_response": True,
+        "semantic_rules_unchanged": True,
+        "expected_schema_version": request.schema_version,
+        "expected_request_digest": request_digest(request),
+        "expected_items": [{
+            "proposal_id": request.proposals[0].proposal_id,
+            "support_id": request.proposals[0].support_id,
+        }],
+        "required_top_level_keys": [
+            "schema_version", "request_digest", "items",
+        ],
+        "required_item_keys": [
+            "proposal_id", "support_id", "verdict", "actor", "actuality",
+            "statement_relation", "label_relation", "object_relation",
+            "polarity_relation", "level_supported", "basis_ids",
+        ],
+        "allowed_values": {
+            "verdict": ["supported", "rejected", "uncertain"],
+            "actor": ["proposed", "other", "ambiguous"],
+            "actuality": [
+                "asserted", "reported", "hypothetical", "question", "ambiguous",
+            ],
+            "statement_relation": ["supported", "contradicted", "ambiguous"],
+            "label_relation": [
+                "same_axis", "different_axis", "none", "ambiguous",
+            ],
+            "object_relation": [
+                "same", "different", "not_applicable", "ambiguous",
+            ],
+            "polarity_relation": [
+                "same", "opposite", "not_applicable", "ambiguous",
+            ],
+            "level_supported": ["yes", "no", "ambiguous"],
+        },
+        "item_count": 1,
+        "basis_ids_type": "array_of_support_id_strings",
+        "additional_fields_allowed": False,
+        "markdown_allowed": False,
+    }
+    assert prior_output_marker not in provider.calls[1][0] + provider.calls[1][1]
+
+
+def test_batch_identity_mismatch_can_regenerate_once_from_same_request():
+    request, source, frozen = _source_request()
+    missing_items = json.dumps({
+        "schema_version": request.schema_version,
+        "request_digest": request_digest(request),
+        "items": [],
+    })
+    provider = SequencedProvider([
+        _provider_response(missing_items),
+        _provider_response(_response(request)),
+    ])
+
+    result = _run(request, source, frozen, provider)
+
+    assert result.failure_reason is None
+    assert result.attempted_calls == len(provider.calls) == 2
+    assert result.evaluation.decisions[0].verdict == "supported"
+    retry_payload = json.loads(
+        provider.calls[1][1].removeprefix(SCOPE_REVIEW_USER_PREFIX)
+    )
+    assert retry_payload["validation_retry"]["failure_code"] == "response_mismatch"
+
+
+@pytest.mark.parametrize("item_overrides", (
+    {
+        "verdict": "uncertain",
+        "actor": "ambiguous",
+        "actuality": "ambiguous",
+        "statement_relation": "ambiguous",
+        "label_relation": "ambiguous",
+        "object_relation": "ambiguous",
+        "polarity_relation": "ambiguous",
+        "level_supported": "ambiguous",
+        "basis_ids": [],
+    },
+    {"verdict": "rejected", "actor": "other", "basis_ids": []},
+    {"verdict": "supported", "actor": "ambiguous"},
+    {"verdict": "supported", "basis_ids": []},
+))
+def test_semantic_or_evidence_decision_never_triggers_contract_regeneration(
+    item_overrides,
+):
+    request, source, frozen = _source_request()
+    provider = FakeProvider(_response(request, **item_overrides))
+
+    result = _run(request, source, frozen, provider)
+
+    assert result.attempted_calls == len(provider.calls) == 1
+    assert result.failure_reason is None
+
+
+def test_second_contract_failure_stays_fail_closed_without_third_call():
+    request, source, frozen = _source_request()
+    provider = SequencedProvider([
+        _provider_response("{first-broken"),
+        _provider_response("{second-broken"),
+        _provider_response(_response(request)),
+    ])
+
+    result = _run(request, source, frozen, provider)
+
+    assert result.failure_reason == "response_invalid"
+    assert result.attempted_calls == len(provider.calls) == 2
+    assert result.evaluation.decisions[0].verdict == "uncertain"
+    assert len(provider.responses) == 1
+
+
+def test_contract_regeneration_rechecks_shared_budget_before_second_call():
+    request, source, frozen = _source_request()
+    system, user = build_scope_review_prompts(request)
+    retry_system, retry_user = _build_scope_review_contract_regeneration_prompts(
+        request, failure="response_invalid",
+    )
+    first_estimate = estimate_issue_evidence_review_tokens(
+        system, user, completion_reserve=256,
+    )
+    retry_estimate = estimate_issue_evidence_review_tokens(
+        retry_system, retry_user, completion_reserve=256,
+    )
+    provider = SequencedProvider([
+        _provider_response("{broken"),
+        _provider_response(_response(request)),
+    ])
+
+    result = _run(
+        request,
+        source,
+        frozen,
+        provider,
+        token_budget=first_estimate + retry_estimate - 1,
+    )
+
+    assert result.failure_reason == "token_budget"
+    assert result.attempted_calls == len(provider.calls) == 1
+    assert result.estimated_tokens == first_estimate + retry_estimate
+    assert result.charged_tokens == first_estimate
+    assert result.evaluation.decisions[0].verdict == "uncertain"
+
+
+def test_contract_regeneration_rechecks_shared_deadline_before_second_call():
+    request, source, frozen = _source_request()
+    clock = [10.0]
+    provider = FakeProvider("{broken", clock=clock, advance=5)
+
+    result = _run(
+        request,
+        source,
+        frozen,
+        provider,
+        timeout_seconds=10,
+        remaining_deadline_seconds=5,
+        monotonic=lambda: clock[0],
+    )
+
+    assert result.failure_reason == "deadline"
+    assert result.attempted_calls == len(provider.calls) == 1
+    assert result.evaluation.decisions[0].verdict == "uncertain"
 
 
 def test_one_missing_item_invalidates_whole_batch():

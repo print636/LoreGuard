@@ -45,7 +45,12 @@ def test_ooc_fixture_has_distinct_conflict_growth_and_single_emergency():
     for case in oracle["expected_cases"]:
         if not case["visible"]:
             continue
-        for evidence in case["visible_issue"]["allowed_evidence"]:
+        contract = case[
+            "visible_issue"
+            if case.get("expected_report_class") == "formal"
+            else "review_clue"
+        ]
+        for evidence in contract["allowed_evidence"]:
             path = FIXTURE / evidence["document_name"]
             lines = path.read_text(encoding="utf-8").splitlines()
             assert 1 <= evidence["line_start"] <= evidence["line_end"] <= len(lines)
@@ -112,7 +117,12 @@ def test_transfer_fixture_fixes_a_distinct_world_and_three_case_oracle():
     for case in oracle["expected_cases"]:
         if not case["visible"]:
             continue
-        for evidence in case["visible_issue"]["allowed_evidence"]:
+        contract = case[
+            "visible_issue"
+            if case.get("expected_report_class") == "formal"
+            else "review_clue"
+        ]
+        for evidence in contract["allowed_evidence"]:
             lines = (TRANSFER_FIXTURE / evidence["document_name"]).read_text(
                 encoding="utf-8"
             ).splitlines()
@@ -273,9 +283,15 @@ def test_source_anchored_dev_report_forces_strict_gate_false(monkeypatch):
         "runtime_provenance": {"capabilities": {"character_consistency": True}},
         "model": {"configured": True},
     })
+    monkeypatch.setattr(
+        live_acceptance,
+        "_safe_runtime_provenance",
+        lambda _value: {"capabilities": {"character_consistency": True}},
+    )
     monkeypatch.setattr(live_acceptance, "_execute_trial", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(live_acceptance, "_evaluate_gates", lambda _trials: {
-        "at_least_three_independent_full_workflow_trials": True,
+    monkeypatch.setattr(live_acceptance, "_evaluate_gates", lambda _trials, **_kwargs: {
+        "at_least_three_independent_full_workflow_trials": False,
+        "visible_issue_semantic_identity_valid_in_each_trial": True,
         "other": True,
     })
     monkeypatch.setattr(live_acceptance, "_emit_report", lambda report, _path: captured.append(report))
@@ -329,11 +345,15 @@ def test_partial_baseline_diagnostic_never_admits_unprocessed_or_failed_run():
         "material_coverage": "partial",
         "planned_chunks": 3,
         "processed_chunks": 3,
+        "model_completed_chunks": 3,
+        "model_incomplete_chunks": 0,
         "stage_usage": {"attempted_calls": 4},
         "reason_counts": {"key_object_support": 7},
     }
     assert _diagnostic_partial_baseline_allowed(partial)
-    assert not _diagnostic_partial_baseline_allowed({**partial, "processed_chunks": 2})
+    assert not _diagnostic_partial_baseline_allowed({
+        **partial, "model_completed_chunks": 2, "model_incomplete_chunks": 1
+    })
     assert not _diagnostic_partial_baseline_allowed({**partial, "status": "failed"})
     assert not _diagnostic_partial_baseline_allowed({**partial, "reason_counts": {}})
     assert not _diagnostic_partial_baseline_allowed({

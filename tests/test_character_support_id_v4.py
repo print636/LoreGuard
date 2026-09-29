@@ -545,6 +545,9 @@ def test_v4_same_line_same_axis_siblings_keep_signal_identity_but_one_line_of_ev
     assert len({signal.id for signal in result.signals}) == 2
     assert len(result.pending_candidates) == 1
     assert len(result.pending_candidates[0].evidence) == 1
+    # V4 locates the assertion but does not bind reviewer-approved scope or a
+    # frozen run input, so it cannot by itself produce a required_v1 row.
+    assert result.pending_candidates[0].support_refs == ()
 
 
 def test_v4_regeneration_cannot_swap_same_line_support_id_for_verified_anchor():

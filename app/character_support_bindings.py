@@ -32,7 +32,10 @@ class TraitSupportRef(BaseModel):
     actor_anchor_id: str | None = Field(default=None, pattern=_SUPPORT_ID)
     label_anchor_id: str | None = Field(default=None, pattern=_SUPPORT_ID)
     scope_relation: Literal[
-        "local", "same_actor_continuation", "labelled_elaboration"
+        "local",
+        "same_actor_continuation",
+        "labelled_elaboration",
+        "postposed_label_summary",
     ]
 
 
@@ -113,29 +116,45 @@ def bind_support_refs(
             ref.label_anchor_id is not None and label is None
         ):
             raise ValueError("candidate support anchor is invalid")
-        for anchor in (actor, label):
-            if anchor is not None and (
-                anchor.line_number != line_number or anchor.start_offset > target.start_offset
-            ):
-                raise ValueError("candidate support anchor is outside the target line")
-        if actor is not None and actor.start_offset == target.start_offset:
+        if actor is not None and (
+            actor.line_number != line_number
+            or actor.start_offset >= target.start_offset
+        ):
             raise ValueError("candidate support actor anchor must precede target")
+        if label is not None and label.line_number != line_number:
+            raise ValueError("candidate support label anchor is outside the target line")
+        if label is not None:
+            if ref.scope_relation == "postposed_label_summary":
+                if label.start_offset <= target.start_offset:
+                    raise ValueError("candidate support label must follow target")
+                if any(
+                    clause.line_number == line_number
+                    and clause.start_offset > label.start_offset
+                    for clause in index.clauses
+                ):
+                    raise ValueError("candidate support label must be final")
+            elif label.start_offset > target.start_offset:
+                raise ValueError("candidate support label must not follow target")
         if ref.scope_relation == "local":
             valid_relation = actor is None and label in (None, target)
         elif ref.scope_relation == "same_actor_continuation":
             valid_relation = actor is not None and label in (None, target)
+        elif ref.scope_relation == "labelled_elaboration":
+            valid_relation = label is not None and label != target
         else:
             valid_relation = label is not None and label != target
         if not valid_relation:
             raise ValueError("candidate support relation is invalid")
-        # Only the server-determined anchor-to-target chain is context. The
-        # reviewer may have supplied extra same-line basis IDs; ignore those.
+        # Only server-determined anchor/target paths are context. A reviewed
+        # postposed summary extends this bounded path after the target; it does
+        # not turn unrelated same-line clauses into evidence.
         anchors = [anchor for anchor in (actor, label) if anchor is not None and anchor != target]
         context = []
         if anchors:
-            first = min(anchor.start_offset for anchor in anchors)
+            first = min([target.start_offset, *(anchor.start_offset for anchor in anchors)])
+            last = max([target.start_offset, *(anchor.start_offset for anchor in anchors)])
             for clause in index.clauses:
-                if first <= clause.start_offset < target.start_offset:
+                if first <= clause.start_offset <= last and clause != target:
                     role = (
                         "actor_anchor" if actor == clause else
                         "label_anchor" if label == clause else "bridge"

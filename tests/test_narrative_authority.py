@@ -1305,6 +1305,7 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
                     "support_bindings_sha256",
                     "axis_alignment", "axis_polarity",
                     "axis_positive_proposition_sha256",
+                    "key_object",
                 }
             if table_name == "character_trait_reviews":
                 expected_columns -= {
@@ -1338,6 +1339,7 @@ def test_narrative_authority_migrations_round_trip_have_exact_additive_tables():
             "support_bindings_sha256",
             "axis_alignment", "axis_polarity",
             "axis_positive_proposition_sha256",
+            "key_object",
         }
         engine.dispose()
 

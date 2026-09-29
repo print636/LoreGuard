@@ -26,6 +26,8 @@ test("provisional clue contract keeps model proposals separate from issue fields
   assert.deepEqual(result.items[0], clue);
   assert.equal(result.items[0].reason, "partial_model_package");
   assert.equal(provisionalClueDimensionLabel(result.items[0].dimension), "行为边界");
+  assert.equal(provisionalClueDimensionLabel("relationship_attitude"), "关系态度");
+  assert.equal(provisionalClueDimensionLabel("motivation_goal"), "长期动机/目标");
   assert.deepEqual(normalizeProvisionalClueResult({ items: [], truncated: false }), {
     items: [], truncated: false,
   });

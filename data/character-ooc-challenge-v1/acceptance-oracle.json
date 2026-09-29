@@ -52,6 +52,7 @@
       "promote_reason": "model_contradicts",
       "review_verdict": "contradicts",
       "visible": true,
+      "expected_report_class": "formal",
       "min_matched_observation_count": 2,
       "max_matched_observation_count": 3,
       "expected_citation_roles": ["B", "C"],
@@ -83,6 +84,7 @@
       "promote_reason": "model_explained",
       "review_verdict": "explained",
       "visible": false,
+      "expected_report_class": "none",
       "min_matched_observation_count": 2,
       "max_matched_observation_count": 3,
       "expected_citation_roles": ["B", "C", "G"]
@@ -96,9 +98,24 @@
       "final_outcome": "needs_confirmation",
       "promote_reason": "single_behavior_is_not_drift",
       "review_verdict": null,
-      "visible": false,
+      "visible": true,
+      "expected_report_class": "review_clue",
       "matched_observation_count": 1,
-      "expected_citation_roles": []
+      "expected_citation_roles": [],
+      "review_clue": {
+        "subtype": "core_trait_drift",
+        "judgement": "needs_confirmation",
+        "required_evidence": [
+          {"document_name": "02-character-profiles.md", "line": 13},
+          {"document_name": "04-draft-event-v1.1.md", "line": 10}
+        ],
+        "required_any_evidence": [],
+        "required_any_evidence_min_matches": 0,
+        "allowed_evidence": [
+          {"document_name": "02-character-profiles.md", "line_start": 13, "line_end": 13},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 10, "line_end": 10}
+        ]
+      }
     }
   ]
 }

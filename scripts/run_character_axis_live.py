@@ -54,6 +54,7 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY,
     _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY,
     _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION,
+    _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSIONS,
     _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY,
     _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS,
     _valid_character_scope_review_limits,
@@ -62,6 +63,14 @@ from scripts.run_evidence_investigator_live import (
     _valid_character_history_semantic_review_limits,
     _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS,
     _valid_character_draft_actor_review_limits,
+    _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS,
+    _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS,
+    _valid_character_target_bound_draft_review_limits,
+    _CHARACTER_OOC_PROTOCOL_KEY,
+    _CHARACTER_OOC_DIMENSIONS_KEY,
+    _CHARACTER_OOC_PROTOCOL_VERSION,
+    _CHARACTER_OOC_SUPPORTED_DIMENSIONS,
+    _CHARACTER_OOC_PROTOCOL_KEYS,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY,
     _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION,
@@ -75,7 +84,17 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS,
     _CHARACTER_EXPLANATION_REVIEW_KEY,
     _CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY,
+    _CHARACTER_EXPLANATION_MAX_WINDOWS_KEY,
+    _CHARACTER_EXPLANATION_MAX_COMPLETION_KEY,
+    _CHARACTER_EXPLANATION_PROVIDER_MAX_COMPLETION_KEY,
+    _CHARACTER_EXPLANATION_REVIEW_LEGACY_KEYS,
+    _CHARACTER_EXPLANATION_REVIEW_WINDOW_KEYS,
+    _CHARACTER_EXPLANATION_REVIEW_V1_KEYS,
     _CHARACTER_EXPLANATION_REVIEW_KEYS,
+    _CHARACTER_EXPLANATION_SCHEMA_VERSION_KEY,
+    _CHARACTER_EXPLANATION_PROMPT_VERSION_KEY,
+    _CHARACTER_EXPLANATION_SCHEMA_VERSION,
+    _CHARACTER_EXPLANATION_PROMPT_VERSION,
     _CHARACTER_CONSISTENCY_NUMBER_LIMIT_BOUNDS,
     _local_service_artifact_sha256,
 )
@@ -834,7 +853,11 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     draft_excerpt_repair_keys = set(limits) & _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
     history_review_keys = set(limits) & _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
     draft_actor_review_keys = set(limits) & _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
+    target_bound_draft_review_keys = (
+        set(limits) & _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS
+    )
     explanation_review_keys = set(limits) & _CHARACTER_EXPLANATION_REVIEW_KEYS
+    ooc_protocol_keys = set(limits) & _CHARACTER_OOC_PROTOCOL_KEYS
     if (
         set(capabilities) != _CAPABILITY_KEYS
         or any(type(flag) is not bool for flag in capabilities.values())
@@ -850,15 +873,29 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or draft_actor_review_keys not in (
             set(), set(_CHARACTER_DRAFT_ACTOR_REVIEW_KEYS)
         )
+        or target_bound_draft_review_keys not in (
+            set(),
+            set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS),
+            set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS),
+        )
         or explanation_review_keys not in (
-            set(), set(_CHARACTER_EXPLANATION_REVIEW_KEYS)
+            set(),
+            set(_CHARACTER_EXPLANATION_REVIEW_LEGACY_KEYS),
+            set(_CHARACTER_EXPLANATION_REVIEW_WINDOW_KEYS),
+            set(_CHARACTER_EXPLANATION_REVIEW_V1_KEYS),
+            set(_CHARACTER_EXPLANATION_REVIEW_KEYS),
+        )
+        or ooc_protocol_keys not in (
+            set(), set(_CHARACTER_OOC_PROTOCOL_KEYS)
         )
         or set(limits) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
             | _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
             | _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
+            | _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS
             | _CHARACTER_EXPLANATION_REVIEW_KEYS
+            | _CHARACTER_OOC_PROTOCOL_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
@@ -928,6 +965,17 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or limits.get("sensitivity") not in {"conservative", "balanced", "exploratory"}
     ):
         return None
+    if ooc_protocol_keys and (
+        limits[_CHARACTER_OOC_PROTOCOL_KEY] != _CHARACTER_OOC_PROTOCOL_VERSION
+        or type(limits[_CHARACTER_OOC_DIMENSIONS_KEY]) is not list
+        or tuple(limits[_CHARACTER_OOC_DIMENSIONS_KEY])
+        != _CHARACTER_OOC_SUPPORTED_DIMENSIONS
+        or any(
+            type(dimension) is not str
+            for dimension in limits[_CHARACTER_OOC_DIMENSIONS_KEY]
+        )
+    ):
+        return None
     if (
         _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY in limits
         and type(limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY]) is not bool
@@ -964,9 +1012,11 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
             limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY]
             and limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] is not True
         )
-        or limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY] != (
-            _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION
-            if limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY] else None
+        or (
+            limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY]
+            not in _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSIONS
+            if limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY]
+            else limits[_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY] is not None
         )
     ):
         return None
@@ -981,12 +1031,58 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         return None
     if draft_actor_review_keys and not _valid_character_draft_actor_review_limits(limits):
         return None
+    if (
+        target_bound_draft_review_keys
+        and not _valid_character_target_bound_draft_review_limits(limits)
+    ):
+        return None
     if explanation_review_keys and (
         type(limits[_CHARACTER_EXPLANATION_REVIEW_KEY]) is not bool
         or type(limits[_CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY]) is not int
         or not 512
         <= limits[_CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY]
         <= 60_000
+        or (
+            _CHARACTER_EXPLANATION_MAX_WINDOWS_KEY in limits
+            and (
+                type(limits[_CHARACTER_EXPLANATION_MAX_WINDOWS_KEY]) is not int
+                or not 1
+                <= limits[_CHARACTER_EXPLANATION_MAX_WINDOWS_KEY]
+                <= 64
+            )
+        )
+        or (
+            _CHARACTER_EXPLANATION_MAX_COMPLETION_KEY in limits
+            and (
+                type(limits[_CHARACTER_EXPLANATION_MAX_COMPLETION_KEY]) is not int
+                or not 256
+                <= limits[_CHARACTER_EXPLANATION_MAX_COMPLETION_KEY]
+                <= 4_096
+                or type(
+                    limits[_CHARACTER_EXPLANATION_PROVIDER_MAX_COMPLETION_KEY]
+                ) is not int
+                or not 1
+                <= limits[_CHARACTER_EXPLANATION_PROVIDER_MAX_COMPLETION_KEY]
+                <= limits[_CHARACTER_EXPLANATION_MAX_COMPLETION_KEY]
+                or limits[_CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY]
+                < limits[_CHARACTER_EXPLANATION_MAX_COMPLETION_KEY]
+            )
+        )
+        or (
+            _CHARACTER_EXPLANATION_SCHEMA_VERSION_KEY in limits
+            and (
+                limits[_CHARACTER_EXPLANATION_SCHEMA_VERSION_KEY]
+                != (
+                    _CHARACTER_EXPLANATION_SCHEMA_VERSION
+                    if limits[_CHARACTER_EXPLANATION_REVIEW_KEY] else None
+                )
+                or limits[_CHARACTER_EXPLANATION_PROMPT_VERSION_KEY]
+                != (
+                    _CHARACTER_EXPLANATION_PROMPT_VERSION
+                    if limits[_CHARACTER_EXPLANATION_REVIEW_KEY] else None
+                )
+            )
+        )
     ):
         return None
     if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in limits and (
@@ -2549,6 +2645,20 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
             )
         )
     )
+    ooc_protocol_valid = (
+        limits.get(_CHARACTER_OOC_PROTOCOL_KEY)
+        == _CHARACTER_OOC_PROTOCOL_VERSION
+        and type(limits.get(_CHARACTER_OOC_DIMENSIONS_KEY)) is list
+        and tuple(limits[_CHARACTER_OOC_DIMENSIONS_KEY])
+        == _CHARACTER_OOC_SUPPORTED_DIMENSIONS
+        and all(
+            type(dimension) is str
+            for dimension in limits[_CHARACTER_OOC_DIMENSIONS_KEY]
+        )
+    )
+    explanation_max_windows = limits.get(
+        _CHARACTER_EXPLANATION_MAX_WINDOWS_KEY
+    )
     alias = provider.get("model_alias")
     return {
         "schema_version": (
@@ -2582,6 +2692,19 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
             )
             if type(value := limits.get(key)) is int and value >= 0
         },
+        "ooc_protocol_version": (
+            limits[_CHARACTER_OOC_PROTOCOL_KEY] if ooc_protocol_valid else None
+        ),
+        "ooc_supported_dimensions": (
+            list(limits[_CHARACTER_OOC_DIMENSIONS_KEY])
+            if ooc_protocol_valid else None
+        ),
+        "explanation_max_windows_per_case": (
+            explanation_max_windows
+            if type(explanation_max_windows) is int
+            and 1 <= explanation_max_windows <= 64
+            else None
+        ),
         "signal_full_line_echo_v2": (
             limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY)
             if type(limits.get(_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY)) is bool

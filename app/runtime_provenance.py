@@ -10,9 +10,11 @@ from .config import Settings
 from .character_trait_extraction import (
     ASSERTION_INDEX_V1, DRAFT_SIGNAL_TRACE_V1,
     DRAFT_ACTOR_SIGNAL_PROMPT_V1, DRAFT_SOURCE_EXCERPT_REPAIR_V1,
+    TARGET_BOUND_DRAFT_SIGNAL_PROMPT_V2,
+    TARGET_BOUND_DRAFT_SIGNAL_PROMPT_V3,
     SUPPORT_TRACE_V1,
 )
-from .character_scope_review import SCOPE_REVIEW_PROMPT_V3, SCOPE_REVIEW_SCHEMA_V1
+from .character_scope_review import SCOPE_REVIEW_PROMPT_V4, SCOPE_REVIEW_SCHEMA_V2
 from .character_history_semantic_review import (
     HISTORY_REVIEW_PROMPT_V1, HISTORY_REVIEW_SCHEMA_V1,
     HISTORY_REVIEW_SEGMENTER_V1,
@@ -22,6 +24,16 @@ from .character_draft_actor_review import (
     DRAFT_ACTOR_REVIEW_BATCH_SCHEMA_V1,
     DRAFT_ACTOR_REVIEW_PROMPT_V1,
     DRAFT_ACTOR_REVIEW_SCHEMA_V1,
+    TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V2,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2,
+    TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2,
+    TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8,
+    TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
+)
+from .character_explanation_review import (
+    EXPLANATION_REVIEW_PROMPT_V2,
+    EXPLANATION_REVIEW_SCHEMA_V2,
 )
 from .embeddings import EmbeddingNotConfiguredError, OpenAICompatibleEmbeddingProvider
 from .evidence_chunks import EvidenceChunker
@@ -29,7 +41,16 @@ from .provider import safe_thinking_configuration
 
 
 RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v3"
-CHARACTER_SEMANTIC_SCOPE_PROTOCOL_V5 = "semantic-scope-v5"
+CHARACTER_SEMANTIC_SCOPE_PROTOCOL_V6 = "semantic-scope-v6"
+CHARACTER_OOC_PROTOCOL_VERSION = "character-ooc-v1"
+CHARACTER_OOC_SUPPORTED_DIMENSIONS = (
+    "core_trait",
+    "stable_preference",
+    "speech_pattern",
+    "value_boundary",
+    "relationship_attitude",
+    "motivation_goal",
+)
 _MAX_BUNDLE_FILES = 512
 _MAX_BUNDLE_FILE_BYTES = 4 * 1024 * 1024
 _MAX_BUNDLE_TOTAL_BYTES = 32 * 1024 * 1024
@@ -116,6 +137,14 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
         value
         for value in (
             settings.character_drift_max_completion_tokens,
+            settings.provider_max_completion_tokens,
+        )
+        if value is not None
+    )
+    explanation_provider_completion = min(
+        value
+        for value in (
+            settings.character_explanation_max_completion_tokens,
             settings.provider_max_completion_tokens,
         )
         if value is not None
@@ -232,6 +261,10 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "embeddings": settings.enable_embeddings,
         },
         "character_consistency_limits": {
+            "ooc_protocol_version": CHARACTER_OOC_PROTOCOL_VERSION,
+            "ooc_supported_dimensions": list(
+                CHARACTER_OOC_SUPPORTED_DIMENSIONS
+            ),
             "sensitivity": settings.character_consistency_sensitivity,
             "per_run_token_budget": max(0, int(settings.per_run_token_budget)),
             "daily_token_budget": max(0, int(settings.daily_token_budget)),
@@ -254,15 +287,15 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "signal_support_id_v4": settings.character_signal_support_id_v4,
             "signal_semantic_scope_v5": settings.character_signal_semantic_scope_v5,
             "signal_semantic_scope_version": (
-                CHARACTER_SEMANTIC_SCOPE_PROTOCOL_V5
+                CHARACTER_SEMANTIC_SCOPE_PROTOCOL_V6
                 if settings.character_signal_semantic_scope_v5 else None
             ),
             "signal_scope_review_v1": settings.character_signal_scope_review_v1,
             "signal_scope_review_schema_version": (
-                SCOPE_REVIEW_SCHEMA_V1 if settings.character_signal_scope_review_v1 else None
+                SCOPE_REVIEW_SCHEMA_V2 if settings.character_signal_scope_review_v1 else None
             ),
             "signal_scope_review_prompt_version": (
-                SCOPE_REVIEW_PROMPT_V3 if settings.character_signal_scope_review_v1 else None
+                SCOPE_REVIEW_PROMPT_V4 if settings.character_signal_scope_review_v1 else None
             ),
             "signal_scope_review_token_reserve": (
                 settings.character_signal_scope_review_token_reserve
@@ -390,6 +423,47 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "draft_actor_review_provider_max_attempts": (
                 draft_actor_review_provider_attempts
             ),
+            "target_bound_draft_review_v2": (
+                settings.character_target_bound_draft_review_v2
+            ),
+            "target_bound_draft_review_v3": (
+                settings.character_target_bound_draft_review_v3
+            ),
+            "target_bound_draft_review_schema_version": (
+                TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
+                if settings.character_target_bound_draft_review_v3 else (
+                    TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2
+                    if settings.character_target_bound_draft_review_v2 else None
+                )
+            ),
+            "target_bound_draft_review_batch_schema_version": (
+                TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4
+                if settings.character_target_bound_draft_review_v3 else (
+                    TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V2
+                    if settings.character_target_bound_draft_review_v2 else None
+                )
+            ),
+            "target_bound_draft_review_prompt_version": (
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8
+                if settings.character_target_bound_draft_review_v3 else (
+                    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
+                    if settings.character_target_bound_draft_review_v2 else None
+                )
+            ),
+            "target_bound_draft_review_signal_prompt_version": (
+                TARGET_BOUND_DRAFT_SIGNAL_PROMPT_V3
+                if settings.character_target_bound_draft_review_v3 else (
+                    TARGET_BOUND_DRAFT_SIGNAL_PROMPT_V2
+                    if settings.character_target_bound_draft_review_v2 else None
+                )
+            ),
+            "target_bound_draft_review_clause_index_version": (
+                DRAFT_ACTOR_CLAUSE_INDEX_V1
+                if (
+                    settings.character_target_bound_draft_review_v2
+                    or settings.character_target_bound_draft_review_v3
+                ) else None
+            ),
             "signal_support_trace_v1": settings.character_signal_support_trace_v1,
             "signal_support_trace_version": (
                 SUPPORT_TRACE_V1 if settings.character_signal_support_trace_v1 else None
@@ -451,8 +525,25 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "drift_provider_max_completion_tokens": drift_provider_completion,
             "drift_provider_max_response_bytes": drift_provider_response_bytes,
             "explanation_review_v1": settings.character_explanation_review_v1,
+            "explanation_review_schema_version": (
+                EXPLANATION_REVIEW_SCHEMA_V2
+                if settings.character_explanation_review_v1 else None
+            ),
+            "explanation_review_prompt_version": (
+                EXPLANATION_REVIEW_PROMPT_V2
+                if settings.character_explanation_review_v1 else None
+            ),
             "explanation_token_budget": (
                 settings.character_explanation_token_budget
+            ),
+            "explanation_max_completion_tokens": (
+                settings.character_explanation_max_completion_tokens
+            ),
+            "explanation_provider_max_completion_tokens": (
+                explanation_provider_completion
+            ),
+            "explanation_max_windows_per_case": (
+                settings.character_explanation_max_windows_per_case
             ),
         },
         "investigator_limits": {

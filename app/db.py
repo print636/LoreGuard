@@ -716,9 +716,17 @@ class CharacterTraitCandidateRow(Base):
         ),
         CheckConstraint(
             "trait_type IN ('core_personality', 'preference', 'value', "
-            "'speech_pattern', 'behavior_boundary', 'contextual_behavior', "
-            "'current_state')",
+            "'relationship_attitude', 'motivation_goal', 'speech_pattern', "
+            "'behavior_boundary', 'contextual_behavior', 'current_state')",
             name="ck_character_trait_candidate_type",
+        ),
+        CheckConstraint(
+            "trait_type NOT IN ('relationship_attitude', 'motivation_goal') OR "
+            "(comparison_key IS NOT NULL AND "
+            "comparison_key LIKE trait_type || ':%' AND "
+            "LENGTH(comparison_key) <= 160 AND key_object IS NOT NULL AND "
+            "LENGTH(TRIM(key_object)) > 0)",
+            name="ck_character_trait_candidate_object_identity",
         ),
         CheckConstraint(
             "polarity IN ('positive', 'negative', 'neutral', 'unclear')",
@@ -825,6 +833,8 @@ class CharacterTraitCandidateRow(Base):
     )
     # Pre-migration candidates have no recoverable object anchor.
     comparison_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # First-class relationship/goal object; legacy and other dimensions stay NULL.
+    key_object: Mapped[str | None] = mapped_column(String(80), nullable=True)
     value: Mapped[str] = mapped_column(Text)
     polarity: Mapped[str] = mapped_column(String(24), default="unclear")
     stability: Mapped[str] = mapped_column(String(24))

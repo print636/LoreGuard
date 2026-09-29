@@ -5,6 +5,11 @@ never reads a Provider credential: the already running API owns all model
 configuration.  Output is limited to fixture labels, hashes, evidence file/line
 references, counters, verdict labels and token usage; source text, credentials,
 the configured endpoint and upstream responses are not printed.
+
+Passing uses model-completion counters and complete per-case material/explanation
+coverage. Formal issues, review clues and provisional clues are fetched and
+scored as separate report classes; an unassessed or partial case never receives
+clean-case credit.
 """
 
 from __future__ import annotations
@@ -28,11 +33,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.character_trait_extraction import stable_trait_identity
-from app.character_traits import _OBJECT_BEARING_TRAIT_DIMENSIONS
+from app.character_traits import (
+    _OBJECT_BEARING_TRAIT_DIMENSIONS,
+    _validated_comparison_key,
+)
+from scripts.run_evidence_investigator_live import (
+    _local_service_artifact_sha256,
+    _safe_runtime_provenance as _safe_evidence_runtime_provenance,
+)
 
 
 FIXTURES = {
     "demo": ROOT / "data" / "character-continuity-demo",
+    "alpha-v1": ROOT / "data" / "character-ooc-alpha-v1",
     "ooc-v1": ROOT / "data" / "character-ooc-challenge-v1",
     "ooc-transfer-v1": ROOT / "data" / "character-ooc-transfer-v1",
 }
@@ -60,6 +73,31 @@ _TRACE_OBSERVATION_KINDS = frozenset({
     "state_description",
 })
 _TRACE_POLARITIES = frozenset({"positive", "negative", "neutral", "unclear"})
+_ALPHA_OOC_DIMENSIONS = (
+    "core_trait", "stable_preference", "speech_pattern", "value_boundary",
+    "relationship_attitude", "motivation_goal",
+)
+_ALPHA_FORMAL_SUPPORT_BINDING_IDENTITY = {
+    "signal_support_id_v4": True,
+    "signal_support_segmenter_version": "assertion-index-v1",
+    "signal_semantic_scope_v5": True,
+    "signal_semantic_scope_version": "semantic-scope-v6",
+    "signal_scope_review_v1": True,
+    "signal_scope_review_schema_version": "character-scope-review-v2",
+    "signal_scope_review_prompt_version": "character-scope-review-prompt-v4",
+}
+_ALPHA_EXPLANATION_REVIEW_IDENTITY = {
+    "explanation_review_v1": True,
+    "explanation_review_schema_version": "character-explanation-review-v2",
+    "explanation_review_prompt_version": (
+        "character-explanation-review-prompt-v2"
+    ),
+}
+_STABILITY_OBSERVATION_KEY = (
+    "stable_visible_issue_semantic_identity_across_independent_trials"
+)
+_ALPHA_FIXTURE = "alpha-v1"
+_LEGACY_MINIMUM_TRIALS = 3
 _TOKEN_ADMISSION_FIELDS = (
     "stage_phase", "signal_phase", "chunk_ordinal", "target_ordinal",
     "estimated_tokens", "available_tokens", "stage_remaining_before",
@@ -70,6 +108,120 @@ _TRACE_SENSITIVE_LABEL = re.compile(
     r"credential|private[_\s-]?key|(?:^|[^a-z0-9])sk-[a-z0-9]{8,}|密钥|密码)",
     re.IGNORECASE,
 )
+_AUTHOR_AXIS_UNSAFE_TEXT = re.compile(
+    r"(?:[a-z][a-z0-9+.-]{1,15}://|www\.)|"
+    r"(?:api[_\s-]?key|base[_\s-]?url|authorization|bearer\s+|password|"
+    r"credential|private[_\s-]?key|(?:^|[^a-z0-9])sk-[a-z0-9]{8,}|\u5bc6\u94a5|\u5bc6\u7801)",
+    re.IGNORECASE,
+)
+_AUTHOR_AXIS_PLAN_ID = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_SCOPED_AXIS_TRAIT_TYPES = frozenset({"value", "behavior_boundary"})
+_AUTHOR_AXIS_PLAN_FIELDS = frozenset({
+    "plan_id", "case_id", "trait_type", "display_name", "definition",
+    "positive_proposition", "applicability_scope", "axis_alignment",
+})
+_TARGET_BOUND_DRAFT_REVIEW_V2 = {
+    "target_bound_draft_review_schema_version": (
+        "character-target-bound-draft-review-v2"
+    ),
+    "target_bound_draft_review_batch_schema_version": (
+        "character-target-bound-draft-review-batch-v2"
+    ),
+    "target_bound_draft_review_prompt_version": (
+        "character-target-bound-draft-review-prompt-v2"
+    ),
+    "target_bound_draft_review_signal_prompt_version": (
+        "character-target-bound-draft-signal-prompt-v2"
+    ),
+    "target_bound_draft_review_clause_index_version": (
+        "draft-actor-clause-index-v1"
+    ),
+}
+_TARGET_BOUND_DRAFT_REVIEW_V3 = {
+    "target_bound_draft_review_schema_version": (
+        "character-target-bound-draft-review-v4"
+    ),
+    "target_bound_draft_review_batch_schema_version": (
+        "character-target-bound-draft-review-batch-v4"
+    ),
+    "target_bound_draft_review_prompt_version": (
+        "character-target-bound-draft-review-prompt-v8"
+    ),
+    "target_bound_draft_review_signal_prompt_version": (
+        "character-target-bound-draft-signal-prompt-v3"
+    ),
+    "target_bound_draft_review_clause_index_version": (
+        "draft-actor-clause-index-v1"
+    ),
+}
+
+
+def _safe_runtime_provenance(value: object) -> dict[str, Any] | None:
+    """Strict character-safe projection built on the shared consumer.
+
+    The shared parser validates the exact content-free schema. Character runs
+    may legitimately disable embeddings, so that one producer-supported form
+    is validated through a non-mutating sentinel adaptation and restored in
+    the projection. Character-only scalar and effective-provider constraints
+    then match the stricter character-axis consumer.
+    """
+
+    safe = _safe_evidence_runtime_provenance(value)
+    if safe is None and type(value) is dict:
+        capabilities = value.get("capabilities")
+        rag = value.get("rag")
+        if (
+            type(capabilities) is dict
+            and capabilities.get("embeddings") is False
+            and type(rag) is dict
+            and rag.get("profile_fingerprint") is None
+        ):
+            adapted = {
+                **value,
+                "capabilities": {**capabilities, "embeddings": True},
+                "rag": {**rag, "profile_fingerprint": "0" * 64},
+            }
+            safe = _safe_evidence_runtime_provenance(adapted)
+            if safe is not None:
+                safe["capabilities"]["embeddings"] = False
+                safe["rag"]["profile_fingerprint"] = None
+    if safe is None:
+        return None
+    if type(value) is not dict:
+        return None
+    raw_build = value.get("build")
+    raw_provider = value.get("chat_provider")
+    if type(raw_build) is not dict or type(raw_provider) is not dict:
+        return None
+    revision = raw_build.get("git_revision")
+    temperature = raw_provider.get("temperature")
+    if (
+        revision is not None
+        and (type(revision) is not str or len(revision) not in {40, 64})
+    ) or type(temperature) not in {int, float}:
+        return None
+    embeddings_enabled = safe["capabilities"]["embeddings"]
+    profile = safe["rag"]["profile_fingerprint"]
+    if (
+        embeddings_enabled
+        and not isinstance(profile, str)
+    ) or (not embeddings_enabled and profile is not None):
+        return None
+    limits = safe["character_consistency_limits"]
+    for prefix in ("signal", "drift"):
+        if (
+            limits[f"{prefix}_provider_max_completion_tokens"]
+            > limits[f"{prefix}_max_completion_tokens"]
+            or limits[f"{prefix}_provider_max_response_bytes"]
+            > limits[f"{prefix}_max_response_bytes"]
+            or limits[f"{prefix}_provider_timeout_seconds"]
+            > min(
+                limits[f"{prefix}_timeout_seconds"],
+                limits[f"{prefix}_total_deadline_seconds"],
+            )
+        ):
+            return None
+    return safe
 
 
 def _dataset_label() -> str:
@@ -90,14 +242,16 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _comparison_identity(*, dimension: str, trait_key: str) -> dict[str, str]:
+def _comparison_identity(
+    *, dimension: str, trait_key: str, key_object: str = ""
+) -> dict[str, str]:
     """Return the legacy label-derived identity for a confirmed trait.
 
     The raw model label is intentionally not copied into the acceptance report.
     New object-axis runs bind by candidate ID and use the frozen trace key.
     """
 
-    comparison_key = stable_trait_identity(dimension, trait_key)
+    comparison_key = stable_trait_identity(dimension, trait_key, key_object)
     return {
         "dimension": dimension,
         "comparison_key_sha256": _sha256_text(comparison_key),
@@ -112,6 +266,14 @@ def _trace_comparison_sha256(trace: dict[str, Any]) -> str | None:
 
 
 def _candidate_id_sha256(value: object) -> str | None:
+    return _safe_uuid_sha256(value)
+
+
+def _valid_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _safe_uuid_sha256(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     try:
@@ -122,8 +284,16 @@ def _candidate_id_sha256(value: object) -> str | None:
     return _sha256_text(value)
 
 
-def _valid_sha256(value: object) -> bool:
-    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+def _safe_author_axis_text(value: object, *, maximum: int) -> bool:
+    """Mirror the API's bounded author-text envelope during preflight."""
+
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= maximum
+        and value == " ".join(value.split())
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+        and _AUTHOR_AXIS_UNSAFE_TEXT.search(value) is None
+    )
 
 
 def _trace_for_candidate(
@@ -211,6 +381,51 @@ def _request(
     return payload
 
 
+def _request_list(
+    client: httpx.Client,
+    method: str,
+    path: str,
+    **kwargs: Any,
+) -> list[Any]:
+    """Request a JSON list without weakening the object-only API helper."""
+
+    response = client.request(method, path, **kwargs)
+    if response.status_code >= 400:
+        raise AcceptanceFailure(
+            "http_request_failed",
+            safe_payload={
+                "code": "http_request_failed",
+                "stage": "http_api",
+                "details": {
+                    "method": method,
+                    "route_kind": path.split("?", 1)[0],
+                    "status_code": response.status_code,
+                },
+            },
+        )
+    try:
+        payload = response.json()
+    except (ValueError, TypeError) as exc:
+        raise AcceptanceFailure(
+            "http_response_invalid_json",
+            safe_payload={
+                "code": "http_response_invalid_json",
+                "stage": "http_api",
+                "details": {"method": method, "route_kind": path.split("?", 1)[0]},
+            },
+        ) from exc
+    if not isinstance(payload, list):
+        raise AcceptanceFailure(
+            "http_response_not_list",
+            safe_payload={
+                "code": "http_response_not_list",
+                "stage": "http_api",
+                "details": {"method": method, "route_kind": path.split("?", 1)[0]},
+            },
+        )
+    return payload
+
+
 def _context(*, release_key: str, ordinal: int, published: bool) -> dict[str, Any]:
     return {
         "resolution_state": "confirmed",
@@ -290,6 +505,81 @@ def _wait_run(
         time.sleep(1.0)
 
 
+def _validated_author_axis_plans(
+    value: object,
+    *,
+    selectors_by_case: dict[str, dict[str, Any]],
+    expected_by_case: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate author intent without accepting a guessed comparison key."""
+
+    if not isinstance(value, list):
+        raise RuntimeError("acceptance oracle author axis plan must be a list")
+    plan_ids: set[str] = set()
+    case_ids: set[str] = set()
+    plans: list[dict[str, Any]] = []
+    for plan in value:
+        if not isinstance(plan, dict) or set(plan) != _AUTHOR_AXIS_PLAN_FIELDS:
+            raise RuntimeError(
+                "acceptance oracle author axis plan fields are invalid"
+            )
+        plan_id = plan.get("plan_id")
+        case_id = plan.get("case_id")
+        trait_type = plan.get("trait_type")
+        if (
+            not isinstance(plan_id, str)
+            or _AUTHOR_AXIS_PLAN_ID.fullmatch(plan_id) is None
+            or plan_id in plan_ids
+        ):
+            raise RuntimeError(
+                "acceptance oracle author axis ids are invalid or duplicated"
+            )
+        if (
+            not isinstance(case_id, str)
+            or not case_id
+            or case_id in case_ids
+        ):
+            raise RuntimeError(
+                "acceptance oracle author axis cases are invalid or duplicated"
+            )
+        selector = selectors_by_case.get(case_id)
+        expected = expected_by_case.get(case_id)
+        if selector is None or expected is None:
+            raise RuntimeError(
+                "acceptance oracle author axis references an unknown case"
+            )
+        # Scope is meaningful only for these product-supported dimensions.
+        # The exact-field check above also rejects oracle-owned comparison_key,
+        # key_object, trait_key, and comparison hashes: identity must come from
+        # the uniquely selected, frozen API candidate instead.
+        if (
+            trait_type not in _SCOPED_AXIS_TRAIT_TYPES
+            or selector.get("trait_type") != trait_type
+            or expected.get("dimension") != trait_type
+        ):
+            raise RuntimeError(
+                "acceptance oracle author axis scope or dimension is invalid"
+            )
+        if (
+            not _safe_author_axis_text(plan.get("display_name"), maximum=80)
+            or not _safe_author_axis_text(plan.get("definition"), maximum=200)
+            or not _safe_author_axis_text(
+                plan.get("positive_proposition"), maximum=200
+            )
+            or not _safe_author_axis_text(
+                plan.get("applicability_scope"), maximum=200
+            )
+            or plan.get("axis_alignment") not in {"same", "opposite"}
+        ):
+            raise RuntimeError(
+                "acceptance oracle author axis author intent is invalid"
+            )
+        plan_ids.add(plan_id)
+        case_ids.add(case_id)
+        plans.append(plan)
+    return plans
+
+
 def _validate_oracle_payload(
     payload: object, *, require_frozen_semantic_axis: bool = False
 ) -> dict[str, Any]:
@@ -327,6 +617,13 @@ def _validate_oracle_payload(
         or not all(isinstance(value, str) and value for value in selector_ids)
     ):
         raise RuntimeError("acceptance oracle case ids are invalid or inconsistent")
+    selectors_by_case = {row["case_id"]: row for row in selectors}
+    expected_by_case = {row["case_id"]: row for row in expected}
+    author_axes = _validated_author_axis_plans(
+        payload.get("author_axes", []),
+        selectors_by_case=selectors_by_case,
+        expected_by_case=expected_by_case,
+    )
     for selector in selectors:
         if not isinstance(selector, dict):
             raise RuntimeError("acceptance oracle selector is invalid")
@@ -464,9 +761,30 @@ def _validate_oracle_payload(
             or row.get("review_outcome") not in {"completed", "not_run"}
         ):
             raise RuntimeError("acceptance oracle case contract is invalid")
-        if row["visible"] is True and not isinstance(row.get("visible_issue"), dict):
+        report_class = row.get("expected_report_class")
+        if report_class is not None and report_class not in {
+            "formal", "review_clue", "none"
+        }:
+            raise RuntimeError("acceptance oracle report class is invalid")
+        if report_class == "formal" and (
+            row["visible"] is not True
+            or not isinstance(row.get("visible_issue"), dict)
+        ):
+            raise RuntimeError("formal oracle case lacks a full issue signature")
+        if report_class == "review_clue" and (
+            row["visible"] is not True
+            or not isinstance(row.get("review_clue"), dict)
+        ):
+            raise RuntimeError("review clue oracle case lacks a full signature")
+        if report_class == "none" and row["visible"] is not False:
+            raise RuntimeError("non-reporting oracle case cannot be visible")
+        if (
+            report_class is None
+            and row["visible"] is True
+            and not isinstance(row.get("visible_issue"), dict)
+        ):
             raise RuntimeError("visible oracle case lacks a full issue signature")
-    return payload
+    return {**payload, "author_axes": author_axes}
 
 
 def _load_oracle() -> dict[str, Any]:
@@ -486,7 +804,7 @@ def _matches_selector(candidate: dict[str, Any], selector: dict[str, Any]) -> bo
         for row in variants
     ):
         return False
-    for field in ("polarity", "stability"):
+    for field in ("polarity", "stability", "key_object"):
         expected_value = selector.get(field)
         if expected_value is not None and candidate.get(field) != expected_value:
             return False
@@ -509,12 +827,20 @@ def _matches_source_anchored_selector(
     if not isinstance(document, str) or type(line) is not int:
         return False
     value_contains = selector.get("value_contains")
-    if value_contains is not None and (
-        not isinstance(value_contains, str)
-        or not value_contains
-        or value_contains not in str(candidate.get("value") or "")
-    ):
-        return False
+    evidence = candidate.get("evidence")
+    evidence_texts = (
+        [str(row.get("text") or "") for row in evidence if isinstance(row, dict)]
+        if isinstance(evidence, list)
+        else []
+    )
+    if value_contains is not None:
+        if not isinstance(value_contains, str) or not value_contains:
+            return False
+        if (
+            value_contains not in str(candidate.get("value") or "")
+            and not any(value_contains in text for text in evidence_texts)
+        ):
+            return False
     value_contains_any = selector.get("value_contains_any")
     if value_contains_any is not None and (
         not isinstance(value_contains_any, list)
@@ -522,12 +848,14 @@ def _matches_source_anchored_selector(
         or not any(
             isinstance(value, str)
             and value
-            and value in str(candidate.get("value") or "")
+            and (
+                value in str(candidate.get("value") or "")
+                or any(value in text for text in evidence_texts)
+            )
             for value in value_contains_any
         )
     ):
         return False
-    evidence = candidate.get("evidence")
     if not isinstance(evidence, list):
         return False
     return any(
@@ -540,13 +868,204 @@ def _matches_source_anchored_selector(
     )
 
 
+def _author_axis_failure(
+    code: str,
+    *,
+    case_id: str,
+    candidate_id_sha256: str | None = None,
+    contract_check: str,
+) -> AcceptanceFailure:
+    details: dict[str, Any] = {
+        "case_id": case_id,
+        "contract_check": contract_check,
+    }
+    if _valid_sha256(candidate_id_sha256):
+        details["candidate_id_sha256"] = candidate_id_sha256
+    return AcceptanceFailure(
+        code,
+        safe_payload={
+            "code": code,
+            "stage": "baseline_author_axis",
+            "details": details,
+        },
+    )
+
+
+def _create_and_verify_author_axes(
+    client: httpx.Client,
+    project_id: str,
+    selected: dict[str, tuple[str, dict[str, Any]]],
+    plans: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Create every planned axis before candidate review mutates any state."""
+
+    selected_by_case = {
+        case_id: (candidate_id, candidate)
+        for candidate_id, (case_id, candidate) in selected.items()
+    }
+    bindings: dict[str, dict[str, Any]] = {}
+    for plan in plans:
+        case_id = str(plan["case_id"])
+        selected_row = selected_by_case.get(case_id)
+        if selected_row is None:
+            raise _author_axis_failure(
+                "author_axis_candidate_missing",
+                case_id=case_id,
+                contract_check="selected_case",
+            )
+        candidate_id, candidate = selected_row
+        candidate_digest = _candidate_id_sha256(candidate_id)
+        trait_type = plan.get("trait_type")
+        comparison_key = candidate.get("comparison_key")
+        try:
+            validated_key = _validated_comparison_key(
+                comparison_key, trait_type=str(trait_type)
+            )
+        except ValueError:
+            validated_key = None
+        if (
+            candidate_digest is None
+            or trait_type not in _SCOPED_AXIS_TRAIT_TYPES
+            or candidate.get("trait_type") != trait_type
+            or validated_key is None
+            or validated_key != comparison_key
+            or not _safe_author_axis_text(validated_key, maximum=200)
+        ):
+            raise _author_axis_failure(
+                "author_axis_candidate_comparison_key_invalid",
+                case_id=case_id,
+                candidate_id_sha256=candidate_digest,
+                contract_check="candidate_frozen_comparison_key",
+            )
+        created = _request(
+            client,
+            "POST",
+            f"/api/v1/projects/{project_id}/character-trait-axes",
+            json={
+                "trait_type": trait_type,
+                "display_name": plan["display_name"],
+                "definition": plan["definition"],
+                "positive_proposition": plan["positive_proposition"],
+                # This value is intentionally taken only from the selected
+                # frozen candidate; the oracle is forbidden from supplying it.
+                "comparison_key": validated_key,
+                "applicability_scope": plan["applicability_scope"],
+            },
+        )
+        axis_id = created.get("id")
+        axis_id_sha256 = _safe_uuid_sha256(axis_id)
+        version = created.get("version")
+        proposition_sha256 = created.get("positive_proposition_sha256")
+        scope_sha256 = created.get("applicability_scope_sha256")
+        expected_definition_sha256 = _sha256_text(plan["definition"])
+        expected_proposition_sha256 = _sha256_text(
+            plan["positive_proposition"]
+        )
+        expected_scope_sha256 = _sha256_text(plan["applicability_scope"])
+        response_valid = (
+            axis_id_sha256 is not None
+            and created.get("project_id") == project_id
+            and created.get("trait_type") == trait_type
+            and type(version) is int
+            and version == 1
+            and created.get("display_name") == plan["display_name"]
+            and created.get("definition") == plan["definition"]
+            and created.get("definition_sha256") == expected_definition_sha256
+            and created.get("positive_proposition")
+            == plan["positive_proposition"]
+            and proposition_sha256 == expected_proposition_sha256
+            and created.get("comparison_key") == validated_key
+            and created.get("applicability_scope")
+            == plan["applicability_scope"]
+            and scope_sha256 == expected_scope_sha256
+            and isinstance(
+                created.get("positive_proposition_authored_at"), str
+            )
+            and bool(created.get("positive_proposition_authored_at"))
+        )
+        if not response_valid:
+            raise _author_axis_failure(
+                "author_axis_response_invalid",
+                case_id=case_id,
+                candidate_id_sha256=candidate_digest,
+                contract_check="created_axis_snapshot",
+            )
+        bindings[candidate_id] = {
+            # Raw identity and object key are transient request state only.
+            # They are never copied into the returned acceptance report.
+            "_axis_id": axis_id,
+            "_comparison_key": validated_key,
+            "axis_alignment": plan["axis_alignment"],
+            "axis_id_sha256": axis_id_sha256,
+            "axis_version": version,
+            "axis_positive_proposition_sha256": proposition_sha256,
+            "axis_applicability_scope_sha256": scope_sha256,
+        }
+    return bindings
+
+
+def _verify_bound_candidate_decision(
+    response: dict[str, Any],
+    *,
+    binding: dict[str, Any],
+    candidate: dict[str, Any],
+    case_id: str,
+    candidate_id_sha256: str,
+) -> None:
+    reviewed = response.get("candidate")
+    polarity = candidate.get("polarity")
+    expected_axis_polarity = polarity
+    if binding["axis_alignment"] == "opposite":
+        expected_axis_polarity = {
+            "positive": "negative", "negative": "positive"
+        }.get(polarity)
+    if not (
+        isinstance(reviewed, dict)
+        and reviewed.get("id") == candidate.get("id")
+        and reviewed.get("character_key") == candidate.get("character_key")
+        and reviewed.get("review_state") == "confirmed"
+        and reviewed.get("approved_axis_id") == binding["_axis_id"]
+        and type(reviewed.get("approved_axis_version")) is int
+        and reviewed.get("approved_axis_version") == binding["axis_version"]
+        and reviewed.get("axis_alignment") == binding["axis_alignment"]
+        and reviewed.get("axis_polarity") == expected_axis_polarity
+        and reviewed.get("axis_positive_proposition_sha256")
+        == binding["axis_positive_proposition_sha256"]
+        and reviewed.get("comparison_key") == binding["_comparison_key"]
+        and reviewed.get("trait_type") == candidate.get("trait_type")
+    ):
+        raise _author_axis_failure(
+            "author_axis_decision_response_invalid",
+            case_id=case_id,
+            candidate_id_sha256=candidate_id_sha256,
+            contract_check="confirmed_axis_binding",
+        )
+
+
 def _review_explicit_candidates(
     client: httpx.Client,
     project_id: str,
     selectors: list[dict[str, Any]],
     *,
+    author_axes: list[dict[str, Any]] | None = None,
     diagnostic_source_anchored: bool = False,
 ) -> dict[str, Any]:
+    if author_axes is None:
+        author_axes = []
+    if author_axes:
+        selector_map = {
+            row["case_id"]: row
+            for row in selectors
+            if isinstance(row, dict) and isinstance(row.get("case_id"), str)
+        }
+        author_axes = _validated_author_axis_plans(
+            author_axes,
+            selectors_by_case=selector_map,
+            expected_by_case={
+                case_id: {"dimension": row.get("trait_type")}
+                for case_id, row in selector_map.items()
+            },
+        )
     roster = _request(
         client,
         "GET",
@@ -682,12 +1201,10 @@ def _review_explicit_candidates(
                 "strict_selector_match": _matches_selector(matches[0], selector),
             })
 
-    confirmed = rejected = 0
-    case_traits: dict[str, dict[str, str]] = {}
-    for candidate_id, candidate in sorted(candidates_by_id.items()):
+    for candidate in candidates_by_id.values():
         revision = candidate.get("revision")
         character_key = candidate.get("character_key")
-        if not isinstance(revision, int) or not isinstance(character_key, str):
+        if type(revision) is not int or not isinstance(character_key, str):
             raise AcceptanceFailure(
                 "candidate_contract_invalid",
                 safe_payload={
@@ -696,42 +1213,19 @@ def _review_explicit_candidates(
                     "details": {},
                 },
             )
-        chosen = selected.get(candidate_id)
-        decision = "confirm" if chosen is not None else "reject"
-        _request(
-            client,
-            "POST",
-            (
-                f"/api/v1/projects/{project_id}/characters/"
-                f"{quote(character_key, safe='')}/profile-candidates/"
-                f"{quote(candidate_id, safe='')}/decisions"
-            ),
-            headers={"Idempotency-Key": f"{decision}-{candidate_id}"},
-            json={
-                "decision": decision,
-                "expected_revision": revision,
-                "comment": (
-                    (
-                        "原创 DEV 诊断：仅按设定来源锚点模拟确认，非正式验收"
-                        if diagnostic_source_anchored
-                        else "原创 DEV 演示集：命中人工编写的确认清单"
-                    )
-                    if chosen is not None
-                    else "原创 DEV 演示集：未命中人工确认清单，自动拒绝"
-                ),
-            },
-        )
-        if chosen is None:
-            rejected += 1
-            continue
-        case_id, _ = chosen
+
+    selected_traits: dict[str, dict[str, Any]] = {}
+    for candidate_id, (case_id, candidate) in selected.items():
         trait_key = candidate.get("trait_key")
         dimension = candidate.get("trait_type")
+        key_object = candidate.get("key_object")
+        candidate_id_sha256 = _candidate_id_sha256(candidate_id)
         if (
             not isinstance(trait_key, str)
             or not trait_key
             or not isinstance(dimension, str)
             or not dimension
+            or candidate_id_sha256 is None
         ):
             raise AcceptanceFailure(
                 "candidate_trait_identity_invalid",
@@ -741,19 +1235,126 @@ def _review_explicit_candidates(
                     "details": {"case_id": case_id},
                 },
             )
-        candidate_id_sha256 = _candidate_id_sha256(candidate_id)
-        if candidate_id_sha256 is None:
-            raise AcceptanceFailure(
-                "candidate_trait_identity_invalid",
-                safe_payload={
-                    "code": "candidate_trait_identity_invalid",
-                    "stage": "baseline_candidate_review",
-                    "details": {"case_id": case_id},
-                },
+        selected_traits[candidate_id] = {
+            "case_id": case_id,
+            "trait_key": trait_key,
+            "dimension": dimension,
+            "key_object": key_object if isinstance(key_object, str) else "",
+            "candidate_id_sha256": candidate_id_sha256,
+        }
+
+    # This must finish for every planned axis before the first candidate
+    # decision is sent. A failed creation or snapshot check therefore leaves
+    # every candidate pending and makes the trial fail closed.
+    axis_bindings = _create_and_verify_author_axes(
+        client, project_id, selected, author_axes
+    )
+
+    confirmed = rejected = 0
+    case_traits: dict[str, dict[str, Any]] = {}
+    for candidate_id, candidate in sorted(candidates_by_id.items()):
+        revision = candidate.get("revision")
+        character_key = candidate.get("character_key")
+        chosen = selected.get(candidate_id)
+        decision = "confirm" if chosen is not None else "reject"
+        decision_payload: dict[str, Any] = {
+            "decision": decision,
+            "expected_revision": revision,
+            "comment": (
+                (
+                    "原创 DEV 诊断：仅按设定来源锚点模拟确认，非正式验收"
+                    if diagnostic_source_anchored
+                    else "原创 DEV 演示集：命中人工编写的确认清单"
+                )
+                if chosen is not None
+                else "原创 DEV 演示集：未命中人工确认清单，自动拒绝"
+            ),
+        }
+        binding = axis_bindings.get(candidate_id)
+        if binding is not None:
+            decision_payload.update({
+                "approved_axis_id": binding["_axis_id"],
+                "expected_axis_version": binding["axis_version"],
+                "axis_alignment": binding["axis_alignment"],
+                "expected_axis_positive_proposition_sha256": (
+                    binding["axis_positive_proposition_sha256"]
+                ),
+                "expected_axis_applicability_scope_sha256": (
+                    binding["axis_applicability_scope_sha256"]
+                ),
+                "scope_applicability_confirmed": True,
+            })
+        decision_response = _request(
+            client,
+            "POST",
+            (
+                f"/api/v1/projects/{project_id}/characters/"
+                f"{quote(character_key, safe='')}/profile-candidates/"
+                f"{quote(candidate_id, safe='')}/decisions"
+            ),
+            headers={"Idempotency-Key": f"{decision}-{candidate_id}"},
+            json=decision_payload,
+        )
+        if chosen is None:
+            rejected += 1
+            continue
+        metadata = selected_traits[candidate_id]
+        case_id = metadata["case_id"]
+        dimension = metadata["dimension"]
+        candidate_id_sha256 = metadata["candidate_id_sha256"]
+        if binding is not None:
+            _verify_bound_candidate_decision(
+                decision_response,
+                binding=binding,
+                candidate=candidate,
+                case_id=case_id,
+                candidate_id_sha256=candidate_id_sha256,
             )
+            comparison_identity = {
+                "dimension": dimension,
+                "comparison_key_sha256": _sha256_text(
+                    binding["_comparison_key"]
+                ),
+            }
+            axis_metadata: dict[str, Any] = {
+                "axis_bound": True,
+                "axis_id_sha256": binding["axis_id_sha256"],
+                "axis_version": binding["axis_version"],
+                # The worker trace identifies an approved axis by its
+                # server-owned UUID/version, while ``comparison_key_sha256``
+                # above intentionally retains the author-authored semantic
+                # comparison key.  Freeze both identities at the verified
+                # creation/decision boundary; a later trace must not be able
+                # to nominate its own expected identity.
+                "approved_axis_runtime_comparison_key_sha256": _sha256_text(
+                    f"approved_axis:{binding['_axis_id']}:"
+                    f"{binding['axis_version']}"
+                ),
+                "axis_alignment": binding["axis_alignment"],
+                "axis_positive_proposition_sha256": (
+                    binding["axis_positive_proposition_sha256"]
+                ),
+                "axis_applicability_scope_sha256": (
+                    binding["axis_applicability_scope_sha256"]
+                ),
+                "axis_creation_status": "created",
+                "axis_decision_status": "confirmed_bound",
+            }
+        else:
+            comparison_identity = _comparison_identity(
+                dimension=dimension,
+                trait_key=metadata["trait_key"],
+                key_object=metadata["key_object"],
+            )
+            axis_metadata = {
+                "axis_bound": False,
+                "axis_creation_status": "not_requested",
+                "axis_decision_status": "confirmed_unbound",
+            }
         case_traits[case_id] = {
-            **_comparison_identity(dimension=dimension, trait_key=trait_key),
+            **comparison_identity,
             "confirmed_candidate_id_sha256": candidate_id_sha256,
+            **axis_metadata,
         }
         confirmed += 1
     review = {
@@ -761,6 +1362,11 @@ def _review_explicit_candidates(
         "rejected": rejected,
         "expected_confirmed": len(selectors),
         "explicit_reviewable_candidate_count": len(candidates_by_id),
+        "author_axis_plan_count": len(author_axes),
+        "author_axes_created": len(axis_bindings),
+        "author_axis_operation_status": (
+            "created_and_bound" if axis_bindings else "not_requested"
+        ),
         "recognized_characters": sorted(set(characters)),
         "case_traits": case_traits,
     }
@@ -837,6 +1443,8 @@ def _safe_case_trace_summary(row: dict[str, Any]) -> dict[str, Any]:
             row.get("matched_observation_refs_truncated") is True
         ),
         "prepare_reason": row.get("prepare_reason"),
+        "material_coverage": row.get("material_coverage"),
+        "explanation_coverage": row.get("explanation_coverage"),
         "review_outcome": row.get("review_outcome"),
         "review_verdict": row.get("review_verdict"),
         "citation_roles": (
@@ -932,6 +1540,7 @@ def _safe_visible_issue(
     metadata = metadata if isinstance(metadata, dict) else {}
     dimension = metadata.get("dimension")
     trait_key = metadata.get("trait_key")
+    key_object = metadata.get("key_object")
     character_key = metadata.get("character_key")
     candidate_id_sha256 = _candidate_id_sha256(
         metadata.get("confirmed_candidate_id")
@@ -943,10 +1552,15 @@ def _safe_visible_issue(
         and dimension
         and isinstance(trait_key, str)
         and trait_key
+        and (
+            dimension not in {"relationship_attitude", "motivation_goal"}
+            or (isinstance(key_object, str) and bool(key_object.strip()))
+        )
     ):
         legacy_comparison_sha256 = _comparison_identity(
             dimension=dimension,
             trait_key=trait_key,
+            key_object=(key_object if isinstance(key_object, str) else ""),
         )["comparison_key_sha256"]
     if (
         case_trace is not None
@@ -979,6 +1593,45 @@ def _safe_visible_issue(
     }
 
 
+def _safe_provisional_clue(value: object) -> dict[str, Any] | None:
+    """Retain only source coordinates and bounded enums from an unverified clue."""
+
+    if not isinstance(value, dict):
+        return None
+    clue_id = value.get("id")
+    document_name = value.get("document_name")
+    line_start = value.get("line_start")
+    line_end = value.get("line_end")
+    dimension = value.get("dimension")
+    if (
+        not isinstance(clue_id, str)
+        or re.fullmatch(r"pc_[a-f0-9]{32}", clue_id) is None
+        or not isinstance(document_name, str)
+        or not document_name
+        or len(document_name) > 255
+        or any(ord(char) < 32 or char in "/\\" for char in document_name)
+        or _TRACE_SENSITIVE_LABEL.search(document_name)
+        or type(line_start) is not int
+        or type(line_end) is not int
+        or not 1 <= line_start <= line_end <= 10_000_000
+        or dimension not in {
+            "core_personality", "preference", "value",
+            "relationship_attitude", "motivation_goal", "speech_pattern",
+            "behavior_boundary", "contextual_behavior", "current_state",
+        }
+        or value.get("reason") != "partial_model_package"
+    ):
+        return None
+    return {
+        "id_sha256": _sha256_text(clue_id),
+        "document_name": document_name,
+        "line_start": line_start,
+        "line_end": line_end,
+        "dimension": dimension,
+        "reason": "partial_model_package",
+    }
+
+
 def _safe_token_admission_events(value: object) -> list[dict[str, int | str | None]]:
     """Copy only bounded numeric admission facts; never copy model or source text."""
 
@@ -995,7 +1648,10 @@ def _safe_token_admission_events(value: object) -> list[dict[str, int | str | No
         numeric_limits = {
             "estimated_tokens": 1_000_000,
             "available_tokens": 1_000_000,
-            "stage_remaining_before": 150_000,
+            # Bound this by the Settings ceiling rather than the deployment's
+            # current default. Smaller configured values remain valid while
+            # impossible values are discarded from the safe artifact.
+            "stage_remaining_before": 500_000,
             "reviewer_reserve_tokens": 8_000,
             "model_calls_before_failure": 2,
         }
@@ -1033,6 +1689,9 @@ def _run_summary(
     diagnostics = _request(
         client, "GET", f"/api/v1/analysis-runs/{run_id}/diagnostics"
     )
+    worker_runtime_provenance = _safe_runtime_provenance(
+        diagnostics.get("runtime_provenance")
+    )
     stage = diagnostics.get("character_consistency")
     if not isinstance(stage, dict):
         stage = {}
@@ -1051,32 +1710,81 @@ def _run_summary(
         if isinstance(case_trace, list)
         else []
     )
-    issues = _request(
-        client,
-        "GET",
-        f"/api/v1/projects/{project_id}/drift-issues",
-        params={"limit": 200, "offset": 0},
-    ).get("items")
-    if not isinstance(issues, list):
-        raise RuntimeError("drift issue page is missing items")
+    formal_items = _request_list(
+        client, "GET", f"/api/v1/analysis-runs/{run_id}/issues"
+    )
+    review_page = _request(
+        client, "GET", f"/api/v1/analysis-runs/{run_id}/review-clues"
+    )
+    provisional_page = _request(
+        client, "GET", f"/api/v1/analysis-runs/{run_id}/provisional-clues"
+    )
+    review_items = review_page.get("items")
+    provisional_items = provisional_page.get("items")
+    if not isinstance(review_items, list):
+        raise RuntimeError("review clue page is missing items")
+    if not isinstance(provisional_items, list):
+        raise RuntimeError("provisional clue page is missing items")
     signatures: list[str] = []
     contradiction_characters: set[str] = set()
-    visible_issue_cases: list[dict[str, Any]] = []
-    for issue in issues:
-        if not isinstance(issue, dict) or issue.get("run_id") != run_id:
+    formal_issue_cases: list[dict[str, Any]] = []
+    review_clue_cases: list[dict[str, Any]] = []
+    report_class_integrity = True
+    for issue in formal_items:
+        if (
+            not isinstance(issue, dict)
+            or issue.get("report_class") != "formal"
+        ):
+            report_class_integrity = False
+            continue
+        if issue.get("category") != "character_drift":
             continue
         safe_issue = _safe_visible_issue(issue, case_trace=case_trace)
         signatures.append(
             json.dumps(safe_issue, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         )
-        visible_issue_cases.append(safe_issue)
+        formal_issue_cases.append(safe_issue)
         if safe_issue["judgement"] == "contradicts" and isinstance(
             safe_issue["character_key"], str
         ):
             contradiction_characters.add(safe_issue["character_key"])
+    for clue in review_items:
+        if (
+            not isinstance(clue, dict)
+            or clue.get("report_class") != "review_clue"
+            or clue.get("category") != "character_drift"
+        ):
+            report_class_integrity = False
+            continue
+        review_clue_cases.append(
+            _safe_visible_issue(clue, case_trace=case_trace)
+        )
+    safe_provisional = [
+        safe
+        for item in provisional_items
+        for safe in [_safe_provisional_clue(item)]
+        if safe is not None
+    ]
+    if len(safe_provisional) != len(provisional_items):
+        report_class_integrity = False
+    review_unavailable_count = review_page.get("unavailable_count")
+    review_collection_complete = (
+        type(review_unavailable_count) is int
+        and review_unavailable_count == 0
+        and review_page.get("scan_limited") is False
+        and review_page.get("truncated") is False
+    )
+    provisional_collection_complete = (
+        provisional_page.get("truncated") is False
+        and len(safe_provisional) == len(provisional_items)
+    )
     return {
         "run_id": run_id,
         "status": run.get("status"),
+        # Strictly validated, content-free projection only. Invalid worker
+        # payloads become ``None`` and fail the Alpha API/worker identity gate;
+        # the raw diagnostics object is never copied into the report.
+        "runtime_provenance": worker_runtime_provenance,
         "elapsed_seconds": run.get("_acceptance_elapsed_seconds"),
         "prompt_tokens": run.get("prompt_tokens"),
         "completion_tokens": run.get("completion_tokens"),
@@ -1085,6 +1793,23 @@ def _run_summary(
         "material_coverage": stage.get("material_coverage"),
         "planned_chunks": counts.get("planned_chunks"),
         "processed_chunks": counts.get("processed_chunks"),
+        "model_called_chunks": counts.get("model_called_chunks"),
+        "model_completed_chunks": counts.get("model_completed_chunks"),
+        "model_uncalled_chunks": counts.get("model_uncalled_chunks"),
+        "model_incomplete_chunks": counts.get("model_incomplete_chunks"),
+        "case_material_complete_count": counts.get(
+            "case_material_complete_count"
+        ),
+        "case_material_partial_count": counts.get(
+            "case_material_partial_count"
+        ),
+        "explanation_review_required_case_count": counts.get(
+            "explanation_review_required_case_count"
+        ),
+        "explanation_review_complete_case_count": counts.get(
+            "explanation_review_complete_case_count"
+        ),
+        "explanation_coverage": stage.get("explanation_coverage"),
         "signals": counts.get("signal_count"),
         "draft_observations": counts.get("draft_observation_count"),
         "drift_considered": counts.get("drift_considered"),
@@ -1093,21 +1818,47 @@ def _run_summary(
         "token_admission_events": token_admission_events,
         "case_trace": case_trace,
         "issues": sorted(signatures),
+        # Keep the old key as a report-schema compatibility alias.  It now
+        # means formal character issues only; review/provisional clues are
+        # always separate collections below.
         "visible_issue_cases": sorted(
-            visible_issue_cases,
+            formal_issue_cases,
             key=lambda row: (
                 str(row["character_key"]),
                 str(row["dimension"]),
                 str(row["comparison_key_sha256"]),
             ),
         ),
+        "formal_issue_cases": sorted(
+            formal_issue_cases,
+            key=lambda row: (
+                str(row["character_key"]),
+                str(row["dimension"]),
+                str(row["comparison_key_sha256"]),
+            ),
+        ),
+        "review_clue_cases": sorted(
+            review_clue_cases,
+            key=lambda row: (
+                str(row["character_key"]),
+                str(row["dimension"]),
+                str(row["comparison_key_sha256"]),
+            ),
+        ),
+        "provisional_clue_cases": safe_provisional,
+        "formal_character_issue_count": len(formal_issue_cases),
+        "review_clue_count": len(review_clue_cases),
+        "provisional_clue_count": len(safe_provisional),
+        "report_class_integrity": report_class_integrity,
+        "review_clue_collection_complete": review_collection_complete,
+        "provisional_clue_collection_complete": provisional_collection_complete,
         "contradiction_characters": sorted(contradiction_characters),
     }
 
 
 def _runtime_identity(
     expected: dict[str, Any],
-    case_traits: dict[str, dict[str, str]],
+    case_traits: dict[str, dict[str, Any]],
     trace: list[dict[str, Any]],
 ) -> tuple[str, str, str] | None:
     case_id = expected.get("case_id")
@@ -1136,10 +1887,46 @@ def _runtime_identity(
         )
         if matched_trace is None:
             return None
+        if runtime.get("axis_bound") is True:
+            approved_axis_hash = _verified_approved_axis_runtime_hash(runtime)
+            if (
+                not _valid_sha256(comparison_hash)
+                or approved_axis_hash is None
+                or matched_trace["comparison_key_sha256"] != approved_axis_hash
+            ):
+                return None
         comparison_hash = matched_trace["comparison_key_sha256"]
     if not _valid_sha256(comparison_hash):
         return None
     return character_key, dimension, comparison_hash
+
+
+def _verified_approved_axis_runtime_hash(
+    runtime: dict[str, Any],
+) -> str | None:
+    """Return the pre-bound worker identity for one fully verified axis.
+
+    The semantic comparison key remains useful candidate-review provenance,
+    but it is not the key emitted by an approved-axis case trace.  Require the
+    complete safe metadata created after axis creation and candidate decision
+    verification before accepting the separately frozen runtime key.
+    """
+
+    runtime_hash = runtime.get("approved_axis_runtime_comparison_key_sha256")
+    if not (
+        runtime.get("axis_bound") is True
+        and runtime.get("axis_creation_status") == "created"
+        and runtime.get("axis_decision_status") == "confirmed_bound"
+        and _valid_sha256(runtime.get("axis_id_sha256"))
+        and type(runtime.get("axis_version")) is int
+        and runtime["axis_version"] >= 1
+        and runtime.get("axis_alignment") in {"same", "opposite"}
+        and _valid_sha256(runtime.get("axis_positive_proposition_sha256"))
+        and _valid_sha256(runtime.get("axis_applicability_scope_sha256"))
+        and _valid_sha256(runtime_hash)
+    ):
+        return None
+    return runtime_hash
 
 
 def _trace_identity(trace: dict[str, Any]) -> tuple[str, str, str] | None:
@@ -1163,6 +1950,13 @@ def _case_matches_expected(
 ) -> bool:
     if (
         _trace_identity(trace) != runtime_identity
+    ):
+        return False
+    # A semantic verdict is not an assessed Alpha result when either the
+    # relevant material or its explanation search was incomplete.
+    if (
+        trace.get("material_coverage") != "complete"
+        or trace.get("explanation_coverage") != "complete"
     ):
         return False
     prepare_reason = trace.get("prepare_reason")
@@ -1233,6 +2027,7 @@ def _visible_issue_matches(
     expected: dict[str, Any],
     *,
     runtime_identity: tuple[str, str, str],
+    contract_field: str = "visible_issue",
 ) -> bool:
     issue_identity = (
         issue.get("character_key"),
@@ -1241,7 +2036,7 @@ def _visible_issue_matches(
     )
     if issue_identity != runtime_identity:
         return False
-    visible_expectation = expected.get("visible_issue")
+    visible_expectation = expected.get(contract_field)
     if not isinstance(visible_expectation, dict):
         return False
     if (
@@ -1297,18 +2092,38 @@ def _visible_issue_matches(
     return True
 
 
+def _expected_report_class(expected: dict[str, Any]) -> str:
+    explicit = expected.get("expected_report_class")
+    if explicit in {"formal", "review_clue", "none"}:
+        return explicit
+    outcome = expected.get("final_outcome")
+    if outcome == "conflict":
+        return "formal"
+    if outcome in {"needs_confirmation", "unverifiable"} and expected.get(
+        "visible"
+    ) is True:
+        return "review_clue"
+    return "none"
+
+
 def _evaluate_oracle_trial(
     trial: dict[str, Any],
     expected_cases: list[dict[str, Any]],
-    case_traits: dict[str, dict[str, str]],
+    case_traits: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     trace = trial.get("case_trace")
     trace = trace if isinstance(trace, list) else []
     checks: dict[str, bool] = {}
     expected_identities: list[tuple[str, str, str]] = []
     visible_checks: dict[str, bool] = {}
-    visible_issues = trial.get("visible_issue_cases")
+    review_clue_checks: dict[str, bool] = {}
+    report_class_checks: dict[str, bool] = {}
+    visible_issues = trial.get("formal_issue_cases")
+    if not isinstance(visible_issues, list):
+        visible_issues = trial.get("visible_issue_cases")
     visible_issues = visible_issues if isinstance(visible_issues, list) else []
+    review_clues = trial.get("review_clue_cases")
+    review_clues = review_clues if isinstance(review_clues, list) else []
     for expected in expected_cases:
         case_id = expected.get("case_id")
         if not isinstance(case_id, str):
@@ -1316,8 +2131,12 @@ def _evaluate_oracle_trial(
         runtime_identity = _runtime_identity(expected, case_traits, trace)
         if runtime_identity is None:
             checks[case_id] = False
-            if expected.get("visible") is True:
+            expected_class = _expected_report_class(expected)
+            if expected_class == "formal":
                 visible_checks[case_id] = False
+            elif expected_class == "review_clue":
+                review_clue_checks[case_id] = False
+            report_class_checks[case_id] = False
             continue
         candidates = [
             row
@@ -1329,24 +2148,63 @@ def _evaluate_oracle_trial(
             candidates[0], expected, runtime_identity=runtime_identity
         )
         expected_identities.append(runtime_identity)
-        if expected.get("visible") is True:
-            issue_candidates = [
-                row
-                for row in visible_issues
-                if isinstance(row, dict)
-                and (
-                    row.get("character_key"),
-                    row.get("dimension"),
-                    row.get("comparison_key_sha256"),
-                )
-                == runtime_identity
-            ]
+        expected_class = _expected_report_class(expected)
+        formal_candidates = [
+            row
+            for row in visible_issues
+            if isinstance(row, dict)
+            and (
+                row.get("character_key"),
+                row.get("dimension"),
+                row.get("comparison_key_sha256"),
+            )
+            == runtime_identity
+        ]
+        clue_candidates = [
+            row
+            for row in review_clues
+            if isinstance(row, dict)
+            and (
+                row.get("character_key"),
+                row.get("dimension"),
+                row.get("comparison_key_sha256"),
+            )
+            == runtime_identity
+        ]
+        report_class_checks[case_id] = (
+            (
+                expected_class == "formal"
+                and len(formal_candidates) == 1
+                and not clue_candidates
+            )
+            or (
+                expected_class == "review_clue"
+                and len(clue_candidates) == 1
+                and not formal_candidates
+            )
+            or (
+                expected_class == "none"
+                and not formal_candidates
+                and not clue_candidates
+            )
+        )
+        if expected_class == "formal":
             visible_checks[case_id] = (
-                len(issue_candidates) == 1
+                len(formal_candidates) == 1
                 and _visible_issue_matches(
-                    issue_candidates[0],
+                    formal_candidates[0],
                     expected,
                     runtime_identity=runtime_identity,
+                )
+            )
+        elif expected_class == "review_clue":
+            review_clue_checks[case_id] = (
+                len(clue_candidates) == 1
+                and _visible_issue_matches(
+                    clue_candidates[0],
+                    expected,
+                    runtime_identity=runtime_identity,
+                    contract_field="review_clue",
                 )
             )
 
@@ -1358,6 +2216,7 @@ def _evaluate_oracle_trial(
         if identity is not None
     ]
     valid_visible_issues = [row for row in visible_issues if isinstance(row, dict)]
+    valid_review_clues = [row for row in review_clues if isinstance(row, dict)]
     return {
         "cases": checks,
         "all_cases_passed": bool(checks) and all(checks.values()),
@@ -1367,9 +2226,17 @@ def _evaluate_oracle_trial(
         ),
         "visible_issue_cases": visible_checks,
         "visible_issues_exact": (
-            bool(visible_checks)
-            and all(visible_checks.values())
+            all(visible_checks.values())
             and len(valid_visible_issues) == len(visible_checks)
+        ),
+        "review_clue_cases": review_clue_checks,
+        "review_clues_exact": (
+            all(review_clue_checks.values())
+            and len(valid_review_clues) == len(review_clue_checks)
+        ),
+        "report_classes": report_class_checks,
+        "report_classes_exact": (
+            bool(report_class_checks) and all(report_class_checks.values())
         ),
     }
 
@@ -1436,7 +2303,7 @@ def _failure_report(failure: dict[str, Any]) -> dict[str, Any]:
     except (OSError, ValueError):
         hashes = {}
     return {
-        "schema_version": "character-continuity-live-dev-v2",
+        "schema_version": "character-continuity-live-dev-v3",
         "dataset": _dataset_label(),
         "claims": {
             "blind_holdout": False,
@@ -1476,15 +2343,50 @@ def _stage_model_tokens_reported(summary: dict[str, Any]) -> bool:
 
 def _all_planned_chunks_processed(summary: dict[str, Any]) -> bool:
     planned = summary.get("planned_chunks")
-    processed = summary.get("processed_chunks")
+    completed = summary.get("model_completed_chunks")
+    incomplete = summary.get("model_incomplete_chunks")
+    called = summary.get("model_called_chunks")
+    uncalled = summary.get("model_uncalled_chunks")
     return (
         summary.get("status") == "completed"
         and summary.get("stage_outcome") == "completed"
         and summary.get("material_coverage") == "complete"
         and type(planned) is int
         and planned > 0
-        and type(processed) is int
-        and processed == planned
+        and type(completed) is int
+        and completed == planned
+        and type(incomplete) is int
+        and incomplete == 0
+        and type(called) is int
+        and called == planned
+        and type(uncalled) is int
+        and uncalled == 0
+    )
+
+
+def _case_review_coverage_complete(summary: dict[str, Any]) -> bool:
+    trace = summary.get("case_trace")
+    complete = summary.get("case_material_complete_count")
+    partial = summary.get("case_material_partial_count")
+    explanation_required = summary.get("explanation_review_required_case_count")
+    explanation_complete = summary.get("explanation_review_complete_case_count")
+    return (
+        isinstance(trace, list)
+        and bool(trace)
+        and type(complete) is int
+        and complete == len(trace)
+        and type(partial) is int
+        and partial == 0
+        and all(
+            isinstance(row, dict)
+            and row.get("material_coverage") == "complete"
+            and row.get("explanation_coverage") == "complete"
+            for row in trace
+        )
+        and summary.get("explanation_coverage") == "complete"
+        and type(explanation_required) is int
+        and type(explanation_complete) is int
+        and explanation_required == explanation_complete == len(trace)
     )
 
 
@@ -1492,18 +2394,27 @@ def _baseline_admission(summary: dict[str, Any]) -> dict[str, Any]:
     usage = summary.get("stage_usage")
     usage = usage if isinstance(usage, dict) else {}
     planned = summary.get("planned_chunks")
-    processed = summary.get("processed_chunks")
+    completed = summary.get("model_completed_chunks")
+    incomplete = summary.get("model_incomplete_chunks")
+    called = summary.get("model_called_chunks")
+    uncalled = summary.get("model_uncalled_chunks")
     checks = {
         "run_completed": summary.get("status") == "completed",
         "character_stage_completed_without_degradation": (
             summary.get("stage_outcome") == "completed"
             and summary.get("material_coverage") == "complete"
         ),
-        "all_planned_chunks_processed": (
+        "all_planned_chunks_model_completed": (
             type(planned) is int
             and planned > 0
-            and type(processed) is int
-            and processed == planned
+            and type(completed) is int
+            and completed == planned
+            and type(incomplete) is int
+            and incomplete == 0
+            and type(called) is int
+            and called == planned
+            and type(uncalled) is int
+            and uncalled == 0
         ),
         "model_calls_reported": (
             type(usage.get("attempted_calls")) is int
@@ -1522,7 +2433,11 @@ def _baseline_admission(summary: dict[str, Any]) -> dict[str, Any]:
             "stage_reason": summary.get("stage_reason"),
             "material_coverage": summary.get("material_coverage"),
             "planned_chunks": planned,
-            "processed_chunks": processed,
+            "processed_chunks": summary.get("processed_chunks"),
+            "model_called_chunks": called,
+            "model_completed_chunks": completed,
+            "model_uncalled_chunks": uncalled,
+            "model_incomplete_chunks": incomplete,
             "stage_usage": {
                 key: usage.get(key)
                 for key in (
@@ -1544,14 +2459,16 @@ def _diagnostic_partial_baseline_allowed(summary: dict[str, Any]) -> bool:
     counts = summary.get("reason_counts")
     counts = counts if isinstance(counts, dict) else {}
     planned = summary.get("planned_chunks")
-    processed = summary.get("processed_chunks")
+    completed = summary.get("model_completed_chunks")
+    incomplete = summary.get("model_incomplete_chunks")
     return (
         summary.get("status") == "completed"
         and summary.get("stage_outcome") == "partial"
         and summary.get("material_coverage") == "partial"
         and type(planned) is int
         and planned > 0
-        and processed == planned
+        and completed == planned
+        and incomplete == 0
         and type(usage.get("attempted_calls")) is int
         and usage["attempted_calls"] > 0
         and any(
@@ -1596,20 +2513,20 @@ def _visible_issue_semantic_identity(
     return identity
 
 
-def _evaluate_gates(trials: list[dict[str, Any]]) -> dict[str, bool]:
-    baselines = [row.get("baseline", {}) for row in trials]
-    drafts = [row.get("draft", {}) for row in trials]
-    reviews = [row.get("candidate_review", {}) for row in trials]
-    oracle_results = [row.get("oracle", {}) for row in trials]
-    project_ids = [row.get("project_id") for row in trials]
-    semantic_signatures: list[tuple[tuple[str, str, str, str, str], ...]] = []
-    semantic_signatures_valid = True
-    for draft in drafts:
+def _semantic_signatures(
+    trials: list[dict[str, Any]],
+) -> tuple[bool, list[tuple[tuple[str, str, str, str, str], ...]]]:
+    """Return validated per-trial issue identities without claiming stability."""
+
+    signatures: list[tuple[tuple[str, str, str, str, str], ...]] = []
+    valid = True
+    for trial in trials:
+        draft = trial.get("draft", {})
         visible_issues = (
             draft.get("visible_issue_cases") if isinstance(draft, dict) else None
         )
         if not isinstance(visible_issues, list) or not visible_issues:
-            semantic_signatures_valid = False
+            valid = False
             continue
         identities = [
             _visible_issue_semantic_identity(row)
@@ -1618,21 +2535,84 @@ def _evaluate_gates(trials: list[dict[str, Any]]) -> dict[str, bool]:
             for row in visible_issues
         ]
         if any(identity is None for identity in identities):
-            semantic_signatures_valid = False
+            valid = False
             continue
-        semantic_signatures.append(tuple(sorted(identities)))
-    enough_independent_trials = (
-        len(trials) >= 3
+        signatures.append(tuple(sorted(identities)))
+    return valid, signatures
+
+
+def _independent_project_trials(
+    trials: list[dict[str, Any]], *, minimum: int
+) -> bool:
+    project_ids = [row.get("project_id") for row in trials]
+    return (
+        len(trials) >= minimum
         and all(isinstance(project_id, str) and project_id for project_id in project_ids)
         and len(set(project_ids)) == len(project_ids)
     )
-    return {
-        "at_least_three_independent_full_workflow_trials": enough_independent_trials,
+
+
+def _minimum_trial_count(fixture: str) -> int:
+    if fixture not in FIXTURES:
+        raise ValueError("unknown character acceptance fixture")
+    return 1 if fixture == _ALPHA_FIXTURE else _LEGACY_MINIMUM_TRIALS
+
+
+def _alpha_worker_runtime_provenance_matches_api(
+    trials: list[dict[str, Any]], api_runtime_provenance: object,
+) -> bool:
+    """Require every worker snapshot to equal the strict API projection."""
+
+    safe_api = _safe_runtime_provenance(api_runtime_provenance)
+    if safe_api is None or not trials:
+        return False
+    for trial in trials:
+        for phase in ("baseline", "draft"):
+            summary = trial.get(phase)
+            worker = (
+                _safe_runtime_provenance(summary.get("runtime_provenance"))
+                if isinstance(summary, dict)
+                else None
+            )
+            if worker is None or worker != safe_api:
+                return False
+    return True
+
+
+def _evaluate_gates(
+    trials: list[dict[str, Any]],
+    *,
+    fixture: str = "demo",
+    api_runtime_provenance: object = None,
+    post_run_api_runtime_provenance: object = None,
+) -> dict[str, bool]:
+    """Evaluate the required gates for the selected fixture contract.
+
+    Alpha is a one-run functional-development fixture, so cross-run stability
+    remains observational there. The older fixtures retain their historical
+    three-independent-run requirement and required semantic-stability gate.
+    """
+
+    baselines = [row.get("baseline", {}) for row in trials]
+    drafts = [row.get("draft", {}) for row in trials]
+    reviews = [row.get("candidate_review", {}) for row in trials]
+    oracle_results = [row.get("oracle", {}) for row in trials]
+    semantic_signatures_valid, semantic_signatures = _semantic_signatures(trials)
+    minimum_trials = _minimum_trial_count(fixture)
+    independent_trials = _independent_project_trials(
+        trials, minimum=minimum_trials
+    )
+    gates = {
+        (
+            "at_least_one_fresh_full_workflow_trial"
+            if fixture == _ALPHA_FIXTURE
+            else "at_least_three_independent_full_workflow_trials"
+        ): independent_trials,
         "all_baseline_runs_completed": bool(baselines)
         and all(row.get("status") == "completed" for row in baselines),
         "baseline_character_stage_model_tokens_reported": bool(baselines)
         and all(_stage_model_tokens_reported(row) for row in baselines),
-        "baseline_all_planned_chunks_processed_without_degradation": bool(baselines)
+        "baseline_all_planned_chunks_model_completed_without_degradation": bool(baselines)
         and all(_all_planned_chunks_processed(row) for row in baselines),
         "baseline_explicit_candidate_set_matches_oracle_exactly": bool(reviews)
         and all(_candidate_review_exact(row) for row in reviews),
@@ -1640,14 +2620,22 @@ def _evaluate_gates(trials: list[dict[str, Any]]) -> dict[str, bool]:
         and all(row.get("status") == "completed" for row in drafts),
         "draft_character_stage_model_tokens_reported": bool(drafts)
         and all(_stage_model_tokens_reported(row) for row in drafts),
-        "draft_all_planned_chunks_processed_without_degradation": bool(drafts)
+        "draft_all_planned_chunks_model_completed_without_degradation": bool(drafts)
         and all(_all_planned_chunks_processed(row) for row in drafts),
-        "stable_visible_issue_semantic_identity_across_independent_trials": (
-            enough_independent_trials
-            and semantic_signatures_valid
-            and len(semantic_signatures) == len(trials)
-            and len(set(semantic_signatures)) == 1
+        "draft_case_material_and_explanation_coverage_complete": bool(drafts)
+        and all(_case_review_coverage_complete(row) for row in drafts),
+        "draft_report_classes_are_separate_and_complete": bool(drafts)
+        and all(
+            row.get("report_class_integrity") is True
+            and row.get("review_clue_collection_complete") is True
+            and row.get("provisional_clue_collection_complete") is True
+            for row in drafts
         ),
+        "draft_has_no_unverified_provisional_clues": bool(drafts)
+        and all(row.get("provisional_clue_count") == 0 for row in drafts),
+        "visible_issue_semantic_identity_valid_in_each_trial": bool(trials)
+        and semantic_signatures_valid
+        and len(semantic_signatures) == len(trials),
         "all_runtime_bound_expected_cases_passed": bool(oracle_results)
         and all(row.get("all_cases_passed") is True for row in oracle_results),
         "trace_has_no_unexpected_runtime_bound_cases": bool(oracle_results)
@@ -1657,6 +2645,102 @@ def _evaluate_gates(trials: list[dict[str, Any]]) -> dict[str, bool]:
         ),
         "visible_issue_full_safe_signatures_match_oracle": bool(oracle_results)
         and all(row.get("visible_issues_exact") is True for row in oracle_results),
+        "review_clue_full_safe_signatures_match_oracle": bool(oracle_results)
+        and all(row.get("review_clues_exact") is True for row in oracle_results),
+        "report_class_assignment_matches_oracle": bool(oracle_results)
+        and all(row.get("report_classes_exact") is True for row in oracle_results),
+    }
+    if fixture == _ALPHA_FIXTURE:
+        safe_preflight = _safe_runtime_provenance(api_runtime_provenance)
+        safe_post_run = _safe_runtime_provenance(
+            post_run_api_runtime_provenance
+        )
+        gates["api_and_worker_runtime_provenance_match"] = (
+            _alpha_worker_runtime_provenance_matches_api(
+                trials, api_runtime_provenance
+            )
+        )
+        gates["post_run_api_runtime_provenance_matches_preflight"] = (
+            safe_preflight is not None
+            and safe_post_run is not None
+            and safe_post_run == safe_preflight
+        )
+    else:
+        gates[_STABILITY_OBSERVATION_KEY] = (
+            independent_trials
+            and semantic_signatures_valid
+            and len(semantic_signatures) == len(trials)
+            and len(set(semantic_signatures)) == 1
+        )
+    return gates
+
+
+def _evaluate_stability_observations(
+    trials: list[dict[str, Any]],
+    *,
+    fixture: str = "demo",
+) -> dict[str, bool]:
+    """Evaluate stability at the selected fixture's evidentiary threshold."""
+
+    semantic_signatures_valid, semantic_signatures = _semantic_signatures(trials)
+    observation_minimum = (
+        2 if fixture == _ALPHA_FIXTURE else _LEGACY_MINIMUM_TRIALS
+    )
+    multiple_independent_trials = _independent_project_trials(
+        trials, minimum=observation_minimum
+    )
+    return {
+        "multiple_independent_full_workflow_trials": multiple_independent_trials,
+        _STABILITY_OBSERVATION_KEY: (
+            multiple_independent_trials
+            and semantic_signatures_valid
+            and len(semantic_signatures) == len(trials)
+            and len(set(semantic_signatures)) == 1
+        ),
+    }
+
+
+def _evaluation_claims(
+    trials: list[dict[str, Any]],
+    gates: dict[str, bool],
+    observations: dict[str, bool],
+    *,
+    diagnostic_source_anchored: bool,
+) -> dict[str, Any]:
+    """Build explicit claims without treating one run as stability evidence."""
+
+    multiple_trials = observations[
+        "multiple_independent_full_workflow_trials"
+    ]
+    stable = observations[
+        _STABILITY_OBSERVATION_KEY
+    ]
+    return {
+        "blind_holdout": False,
+        "production_quality": False,
+        "open_text_generalization": False,
+        "semantic_coverage": False,
+        "diagnostic_source_anchored_candidate_review": diagnostic_source_anchored,
+        # For Alpha this means at least two fresh projects. For legacy fixtures
+        # it preserves the historical three-project evidentiary threshold.
+        "independent_full_workflow_trials": multiple_trials,
+        "full_workflow_trial_count": len(trials),
+        "visible_issue_semantic_identity_valid_in_each_trial": gates[
+            "visible_issue_semantic_identity_valid_in_each_trial"
+        ],
+        "semantic_identity_stability_assessed": multiple_trials,
+        "semantic_identity_stable_across_independent_trials": stable,
+    }
+
+
+def _report_gates(
+    required_gates: dict[str, bool], observations: dict[str, bool]
+) -> dict[str, bool]:
+    """Expose stability while preserving whether policy makes it required."""
+
+    return {
+        **required_gates,
+        _STABILITY_OBSERVATION_KEY: observations[_STABILITY_OBSERVATION_KEY],
     }
 
 
@@ -1725,6 +2809,7 @@ def _execute_trial(
         client,
         project_id,
         oracle["confirm_candidates"],
+        author_axes=oracle.get("author_axes", []),
         diagnostic_source_anchored=diagnostic_source_anchored,
     )
     if candidate_review["confirmed"] != len(oracle["confirm_candidates"]):
@@ -1784,14 +2869,124 @@ def _model_available_for_session(client: httpx.Client, health: dict[str, Any]) -
     return profile.get("configured") is True or profile.get("service_default_available") is True
 
 
+def _target_bound_actor_v2_ready(limits: object) -> bool:
+    return (
+        isinstance(limits, dict)
+        and limits.get("draft_actor_review_v1") is True
+        and limits.get("target_bound_draft_review_v2") is True
+        and all(
+            limits.get(field) == expected
+            for field, expected in _TARGET_BOUND_DRAFT_REVIEW_V2.items()
+        )
+    )
+
+
+def _target_bound_semantic_v3_ready(limits: object) -> bool:
+    return (
+        isinstance(limits, dict)
+        and limits.get("draft_actor_review_v1") is True
+        and limits.get("target_bound_draft_review_v2") is False
+        and limits.get("target_bound_draft_review_v3") is True
+        and all(
+            limits.get(field) == expected
+            for field, expected in _TARGET_BOUND_DRAFT_REVIEW_V3.items()
+        )
+    )
+
+
+def _alpha_runtime_ready(provenance: dict[str, Any]) -> bool:
+    """Check Alpha-only switches on an already strict-safe projection."""
+
+    limits = provenance.get("character_consistency_limits")
+    return (
+        isinstance(limits, dict)
+        and all(
+            limits.get(field) == expected
+            for field, expected in _ALPHA_EXPLANATION_REVIEW_IDENTITY.items()
+        )
+        and limits.get("ooc_protocol_version") == "character-ooc-v1"
+        and limits.get("ooc_supported_dimensions") == list(_ALPHA_OOC_DIMENSIONS)
+        # V4 alone only identifies an assertion. V5 supplies its scope
+        # relation, and the V1 reviewer binds the accepted proposal to the
+        # frozen run input; all three are needed for required_v1 persistence.
+        and all(
+            limits.get(field) == expected
+            for field, expected in _ALPHA_FORMAL_SUPPORT_BINDING_IDENTITY.items()
+        )
+        # The versioned switch is the public runtime protocol identity for
+        # scoped value/boundary review; Alpha never enables it implicitly.
+        and limits.get("scoped_axis_drift_v1") is True
+        and _target_bound_semantic_v3_ready(limits)
+    )
+
+
+def _alpha_service_artifact_binding(
+    provenance: dict[str, Any], *, allow_remote_service_artifact: bool
+) -> dict[str, bool]:
+    """Bind Alpha to this checkout unless an explicit remote override is used."""
+
+    build = provenance.get("build")
+    live_hash = (
+        build.get("service_artifact_sha256")
+        if isinstance(build, dict)
+        else None
+    )
+    local_hash = _local_service_artifact_sha256(ROOT)
+    local_available = isinstance(local_hash, str)
+    matches = local_available and local_hash == live_hash
+    if not allow_remote_service_artifact:
+        if not local_available:
+            raise AcceptanceFailure(
+                "local_service_artifact_unavailable",
+                safe_payload={
+                    "code": "local_service_artifact_unavailable",
+                    "stage": "runner_preflight",
+                    "details": {},
+                },
+            )
+        if not matches:
+            raise AcceptanceFailure(
+                "service_artifact_mismatch",
+                safe_payload={
+                    "code": "service_artifact_mismatch",
+                    "stage": "runner_preflight",
+                    "details": {},
+                },
+            )
+    return {
+        "local_service_artifact_match_enforced": (
+            not allow_remote_service_artifact
+        ),
+        "local_service_artifact_matches_live_api": matches,
+        "remote_service_artifact_override": allow_remote_service_artifact,
+    }
+
+
 def run(args: argparse.Namespace) -> int:
     global DEMO
     DEMO = FIXTURES[args.fixture]
+    trial_count = (
+        _minimum_trial_count(args.fixture)
+        if getattr(args, "trials", None) is None
+        else args.trials
+    )
     diagnostic_source_anchored = bool(
         getattr(args, "diagnostic_review_source_anchored_candidates", False)
     )
+    allow_remote_service_artifact = bool(
+        getattr(args, "allow_remote_service_artifact", False)
+    )
+    if allow_remote_service_artifact and args.fixture != _ALPHA_FIXTURE:
+        raise AcceptanceFailure(
+            "remote_service_artifact_override_scope_invalid",
+            safe_payload={
+                "code": "remote_service_artifact_override_scope_invalid",
+                "stage": "runner_preflight",
+                "details": {"allowed_fixture": _ALPHA_FIXTURE},
+            },
+        )
     if diagnostic_source_anchored and (
-        args.fixture not in {"ooc-v1", "ooc-transfer-v1"} or args.trials != 1
+        args.fixture not in {"ooc-v1", "ooc-transfer-v1"} or trial_count != 1
     ):
         raise AcceptanceFailure(
             "diagnostic_source_anchored_scope_invalid",
@@ -1821,7 +3016,19 @@ def run(args: argparse.Namespace) -> int:
         timeout=httpx.Timeout(30.0),
     ) as client:
         health = _request(client, "GET", "/health")
-        capabilities = health.get("runtime_provenance", {}).get("capabilities", {})
+        api_runtime_provenance = _safe_runtime_provenance(
+            health.get("runtime_provenance")
+        )
+        if api_runtime_provenance is None:
+            raise AcceptanceFailure(
+                "runtime_provenance_invalid",
+                safe_payload={
+                    "code": "runtime_provenance_invalid",
+                    "stage": "runner_preflight",
+                    "details": {},
+                },
+            )
+        capabilities = api_runtime_provenance["capabilities"]
         if capabilities.get("character_consistency") is not True:
             raise AcceptanceFailure(
                 "character_consistency_disabled",
@@ -1840,48 +3047,113 @@ def run(args: argparse.Namespace) -> int:
                     "details": {},
                 },
             )
+        if (
+            args.fixture == _ALPHA_FIXTURE
+            and not _alpha_runtime_ready(api_runtime_provenance)
+        ):
+            raise AcceptanceFailure(
+                "alpha_ooc_capabilities_unavailable",
+                safe_payload={
+                    "code": "alpha_ooc_capabilities_unavailable",
+                    "stage": "runner_preflight",
+                    "details": {
+                        "required_ooc_protocol_version": "character-ooc-v1",
+                        "required_explanation_review": True,
+                        "required_formal_support_binding_identity": dict(
+                            _ALPHA_FORMAL_SUPPORT_BINDING_IDENTITY
+                        ),
+                        "required_scoped_axis_drift_v1": True,
+                        "required_draft_actor_review_v1": True,
+                        "required_target_bound_draft_review_v3": True,
+                        "required_target_bound_protocol_versions": dict(
+                            _TARGET_BOUND_DRAFT_REVIEW_V3
+                        ),
+                        "required_dimensions": list(_ALPHA_OOC_DIMENSIONS),
+                    },
+                },
+            )
+        artifact_binding = (
+            _alpha_service_artifact_binding(
+                api_runtime_provenance,
+                allow_remote_service_artifact=allow_remote_service_artifact,
+            )
+            if args.fixture == _ALPHA_FIXTURE
+            else {}
+        )
         trials = [
             _execute_trial(
                 client,
                 oracle,
                 trial_number=index,
                 timeout_seconds=args.run_timeout_seconds,
-                guided_review=args.fixture in {"ooc-v1", "ooc-transfer-v1"},
+                guided_review=args.fixture in {
+                    "alpha-v1", "ooc-v1", "ooc-transfer-v1"
+                },
                 diagnostic_continue_partial=(
                     args.fixture in {"ooc-v1", "ooc-transfer-v1"}
                     and args.diagnostic_continue_partial_baseline
                 ),
                 diagnostic_source_anchored=diagnostic_source_anchored,
             )
-            for index in range(1, args.trials + 1)
+            for index in range(1, trial_count + 1)
         ]
+        post_run_api_runtime_provenance = None
+        try:
+            post_run_health = _request(client, "GET", "/health")
+        except (AcceptanceFailure, httpx.HTTPError):
+            # The Alpha post-run identity gate below fails closed. Do not copy
+            # an unavailable response or its failure details into the report.
+            pass
+        else:
+            post_run_api_runtime_provenance = _safe_runtime_provenance(
+                post_run_health.get("runtime_provenance")
+            )
 
-    gates = _evaluate_gates(trials)
-    gates["strict_candidate_selector_identity"] = not diagnostic_source_anchored
+    required_gates = _evaluate_gates(
+        trials,
+        fixture=args.fixture,
+        api_runtime_provenance=api_runtime_provenance,
+        post_run_api_runtime_provenance=post_run_api_runtime_provenance,
+    )
+    required_gates["strict_candidate_selector_identity"] = (
+        not diagnostic_source_anchored
+    )
+    observations = _evaluate_stability_observations(
+        trials, fixture=args.fixture
+    )
+    # Keep the historical field available for report consumers. It is
+    # observational-only for Alpha, but remains a required gate for every
+    # pre-existing fixture.
+    reported_gates = _report_gates(required_gates, observations)
     report = {
-        "schema_version": "character-continuity-live-dev-v2",
+        "schema_version": "character-continuity-live-dev-v3",
         "dataset": _dataset_label(),
-        "claims": {
-            "blind_holdout": False,
-            "production_quality": False,
-            "open_text_generalization": False,
-            "semantic_coverage": False,
-            "diagnostic_source_anchored_candidate_review": diagnostic_source_anchored,
-            "independent_full_workflow_trials": gates[
-                "at_least_three_independent_full_workflow_trials"
-            ],
+        "claims": _evaluation_claims(
+            trials,
+            required_gates,
+            observations,
+            diagnostic_source_anchored=diagnostic_source_anchored,
+        ) | artifact_binding,
+        "gate_policy": {
+            "required_for_pass": list(required_gates),
+            "observational_only": (
+                [_STABILITY_OBSERVATION_KEY]
+                if args.fixture == _ALPHA_FIXTURE
+                else []
+            ),
         },
-        "runtime_provenance": health.get("runtime_provenance"),
+        "observations": observations,
+        "runtime_provenance": api_runtime_provenance,
         "dataset_sha256": _dataset_hashes(),
         "trials": trials,
-        "gates": gates,
-        "passed": all(gates.values()) and not diagnostic_source_anchored,
+        "gates": reported_gates,
+        "passed": all(required_gates.values()) and not diagnostic_source_anchored,
     }
     _emit_report(report, args.output_json)
     return 0 if report["passed"] else 1
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture", choices=tuple(FIXTURES), default="demo")
     parser.add_argument(
@@ -1898,7 +3170,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--trials", type=int, default=3, choices=range(1, 6))
+    parser.add_argument(
+        "--allow-remote-service-artifact",
+        action="store_true",
+        help=(
+            "Alpha only: explicitly allow a live service built from a different "
+            "checkout; the override and match result are recorded in the report"
+        ),
+    )
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=None,
+        choices=range(1, 6),
+        help="fresh workflow count (default: 1 for alpha-v1, 3 otherwise)",
+    )
     parser.add_argument("--run-timeout-seconds", type=float, default=1800.0)
     parser.add_argument(
         "--output-json",
@@ -1907,7 +3193,10 @@ def parse_args() -> argparse.Namespace:
             "placed there automatically"
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.trials is None:
+        args.trials = _minimum_trial_count(args.fixture)
+    return args
 
 
 if __name__ == "__main__":

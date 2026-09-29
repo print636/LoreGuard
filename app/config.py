@@ -260,7 +260,7 @@ class Settings(BaseSettings):
     # call in the optional stage.  The per-call budgets below can only tighten
     # this ceiling; they are not additive entitlements.
     character_consistency_stage_token_budget: int = Field(
-        default=150_000, ge=256, le=150_000
+        default=300_000, ge=256, le=500_000
     )
     character_consistency_max_chunks_per_run: int = Field(
         default=24, ge=1, le=128
@@ -326,6 +326,15 @@ class Settings(BaseSettings):
     # It remains opt-in and fail-closed; one logical batch receives one
     # transport attempt and shares the character-stage usage ledger.
     character_draft_actor_review_v1: bool = False
+    # Additive, target-bound V2 review for focused draft recall. V2 reuses the
+    # V1 frozen-source/provider boundary and limits, but its response may only
+    # contain enum relations and source IDs. Keep both switches explicit so a
+    # historical V1 deployment cannot silently change protocol.
+    character_target_bound_draft_review_v2: bool = False
+    # V3 adds server-discovered candidate-line recall, exact source-slice
+    # object binding and author-scoped axis decisions. It is a new protocol,
+    # never an in-place reinterpretation of stored V2 runs.
+    character_target_bound_draft_review_v3: bool = False
     character_draft_actor_review_token_reserve: int = Field(
         default=6_000, ge=256, le=20_000
     )
@@ -374,7 +383,7 @@ class Settings(BaseSettings):
     # This budget spans that whole regeneration cycle; it is independent from
     # the per-response completion cap and remains subordinate to the stage cap.
     character_signal_token_budget: int = Field(
-        default=22_000, ge=256, le=40_000
+        default=26_000, ge=256, le=40_000
     )
     character_signal_max_completion_tokens: int = Field(
         default=4_096, ge=64, le=8_192
@@ -411,6 +420,20 @@ class Settings(BaseSettings):
     # one OOC case.  It is separate from the final drift verdict budget.
     character_explanation_token_budget: int = Field(
         default=24_000, ge=512, le=60_000
+    )
+    # Explanation batches have a wider structured response than the final
+    # drift verdict. Keep their completion ceiling independent so changing the
+    # verdict contract cannot silently truncate explanation JSON (or vice
+    # versa).
+    character_explanation_max_completion_tokens: int = Field(
+        default=2_048, ge=256, le=4_096
+    )
+    # Exhaustive frozen-source windows considered for one OOC case.  The
+    # semantic reviewer still batches these in groups of four and shares the
+    # case token budget; hitting this cap is an explicit partial-coverage
+    # result, never a clean absence claim.
+    character_explanation_max_windows_per_case: int = Field(
+        default=48, ge=1, le=64
     )
     # Evidence Investigator is an independent, default-off capability.  These
     # values are server-owned safety ceilings, not model-selected tuning knobs.
@@ -462,8 +485,8 @@ class Settings(BaseSettings):
     evidence_investigator_require_hybrid: bool = True
     # Leave headroom for the optional character stage after earlier model
     # extraction. These remain finite admission ceilings, not usage targets.
-    per_run_token_budget: int = 200_000
-    daily_token_budget: int = 600_000
+    per_run_token_budget: int = 400_000
+    daily_token_budget: int = 2_000_000
     model_input_price_per_million: float | None = None
     model_output_price_per_million: float | None = None
     max_upload_bytes: int = 10 * 1024 * 1024
@@ -649,6 +672,25 @@ class Settings(BaseSettings):
         ):
             raise ValueError("character draft actor review v1 requires full line v2")
         if (
+            self.character_target_bound_draft_review_v2
+            and not self.character_draft_actor_review_v1
+        ):
+            raise ValueError(
+                "character target-bound draft review v2 requires draft actor review v1"
+            )
+        if (
+            self.character_target_bound_draft_review_v3
+            and not self.character_draft_actor_review_v1
+        ):
+            raise ValueError(
+                "character target-bound draft review v3 requires draft actor review v1"
+            )
+        if (
+            self.character_target_bound_draft_review_v2
+            and self.character_target_bound_draft_review_v3
+        ):
+            raise ValueError("character target-bound draft review versions are exclusive")
+        if (
             self.character_signal_support_trace_v1
             and not self.character_signal_support_id_v4
         ):
@@ -693,9 +735,21 @@ class Settings(BaseSettings):
             < self.character_drift_max_completion_tokens
         ):
             raise ValueError("character drift budget cannot reserve model output")
-        if self.character_consistency_stage_token_budget < max(
+        if (
+            self.character_explanation_token_budget
+            < self.character_explanation_max_completion_tokens
+        ):
+            raise ValueError("character explanation budget cannot reserve model output")
+        active_completion_limits = [
             self.character_signal_max_completion_tokens,
             self.character_drift_max_completion_tokens,
+        ]
+        if self.character_explanation_review_v1:
+            active_completion_limits.append(
+                self.character_explanation_max_completion_tokens
+            )
+        if self.character_consistency_stage_token_budget < max(
+            active_completion_limits
         ):
             raise ValueError(
                 "character consistency stage budget cannot reserve a model output"

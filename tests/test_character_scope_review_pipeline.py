@@ -57,13 +57,14 @@ def _record(
     trait_key: str = "melon_preference",
     key_object: str = "蜜瓜",
     stability: str = "stable",
+    polarity: str = "positive",
 ) -> dict:
     return {
         "character": character,
         "dimension": dimension,
         "trait_key": trait_key,
         "statement": statement,
-        "polarity": "positive",
+        "polarity": polarity,
         "stability": stability,
         "observation_kind": "explicit_declaration",
         "context": "",
@@ -116,9 +117,13 @@ class ReviewingProvider:
                     [target["start_offset"]]
                     + [clauses[anchor_id]["start_offset"] for anchor_id in anchor_ids if anchor_id]
                 )
+                last_offset = max(
+                    [target["start_offset"]]
+                    + [clauses[anchor_id]["start_offset"] for anchor_id in anchor_ids if anchor_id]
+                )
                 exact_basis = [
                     clause["support_id"] for clause in line["clauses"]
-                    if first_offset <= clause["start_offset"] <= target["start_offset"]
+                    if first_offset <= clause["start_offset"] <= last_offset
                 ]
                 item = {
                     "proposal_id": proposal["proposal_id"],
@@ -186,6 +191,187 @@ def test_nonliteral_same_axis_continuation_reaches_review_and_can_be_pending():
         "L2:A1", "L2:A2", "L2:A3",
     ]
     assert request["lines"][0]["clauses"][2]["text"] == "她先向搭档说明可能危及航船的情况"
+
+
+@pytest.mark.parametrize(("line", "record"), (
+    (
+        "黎音长期内向谨慎，面对初次见面的陌生人时会先观察，不会主动与对方长谈；这是她稳定的核心性格。",
+        {
+            "support_id": "L2:A1", "label_anchor_id": "L2:A4",
+            "statement": "黎音长期内向谨慎", "character": "黎音",
+            "dimension": "core_personality", "stability": "core",
+            "trait_key": "social_caution", "key_object": "",
+        },
+    ),
+    (
+        "沈砚一直喜欢甜味栗子糕，这是他长期稳定的食物偏好。",
+        {
+            "support_id": "L2:A1", "label_anchor_id": "L2:A2",
+            "statement": "沈砚一直喜欢甜味栗子糕", "character": "沈砚",
+            "dimension": "preference", "stability": "stable",
+            "trait_key": "chestnut_cake_preference", "key_object": "甜味栗子糕",
+        },
+    ),
+    (
+        "苏弦原本长期回避面对陌生听众公开发言，这是她训练前稳定的核心性格。",
+        {
+            "support_id": "L2:A1", "label_anchor_id": "L2:A2",
+            "statement": "苏弦原本长期回避面对陌生听众公开发言", "character": "苏弦",
+            "dimension": "core_personality", "stability": "core",
+            "trait_key": "public_speaking_participation", "key_object": "",
+            "polarity": "negative",
+        },
+    ),
+))
+def test_alpha_postposed_summary_lines_produce_complete_reviewed_support_ref(
+    line: str, record: dict,
+):
+    proposed = _record(
+        line,
+        scope_relation="postposed_label_summary",
+        **record,
+    )
+    result, provider = _extract(line, ReviewingProvider([proposed]))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == len(result.pending_candidates) == 1
+    candidate = result.pending_candidates[0]
+    assert len(candidate.support_refs) == 1
+    support = candidate.support_refs[0]
+    assert support.run_input_id == "frozen-input-1"
+    assert support.support_id == "L2:A1"
+    assert support.label_anchor_id == record["label_anchor_id"]
+    assert support.scope_relation == "postposed_label_summary"
+    assert provider.review_payload["basis_path_hints"] == [{
+        "proposal_id": "p1",
+        "if_supported_basis_ids": [
+            clause["support_id"]
+            for clause in provider.review_payload["request"]["lines"][0]["clauses"]
+        ],
+    }]
+    assert "同轴事实自身的“不/不会”等负向措辞并非自动拒绝理由" in provider.calls[0][0]
+
+
+def test_postposed_summary_cross_subject_or_axis_is_never_silent_evidence():
+    line = "桑衍长期内向谨慎，周尧喜欢蜜瓜，这是他的稳定偏好。"
+    proposed = _record(
+        line,
+        support_id="L2:A1",
+        label_anchor_id="L2:A3",
+        scope_relation="postposed_label_summary",
+        statement="桑衍长期内向谨慎",
+        dimension="core_personality",
+        stability="core",
+        key_object="",
+        trait_key="social_caution",
+    )
+    result, provider = _extract(
+        line,
+        ReviewingProvider([proposed], [{
+            "verdict": "rejected",
+            "label_relation": "different_axis",
+        }]),
+    )
+
+    assert len(provider.calls) == 2
+    assert result.diagnostics.outcome == "partial"
+    assert result.signals == result.pending_candidates == ()
+    assert result.diagnostics.reason_counts == {
+        "scope_review_reviewer_rejected": 1,
+    }
+
+
+def test_invalid_forward_anchor_regenerates_only_via_explicit_postposed_relation():
+    line = "沈砚一直喜欢甜味栗子糕，这是他长期稳定的食物偏好。"
+    invalid = _record(
+        line,
+        support_id="L2:A1",
+        label_anchor_id="L2:A2",
+        scope_relation="labelled_elaboration",
+        statement="沈砚一直喜欢甜味栗子糕",
+        character="沈砚",
+        trait_key="chestnut_cake_preference",
+        key_object="甜味栗子糕",
+    )
+    repaired = dict(invalid, scope_relation="postposed_label_summary")
+
+    class Regenerating(ReviewingProvider):
+        signal_attempt = 0
+
+        def complete(self, system: str, user: str):
+            if not user.startswith(SCOPE_REVIEW_USER_PREFIX):
+                self.calls.append((system, user))
+                record = invalid if self.signal_attempt == 0 else repaired
+                self.signal_attempt += 1
+                return SimpleNamespace(
+                    text=json.dumps({"records": [record]}, ensure_ascii=False),
+                    prompt_tokens=17,
+                    completion_tokens=9,
+                )
+            return super().complete(system, user)
+
+    result, provider = _extract(line, Regenerating([repaired]))
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.pending_candidates) == 1
+    assert result.diagnostics.reason_counts == {
+        "regenerated_from_scope_anchor_invalid": 1,
+    }
+    assert "scope_anchor_invalid" in provider.calls[1][1]
+    assert "postposed_label_summary" in provider.calls[1][1]
+
+
+def test_invalid_forward_anchor_fails_closed_without_a_clean_regeneration():
+    line = "沈砚一直喜欢甜味栗子糕，这是他长期稳定的食物偏好。"
+    invalid = _record(
+        line,
+        support_id="L2:A1",
+        label_anchor_id="L2:A2",
+        scope_relation="labelled_elaboration",
+        statement="沈砚一直喜欢甜味栗子糕",
+        character="沈砚",
+        trait_key="chestnut_cake_preference",
+        key_object="甜味栗子糕",
+    )
+    result, provider = _extract(
+        line,
+        ReviewingProvider([invalid]),
+        settings=_settings(character_signal_package_max_attempts=1),
+    )
+    assert len(provider.calls) == 1
+    assert result.diagnostics.outcome == "degraded"
+    assert result.signals == result.pending_candidates == ()
+    assert result.diagnostics.reason_counts == {"scope_anchor_invalid": 1}
+
+
+@pytest.mark.parametrize("tail", (
+    "但她随后否认这是自己的性格",
+    "不过她更正说那只是一次误会",
+    "她当天还带了一壶热茶",
+))
+def test_postposed_summary_with_any_trailing_assertion_fails_before_review(tail: str):
+    line = f"桑衍长期内向谨慎，这是她稳定的核心性格，{tail}。"
+    proposed = _record(
+        line,
+        support_id="L2:A1",
+        label_anchor_id="L2:A2",
+        scope_relation="postposed_label_summary",
+        statement="桑衍长期内向谨慎",
+        dimension="core_personality",
+        stability="core",
+        key_object="",
+        trait_key="social_caution",
+    )
+    result, provider = _extract(
+        line,
+        ReviewingProvider([proposed]),
+        settings=_settings(character_signal_package_max_attempts=1),
+    )
+
+    assert len(provider.calls) == 1
+    assert provider.review_payload is None
+    assert result.diagnostics.outcome == "degraded"
+    assert result.signals == result.pending_candidates == ()
+    assert result.diagnostics.reason_counts == {"scope_anchor_invalid": 1}
 
 
 @pytest.mark.parametrize("line, record, conflict", [
@@ -322,7 +508,12 @@ def test_invalid_review_and_frozen_source_mismatch_fail_closed():
     assert invalid.diagnostics.outcome == "partial"
     assert invalid.diagnostics.charged_tokens > 0
     assert invalid.diagnostics.reason_counts == {"scope_review_response_invalid": 1}
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
+    assert provider.calls[2][1].startswith(SCOPE_REVIEW_USER_PREFIX)
+    retry_payload = json.loads(
+        provider.calls[2][1].removeprefix(SCOPE_REVIEW_USER_PREFIX)
+    )
+    assert retry_payload["validation_retry"]["failure_code"] == "response_invalid"
 
     mismatched_source = ScopeReviewSourceIdentity(
         run_input_id="frozen-input-1", document_id="document-1",

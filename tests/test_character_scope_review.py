@@ -8,8 +8,8 @@ from pydantic import ValidationError
 
 from app.character_scope_review import (
     MAX_SCOPE_REVIEW_RESPONSE_BYTES,
-    SCOPE_REVIEW_SCHEMA_V1,
-    SCOPE_REVIEW_PROMPT_V3,
+    SCOPE_REVIEW_SCHEMA_V2,
+    SCOPE_REVIEW_PROMPT_V4,
     ScopeReviewClause,
     ScopeReviewItem,
     ScopeReviewLine,
@@ -121,7 +121,7 @@ def _item(request: ScopeReviewRequest, *, proposal_id: str = "p1", **changes) ->
 
 def _response(request: ScopeReviewRequest, *items: dict, **changes) -> str:
     payload = {
-        "schema_version": SCOPE_REVIEW_SCHEMA_V1,
+        "schema_version": SCOPE_REVIEW_SCHEMA_V2,
         "request_digest": request_digest(request),
         "items": list(items),
     }
@@ -142,7 +142,7 @@ def _evaluate(request: ScopeReviewRequest, identity: ScopeReviewSourceIdentity,
 
 def test_nonliteral_same_axis_and_situational_middle_clause_are_supported():
     request, identity, frozen_content = _request()
-    assert request.prompt_version == SCOPE_REVIEW_PROMPT_V3
+    assert request.prompt_version == SCOPE_REVIEW_PROMPT_V4
     result = _evaluate(request, identity, frozen_content, _item(request))
     assert result.decisions[0].verdict == "supported"
     assert result.decisions[0].reason == "supported"
@@ -200,6 +200,87 @@ def test_label_anchor_cannot_point_forward_or_to_another_line(label_anchor_id: s
             lines=(first, second),
             proposals=(proposal,),
         )
+
+
+def test_postposed_summary_requires_and_covers_complete_target_to_label_path():
+    line = _line((
+        "桑衍长期内向谨慎",
+        "面对陌生人时会先观察",
+        "这是她稳定的核心性格",
+    ))
+    proposal = _proposal(
+        support_id="L2:A1",
+        actor_anchor_id=None,
+        label_anchor_id="L2:A3",
+        scope_relation="postposed_label_summary",
+        statement="桑衍长期内向谨慎",
+        key_object="",
+    )
+    request, identity, frozen_content = _request(line, (proposal,))
+    assert request.schema_version == SCOPE_REVIEW_SCHEMA_V2
+
+    supported = _evaluate(
+        request,
+        identity,
+        frozen_content,
+        _item(request, basis_ids=["L2:A1", "L2:A2", "L2:A3"]),
+    )
+    assert supported.decisions[0].verdict == "supported"
+    assert supported.decisions[0].basis_ids == (
+        "L2:A1", "L2:A2", "L2:A3",
+    )
+
+    missing_bridge = _evaluate(
+        request,
+        identity,
+        frozen_content,
+        _item(request, basis_ids=["L2:A1", "L2:A3"]),
+    )
+    assert missing_bridge.decisions[0].verdict == "uncertain"
+    assert missing_bridge.decisions[0].reason == "basis_invalid"
+    assert missing_bridge.decisions[0].basis_invalid_subtype == "missing_intermediate"
+
+
+@pytest.mark.parametrize("changes", (
+    {"label_anchor_id": None},
+    {"label_anchor_id": "L2:A1"},
+))
+def test_postposed_summary_rejects_missing_or_non_later_label(changes: dict):
+    values = {
+        "support_id": "L2:A2",
+        "actor_anchor_id": "L2:A1",
+        "label_anchor_id": "L2:A3",
+        "scope_relation": "postposed_label_summary",
+    }
+    values.update(changes)
+    proposal = _proposal(
+        **values,
+    )
+    with pytest.raises(ValidationError):
+        _request(proposals=(proposal,))
+
+
+@pytest.mark.parametrize("tail", (
+    "但她随后否认这是自己的性格",
+    "不过她更正说那只是一次误会",
+    "她当天还带了一壶热茶",
+))
+def test_postposed_summary_label_must_be_the_final_assertion(tail: str):
+    line = _line((
+        "桑衍长期内向谨慎",
+        "这是她稳定的核心性格",
+        tail,
+    ))
+    proposal = _proposal(
+        support_id="L2:A1",
+        actor_anchor_id=None,
+        label_anchor_id="L2:A2",
+        scope_relation="postposed_label_summary",
+        statement="桑衍长期内向谨慎",
+        key_object="",
+    )
+    with pytest.raises(ValidationError):
+        _request(line, (proposal,))
 
 
 @pytest.mark.parametrize("changes", (

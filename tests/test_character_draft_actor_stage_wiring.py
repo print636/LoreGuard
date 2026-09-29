@@ -11,6 +11,7 @@ import app.character_consistency_stage as stage_module
 from app.character_consistency_stage import (
     CharacterConsistencyStage,
     _FrozenDocument,
+    _safe_target_bound_slot_conflict_counts,
     project_provisional_draft_clues,
 )
 from app.character_drift import ConfirmedTraitSnapshot
@@ -615,3 +616,203 @@ def test_flag_off_keeps_legacy_draft_extraction_call_shape(
         "candidate_evidence_ranges",
     }
     assert recorder.targeted_calls[1]["candidate_evidence_ranges"] == ((1, 1),)
+
+
+def test_target_bound_v2_passes_stable_target_ordinal_to_both_recall_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = _draft_source("祁雾沉默片刻。")
+    recorder = _ExtractionRecorder(
+        primary_result=_result(), targeted_results=[_result(), _result()]
+    )
+    monkeypatch.setattr(
+        stage_module, "CharacterSignalExtractor", recorder.extractor_type()
+    )
+
+    _run(
+        _FrozenStage(
+            source=source,
+            baselines=[_baseline_entry()],
+            settings=_settings(
+                character_signal_full_line_prompt_v2=True,
+                character_draft_actor_review_v1=True,
+                character_target_bound_draft_review_v2=True,
+            ),
+        ),
+        source,
+    )
+
+    assert len(recorder.targeted_calls) == 2
+    assert [call["target_ordinal"] for call in recorder.targeted_calls] == [1, 1]
+
+
+def test_target_bound_v3_passes_stable_target_ordinal_to_both_recall_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = _draft_source("祁雾沉默片刻。")
+    recorder = _ExtractionRecorder(
+        primary_result=_result(), targeted_results=[_result(), _result()]
+    )
+    monkeypatch.setattr(
+        stage_module, "CharacterSignalExtractor", recorder.extractor_type()
+    )
+
+    _run(
+        _FrozenStage(
+            source=source,
+            baselines=[_baseline_entry()],
+            settings=_settings(
+                character_signal_full_line_prompt_v2=True,
+                character_draft_actor_review_v1=True,
+                character_target_bound_draft_review_v3=True,
+            ),
+        ),
+        source,
+    )
+
+    assert len(recorder.targeted_calls) == 2
+    assert [call["target_ordinal"] for call in recorder.targeted_calls] == [1, 1]
+
+
+def test_target_bound_v2_unresolved_binding_keeps_case_partial_and_non_formal(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = _draft_source("前言。\n祁雾用奉承话术迂回交流。")
+    reverse_action = _reverse_action(source)
+    unresolved = CharacterSignalExtractionResult(
+        signals=(reverse_action,),
+        draft_observations=(reverse_action,),
+        diagnostics=CharacterSignalDiagnostics(
+            outcome="partial",
+            attempted_calls=2,
+            raw_records=1,
+            accepted_records=1,
+            rejected_records=0,
+            reason_counts={
+                "semantic_binding_unresolved": 1,
+                "target_bound_provider_timeout": 1,
+            },
+            prompt_tokens=5,
+            completion_tokens=3,
+            charged_tokens=8,
+        ),
+    )
+    recorder = _ExtractionRecorder(
+        primary_result=_result(),
+        targeted_results=[unresolved],
+    )
+    monkeypatch.setattr(
+        stage_module, "CharacterSignalExtractor", recorder.extractor_type()
+    )
+
+    result = _run(
+        _FrozenStage(
+            source=source,
+            baselines=[_baseline_entry()],
+            settings=_settings(
+                character_signal_full_line_prompt_v2=True,
+                character_draft_actor_review_v1=True,
+                character_target_bound_draft_review_v2=True,
+            ),
+        ),
+        source,
+    )
+
+    assert result.issues == ()
+    assert len(result.review_clues) == 1
+    assert result.review_clues[0].metadata["final_outcome"] == (
+        "needs_confirmation"
+    )
+    diagnostics = result.diagnostics
+    assert diagnostics["counts"]["case_material_complete_count"] == 0
+    assert diagnostics["counts"]["case_material_partial_count"] == 1
+    assert diagnostics["case_material_partial_reason_counts"] == {
+        "semantic_binding_unresolved": 1,
+        "targeted_package_incomplete": 1,
+    }
+    assert diagnostics["case_trace"][0]["material_coverage"] == "partial"
+    assert diagnostics["case_trace"][0]["review_outcome"] == "not_run"
+    assert diagnostics["reason_counts"]["target_bound_provider_timeout"] == 1
+    assert (
+        diagnostics["reason_counts"][
+            "targeted_pass_target_bound_provider_timeout"
+        ]
+        == 1
+    )
+
+
+def test_target_bound_slot_conflicts_are_aggregated_as_content_free_enums(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    private_text = "前言。\n祁雾用奉承话术迂回交流。"
+    source = _draft_source(private_text)
+    unresolved = CharacterSignalExtractionResult(
+        diagnostics=CharacterSignalDiagnostics(
+            outcome="partial",
+            attempted_calls=2,
+            raw_records=0,
+            accepted_records=0,
+            rejected_records=0,
+            reason_counts={
+                "semantic_binding_unresolved": 1,
+                "target_bound_slot_conflict": 1,
+            },
+            target_bound_slot_conflict_counts={
+                "actor": 1,
+                "object_span": 1,
+            },
+            prompt_tokens=5,
+            completion_tokens=3,
+            charged_tokens=8,
+        ),
+    )
+    recorder = _ExtractionRecorder(
+        primary_result=_result(),
+        targeted_results=[unresolved],
+    )
+    monkeypatch.setattr(
+        stage_module, "CharacterSignalExtractor", recorder.extractor_type()
+    )
+
+    result = _run(
+        _FrozenStage(
+            source=source,
+            baselines=[_baseline_entry()],
+            settings=_settings(
+                character_signal_full_line_prompt_v2=True,
+                character_draft_actor_review_v1=True,
+                character_target_bound_draft_review_v3=True,
+            ),
+        ),
+        source,
+    )
+
+    assert result.diagnostics["target_bound_slot_conflict_counts"] == {
+        "actor": 1,
+        "object_span": 1,
+    }
+    assert private_text not in repr(
+        result.diagnostics["target_bound_slot_conflict_counts"]
+    )
+    # The internal Pydantic field does not leak through ordinary serialization;
+    # only the independently checked stage projection is public.
+    assert "target_bound_slot_conflict_counts" not in (
+        unresolved.diagnostics.model_dump(mode="json")
+    )
+
+
+@pytest.mark.parametrize(
+    "counts,reasons",
+    (
+        ({"actor": 1, "private story": 1}, {"target_bound_slot_conflict": 1}),
+        ({"actor": True}, {"target_bound_slot_conflict": 1}),
+        ({"actor": 1}, {"target_bound_slot_conflict": 2}),
+        ({"actor": 1}, {"target_bound_slot_conflict": 0}),
+        ({"actor": 1}, "private story"),
+    ),
+)
+def test_target_bound_slot_conflict_projection_rejects_poisoned_histograms(
+    counts,
+    reasons,
+):
+    assert _safe_target_bound_slot_conflict_counts(counts, reasons) is None

@@ -41,6 +41,8 @@ export type CharacterDimension =
   | "core_personality"
   | "preference"
   | "value"
+  | "relationship_attitude"
+  | "motivation_goal"
   | "speech_pattern"
   | "behavior_boundary"
   | "contextual_behavior"
@@ -52,6 +54,7 @@ export type CharacterProfileItem = {
   revision: number | null;
   dimension: CharacterDimension;
   statement: string;
+  key_object: string | null;
   origin: "explicit_profile" | "confirmed_inference";
   approved_axis_id: string | null;
   approved_axis_version: number | null;
@@ -95,7 +98,11 @@ export type ProfileSupportBinding = {
   target: ProfileSupportSpan & { role: "target" };
   actor_anchor_id: string | null;
   label_anchor_id: string | null;
-  scope_relation: "local" | "same_actor_continuation" | "labelled_elaboration";
+  scope_relation:
+    | "local"
+    | "same_actor_continuation"
+    | "labelled_elaboration"
+    | "postposed_label_summary";
   context: ProfileSupportSpan[];
 };
 
@@ -122,6 +129,7 @@ export type ProfileCandidate = {
   model_trait_key: string | null;
   polarity: "positive" | "negative" | "neutral" | "unclear" | null;
   comparison_key: string | null;
+  key_object: string | null;
   authority_tier: "core_canon" | "formal_record" | null;
   valid_from_release_ordinal: number | null;
   valid_until_release_ordinal: number | null;

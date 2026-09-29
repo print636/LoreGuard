@@ -29,6 +29,8 @@ const knownDimensions = new Set<CharacterDimension>([
   "core_personality",
   "preference",
   "value",
+  "relationship_attitude",
+  "motivation_goal",
   "speech_pattern",
   "behavior_boundary",
   "contextual_behavior",
@@ -330,6 +332,14 @@ export function normalizeProfileCandidate(
   const dimension = normalizeCharacterDimension(
     source.dimension ?? source.trait_type,
   );
+  const keyObject = optionalText(source.key_object);
+  const comparisonKey = optionalText(source.comparison_key);
+  const requiresKeyObject =
+    dimension === "relationship_attitude" || dimension === "motivation_goal";
+  const hasBoundObjectKey = Boolean(
+    comparisonKey && comparisonKey.startsWith(`${dimension}:`) &&
+    comparisonKey.length <= 160,
+  );
   const traitKey = text(source.trait_key);
   const traitValue = text(source.value);
   const statement = text(
@@ -393,6 +403,7 @@ export function normalizeProfileCandidate(
       supportBindings.status !== "invalid" &&
       status === "pending" &&
       dimension !== "unknown" &&
+      (!requiresKeyObject || Boolean(keyObject) && hasBoundObjectKey) &&
       origin !== "unknown" &&
       sourceRunId &&
       sourceSnapshotRevision &&
@@ -408,6 +419,8 @@ export function normalizeProfileCandidate(
       unreviewableReason = "候选原文行未与冻结输入核对，不能确认。";
     } else if (dimension === "unknown") {
       unreviewableReason = "服务端返回了未识别的角色特征类型。";
+    } else if (requiresKeyObject && (!keyObject || !hasBoundObjectKey)) {
+      unreviewableReason = "关系态度或长期动机候选缺少可核对的对象。";
     } else if (origin === "unknown") {
       unreviewableReason = "候选没有提供可核对的归纳来源。";
     } else if (status === "stale") {
@@ -435,7 +448,8 @@ export function normalizeProfileCandidate(
       source.polarity === "unclear"
         ? source.polarity
         : null,
-    comparison_key: optionalText(source.comparison_key),
+    comparison_key: comparisonKey,
+    key_object: keyObject,
     authority_tier:
       source.authority_tier === "core_canon" ||
       source.authority_tier === "formal_record"
@@ -488,6 +502,14 @@ function normalizeProfileItem(value: unknown): CharacterProfileItem | null {
       ? [normalizeScope(source.scope, `profile:${id}`, source.scope_sha256)]
       : [];
   const evidence = normalizeEvidenceList(source.evidence, source.scope);
+  const dimension = normalizeCharacterDimension(
+    source.dimension ?? source.trait_type,
+  );
+  const keyObject = optionalText(source.key_object);
+  if (
+    (dimension === "relationship_attitude" || dimension === "motivation_goal") &&
+    !keyObject
+  ) return null;
   const approvedAxisId = optionalText(source.approved_axis_id);
   const approvedAxisVersion = positiveInteger(source.approved_axis_version);
   if (Boolean(approvedAxisId) !== Boolean(approvedAxisVersion)) {
@@ -496,10 +518,9 @@ function normalizeProfileItem(value: unknown): CharacterProfileItem | null {
   return {
     id,
     revision: nullableInteger(source.revision),
-    dimension: normalizeCharacterDimension(
-      source.dimension ?? source.trait_type,
-    ),
+    dimension,
     statement,
+    key_object: keyObject,
     approved_axis_id: approvedAxisId,
     approved_axis_version: approvedAxisVersion,
     ...axisMapping(source, approvedAxisId, source.polarity),

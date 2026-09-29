@@ -560,7 +560,7 @@ export default function CandidateReview({
                 <dl>
                   <div><dt>模型原始标签</dt><dd>{selected.model_trait_key || "未提供"}</dd></div>
                   <div><dt>模型内部方向码</dt><dd>{selected.polarity ? polarityNames[selected.polarity] : "未提供"}</dd></div>
-                  <div><dt>对象限定</dt><dd>{selected.comparison_key || "无对象限定"}</dd></div>
+                  <div><dt>对象限定</dt><dd>{selected.key_object || selected.comparison_key || "无对象限定"}</dd></div>
                   <div><dt>来源资料级别</dt><dd>{selected.authority_tier === "core_canon" ? "核心设定来源" : selected.authority_tier === "formal_record" ? "正式资料来源" : "未提供"}</dd></div>
                   <div>
                     <dt>发布范围</dt>

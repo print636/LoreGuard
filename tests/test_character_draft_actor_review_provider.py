@@ -137,6 +137,13 @@ def test_prompt_treats_anchors_as_nonconclusive_and_covers_nonactual_scenes():
     assert "不证明人物归属" in system
     assert "不得因为锚点存在、路径齐全" in system
     payload = json.loads(user.removeprefix(DRAFT_ACTOR_REVIEW_USER_PREFIX))
+    assert "protocol" not in payload
+    assert hashlib.sha256(system.encode("utf-8")).hexdigest() == (
+        "c25d43ae2d0b6d32136ad5c4ae017513624a5ab79b1482788e7d41e0eeb5d1e8"
+    )
+    assert hashlib.sha256(user.encode("utf-8")).hexdigest() == (
+        "f807ccd08e0f4096ad8233e547db8bba36fecdb67b40c4a91595263cd6f6024a"
+    )
     assert payload["batch_digest"] == draft_actor_review_batch_digest(
         (entry.request,)
     )

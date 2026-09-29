@@ -13,6 +13,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from .aliases import build_alias_map
 from .character_drift import (
     CharacterConsistencyReviewer,
     CharacterDriftCase,
@@ -21,6 +22,7 @@ from .character_drift import (
     PreparedCharacterDrift,
     SupportEvidence,
     _evidence_rows,
+    _normalized_evidence_text,
     _validate_decision,
     prepare_character_drift,
     promote_character_drift,
@@ -50,16 +52,20 @@ from .character_trait_extraction import (
     DraftSignalTraceV1,
     PendingTraitCandidate,
     SupportTraceV1,
+    TARGET_BOUND_SLOT_CONFLICT_KINDS,
     _draft_axes_may_match,
     _draft_preference_proves_direct,
+    _matching_target as _extractor_matching_target,
     build_pending_trait_candidates,
     draft_actor_review_evidence_range,
     draft_preference_context_is_relevant,
     draft_preference_context_requires_review,
+    is_unsafe_target_actor_literal,
     preference_modifier_bridge,
     safe_pronoun_evidence_range,
     scoped_axis_object_identity,
     stable_trait_identity,
+    target_bound_signal_matches_frozen_baseline,
     trait_keys_compatible,
 )
 from .character_traits import (
@@ -85,7 +91,7 @@ from .narrative_context import (
 from .pipeline import DocumentInput
 
 
-CHARACTER_CONSISTENCY_CHECKER_VERSION = "character-consistency-stage-v3"
+CHARACTER_CONSISTENCY_CHECKER_VERSION = "character-consistency-stage-v4"
 PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY = "_provisional_draft_clues_v1"
 _SUGGESTION = "请核对是否存在尚未记录的成长、伪装或情境依据"
 _BRIDGE_PATTERN = re.compile(
@@ -169,6 +175,27 @@ _MAX_CASE_TRACE_OBSERVATION_REFS = 12
 _MAX_CASE_TRACE_CITATION_REFS = 8
 _MAX_CASE_TRACE_LINE = 10_000_000
 _CASE_TRACE_CITATION_HANDLE = re.compile(r"^[BCGXP][0-9]{2}$")
+_CASE_MATERIAL_PARTIAL_REASONS = frozenset(
+    {
+        "case_baseline_context_incomplete",
+        "case_comparison_identity_unavailable",
+        "case_draft_package_incomplete",
+        "case_observation_direction_ambiguous",
+        "case_observation_limit",
+        "case_observation_source_unavailable",
+        "case_release_unknown",
+        "case_relevant_draft_release_unknown",
+        "case_relevant_draft_scope_unknown",
+        "case_scope_unknown",
+        "draft_preference_coverage_incomplete",
+        "targeted_candidate_lines_truncated",
+        "targeted_package_incomplete",
+        "semantic_binding_unresolved",
+        "targeted_signal_binding_incomplete",
+        "targeted_target_limit",
+        "targeted_token_budget",
+    }
+)
 _MAX_ACCEPTED_DRAFT_OBSERVATION_REFS = 64
 _MAX_PROVISIONAL_DRAFT_CLUES = 64
 _MAX_PROVISIONAL_CLUE_SPAN_LINES = 32
@@ -196,11 +223,57 @@ _CORE_LABEL_SCOPE_KINDS = frozenset(
         "anchor_unresolved", "other",
     }
 )
+
+
+def _safe_target_bound_slot_conflict_counts(
+    raw_counts: object,
+    raw_reasons: object,
+) -> dict[str, int] | None:
+    """Validate a content-free evaluator histogram before publication.
+
+    One failed decision can carry several independent slot conflicts, so the
+    histogram total is bounded between the number of ``slot_conflict``
+    decisions and that count multiplied by the fixed enum width.  No unknown
+    key, boolean-as-integer, partial histogram, or unbounded count is exposed.
+    """
+
+    if not isinstance(raw_counts, dict) or not isinstance(raw_reasons, dict):
+        return None
+    conflict_total = raw_reasons.get("target_bound_slot_conflict", 0)
+    if (
+        type(conflict_total) is not int
+        or not 0 <= conflict_total <= 1_000_000
+        or not set(raw_counts) <= TARGET_BOUND_SLOT_CONFLICT_KINDS
+    ):
+        return None
+    if not raw_counts:
+        return {} if conflict_total == 0 else None
+    if conflict_total == 0 or not all(
+        type(value) is int and 0 < value <= conflict_total
+        for value in raw_counts.values()
+    ):
+        return None
+    classified_total = sum(raw_counts.values())
+    if not (
+        conflict_total <= classified_total
+        <= conflict_total * len(TARGET_BOUND_SLOT_CONFLICT_KINDS)
+    ):
+        return None
+    return dict(sorted(raw_counts.items()))
+
+
 _SAFE_DOCUMENT_ROLES = frozenset(
     {"chapter", "canon", "character_profile", "reference"}
 )
 _OBJECT_BEARING_TRAIT_DIMENSIONS = frozenset(
-    {"preference", "value", "behavior_boundary", "current_state"}
+    {
+        "preference",
+        "value",
+        "relationship_attitude",
+        "motivation_goal",
+        "behavior_boundary",
+        "current_state",
+    }
 )
 _CONTEXT_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _CONTEXT_SECRET_OR_URL = re.compile(
@@ -302,6 +375,26 @@ class _ExplanationWindowSpec:
     source_ordinal: int
     eligible_draft_document_ids: tuple[str, ...]
     evidence: EvidenceSpan
+    promotion_cap: Literal["definitive", "possible_only"] = "definitive"
+    compound_observation_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _ExplanationWindowCoverage:
+    """Separate hard source gaps from line-level compound observation debt.
+
+    A compound C line still has to be removed as one provenance unit.  Unlike
+    a missing/cropped source range, however, that structural debt can later be
+    closed by independently cited, non-overlapping semantic G/X evidence for
+    every observation in the case.
+    """
+
+    hard_incomplete: bool = False
+    compound_observation_ids: tuple[str, ...] = ()
+
+    @property
+    def incomplete(self) -> bool:
+        return self.hard_incomplete or bool(self.compound_observation_ids)
 
 
 BaselineEntry = tuple[
@@ -416,6 +509,7 @@ class CharacterConsistencyStage:
         evidence_mismatch_counts: Counter[str] = Counter()
         scope_review_slot_conflict_counts: Counter[str] = Counter()
         scope_review_basis_invalid_counts: Counter[str] = Counter()
+        target_bound_slot_conflict_counts: Counter[str] = Counter()
         core_label_scope_counts: Counter[str] = Counter()
         evidence_mismatch_chunks: list[dict[str, Any]] = []
         evidence_mismatch_chunks_omitted = 0
@@ -428,6 +522,18 @@ class CharacterConsistencyStage:
         provisional_draft_candidates: list[
             tuple[_FrozenDocument, CharacterSignal]
         ] = []
+
+        def record_target_bound_slot_conflicts(extraction: object) -> None:
+            diagnostics = getattr(extraction, "diagnostics", None)
+            safe_counts = _safe_target_bound_slot_conflict_counts(
+                getattr(
+                    diagnostics, "target_bound_slot_conflict_counts", None
+                ),
+                getattr(diagnostics, "reason_counts", None),
+            )
+            if safe_counts is not None:
+                target_bound_slot_conflict_counts.update(safe_counts)
+
         frozen = self._bind_frozen_documents(
             db,
             run_id=run_id,
@@ -505,6 +611,22 @@ class CharacterConsistencyStage:
             )
         if shadowed_baselines:
             reason_counts["lower_authority_baseline_shadowed"] += shadowed_baselines
+        alias_map = _unique_alias_map(review_baselines, documents=frozen)
+        aliases_by_character = _aliases_by_character(
+            review_baselines, alias_map=alias_map, documents=frozen
+        )
+        actor_guard_alias_map = _unique_alias_map(
+            authority_baselines, documents=frozen
+        )
+        actor_guard_aliases = _aliases_by_character(
+            authority_baselines,
+            alias_map=actor_guard_alias_map,
+            documents=frozen,
+        )
+        actor_literals_by_character = _confirmed_actor_literals_by_character(
+            authority_baselines,
+            aliases_by_character=actor_guard_aliases,
+        )
 
         planned_chunks: list[tuple[_FrozenDocument, object]] = []
         for source in sorted(eligible, key=lambda row: row.ordinal):
@@ -524,9 +646,11 @@ class CharacterConsistencyStage:
             for chunk in chunks:
                 planned_chunks.append((source, chunk))
         document_chunk_counts: Counter[str] = Counter()
+        planned_primary_chunks_by_document: Counter[str] = Counter()
         original_chunk_ordinals: dict[int, int] = {}
         for source, chunk in planned_chunks:
             document_chunk_counts[source.input_id] += 1
+            planned_primary_chunks_by_document[source.document.id] += 1
             original_chunk_ordinals[id(chunk)] = document_chunk_counts[source.input_id]
         partial = (
             len(planned_chunks) > settings.character_consistency_max_chunks_per_run
@@ -577,6 +701,7 @@ class CharacterConsistencyStage:
                 source,
                 baselines=review_baselines,
                 authority_baselines=authority_baselines,
+                authorized_aliases_by_character=aliases_by_character,
             )
             server_contexts[source.document.id] = context
             context_eligible_traits += context.eligible_traits
@@ -595,6 +720,19 @@ class CharacterConsistencyStage:
                 )
 
         all_signals: dict[str, CharacterSignal] = {}
+        target_material_gaps: defaultdict[
+            tuple[str, tuple[str, str, str, str]], set[str]
+        ] = defaultdict(set)
+
+        def mark_target_material_gap(
+            source: _FrozenDocument,
+            target: CharacterSignalTarget,
+            reason: str,
+        ) -> None:
+            target_material_gaps[
+                (source.document.id, _target_hint_identity(target))
+            ].add(reason)
+
         # A model record never carries an approved-axis ID. Only a clean,
         # validated one-target pass can bind its evidence to a frozen axis.
         axis_bindings_by_signal: dict[str, set[tuple[str, int, str]]] = defaultdict(set)
@@ -610,17 +748,23 @@ class CharacterConsistencyStage:
             source: _FrozenDocument,
         ) -> None:
             nonlocal partial
+            bound_signal = _signal_bound_to_target_character(
+                signal, target=target, alias_map=alias_map
+            )
             axis_key = target.approved_axis_identity
             if axis_key is None:
                 return
             if (
-                signal.source_kind != "draft"
-                or signal.evidence.document_id != source.document.id
-                or signal.polarity != target.requested_polarity
-                or not _signal_matches_target(signal, target)
+                bound_signal.source_kind != "draft"
+                or bound_signal.evidence.document_id != source.document.id
+                or bound_signal.polarity != target.requested_polarity
+                or not _signal_matches_target(bound_signal, target)
             ):
                 partial = True
                 reason_counts["approved_axis_target_signal_mismatch"] += 1
+                mark_target_material_gap(
+                    source, target, "targeted_signal_binding_incomplete"
+                )
                 return
             target_axis_polarity = _verified_target_axis_polarity(
                 target, source=source, baselines=authority_baselines
@@ -628,6 +772,9 @@ class CharacterConsistencyStage:
             if target_axis_polarity is None:
                 partial = True
                 reason_counts["approved_axis_target_direction_ambiguous"] += 1
+                mark_target_material_gap(
+                    source, target, "targeted_signal_binding_incomplete"
+                )
                 return
             # The targeted extractor's polarity is relative to this target's
             # raw label.  Translate only for this bound axis; never change the
@@ -635,22 +782,29 @@ class CharacterConsistencyStage:
             observed_axis_polarity = (
                 "negative" if target_axis_polarity == "positive" else "positive"
             )
-            axis_polarities_by_signal[(signal.id, axis_key)].add(
+            axis_polarities_by_signal[(bound_signal.id, axis_key)].add(
                 observed_axis_polarity
             )
-            axis_bindings_by_signal[signal.id].add(axis_key)
-            actor = _key(signal.character)
+            axis_bindings_by_signal[bound_signal.id].add(axis_key)
+            actor = _key(bound_signal.character)
             for line in range(
-                signal.evidence.line_start, signal.evidence.line_end + 1
+                bound_signal.evidence.line_start,
+                bound_signal.evidence.line_end + 1,
             ):
                 axis_bindings_by_line[
-                    (actor, signal.evidence.document_id, line)
+                    (actor, bound_signal.evidence.document_id, line)
                 ].add(axis_key)
 
         def bound_observations(
             target: CharacterSignalTarget,
             observations: tuple[CharacterSignal, ...],
         ) -> tuple[CharacterSignal, ...]:
+            observations = tuple(
+                _signal_bound_to_target_character(
+                    row, target=target, alias_map=alias_map
+                )
+                for row in observations
+            )
             axis_key = target.approved_axis_identity
             if axis_key is None:
                 return observations
@@ -671,6 +825,7 @@ class CharacterConsistencyStage:
         # publish separate primary-call coverage counters below.
         model_called_chunks = 0
         model_completed_chunks = 0
+        completed_primary_chunks_by_document: Counter[str] = Counter()
         successful_model_calls = 0
         signal_ignored_duplicates = 0
         targeted_eligible_targets = 0
@@ -1007,6 +1162,7 @@ class CharacterConsistencyStage:
                 model_called_chunks += 1
             if primary_called and extraction.diagnostics.outcome == "completed":
                 model_completed_chunks += 1
+                completed_primary_chunks_by_document[source.document.id] += 1
             record_support_trace(
                 extraction, source=source, chunk_ordinal=chunk_ordinal
             )
@@ -1036,6 +1192,7 @@ class CharacterConsistencyStage:
                 "primary_extraction", extraction,
                 source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
             )
+            record_target_bound_slot_conflicts(extraction)
             raw_slot_counts = getattr(
                 extraction.diagnostics, "scope_review_slot_conflict_counts", {}
             )
@@ -1094,7 +1251,11 @@ class CharacterConsistencyStage:
                 continue
             undercovered: list[CharacterSignalTarget] = []
             for target in server_contexts[source.document.id].targets:
-                if not _character_appears_in_chunk(target.character, chunk.content):
+                if not _character_appears_in_chunk(
+                    target.character,
+                    chunk.content,
+                    aliases=target.authorized_aliases,
+                ):
                     continue
                 if _target_has_sufficient_recall_evidence(
                     target,
@@ -1116,6 +1277,10 @@ class CharacterConsistencyStage:
                 targeted_truncated_targets += omitted
                 reason_counts["targeted_target_limit"] += omitted
                 partial = True
+                for omitted_target in undercovered[len(selected_targets) :]:
+                    mark_target_material_gap(
+                        source, omitted_target, "targeted_target_limit"
+                    )
             if not selected_targets:
                 preference_gaps = _draft_preference_coverage_gaps(
                     chunk,
@@ -1125,6 +1290,15 @@ class CharacterConsistencyStage:
                 if preference_gaps:
                     partial = True
                     reason_counts.update(preference_gaps)
+                    for target in server_contexts[source.document.id].targets:
+                        if _draft_preference_coverage_gaps(
+                            chunk, (target,), extraction.draft_observations
+                        ):
+                            mark_target_material_gap(
+                                source,
+                                target,
+                                "draft_preference_coverage_incomplete",
+                            )
                 continue
 
             targeted_passes_scheduled += len(selected_targets)
@@ -1154,6 +1328,12 @@ class CharacterConsistencyStage:
                     partial = True
                     chunk_targets_complete = False
                     initial_round_finished = False
+                    for pending_target in selected_targets[target_index:]:
+                        mark_target_material_gap(
+                            source,
+                            pending_target,
+                            "targeted_token_budget",
+                        )
                     break
                 targeted_settings = settings.model_copy(
                     update={
@@ -1173,6 +1353,14 @@ class CharacterConsistencyStage:
                 ).extract_targeted(
                     targeted_chunk,
                     (target,),
+                    **(
+                        {"target_ordinal": target_index + 1}
+                        if (
+                            settings.character_target_bound_draft_review_v2
+                            or settings.character_target_bound_draft_review_v3
+                        )
+                        else {}
+                    ),
                     **(
                         {
                             "source_identity": draft_actor_source,
@@ -1201,6 +1389,7 @@ class CharacterConsistencyStage:
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
                     target_ordinal=target_index + 1,
                 )
+                record_target_bound_slot_conflicts(targeted)
                 targeted_passes_attempted += targeted.diagnostics.attempted_calls
                 targeted_records_accepted += targeted.diagnostics.accepted_records
                 targeted_records_rejected += targeted.diagnostics.rejected_records
@@ -1209,6 +1398,12 @@ class CharacterConsistencyStage:
                 )
                 for reason, count in targeted.diagnostics.reason_counts.items():
                     reason_counts[f"targeted_pass_{reason}"] += count
+                    # Target-bound failures are a closed, privacy-safe enum.
+                    # Preserve the concrete cause at stage level as well as
+                    # the pass-scoped aggregate so operators can distinguish
+                    # timeout/budget/contract failures without error text.
+                    if reason.startswith("target_bound_"):
+                        reason_counts[reason] += count
                 if targeted.diagnostics.outcome == "completed":
                     targeted_passes_completed += 1
                     successful_model_calls += 1
@@ -1223,7 +1418,19 @@ class CharacterConsistencyStage:
                     if targeted.diagnostics.outcome == "partial":
                         successful_model_calls += 1
                     partial = True
+                    mark_target_material_gap(
+                        source, target, "targeted_package_incomplete"
+                    )
+                    if targeted.diagnostics.reason_counts.get(
+                        "semantic_binding_unresolved", 0
+                    ):
+                        mark_target_material_gap(
+                            source, target, "semantic_binding_unresolved"
+                        )
                 for signal in targeted.signals:
+                    signal = _signal_bound_to_target_character(
+                        signal, target=target, alias_map=alias_map
+                    )
                     if targeted.diagnostics.outcome == "completed":
                         bind_approved_axis(signal, target, source)
                     if all(existing.id != signal.id for existing in chunk_observations):
@@ -1287,6 +1494,11 @@ class CharacterConsistencyStage:
                         ] += truncated_lines
                         chunk_targets_complete = False
                         partial = True
+                        mark_target_material_gap(
+                            source,
+                            target,
+                            "targeted_candidate_lines_truncated",
+                        )
                     verification_queue.append(
                         (target_index, target, candidate_ranges, truncated_lines)
                     )
@@ -1313,6 +1525,14 @@ class CharacterConsistencyStage:
                     targeted_verification_budget_exhausted += exhausted
                     partial = True
                     chunk_targets_complete = False
+                    for _, pending_target, _, _ in verification_queue[
+                        verification_index:
+                    ]:
+                        mark_target_material_gap(
+                            source,
+                            pending_target,
+                            "targeted_token_budget",
+                        )
                     break
                 verification_settings = settings.model_copy(
                     update={
@@ -1334,6 +1554,14 @@ class CharacterConsistencyStage:
                 ).extract_targeted(
                     targeted_chunk,
                     (target,),
+                    **(
+                        {"target_ordinal": target_index + 1}
+                        if (
+                            settings.character_target_bound_draft_review_v2
+                            or settings.character_target_bound_draft_review_v3
+                        )
+                        else {}
+                    ),
                     candidate_evidence_ranges=candidate_ranges,
                     **(
                         {
@@ -1363,6 +1591,7 @@ class CharacterConsistencyStage:
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
                     target_ordinal=target_index + 1,
                 )
+                record_target_bound_slot_conflicts(verification)
                 targeted_passes_attempted += verification.diagnostics.attempted_calls
                 targeted_verification_attempted += (
                     verification.diagnostics.attempted_calls
@@ -1378,6 +1607,8 @@ class CharacterConsistencyStage:
                 )
                 for reason, count in verification.diagnostics.reason_counts.items():
                     reason_counts[f"targeted_verification_{reason}"] += count
+                    if reason.startswith("target_bound_"):
+                        reason_counts[reason] += count
                 if verification.diagnostics.outcome == "completed":
                     targeted_passes_completed += 1
                     targeted_verification_completed += 1
@@ -1390,7 +1621,19 @@ class CharacterConsistencyStage:
                     if verification.diagnostics.outcome == "partial":
                         successful_model_calls += 1
                     partial = True
+                    mark_target_material_gap(
+                        source, target, "targeted_package_incomplete"
+                    )
+                    if verification.diagnostics.reason_counts.get(
+                        "semantic_binding_unresolved", 0
+                    ):
+                        mark_target_material_gap(
+                            source, target, "semantic_binding_unresolved"
+                        )
                 for signal in verification.signals:
+                    signal = _signal_bound_to_target_character(
+                        signal, target=target, alias_map=alias_map
+                    )
                     if verification.diagnostics.outcome == "completed":
                         bind_approved_axis(signal, target, source)
                     if all(existing.id != signal.id for existing in chunk_observations):
@@ -1409,6 +1652,15 @@ class CharacterConsistencyStage:
             if preference_gaps:
                 partial = True
                 reason_counts.update(preference_gaps)
+                for target in server_contexts[source.document.id].targets:
+                    if _draft_preference_coverage_gaps(
+                        chunk, (target,), tuple(chunk_observations)
+                    ):
+                        mark_target_material_gap(
+                            source,
+                            target,
+                            "draft_preference_coverage_incomplete",
+                        )
 
         signals = tuple(all_signals.values())
         # Count final server-deduplicated signals, not per-chunk clean model
@@ -1531,7 +1783,6 @@ class CharacterConsistencyStage:
         if draft_signals and not baselines:
             partial = True
             reason_counts["no_confirmed_character_traits"] += 1
-        alias_map = _unique_alias_map(baselines)
         resolved_drafts: dict[str, list[CharacterSignal]] = defaultdict(list)
         ambiguous_aliases = 0
         for observation in draft_signals:
@@ -1561,11 +1812,17 @@ class CharacterConsistencyStage:
         explanation_review_completed_batches = 0
         explanation_review_failed_batches = 0
         explanation_review_emitted_support = 0
+        explanation_contract_regeneration_attempted_calls = 0
+        explanation_contract_regeneration_recovered_batches = 0
+        explanation_citation_order_normalized_batches = 0
         explanation_review_partial_cases = 0
         explanation_review_truncated_cases = 0
         explanation_review_required_cases = 0
         explanation_review_complete_cases = 0
         explanation_stage_partial = False
+        case_material_complete_count = 0
+        case_material_partial_count = 0
+        case_material_partial_reason_counts: Counter[str] = Counter()
         explanation_segment_cache: dict[
             tuple[str, str], tuple[tuple[EvidenceSpan, ...], bool]
         ] = {}
@@ -1577,6 +1834,7 @@ class CharacterConsistencyStage:
             baseline_entry = (
                 baseline_row, baseline, baseline_scope, character_key
             )
+            case_material_reasons: set[str] = set()
             matches: list[CharacterSignal] = []
             axis_observation_polarities: list[tuple[str, str]] = []
             draft_scopes: list[NarrativeScopeV1] = []
@@ -1595,6 +1853,9 @@ class CharacterConsistencyStage:
                 if axis_match is None:
                     partial = True
                     reason_counts["object_baseline_identity_unavailable"] += 1
+                    case_material_reasons.add(
+                        "case_comparison_identity_unavailable"
+                    )
                     continue
                 if not axis_match:
                     continue
@@ -1605,11 +1866,17 @@ class CharacterConsistencyStage:
                     if len(axis_directions) != 1:
                         partial = True
                         reason_counts["approved_axis_observation_direction_ambiguous"] += 1
+                        case_material_reasons.add(
+                            "case_observation_direction_ambiguous"
+                        )
                         continue
                 source = frozen_by_document.get(observation.evidence.document_id)
                 if source is None or source.scope is None:
                     drift_scope_skipped += 1
                     reason_counts["drift_scope_unknown"] += 1
+                    case_material_reasons.add(
+                        "case_observation_source_unavailable"
+                    )
                     continue
                 if _baseline_shadowed_at_scope(
                     baseline_entry,
@@ -1625,6 +1892,7 @@ class CharacterConsistencyStage:
                 if release_applicability is None:
                     partial = True
                     reason_counts["drift_release_unknown"] += 1
+                    case_material_reasons.add("case_release_unknown")
                     continue
                 if not release_applicability:
                     reason_counts["drift_release_inapplicable"] += 1
@@ -1640,6 +1908,7 @@ class CharacterConsistencyStage:
                     reason_counts[f"drift_scope_{relation}"] += 1
                     if relation == "unknown":
                         partial = True
+                        case_material_reasons.add("case_scope_unknown")
                     continue
                 matches.append(
                     observation.model_copy(
@@ -1659,6 +1928,111 @@ class CharacterConsistencyStage:
                 draft_scopes.append(source.scope)
                 draft_ordinals.append(source.ordinal)
                 draft_document_ids.append(source.document.id)
+            if len(matches) > 24:
+                reason_counts["observation_limit"] += len(matches) - 24
+                matches = matches[:24]
+                axis_observation_polarities = axis_observation_polarities[:24]
+                draft_scopes = draft_scopes[:24]
+                draft_ordinals = draft_ordinals[:24]
+                draft_document_ids = draft_document_ids[:24]
+                partial = True
+                case_material_reasons.add("case_observation_limit")
+
+            case_target_identity = _baseline_hint_identity(baseline_entry)
+            observation_document_ids = {
+                row.evidence.document_id for row in matches
+            }
+            relevant_draft_document_ids = set(observation_document_ids)
+            for source, chunk in planned_chunks:
+                chunk_content = getattr(chunk, "content", None)
+                if (
+                    source.source_kind != "draft"
+                    or not isinstance(chunk_content, str)
+                    or not _character_appears_in_chunk(
+                        baseline.character,
+                        chunk_content,
+                        aliases=aliases_by_character.get(_key(character_key), ()),
+                    )
+                ):
+                    continue
+                if source.scope is None:
+                    relevant_draft_document_ids.add(source.document.id)
+                    case_material_reasons.add(
+                        "case_relevant_draft_scope_unknown"
+                    )
+                    continue
+                if _baseline_shadowed_at_scope(
+                    baseline_entry, authority_baselines, source.scope
+                ):
+                    continue
+                release_applicability = _trait_applies_to_release(
+                    baseline, source.scope
+                )
+                relation = scope_relation(
+                    baseline_scope,
+                    source.scope,
+                    first_resolution="confirmed",
+                    second_resolution=source.resolution_state,
+                )
+                if release_applicability is False or relation == "incompatible":
+                    continue
+                relevant_draft_document_ids.add(source.document.id)
+                if release_applicability is None:
+                    case_material_reasons.add(
+                        "case_relevant_draft_release_unknown"
+                    )
+                if relation == "unknown":
+                    case_material_reasons.add(
+                        "case_relevant_draft_scope_unknown"
+                    )
+            for document_id in relevant_draft_document_ids:
+                source = frozen_by_document.get(document_id)
+                planned_count = planned_primary_chunks_by_document.get(
+                    document_id, 0
+                )
+                completed_count = completed_primary_chunks_by_document.get(
+                    document_id, 0
+                )
+                if source is None or source.source_kind != "draft":
+                    case_material_reasons.add(
+                        "case_observation_source_unavailable"
+                    )
+                    continue
+                if planned_count <= 0 or completed_count != planned_count:
+                    case_material_reasons.add(
+                        "case_draft_package_incomplete"
+                    )
+                context = server_contexts.get(document_id)
+                if baseline.polarity in {"positive", "negative"} and (
+                    context is None
+                    or case_target_identity
+                    not in {
+                        _target_hint_identity(target)
+                        for target in context.targets
+                    }
+                ):
+                    case_material_reasons.add(
+                        "case_baseline_context_incomplete"
+                    )
+                case_material_reasons.update(
+                    target_material_gaps.get(
+                        (document_id, case_target_identity), set()
+                    )
+                )
+            case_material_coverage: Literal["complete", "partial"] = (
+                "partial" if case_material_reasons else "complete"
+            )
+            case_material_assessed = bool(
+                matches or relevant_draft_document_ids
+            )
+            if case_material_assessed:
+                if case_material_coverage == "complete":
+                    case_material_complete_count += 1
+                else:
+                    case_material_partial_count += 1
+                    case_material_partial_reason_counts.update(
+                        sorted(case_material_reasons)
+                    )
             if not matches:
                 case_trace.append(
                     _safe_case_trace(
@@ -1668,6 +2042,13 @@ class CharacterConsistencyStage:
                         matched_observation_count=0,
                         matched_observations=(),
                         prepare_reason="no_matching_observation",
+                        material_coverage=(
+                            case_material_coverage
+                            if case_material_assessed else "not_applicable"
+                        ),
+                        material_coverage_reasons=tuple(
+                            sorted(case_material_reasons)
+                        ),
                         review=None,
                         final_outcome="unverifiable",
                         visible=False,
@@ -1675,14 +2056,6 @@ class CharacterConsistencyStage:
                     )
                 )
                 continue
-            if len(matches) > 24:
-                reason_counts["observation_limit"] += len(matches) - 24
-                matches = matches[:24]
-                axis_observation_polarities = axis_observation_polarities[:24]
-                draft_scopes = draft_scopes[:24]
-                draft_ordinals = draft_ordinals[:24]
-                draft_document_ids = draft_document_ids[:24]
-                partial = True
             legacy_support = _find_support_evidence(
                 baseline=baseline,
                 baseline_scope=baseline_scope,
@@ -1705,7 +2078,7 @@ class CharacterConsistencyStage:
                 observations=tuple(matches),
                 support_evidence=legacy_support,
                 scope_compatibility="compatible",
-                material_coverage="partial" if partial else "complete",
+                material_coverage=case_material_coverage,
                 explanation_coverage="not_run",
                 approved_axis_bound_observation_ids=(
                     tuple(row.id for row in matches)
@@ -1738,6 +2111,7 @@ class CharacterConsistencyStage:
                 # G/X/P evidence.  Ranking never upgrades partial coverage.
                 explanation_coverage: Literal["complete", "partial"] = "complete"
                 semantic_support: tuple[SupportEvidence, ...] = ()
+                explanation_window_coverage = _ExplanationWindowCoverage()
                 selected_sources = tuple(
                     frozen_by_document.get(row.evidence.document_id)
                     for row in prepared.matching_observations
@@ -1747,8 +2121,8 @@ class CharacterConsistencyStage:
                     explanation_stage_partial = True
                     reason_counts["explanation_source_unavailable"] += 1
                 else:
-                    explanation_specs, explanation_windows_truncated = (
-                        _explanation_window_specs(
+                    explanation_specs, explanation_window_coverage = (
+                        _explanation_window_specs_with_coverage(
                             baseline=baseline,
                             baseline_scope=baseline_scope,
                             observations=prepared.matching_observations,
@@ -1765,14 +2139,37 @@ class CharacterConsistencyStage:
                                 for source in selected_sources
                             ),
                             documents=frozen,
+                            limit=(
+                                settings.character_explanation_max_windows_per_case
+                            ),
                             segment_cache=explanation_segment_cache,
                         )
                     )
-                    if explanation_windows_truncated:
+                    if explanation_window_coverage.hard_incomplete:
                         explanation_coverage = "partial"
                         explanation_stage_partial = True
                         explanation_review_truncated_cases += 1
                         reason_counts["explanation_candidate_window_truncated"] += 1
+                    retained_specs: list[_ExplanationWindowSpec] = []
+                    prefiltered_other_actor = 0
+                    for spec in explanation_specs:
+                        actors = _explicit_confirmed_actor_keys(
+                            spec.evidence.text,
+                            actor_literals_by_character=actor_literals_by_character,
+                        )
+                        if (
+                            spec.promotion_cap == "definitive"
+                            and len(actors) == 1
+                            and _key(character_key) not in actors
+                        ):
+                            prefiltered_other_actor += 1
+                            continue
+                        retained_specs.append(spec)
+                    explanation_specs = tuple(retained_specs)
+                    if prefiltered_other_actor:
+                        reason_counts[
+                            "explanation_other_actor_window_prefiltered"
+                        ] += prefiltered_other_actor
                     explanation_review_candidate_count += len(explanation_specs)
                     if explanation_specs:
                         remaining = stage_budget - usage.charged_tokens
@@ -1807,6 +2204,7 @@ class CharacterConsistencyStage:
                                     eligible_draft_document_ids=(
                                         spec.eligible_draft_document_ids
                                     ),
+                                    promotion_cap=spec.promotion_cap,
                                     evidence=spec.evidence.model_copy(deep=True),
                                 )
                                 for index, spec in enumerate(
@@ -1818,6 +2216,9 @@ class CharacterConsistencyStage:
                                     citation=f"C{index:02d}",
                                     observation_id=observation.id,
                                     statement=observation.statement,
+                                    key_object=_explanation_observation_key_object(
+                                        baseline_entry, observation
+                                    ),
                                     document_id=observation.evidence.document_id,
                                     source_ordinal=(
                                         selected_sources[index - 1].ordinal  # type: ignore[union-attr]
@@ -1851,6 +2252,7 @@ class CharacterConsistencyStage:
                                             character=baseline.character,
                                             dimension=baseline.dimension,
                                             trait_key=baseline.trait_key,
+                                            key_object=baseline.key_object,
                                             statement=baseline.statement,
                                             approved_axis_definition=(
                                                 baseline.approved_axis_definition
@@ -1888,6 +2290,26 @@ class CharacterConsistencyStage:
                                 explanation_review_failed_batches += (
                                     explanation_result.diagnostics.failed_batches
                                 )
+                                for code, count in (
+                                    explanation_result.diagnostics
+                                    .contract_failure_counts.items()
+                                ):
+                                    if count:
+                                        reason_counts[
+                                            f"explanation_contract_{code}"
+                                        ] += count
+                                explanation_contract_regeneration_attempted_calls += (
+                                    explanation_result.diagnostics
+                                    .contract_regeneration_attempted_calls
+                                )
+                                explanation_contract_regeneration_recovered_batches += (
+                                    explanation_result.diagnostics
+                                    .contract_regeneration_recovered_batches
+                                )
+                                explanation_citation_order_normalized_batches += (
+                                    explanation_result.diagnostics
+                                    .citation_order_normalized_batches
+                                )
                                 successful_model_calls += (
                                     explanation_result.diagnostics.completed_batches
                                 )
@@ -1897,9 +2319,22 @@ class CharacterConsistencyStage:
                                     reason_counts[
                                         f"explanation_{failure_reason}"
                                     ] += 1
+                                scoped_support, cross_actor_rejected = (
+                                    _without_cross_actor_definitive_support(
+                                        explanation_result.support_evidence,
+                                        target_character_key=character_key,
+                                        actor_literals_by_character=(
+                                            actor_literals_by_character
+                                        ),
+                                    )
+                                )
+                                if cross_actor_rejected:
+                                    reason_counts[
+                                        "explanation_cross_actor_support_rejected"
+                                    ] += cross_actor_rejected
                                 semantic_support, support_truncated = (
                                     _select_semantic_explanation_support(
-                                        explanation_result.support_evidence,
+                                        scoped_support,
                                         limit=(
                                             settings.character_drift_max_support_evidence
                                         ),
@@ -1918,6 +2353,36 @@ class CharacterConsistencyStage:
                                         reason_counts[
                                             "explanation_support_limit"
                                         ] += 1
+                if explanation_window_coverage.compound_observation_ids:
+                    reviewed_possible_only_ids = {
+                        observation_id
+                        for spec in explanation_specs
+                        if spec.promotion_cap == "possible_only"
+                        for observation_id in spec.compound_observation_ids
+                    }
+                    compound_debt_closed = (
+                        explanation_coverage == "complete"
+                        and (
+                            set(
+                                explanation_window_coverage
+                                .compound_observation_ids
+                            ) <= reviewed_possible_only_ids
+                            or _compound_explanation_debt_is_closed(
+                                observations=prepared.matching_observations,
+                                compound_observation_ids=(
+                                    explanation_window_coverage
+                                    .compound_observation_ids
+                                ),
+                                support_evidence=semantic_support,
+                            )
+                        )
+                    )
+                    if not compound_debt_closed:
+                        explanation_coverage = "partial"
+                        explanation_stage_partial = True
+                        reason_counts[
+                            "explanation_compound_line_unresolved"
+                        ] += 1
                 if explanation_coverage != "complete":
                     explanation_review_partial_cases += 1
                 else:
@@ -2021,6 +2486,10 @@ class CharacterConsistencyStage:
                     matched_observations=prepared.matching_observations,
                     prepared=prepared,
                     prepare_reason=prepared.reason,
+                    material_coverage=prepared.case.material_coverage,
+                    material_coverage_reasons=tuple(
+                        sorted(case_material_reasons)
+                    ),
                     review=review_for_promotion,
                     final_outcome=promoted.outcome,
                     visible=(
@@ -2202,6 +2671,15 @@ class CharacterConsistencyStage:
             explanation_review_emitted_support_count=(
                 explanation_review_emitted_support
             ),
+            explanation_contract_regeneration_attempted_call_count=(
+                explanation_contract_regeneration_attempted_calls
+            ),
+            explanation_contract_regeneration_recovered_batch_count=(
+                explanation_contract_regeneration_recovered_batches
+            ),
+            explanation_citation_order_normalized_batch_count=(
+                explanation_citation_order_normalized_batches
+            ),
             explanation_review_partial_case_count=(
                 explanation_review_partial_cases
             ),
@@ -2214,6 +2692,8 @@ class CharacterConsistencyStage:
             explanation_review_complete_case_count=(
                 explanation_review_complete_cases
             ),
+            case_material_complete_count=case_material_complete_count,
+            case_material_partial_count=case_material_partial_count,
             issue_count=len(issues),
             review_clue_count=len(review_clues),
             stage_token_budget=stage_budget,
@@ -2224,6 +2704,9 @@ class CharacterConsistencyStage:
             sensitivity=settings.character_consistency_sensitivity,
             material_coverage="partial" if partial else "complete",
             explanation_coverage=explanation_coverage_summary,
+            case_material_partial_reason_counts=(
+                case_material_partial_reason_counts
+            ),
             case_trace=case_trace,
             accepted_signal_histogram=accepted_signal_histogram,
             candidate_eligibility=candidate_eligibility,
@@ -2236,6 +2719,7 @@ class CharacterConsistencyStage:
             evidence_mismatch_counts=evidence_mismatch_counts,
             scope_review_slot_conflict_counts=scope_review_slot_conflict_counts,
             scope_review_basis_invalid_counts=scope_review_basis_invalid_counts,
+            target_bound_slot_conflict_counts=target_bound_slot_conflict_counts,
             evidence_mismatch_chunks=evidence_mismatch_chunks,
             evidence_mismatch_chunks_omitted_count=(
                 evidence_mismatch_chunks_omitted
@@ -2387,6 +2871,7 @@ class CharacterConsistencyStage:
                     character=payload.get("character_display_name"),
                     dimension=payload.get("trait_type"),
                     trait_key=payload.get("trait_key"),
+                    key_object=payload.get("key_object", ""),
                     statement=payload.get("value"),
                     polarity=payload.get("polarity"),
                     stability=payload.get("stability"),
@@ -2486,16 +2971,26 @@ def _classify_frozen_source(
     return None, "reference", scope, resolution, publication, "reference"
 
 
-def _character_appears_in_chunk(character: str, content: str) -> bool:
-    character_key = _key(character)
-    return bool(character_key) and any(
-        character_key in _key(line) for line in content.splitlines()
+def _character_appears_in_chunk(
+    character: str,
+    content: str,
+    *,
+    aliases: tuple[str, ...] = (),
+) -> bool:
+    character_keys = {
+        key for value in (character, *aliases) if (key := _key(value))
+    }
+    return bool(character_keys) and any(
+        any(key in _key(line) for key in character_keys)
+        for line in content.splitlines()
     )
 
 
 def _signal_matches_target(
     signal: CharacterSignal, target: CharacterSignalTarget
 ) -> bool:
+    if signal.target_bound_target_digest is not None:
+        return _extractor_matching_target(signal, (target,)) is target
     if target.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS:
         scoped_axis = (
             target.dimension in {"value", "behavior_boundary"}
@@ -2655,6 +3150,31 @@ def _target_has_sufficient_recall_evidence(
             in {"action", "decision", "interaction", "dialogue", "speech_sample"}
         }
         return len(independent_preference_spans) >= 2
+    if target.dimension in {"relationship_attitude", "motivation_goal"}:
+        coordinate_distinct = {
+            (
+                signal.evidence.document_id,
+                signal.evidence.line_start,
+                signal.evidence.line_end,
+            ): signal
+            for signal in matching
+            if signal.observation_kind
+            in {
+                "explicit_declaration",
+                "state_description",
+                "action",
+                "decision",
+                "interaction",
+                "dialogue",
+                "speech_sample",
+            }
+        }
+        return len(coordinate_distinct) >= 2 and len(
+            {
+                _normalized_evidence_text(signal.evidence.text)
+                for signal in coordinate_distinct.values()
+            }
+        ) >= 2
     if any(
         signal.observation_kind in {"explicit_declaration", "state_description"}
         for signal in matching
@@ -2758,11 +3278,53 @@ def _draft_preference_coverage_gaps(
             if draft_preference_context_requires_review(
                 line, character=target.character, key_object=object_anchor
             ):
+                if any(
+                    _target_bound_preference_certificate_covers_line(
+                        observation,
+                        target=target,
+                        document_id=chunk.document_id,
+                        line_number=line_number,
+                    )
+                    for observation in observations
+                ):
+                    continue
                 gaps["draft_preference_semantic_coverage_uncertain"] += 1
                 continue
             if not matched:
                 gaps["draft_preference_direct_evidence_unextracted"] += 1
     return gaps
+
+
+def _target_bound_preference_certificate_covers_line(
+    observation: CharacterSignal,
+    *,
+    target: CharacterSignalTarget,
+    document_id: str,
+    line_number: int,
+) -> bool:
+    """Accept only a complete V3 certificate bound to this exact source line."""
+
+    basis_id = observation.target_bound_object_basis_id
+    basis_match = (
+        re.fullmatch(r"L([1-9][0-9]{0,7}):A[1-9][0-9]{0,2}", basis_id)
+        if isinstance(basis_id, str) else None
+    )
+    return bool(
+        target.dimension == "preference"
+        and observation.evidence.document_id == document_id
+        and observation.evidence.line_start <= line_number
+        <= observation.evidence.line_end
+        and basis_match is not None
+        and int(basis_match.group(1)) == line_number
+        and target_bound_signal_matches_frozen_baseline(
+            observation,
+            baseline_character=target.character,
+            baseline_dimension=target.dimension,
+            baseline_trait_key=target.trait_key,
+            baseline_comparison_key=target.comparison_key,
+            baseline_polarity=target.baseline_polarity,
+        )
+    )
 
 
 def _direct_frozen_preference_bridge_source(
@@ -2832,28 +3394,56 @@ def _target_candidate_line_ranges(
     and applies the tuple as an exact server-owned allowlist.
     """
 
-    character_key = _key(target.character)
+    actor_literals = (target.character, *target.authorized_aliases)
+    actor_keys = tuple(
+        key for actor in actor_literals if (key := _key(actor))
+    )
     candidates: list[tuple[int, int]] = []
     used_lines: set[int] = set()
     for line_number, line in enumerate(
         chunk.content.splitlines(), start=chunk.global_line_start
     ):
         if (
-            not character_key
-            or character_key not in _key(line)
+            not actor_keys
+            or not any(actor_key in _key(line) for actor_key in actor_keys)
             or line_number in used_lines
         ):
             continue
-        paired = safe_pronoun_evidence_range(
-            chunk, target.character, line_number
+        present_actors = tuple(
+            actor
+            for actor in actor_literals
+            if _key(actor) and _key(actor) in _key(line)
+        )
+        paired = next(
+            (
+                evidence_range
+                for actor in present_actors
+                if (
+                    evidence_range := safe_pronoun_evidence_range(
+                        chunk, actor, line_number
+                    )
+                )
+                is not None
+            ),
+            None,
         )
         if paired is None and draft_actor_review_v1:
-            paired = draft_actor_review_evidence_range(
-                chunk,
-                target.character,
-                line_number,
-                source_identity=source_identity,
-                frozen_content=frozen_content,
+            paired = next(
+                (
+                    evidence_range
+                    for actor in present_actors
+                    if (
+                        evidence_range := draft_actor_review_evidence_range(
+                            chunk,
+                            actor,
+                            line_number,
+                            source_identity=source_identity,
+                            frozen_content=frozen_content,
+                        )
+                    )
+                    is not None
+                ),
+                None,
             )
         candidate = paired or (line_number, line_number)
         if any(
@@ -2927,6 +3517,7 @@ def _safe_server_context(
     *,
     baselines: list[BaselineEntry] | tuple[BaselineEntry, ...] = (),
     authority_baselines: list[BaselineEntry] | tuple[BaselineEntry, ...] | None = None,
+    authorized_aliases_by_character: dict[str, tuple[str, ...]] | None = None,
 ) -> _SafeServerContext:
     """Build a bounded, content-free alignment hint for draft extraction.
 
@@ -2947,6 +3538,7 @@ def _safe_server_context(
     shadow_entries = (
         authority_baselines if authority_baselines is not None else baselines
     )
+    authorized_aliases_by_character = authorized_aliases_by_character or {}
     eligible_entries: list[BaselineEntry] = []
     for entry in sorted(
         baselines,
@@ -3022,7 +3614,7 @@ def _safe_server_context(
 
     applicable: list[
         tuple[
-            str, str, str, str, str, str,
+            str, str, str, str, str, str, str,
             tuple[str, int, str] | None, str | None, dict[str, str],
         ]
     ] = []
@@ -3034,7 +3626,9 @@ def _safe_server_context(
             continue
         seen.add(identity)
         if identity in ambiguous_hint_keys:
-            applicable.append(("", "", "", "", "", "", None, None, {}))
+            applicable.append(
+                ("", "", "", "", "", "", "", None, None, {})
+            )
             continue
         # The approved ID is internal. Core axes retain a neutral label key;
         # scoped axes use the exact frozen author object key. Neither lets a
@@ -3051,6 +3645,12 @@ def _safe_server_context(
             else stable_trait_identity(baseline.dimension, baseline.trait_key)
             if axis_key is not None else identity[2]
         )
+        key_object = (
+            baseline.key_object
+            if baseline.dimension
+            in {"relationship_attitude", "motivation_goal"}
+            else ""
+        )
         labels = (
             baseline.character,
             baseline.dimension,
@@ -3062,10 +3662,14 @@ def _safe_server_context(
         if not all(_safe_context_label(value) for value in labels) or (
             axis_definition is not None
             and not _safe_context_label(axis_definition)
+        ) or (
+            key_object and not _safe_context_label(key_object)
         ):
             # Count the applicable baseline but never serialize a suspicious
             # label.  The resulting partial marker prevents a false clean bill.
-            applicable.append(("", "", "", "", "", "", None, None, {}))
+            applicable.append(
+                ("", "", "", "", "", "", "", None, None, {})
+            )
             continue
         scoped_fields = (
             {
@@ -3084,7 +3688,7 @@ def _safe_server_context(
             if scoped_axis else {}
         )
         applicable.append(
-            (*labels, _safe_baseline_hint(baseline.statement), axis_key,
+            (*labels, key_object, _safe_baseline_hint(baseline.statement), axis_key,
              axis_definition, scoped_fields)
         )
 
@@ -3098,8 +3702,12 @@ def _safe_server_context(
             "dimension": dimension,
             "trait_key": trait_key,
             "comparison_key": comparison_key,
+            **({"key_object": key_object} if key_object else {}),
         }
-        for character, dimension, trait_key, comparison_key, _, _, _, _, _ in selected
+        for (
+            character, dimension, trait_key, comparison_key, _, key_object,
+            _, _, _, _,
+        ) in selected
     ]
 
     while True:
@@ -3122,6 +3730,17 @@ def _safe_server_context(
                         "dimension": dimension,
                         "trait_key": trait_key,
                         "comparison_key": comparison_key,
+                        **({"key_object": key_object} if key_object else {}),
+                        "authorized_aliases": tuple(
+                            alias
+                            for alias in authorized_aliases_by_character.get(
+                                _key(character), ()
+                            )
+                            if len(alias) <= 64
+                            and _safe_context_label(alias)
+                            and _key(alias) != _key(character)
+                            and not is_unsafe_target_actor_literal(alias)
+                        ),
                         "baseline_polarity": baseline_polarity,
                         "requested_polarity": (
                             "negative" if baseline_polarity == "positive" else "positive"
@@ -3141,8 +3760,8 @@ def _safe_server_context(
                 )
                 for (
                     character, dimension, trait_key, comparison_key,
-                    baseline_polarity, baseline_hint, axis_key, axis_definition,
-                    scoped_fields,
+                    baseline_polarity, key_object, baseline_hint, axis_key,
+                    axis_definition, scoped_fields,
                 ) in selected
                 if baseline_polarity in {"positive", "negative"} and baseline_hint
             )
@@ -3293,6 +3912,7 @@ def _trait_candidate_input(
         trait_type=candidate.dimension,
         trait_key=candidate.trait_key,
         comparison_key=candidate.comparison_key,
+        key_object=candidate.key_object,
         value=candidate.statement,
         polarity=candidate.polarity,
         stability=candidate.stability,
@@ -3487,6 +4107,15 @@ def _observation_matches_baseline(
         frozen_key = _frozen_comparison_identity(entry)
         if not frozen_key:
             return None
+        if target_bound_signal_matches_frozen_baseline(
+            observation,
+            baseline_character=baseline.character,
+            baseline_dimension=baseline.dimension,
+            baseline_trait_key=baseline.trait_key,
+            baseline_comparison_key=frozen_key,
+            baseline_polarity=baseline.polarity,
+        ):
+            return True
         if (
             baseline.dimension != "preference"
             and stable_trait_identity(baseline.dimension, baseline.trait_key)
@@ -3560,6 +4189,31 @@ def _baseline_hint_identity(
                 frozen_key
                 and baseline.dimension != "preference"
                 and baseline.approved_axis_identity is None
+            )
+            else ""
+        ),
+    )
+
+
+def _target_hint_identity(
+    target: CharacterSignalTarget,
+) -> tuple[str, str, str, str]:
+    """Project a server-owned recall target onto its frozen baseline key."""
+
+    return (
+        _key(target.character),
+        target.dimension,
+        (
+            f"approved-axis:{target.approved_axis_identity}"
+            if target.approved_axis_identity is not None
+            else target.comparison_key
+        ),
+        (
+            stable_trait_identity(target.dimension, target.trait_key)
+            if (
+                target.approved_axis_identity is None
+                and target.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS
+                and target.dimension != "preference"
             )
             else ""
         ),
@@ -3696,12 +4350,139 @@ def _select_authoritative_baselines(
 
 def _unique_alias_map(
     baselines: list[BaselineEntry],
+    *,
+    documents: list[_FrozenDocument] | tuple[_FrozenDocument, ...] = (),
 ) -> dict[str, tuple[str, ...]]:
+    """Bind explicit formal-profile aliases to unique frozen character keys.
+
+    Draft text and published-history text are intentionally excluded: a new
+    manuscript cannot grant itself an alias, and a later chapter cannot
+    retroactively change who an earlier draft signal belongs to. Ambiguous or
+    cyclic declarations are already removed by ``build_alias_map``; a name
+    collision here stays multi-valued and therefore fails closed downstream.
+    """
+
     values: dict[str, set[str]] = defaultdict(set)
     for _, baseline, _, character_key in baselines:
         values[_key(character_key)].add(character_key)
         values[_key(baseline.character)].add(character_key)
+    formal_documents = [
+        source.document
+        for source in documents
+        if source.source_kind == "formal_character_profile"
+        and source.resolution_state == "confirmed"
+        and source.authority_tier in {"core_canon", "formal_record"}
+    ]
+    explicit_aliases, _, _ = build_alias_map(formal_documents)
+    for alias, canonical in explicit_aliases.items():
+        canonical_keys = values.get(_key(canonical), set())
+        if len(canonical_keys) == 1:
+            values[_key(alias)].update(canonical_keys)
     return {alias: tuple(sorted(keys)) for alias, keys in values.items()}
+
+
+def _aliases_by_character(
+    baselines: list[BaselineEntry],
+    *,
+    alias_map: dict[str, tuple[str, ...]],
+    documents: list[_FrozenDocument] | tuple[_FrozenDocument, ...] = (),
+) -> dict[str, tuple[str, ...]]:
+    literal_aliases: dict[str, set[str]] = defaultdict(set)
+    if documents:
+        formal_documents = [
+            source.document
+            for source in documents
+            if source.source_kind == "formal_character_profile"
+            and source.resolution_state == "confirmed"
+            and source.authority_tier in {"core_canon", "formal_record"}
+        ]
+        explicit_aliases, _, _ = build_alias_map(formal_documents)
+        for alias in explicit_aliases:
+            literal_aliases[_key(alias)].add(alias)
+
+    aliases_for_key: dict[str, set[str]] = defaultdict(set)
+    for alias, character_keys in alias_map.items():
+        if len(character_keys) == 1:
+            character_key = character_keys[0]
+            for literal in literal_aliases.get(alias, {alias}):
+                if (
+                    _key(literal) != _key(character_key)
+                    and not is_unsafe_target_actor_literal(literal)
+                ):
+                    aliases_for_key[character_key].add(literal)
+
+    result: dict[str, tuple[str, ...]] = {}
+    for _, baseline, _, character_key in baselines:
+        aliases = tuple(sorted(aliases_for_key.get(character_key, ())))
+        result[_key(character_key)] = aliases
+        result[_key(baseline.character)] = aliases
+    return result
+
+
+def _confirmed_actor_literals_by_character(
+    baselines: list[BaselineEntry],
+    *,
+    aliases_by_character: dict[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    """Build unique normalized actor literals from confirmed server state.
+
+    Draft prose cannot create a character alias.  A literal shared by more
+    than one confirmed character is omitted, because it cannot safely prove
+    that an explanation block belongs only to one of them.
+    """
+
+    proposed: dict[str, set[str]] = defaultdict(set)
+    literal_owners: dict[str, set[str]] = defaultdict(set)
+    for _, baseline, _, character_key in baselines:
+        owner = _key(character_key)
+        if not owner:
+            continue
+        for value in (
+            character_key,
+            baseline.character,
+            *aliases_by_character.get(owner, ()),
+            *aliases_by_character.get(_key(baseline.character), ()),
+        ):
+            literal = _key(value)
+            if literal:
+                proposed[owner].add(literal)
+                literal_owners[literal].add(owner)
+    return {
+        owner: tuple(
+            sorted(
+                (
+                    literal for literal in literals
+                    if len(literal_owners[literal]) == 1
+                ),
+                key=lambda value: (-len(value), value),
+            )
+        )
+        for owner, literals in proposed.items()
+    }
+
+
+def _signal_bound_to_target_character(
+    signal: CharacterSignal,
+    *,
+    target: CharacterSignalTarget,
+    alias_map: dict[str, tuple[str, ...]],
+) -> CharacterSignal:
+    """Canonicalize only a uniquely authorised alias for recall accounting.
+
+    The evidence and signal ID remain untouched. This does not infer an actor
+    from prose; it merely applies the explicit formal-profile alias map after
+    the extractor has already bound the literal alias to frozen source text.
+    """
+
+    signal_keys = alias_map.get(_key(signal.character), ())
+    target_keys = alias_map.get(_key(target.character), ())
+    if (
+        len(signal_keys) == 1
+        and signal_keys == target_keys
+        and _key(signal.character) != _key(target.character)
+    ):
+        return signal.model_copy(update={"character": target.character})
+    return signal
 
 
 _EXPLANATION_RETRIEVAL_CUE = re.compile(
@@ -3719,68 +4500,336 @@ _EXPLANATION_WINDOW_OVERLAP_LINES = 2
 def _segment_explanation_source(
     document: DocumentInput,
 ) -> tuple[tuple[EvidenceSpan, ...], bool]:
-    """Cover one frozen document with exact, bounded overlapping spans."""
+    """Cover one frozen document with exact paragraph/section-local spans.
+
+    Blank lines and Markdown headings are structural boundaries, not licence
+    to combine unrelated character sections into one semantic candidate.  A
+    heading may travel with only its immediately following local paragraph so
+    the reviewer keeps useful section context.  Oversized *single* structural
+    blocks retain the previous bounded, overlapping splitter and its exact
+    provenance/coverage behaviour.
+    """
 
     lines = document.content.splitlines()
     if not lines:
         return (), False
-    windows: list[EvidenceSpan] = []
-    incomplete = False
+
+    heading_pattern = re.compile(r"^\s{0,3}#{1,6}(?:\s+|$)")
+    blocks: list[tuple[int, int]] = []
+    pending_heading: int | None = None
     cursor = 0
     while cursor < len(lines):
-        first_line = lines[cursor]
-        if len(first_line) > _EXPLANATION_WINDOW_MAX_EVIDENCE_CHARS:
-            # Evidence coordinates must continue to identify the exact frozen
-            # line. Cropping it would create a convincing but unverifiable
-            # citation, so omit it and fail coverage closed.
-            incomplete = True
+        if not lines[cursor].strip():
+            cursor += 1
+            continue
+        if heading_pattern.match(lines[cursor]):
+            if pending_heading is not None:
+                # Two headings with no intervening prose must never be folded
+                # into one candidate. Preserve the first as its own exact row.
+                blocks.append((pending_heading, pending_heading + 1))
+            pending_heading = cursor
             cursor += 1
             continue
 
-        end = cursor
-        char_count = 0
-        while end < len(lines) and end - cursor < _EXPLANATION_WINDOW_MAX_LINES:
-            line = lines[end]
-            added = len(line) + (1 if end > cursor else 0)
-            if end > cursor and char_count + added > _EXPLANATION_WINDOW_MAX_CHARS:
-                break
-            if end == cursor and len(line) > _EXPLANATION_WINDOW_MAX_CHARS:
-                # Preserve one long line whole up to the evidence schema's
-                # hard ceiling. Admission control may still decline the
-                # resulting prompt, which also leaves coverage partial.
-                char_count = len(line)
-                end += 1
-                break
-            char_count += added
-            end += 1
-
-        if end <= cursor:
-            incomplete = True
+        paragraph_start = cursor
+        while (
+            cursor < len(lines)
+            and lines[cursor].strip()
+            and heading_pattern.match(lines[cursor]) is None
+        ):
             cursor += 1
-            continue
-        text = "\n".join(lines[cursor:end])
-        if text.strip():
-            windows.append(
-                EvidenceSpan(
-                    document_id=document.id,
-                    document_name=document.name,
-                    line_start=cursor + 1,
-                    line_end=end,
-                    text=text,
-                )
+        blocks.append(
+            (
+                pending_heading
+                if pending_heading is not None else paragraph_start,
+                cursor,
             )
-        if end == len(lines):
-            break
-        width = end - cursor
-        cursor = (
-            end
-            if width <= _EXPLANATION_WINDOW_OVERLAP_LINES
-            else end - _EXPLANATION_WINDOW_OVERLAP_LINES
         )
+        pending_heading = None
+
+    if pending_heading is not None:
+        blocks.append((pending_heading, pending_heading + 1))
+
+    windows: list[EvidenceSpan] = []
+    incomplete = False
+    for block_start, block_end in blocks:
+        cursor = block_start
+        while cursor < block_end:
+            first_line = lines[cursor]
+            if len(first_line) > _EXPLANATION_WINDOW_MAX_EVIDENCE_CHARS:
+                # Evidence coordinates must continue to identify the exact
+                # frozen line. Cropping it would create a convincing but
+                # unverifiable citation, so omit it and fail coverage closed.
+                incomplete = True
+                cursor += 1
+                continue
+
+            end = cursor
+            char_count = 0
+            while (
+                end < block_end
+                and end - cursor < _EXPLANATION_WINDOW_MAX_LINES
+            ):
+                line = lines[end]
+                added = len(line) + (1 if end > cursor else 0)
+                if (
+                    end > cursor
+                    and char_count + added > _EXPLANATION_WINDOW_MAX_CHARS
+                ):
+                    break
+                if (
+                    end == cursor
+                    and len(line) > _EXPLANATION_WINDOW_MAX_CHARS
+                ):
+                    # Preserve one long line whole up to the evidence schema's
+                    # hard ceiling. Admission control may still decline the
+                    # resulting prompt, which also leaves coverage partial.
+                    char_count = len(line)
+                    end += 1
+                    break
+                char_count += added
+                end += 1
+
+            if end <= cursor:
+                incomplete = True
+                cursor += 1
+                continue
+            text = "\n".join(lines[cursor:end])
+            if text.strip():
+                windows.append(
+                    EvidenceSpan(
+                        document_id=document.id,
+                        document_name=document.name,
+                        line_start=cursor + 1,
+                        line_end=end,
+                        text=text,
+                    )
+                )
+            if end == block_end:
+                break
+            width = end - cursor
+            cursor = (
+                end
+                if width <= _EXPLANATION_WINDOW_OVERLAP_LINES
+                else end - _EXPLANATION_WINDOW_OVERLAP_LINES
+            )
     return tuple(windows), incomplete
 
 
-def _explanation_window_specs(
+def _without_baseline_explanation_spans(
+    document: DocumentInput,
+    spans: tuple[EvidenceSpan, ...],
+    *,
+    baseline: ConfirmedTraitSnapshot,
+) -> tuple[tuple[EvidenceSpan, ...], bool]:
+    """Remove the frozen B block without losing neighbouring explanation text.
+
+    The final drift reviewer already receives every baseline span as a ``B`` row.
+    Feeding the same profile line again inside a broad ``E`` window lets a model
+    mistake the trait definition itself for foreshadowing or a weak explanation;
+    that synthetic ``P`` then blocks an otherwise fully reviewed contradiction.
+
+    Only exact, source-verified baseline coordinates are removed.  The window is
+    split around them so adjacent history remains reviewable.  A matching
+    character section heading and surrounding blank separator lines are removed
+    with the baseline because they carry no event evidence and otherwise leave a
+    misleading actor-only fragment.  A coordinate/text mismatch is reported as
+    incomplete rather than silently subtracting the wrong source material.
+    """
+
+    baseline_rows = tuple(
+        row for row in baseline.evidence if row.document_id == document.id
+    )
+    if not baseline_rows or not spans:
+        return spans, False
+
+    lines = document.content.splitlines()
+    excluded: list[tuple[int, int]] = []
+    actor = unicodedata.normalize("NFKC", baseline.character).strip()
+    for row in baseline_rows:
+        if (
+            row.line_start < 1
+            or row.line_end < row.line_start
+            or row.line_end > len(lines)
+            or "\n".join(lines[row.line_start - 1 : row.line_end]).strip()
+            != row.text.strip()
+        ):
+            return spans, True
+
+        start = row.line_start
+        while start > 1 and not lines[start - 2].strip():
+            start -= 1
+        if start > 1:
+            heading = unicodedata.normalize("NFKC", lines[start - 2]).strip()
+            match = re.fullmatch(r"#{1,6}\s*(.*?)\s*", heading)
+            if match is not None and match.group(1).strip() == actor:
+                start -= 1
+
+        end = row.line_end
+        while end < len(lines) and not lines[end].strip():
+            end += 1
+        excluded.append((start, end))
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(excluded):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    result: list[EvidenceSpan] = []
+    for span in spans:
+        remaining = [(span.line_start, span.line_end)]
+        for excluded_start, excluded_end in merged:
+            next_remaining: list[tuple[int, int]] = []
+            for start, end in remaining:
+                if excluded_end < start or excluded_start > end:
+                    next_remaining.append((start, end))
+                    continue
+                if start < excluded_start:
+                    next_remaining.append((start, excluded_start - 1))
+                if excluded_end < end:
+                    next_remaining.append((excluded_end + 1, end))
+            remaining = next_remaining
+        for start, end in remaining:
+            text = "\n".join(lines[start - 1 : end])
+            if text.strip():
+                result.append(
+                    EvidenceSpan(
+                        document_id=document.id,
+                        document_name=document.name,
+                        line_start=start,
+                        line_end=end,
+                        text=text,
+                    )
+                )
+    return tuple(result), False
+
+
+def _line_has_multiple_assertions(value: str) -> bool:
+    """Return whether one physical line contains multiple sentence assertions.
+
+    This is deliberately only a structural uncertainty check.  It does not
+    decide whether either assertion is a growth event, excuse, or even about
+    the current character.  When a current observation occupies such a line,
+    line-level evidence cannot remove C while retaining a neighbouring
+    explanation assertion with trustworthy coordinates, so coverage must stay
+    partial instead of guessing an assertion subspan.
+    """
+
+    assertions = [
+        part for part in re.split(r"[。！？!?；;]+", value)
+        if any(character.isalnum() for character in part)
+    ]
+    return len(assertions) > 1
+
+
+def _without_observation_explanation_spans(
+    document: DocumentInput,
+    spans: tuple[EvidenceSpan, ...],
+    *,
+    observations: tuple[CharacterSignal, ...],
+) -> tuple[tuple[EvidenceSpan, ...], _ExplanationWindowCoverage]:
+    """Remove applicable current C lines from explanation candidates.
+
+    A current behaviour is supplied separately as a frozen ``C`` row.  Letting
+    the same line re-enter a broad ``E`` window lets the semantic pass mistake
+    the behaviour itself (or its immediate purpose) for an independent growth
+    or exception event.  Remove only exact, source-verified observation line
+    ranges and split windows around them so genuinely separate neighbouring
+    explanation material remains reviewable.
+
+    Evidence coordinates are line based.  If C shares a physical line with a
+    second assertion, the service cannot retain that assertion without making
+    an unverified sub-line attribution.  The whole line is therefore removed
+    and its observation id is retained as a distinct compound-line debt.  The
+    stage may close only that debt later when independent definitive evidence
+    covers every C in the case.  A coordinate/text mismatch is a hard gap and
+    fails closed rather than subtracting an unrelated line.
+    """
+
+    applicable = tuple(
+        observation for observation in observations
+        if observation.evidence.document_id == document.id
+    )
+    if not applicable:
+        return spans, _ExplanationWindowCoverage()
+
+    lines = document.content.splitlines()
+    excluded: list[tuple[int, int]] = []
+    hard_incomplete = False
+    compound_observation_ids: set[str] = set()
+    for observation in applicable:
+        evidence = observation.evidence
+        if (
+            evidence.line_start < 1
+            or evidence.line_end < evidence.line_start
+            or evidence.line_end > len(lines)
+            or "\n".join(
+                lines[evidence.line_start - 1 : evidence.line_end]
+            ).strip() != evidence.text.strip()
+        ):
+            # Valid coordinates are still excluded so C cannot become E, but
+            # the mismatch prevents a claim of exhaustive coverage.
+            hard_incomplete = True
+            if (
+                1 <= evidence.line_start
+                <= evidence.line_end
+                <= len(lines)
+            ):
+                excluded.append((evidence.line_start, evidence.line_end))
+            continue
+        if evidence.line_start != evidence.line_end:
+            hard_incomplete = True
+        elif _line_has_multiple_assertions(lines[evidence.line_start - 1]):
+            compound_observation_ids.add(observation.id)
+        excluded.append((evidence.line_start, evidence.line_end))
+
+    if not excluded:
+        return spans, _ExplanationWindowCoverage(
+            hard_incomplete=hard_incomplete,
+            compound_observation_ids=tuple(sorted(compound_observation_ids)),
+        )
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(excluded):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    result: list[EvidenceSpan] = []
+    for span in spans:
+        remaining = [(span.line_start, span.line_end)]
+        for excluded_start, excluded_end in merged:
+            next_remaining: list[tuple[int, int]] = []
+            for start, end in remaining:
+                if excluded_end < start or excluded_start > end:
+                    next_remaining.append((start, end))
+                    continue
+                if start < excluded_start:
+                    next_remaining.append((start, excluded_start - 1))
+                if excluded_end < end:
+                    next_remaining.append((excluded_end + 1, end))
+            remaining = next_remaining
+        for start, end in remaining:
+            text = "\n".join(lines[start - 1 : end])
+            if text.strip():
+                result.append(
+                    EvidenceSpan(
+                        document_id=document.id,
+                        document_name=document.name,
+                        line_start=start,
+                        line_end=end,
+                        text=text,
+                    )
+                )
+    return tuple(result), _ExplanationWindowCoverage(
+        hard_incomplete=hard_incomplete,
+        compound_observation_ids=tuple(sorted(compound_observation_ids)),
+    )
+
+
+def _explanation_window_specs_with_coverage(
     *,
     baseline: ConfirmedTraitSnapshot,
     baseline_scope: NarrativeScopeV1,
@@ -3789,15 +4838,18 @@ def _explanation_window_specs(
     draft_ordinals: tuple[int, ...],
     draft_document_ids: tuple[str, ...],
     documents: list[_FrozenDocument],
-    limit: int = 24,
+    limit: int = 48,
     segment_cache: dict[
         tuple[str, str], tuple[tuple[EvidenceSpan, ...], bool]
     ] | None = None,
-) -> tuple[tuple[_ExplanationWindowSpec, ...], bool]:
+) -> tuple[tuple[_ExplanationWindowSpec, ...], _ExplanationWindowCoverage]:
     """Exhaustively segment eligible frozen sources without deciding meaning.
 
-    Every non-empty source line is included in at least one candidate whenever
-    ``truncated`` is false.  This distinction is important: lexical actor-name
+    Every explanation-eligible non-empty source line other than the frozen B
+    block and applicable current C ranges is included in at least one candidate
+    whenever ``truncated`` is false.  B and C are supplied separately to the
+    final reviewer and cannot explain their own contradiction.  This
+    distinction is important: lexical actor-name
     windows are useful for ranking, but cannot prove that aliases, pronouns or
     a later retrospective explanation were absent.  Therefore only complete
     source segmentation may open the formal-conflict path; a candidate cap or
@@ -3817,10 +4869,10 @@ def _explanation_window_specs(
         or len(draft_scopes) != len(draft_document_ids)
         or any(type(value) is not int or value < 0 for value in draft_ordinals)
     ):
-        return (), True
+        return (), _ExplanationWindowCoverage(hard_incomplete=True)
     actor = unicodedata.normalize("NFKC", baseline.character).strip()
     if not actor:
-        return (), True
+        return (), _ExplanationWindowCoverage(hard_incomplete=True)
     observation_ranges: dict[str, list[tuple[int, int]]] = defaultdict(list)
     for observation in observations:
         observation_ranges[observation.evidence.document_id].append(
@@ -3828,9 +4880,12 @@ def _explanation_window_specs(
         )
 
     raw: list[_ExplanationWindowSpec] = []
-    incomplete = False
+    hard_incomplete = False
+    compound_observation_ids: set[str] = set()
     for source in sorted(documents, key=lambda row: row.ordinal):
         eligible_source_draft_ids: tuple[str, ...] = ()
+        earlier_other_draft_ids: list[str] = []
+        other_draft_order_uncertain = False
         is_current_draft = (
             source.source_kind == "draft"
             and source.document.id in observation_ranges
@@ -3846,12 +4901,44 @@ def _explanation_window_specs(
             and source.resolution_state == "confirmed"
         )
         if is_other_target_draft and source.document.content.strip():
-            # A separate target draft can contain a cross-chapter explanation,
-            # but draft import order is not narrative chronology and there is
-            # no safe C binding for this case yet. Do not silently omit it and
-            # still claim exhaustive explanation coverage: keep this case
-            # review-only until a release/sequence contract can prove order.
-            incomplete = True
+            # Import ordinal is not narrative chronology.  Only confirmed
+            # release ordinals may prove that another target draft precedes a
+            # C source.  A proven-later draft cannot explain an earlier C and
+            # is safely ignored; equal or missing order remains fail-closed.
+            if source.scope is None:
+                other_draft_order_uncertain = True
+            else:
+                for draft_scope, draft_document_id in zip(
+                    draft_scopes, draft_document_ids, strict=True
+                ):
+                    relation = scope_relation(
+                        draft_scope,
+                        source.scope,
+                        first_resolution="confirmed",
+                        second_resolution=source.resolution_state,
+                    )
+                    source_release = source.scope.release
+                    draft_release = draft_scope.release
+                    source_is_proven_later = (
+                        source_release is not None
+                        and draft_release is not None
+                        and source_release.ordinal > draft_release.ordinal
+                    )
+                    if source_is_proven_later or relation == "incompatible":
+                        continue
+                    if (
+                        relation == "unknown"
+                        or source_release is None
+                        or draft_release is None
+                        or source_release.ordinal == draft_release.ordinal
+                    ):
+                        other_draft_order_uncertain = True
+                        continue
+                    # The only remaining state is a scope-compatible source
+                    # with a strictly earlier confirmed release.
+                    earlier_other_draft_ids.append(draft_document_id)
+            if other_draft_order_uncertain:
+                hard_incomplete = True
         prior_metadata_eligible = (
             (
                 source.source_kind == "formal_character_profile"
@@ -3878,7 +4965,7 @@ def _explanation_window_specs(
             # but its frozen metadata cannot be represented safely by the
             # explanation-review protocol. Never turn that omission into a
             # false claim of exhaustive explanation coverage.
-            incomplete = True
+            hard_incomplete = True
         baseline_relation = (
             scope_relation(
                 baseline_scope,
@@ -3888,7 +4975,7 @@ def _explanation_window_specs(
             )
             if prior_metadata_eligible else "incompatible"
         )
-        compatible_draft_ids: list[str] = []
+        compatible_authority_draft_ids: list[str] = []
         source_scope_uncertain = baseline_relation == "unknown"
         if prior_metadata_eligible and baseline_relation == "compatible":
             for draft_scope, draft_document_id in zip(
@@ -3912,21 +4999,31 @@ def _explanation_window_specs(
                 if release_applicable is None or relation == "unknown":
                     source_scope_uncertain = True
                 if release_applicable is True and relation == "compatible":
-                    compatible_draft_ids.append(draft_document_id)
+                    compatible_authority_draft_ids.append(draft_document_id)
         if source_scope_uncertain:
             # An unresolved release/scope relation means the source may be an
             # explanation for an observation we cannot safely bind. Keep any
             # proven-compatible rows, but formal conflict coverage is partial.
-            incomplete = True
-        is_prior_authority = bool(compatible_draft_ids)
+            hard_incomplete = True
+        is_prior_authority = bool(compatible_authority_draft_ids)
         if is_current_draft:
             eligible_source_draft_ids = (source.document.id,)
+        elif earlier_other_draft_ids:
+            eligible_source_draft_ids = tuple(
+                sorted(set(earlier_other_draft_ids))
+            )
         elif is_prior_authority:
-            eligible_source_draft_ids = tuple(sorted(set(compatible_draft_ids)))
-        if not (is_current_draft or is_prior_authority):
+            eligible_source_draft_ids = tuple(
+                sorted(set(compatible_authority_draft_ids))
+            )
+        if not (
+            is_current_draft
+            or earlier_other_draft_ids
+            or is_prior_authority
+        ):
             continue
         if not eligible_source_draft_ids:
-            incomplete = True
+            hard_incomplete = True
             continue
         cache_key = (source.document.id, source.content_sha256)
         cached = segment_cache.get(cache_key) if segment_cache is not None else None
@@ -3935,7 +5032,30 @@ def _explanation_window_specs(
             if segment_cache is not None:
                 segment_cache[cache_key] = cached
         spans, source_incomplete = cached
-        incomplete = incomplete or source_incomplete
+        spans, baseline_exclusion_incomplete = _without_baseline_explanation_spans(
+            source.document,
+            spans,
+            baseline=baseline,
+        )
+        spans, observation_exclusion_coverage = (
+            _without_observation_explanation_spans(
+                source.document,
+                spans,
+                observations=tuple(
+                    observation for observation in observations
+                    if observation.evidence.document_id
+                    in eligible_source_draft_ids
+                ),
+            )
+        )
+        hard_incomplete = hard_incomplete or source_incomplete
+        hard_incomplete = hard_incomplete or baseline_exclusion_incomplete
+        hard_incomplete = (
+            hard_incomplete or observation_exclusion_coverage.hard_incomplete
+        )
+        compound_observation_ids.update(
+            observation_exclusion_coverage.compound_observation_ids
+        )
         raw.extend(
             _ExplanationWindowSpec(
                 source_kind=source.source_kind,
@@ -3948,16 +5068,46 @@ def _explanation_window_specs(
             )
             for span in spans
         )
+        compound_ids = set(
+            observation_exclusion_coverage.compound_observation_ids
+        )
+        raw.extend(
+            _ExplanationWindowSpec(
+                source_kind=source.source_kind,
+                publication_status=source.publication_status,
+                authority_tier=source.authority_tier,
+                resolution_state=source.resolution_state,
+                source_ordinal=source.ordinal,
+                eligible_draft_document_ids=eligible_source_draft_ids,
+                evidence=observation.evidence.model_copy(deep=True),
+                promotion_cap="possible_only",
+                compound_observation_ids=(observation.id,),
+            )
+            for observation in observations
+            if observation.id in compound_ids
+            and observation.evidence.document_id == source.document.id
+        )
 
-    unique: dict[tuple[str, int, int, str], _ExplanationWindowSpec] = {}
+    unique: dict[tuple[str, int, int, str, str], _ExplanationWindowSpec] = {}
     for row in raw:
         span = row.evidence
         unique.setdefault(
-            (span.document_id, span.line_start, span.line_end, span.text), row
+            (
+                span.document_id,
+                span.line_start,
+                span.line_end,
+                span.text,
+                row.promotion_cap,
+            ),
+            row,
         )
     candidates = tuple(unique.values())
+    coverage = _ExplanationWindowCoverage(
+        hard_incomplete=hard_incomplete,
+        compound_observation_ids=tuple(sorted(compound_observation_ids)),
+    )
     if len(candidates) <= limit:
-        return candidates, incomplete
+        return candidates, coverage
 
     query_text = " ".join(
         value
@@ -4043,7 +5193,173 @@ def _explanation_window_specs(
             index for index in ranked
             if index not in selected_set
         )
-    return tuple(candidates[index] for index in selected[:limit]), True
+    return (
+        tuple(candidates[index] for index in selected[:limit]),
+        _ExplanationWindowCoverage(
+            hard_incomplete=True,
+            compound_observation_ids=coverage.compound_observation_ids,
+        ),
+    )
+
+
+def _explanation_window_specs(
+    **kwargs: Any,
+) -> tuple[tuple[_ExplanationWindowSpec, ...], bool]:
+    """Compatibility wrapper exposing the historical aggregate gap flag."""
+
+    candidates, coverage = _explanation_window_specs_with_coverage(**kwargs)
+    return candidates, coverage.incomplete
+
+
+def _explicit_confirmed_actor_keys(
+    value: str,
+    *,
+    actor_literals_by_character: dict[str, tuple[str, ...]],
+) -> set[str]:
+    """Return unambiguous named actors, preferring a containing longer name."""
+
+    normalized = _key(value)
+    if not normalized:
+        return set()
+    matches: list[tuple[int, int, str, str]] = []
+    for owner, literals in actor_literals_by_character.items():
+        owner_key = _key(owner)
+        if not owner_key:
+            continue
+        for value in literals:
+            literal = _key(value)
+            if not literal:
+                continue
+            start = normalized.find(literal)
+            while start >= 0:
+                matches.append(
+                    (start, start + len(literal), owner_key, literal)
+                )
+                start = normalized.find(literal, start + 1)
+    retained = [
+        match
+        for match in matches
+        if not any(
+            other[0] <= match[0]
+            and match[1] <= other[1]
+            and len(other[3]) > len(match[3])
+            for other in matches
+        )
+    ]
+    return {owner for _, _, owner, _ in retained}
+
+
+def _without_cross_actor_definitive_support(
+    values: tuple[SupportEvidence, ...],
+    *,
+    target_character_key: str,
+    actor_literals_by_character: dict[str, tuple[str, ...]],
+) -> tuple[tuple[SupportEvidence, ...], int]:
+    """Reject only G/X blocks explicitly scoped to another known character.
+
+    Pronoun-only or otherwise actor-implicit text remains reviewable: absence
+    of a name is not proof of a different actor.  The hard gate applies when
+    the exact local evidence names one or more confirmed *other* characters
+    and does not name the current target at all.
+    """
+
+    target = _key(target_character_key)
+    retained: list[SupportEvidence] = []
+    rejected = 0
+    for support in values:
+        if support.kind not in {"causal_bridge", "exception"}:
+            retained.append(support)
+            continue
+        actors = _explicit_confirmed_actor_keys(
+            support.evidence.text,
+            actor_literals_by_character=actor_literals_by_character,
+        )
+        if len(actors) == 1 and target not in actors:
+            rejected += 1
+            continue
+        retained.append(support)
+    return tuple(retained), rejected
+
+
+def _explanation_observation_key_object(
+    baseline_entry: BaselineEntry,
+    observation: CharacterSignal,
+) -> str:
+    """Project only a verified V3 object binding into explanation comparison.
+
+    The observation's source-bound object and its certificate stay untouched.
+    This function changes only the read-only summary sent to the explanation
+    reviewer, whose object-bearing protocol compares against the frozen target
+    object.  Missing or invalid certificates retain the raw object and thus
+    preserve the existing fail-closed mismatch behaviour.
+    """
+
+    _, baseline, _, _ = baseline_entry
+    if baseline.dimension not in _OBJECT_BEARING_TRAIT_DIMENSIONS:
+        return observation.key_object
+    frozen_key = _frozen_comparison_identity(baseline_entry)
+    if not frozen_key or not target_bound_signal_matches_frozen_baseline(
+        observation,
+        baseline_character=baseline.character,
+        baseline_dimension=baseline.dimension,
+        baseline_trait_key=baseline.trait_key,
+        baseline_comparison_key=frozen_key,
+        baseline_polarity=baseline.polarity,
+    ):
+        return observation.key_object
+    target = observation.target_bound_target
+    if baseline.key_object.strip():
+        return baseline.key_object
+    if target is not None and target.key_object.strip():
+        return target.key_object
+    return observation.key_object
+
+
+def _compound_explanation_debt_is_closed(
+    *,
+    observations: tuple[CharacterSignal, ...],
+    compound_observation_ids: tuple[str, ...],
+    support_evidence: tuple[SupportEvidence, ...],
+) -> bool:
+    """Close line-structure debt only with independent G/X for every C."""
+
+    observation_by_id = {row.id: row for row in observations}
+    required = set(observation_by_id)
+    if (
+        not required
+        or not compound_observation_ids
+        or not set(compound_observation_ids) <= required
+    ):
+        return False
+    covered: set[str] = set()
+    for support in support_evidence:
+        if (
+            support.kind not in {"causal_bridge", "exception"}
+            or not support.explicit
+            or support.selection_basis != "semantic_relation_v1"
+        ):
+            continue
+        applicable = {
+            observation_id for observation_id in support.applicable_observation_ids
+            if observation_id in observation_by_id
+        }
+        if not applicable:
+            continue
+        if any(
+            observation_by_id[observation_id].evidence.document_id
+            == support.evidence.document_id
+            and observation_by_id[observation_id].evidence.line_start
+            <= support.evidence.line_end
+            and support.evidence.line_start
+            <= observation_by_id[observation_id].evidence.line_end
+            for observation_id in applicable
+        ):
+            # This duplicates the promotion trust-boundary gate intentionally:
+            # callers and future refactors cannot use overlapping C/E rows to
+            # erase compound-line debt.
+            continue
+        covered.update(applicable)
+    return required <= covered
 
 
 def _select_semantic_explanation_support(
@@ -4621,6 +5937,12 @@ def _to_issue(
             ),
             "dimension": prepared.case.baseline.dimension,
             "trait_key": prepared.case.baseline.trait_key,
+            **(
+                {"key_object": prepared.case.baseline.key_object}
+                if prepared.case.baseline.dimension
+                in {"relationship_attitude", "motivation_goal"}
+                else {}
+            ),
             **(
                 {
                     "approved_axis_id": prepared.case.baseline.approved_axis_id,
@@ -5353,11 +6675,25 @@ def _safe_case_trace(
     matched_observations: tuple[CharacterSignal, ...] = (),
     prepared: PreparedCharacterDrift | None = None,
     prepare_reason: str,
+    material_coverage: str = "not_applicable",
+    material_coverage_reasons: tuple[str, ...] = (),
     review: CharacterReviewResult | None,
     final_outcome: str,
     visible: bool,
     promote_reason: str,
 ) -> dict[str, Any]:
+    safe_material_coverage = (
+        material_coverage
+        if material_coverage in {"complete", "partial", "not_applicable"}
+        else "not_applicable"
+    )
+    safe_material_reasons = (
+        sorted(
+            set(material_coverage_reasons) & _CASE_MATERIAL_PARTIAL_REASONS
+        )
+        if safe_material_coverage == "partial"
+        else []
+    )
     decision = review.decision if review is not None else None
     citation_refs, citation_refs_incomplete = _safe_citation_refs(prepared, review)
     scoped_review: dict[str, Any] | None = None
@@ -5477,6 +6813,8 @@ def _safe_case_trace(
             len(matched_observations) > _MAX_CASE_TRACE_OBSERVATION_REFS
         ),
         "prepare_reason": prepare_reason,
+        "material_coverage": safe_material_coverage,
+        "material_coverage_reasons": safe_material_reasons,
         "explanation_coverage": (
             prepared.case.explanation_coverage
             if prepared is not None else "not_run"
@@ -5573,6 +6911,7 @@ def _diagnostics(
     reasons: Counter[str],
     material_coverage: str = "unknown",
     explanation_coverage: str = "unknown",
+    case_material_partial_reason_counts: Counter[str] | None = None,
     case_trace: list[dict[str, Any]] | None = None,
     accepted_signal_histogram: list[dict[str, str | int]] | None = None,
     candidate_eligibility: dict[str, int] | None = None,
@@ -5583,6 +6922,7 @@ def _diagnostics(
     evidence_mismatch_counts: Counter[str] | None = None,
     scope_review_slot_conflict_counts: Counter[str] | None = None,
     scope_review_basis_invalid_counts: Counter[str] | None = None,
+    target_bound_slot_conflict_counts: Counter[str] | None = None,
     evidence_mismatch_chunks: list[dict[str, Any]] | None = None,
     evidence_mismatch_chunks_omitted_count: int = 0,
     core_label_scope_counts: Counter[str] | None = None,
@@ -5607,6 +6947,9 @@ def _diagnostics(
         "material_coverage": material_coverage,
         "explanation_coverage": explanation_coverage,
         "counts": counts,
+        "case_material_partial_reason_counts": dict(
+            sorted((case_material_partial_reason_counts or {}).items())
+        ),
         "case_trace": list(case_trace or ()),
         "accepted_signal_histogram": list(accepted_signal_histogram or ()),
         "candidate_eligibility": candidate_eligibility or {
@@ -5631,6 +6974,9 @@ def _diagnostics(
         ),
         "scope_review_basis_invalid_counts": dict(
             sorted((scope_review_basis_invalid_counts or {}).items())
+        ),
+        "target_bound_slot_conflict_counts": dict(
+            sorted((target_bound_slot_conflict_counts or {}).items())
         ),
         "evidence_mismatch_chunks": list(evidence_mismatch_chunks or ()),
         "evidence_mismatch_chunks_omitted_count": (
@@ -5680,6 +7026,7 @@ def _empty_stage_result(
         "material_coverage": "unknown",
         "explanation_coverage": "unknown",
         "counts": {},
+        "case_material_partial_reason_counts": {},
         "case_trace": [],
         "accepted_signal_histogram": [],
         "candidate_eligibility": {
@@ -5695,6 +7042,7 @@ def _empty_stage_result(
         "evidence_mismatch_counts": {},
         "scope_review_slot_conflict_counts": {},
         "scope_review_basis_invalid_counts": {},
+        "target_bound_slot_conflict_counts": {},
         "evidence_mismatch_chunks": [],
         "evidence_mismatch_chunks_omitted_count": 0,
         "core_label_scope_counts": {},

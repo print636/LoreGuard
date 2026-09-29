@@ -21,7 +21,7 @@ from app.narrative_context import payload_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0022_character_formal_proof"
+HEAD_REVISION = "0023_major_ooc_dimensions"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):
@@ -354,7 +354,7 @@ class EmbeddingMigrationTests(unittest.TestCase):
                     created_at=datetime(2026, 9, 1),
                 ))
             engine.dispose()
-            self.upgrade(url)
+            self.upgrade_to(url, "0016_character_support_bindings")
             engine = create_engine(url)
             after = {item["name"] for item in inspect(engine).get_columns(
                 "character_trait_candidates"

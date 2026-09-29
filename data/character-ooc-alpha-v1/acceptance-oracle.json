@@ -1,0 +1,315 @@
+{
+  "schema_version": "character-continuity-live-oracle-v2",
+  "dataset_boundary": {
+    "developer_visible": true,
+    "blind_holdout": false,
+    "production_quality_claim": false,
+    "open_text_generalization_claim": false
+  },
+  "author_axes": [
+    {
+      "plan_id": "tangxiu_value_rescue_before_cargo",
+      "case_id": "tangxiu_value_shift",
+      "trait_type": "value",
+      "display_name": "险情中先救人",
+      "definition": "人和货物同时面临直接危险且只能先处理一方时，是否先保障人的安全",
+      "positive_proposition": "唐岫在人和货物同时面临直接危险时先救人再保货",
+      "applicability_scope": "人和货物同时面临直接危险且只能先处理一方时",
+      "axis_alignment": "same"
+    }
+  ],
+  "confirm_candidates": [
+    {
+      "case_id": "liyin_core_shift",
+      "character_key": "黎音",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 5,
+      "value_contains": "陌生人",
+      "polarity": "negative",
+      "stability": "core"
+    },
+    {
+      "case_id": "shenyan_single_preference_reversal",
+      "character_key": "沈砚",
+      "trait_type": "preference",
+      "source_document": "02-character-profiles.md",
+      "source_line": 9,
+      "value_contains": "栗子糕",
+      "polarity": "positive",
+      "stability": "stable"
+    },
+    {
+      "case_id": "baiyu_speech_shift",
+      "character_key": "白榆",
+      "trait_type": "speech_pattern",
+      "source_document": "02-character-profiles.md",
+      "source_line": 13,
+      "value_contains": "简短直接",
+      "polarity": "positive",
+      "stability": "stable"
+    },
+    {
+      "case_id": "tangxiu_value_shift",
+      "character_key": "唐岫",
+      "trait_type": "value",
+      "source_document": "02-character-profiles.md",
+      "source_line": 17,
+      "value_contains": "先救人再保货",
+      "polarity": "positive",
+      "stability": "stable"
+    },
+    {
+      "case_id": "yuji_relationship_shift",
+      "character_key": "余霁",
+      "trait_type": "relationship_attitude",
+      "key_object": "周岚",
+      "source_document": "02-character-profiles.md",
+      "source_line": 21,
+      "value_contains": "信任",
+      "polarity": "positive",
+      "stability": "stable"
+    },
+    {
+      "case_id": "guchao_motivation_shift",
+      "character_key": "顾潮",
+      "trait_type": "motivation_goal",
+      "key_object": "重建海灯塔",
+      "source_document": "02-character-profiles.md",
+      "source_line": 25,
+      "value_contains": "重建海灯塔",
+      "polarity": "positive",
+      "stability": "stable"
+    },
+    {
+      "case_id": "suxian_published_growth",
+      "character_key": "苏弦",
+      "trait_type": "core_personality",
+      "source_document": "02-character-profiles.md",
+      "source_line": 29,
+      "value_contains": "回避",
+      "polarity": "negative",
+      "stability": "core"
+    },
+    {
+      "case_id": "qiwu_active_disguise",
+      "character_key": "祁雾",
+      "trait_type": "speech_pattern",
+      "source_document": "02-character-profiles.md",
+      "source_line": 33,
+      "value_contains": "直来直往",
+      "polarity": "positive",
+      "stability": "stable"
+    }
+  ],
+  "expected_cases": [
+    {
+      "case_id": "liyin_core_shift",
+      "character_key": "黎音",
+      "dimension": "core_personality",
+      "prepare_reason": "two_independent_behaviors",
+      "review_outcome": "completed",
+      "final_outcome": "conflict",
+      "promote_reason": "model_contradicts",
+      "review_verdict": "contradicts",
+      "visible": true,
+      "expected_report_class": "formal",
+      "min_matched_observation_count": 2,
+      "max_matched_observation_count": 4,
+      "expected_citation_roles": ["B", "C"],
+      "visible_issue": {
+        "subtype": "core_trait_drift",
+        "judgement": "contradicts",
+        "required_evidence": [{"document_name": "02-character-profiles.md", "line": 5}],
+        "required_any_evidence": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 3},
+          {"document_name": "04-draft-event-v1.1.md", "line": 4}
+        ],
+        "required_any_evidence_min_matches": 2,
+        "allowed_evidence": [
+          {"document_name": "02-character-profiles.md", "line_start": 5, "line_end": 5},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 3, "line_end": 3},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 4, "line_end": 4}
+        ]
+      }
+    },
+    {
+      "case_id": "shenyan_single_preference_reversal",
+      "character_key": "沈砚",
+      "dimension": "preference",
+      "prepare_reason_any_of": ["explicit_opposed_preference", "reported_opposed_preference"],
+      "review_outcome": "completed",
+      "final_outcome": "needs_confirmation",
+      "promote_reason": "single_opposition_not_repeated",
+      "review_verdict": "contradicts",
+      "visible": true,
+      "expected_report_class": "review_clue",
+      "matched_observation_count": 1,
+      "expected_citation_roles": ["B", "C"],
+      "review_clue": {
+        "subtype": "stable_preference_conflict",
+        "judgement": "contradicts",
+        "required_evidence": [
+          {"document_name": "02-character-profiles.md", "line": 9},
+          {"document_name": "04-draft-event-v1.1.md", "line": 6}
+        ],
+        "required_any_evidence": [],
+        "required_any_evidence_min_matches": 0,
+        "allowed_evidence": [
+          {"document_name": "02-character-profiles.md", "line_start": 9, "line_end": 9},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 6, "line_end": 6}
+        ]
+      }
+    },
+    {
+      "case_id": "baiyu_speech_shift",
+      "character_key": "白榆",
+      "dimension": "speech_pattern",
+      "prepare_reason": "two_independent_behaviors",
+      "review_outcome": "completed",
+      "final_outcome": "conflict",
+      "promote_reason": "model_contradicts",
+      "review_verdict": "contradicts",
+      "visible": true,
+      "expected_report_class": "formal",
+      "min_matched_observation_count": 2,
+      "max_matched_observation_count": 4,
+      "expected_citation_roles": ["B", "C"],
+      "visible_issue": {
+        "subtype": "core_trait_drift",
+        "judgement": "contradicts",
+        "required_evidence": [{"document_name": "02-character-profiles.md", "line": 13}],
+        "required_any_evidence": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 8},
+          {"document_name": "04-draft-event-v1.1.md", "line": 9}
+        ],
+        "required_any_evidence_min_matches": 2,
+        "allowed_evidence": [
+          {"document_name": "02-character-profiles.md", "line_start": 13, "line_end": 13},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 8, "line_end": 8},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 9, "line_end": 9}
+        ]
+      }
+    },
+    {
+      "case_id": "tangxiu_value_shift",
+      "character_key": "唐岫",
+      "dimension": "value",
+      "prepare_reason": "two_independent_behaviors",
+      "review_outcome": "completed",
+      "final_outcome": "conflict",
+      "promote_reason": "model_contradicts",
+      "review_verdict": "contradicts",
+      "visible": true,
+      "expected_report_class": "formal",
+      "min_matched_observation_count": 2,
+      "max_matched_observation_count": 4,
+      "expected_citation_roles": ["B", "C"],
+      "visible_issue": {
+        "subtype": "core_trait_drift",
+        "judgement": "contradicts",
+        "required_evidence": [{"document_name": "02-character-profiles.md", "line": 17}],
+        "required_any_evidence": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 11},
+          {"document_name": "04-draft-event-v1.1.md", "line": 12}
+        ],
+        "required_any_evidence_min_matches": 2,
+        "allowed_evidence": [
+          {"document_name": "02-character-profiles.md", "line_start": 17, "line_end": 17},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 11, "line_end": 11},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 12, "line_end": 12}
+        ]
+      }
+    },
+    {
+      "case_id": "yuji_relationship_shift",
+      "character_key": "余霁",
+      "dimension": "relationship_attitude",
+      "prepare_reason": "two_independent_behaviors",
+      "review_outcome": "completed",
+      "final_outcome": "conflict",
+      "promote_reason": "model_contradicts",
+      "review_verdict": "contradicts",
+      "visible": true,
+      "expected_report_class": "formal",
+      "min_matched_observation_count": 2,
+      "max_matched_observation_count": 4,
+      "expected_citation_roles": ["B", "C"],
+      "visible_issue": {
+        "subtype": "relationship_attitude_drift",
+        "judgement": "contradicts",
+        "required_evidence": [{"document_name": "02-character-profiles.md", "line": 21}],
+        "required_any_evidence": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 14},
+          {"document_name": "04-draft-event-v1.1.md", "line": 15}
+        ],
+        "required_any_evidence_min_matches": 2,
+        "allowed_evidence": [
+          {"document_name": "02-character-profiles.md", "line_start": 21, "line_end": 21},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 14, "line_end": 14},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 15, "line_end": 15}
+        ]
+      }
+    },
+    {
+      "case_id": "guchao_motivation_shift",
+      "character_key": "顾潮",
+      "dimension": "motivation_goal",
+      "prepare_reason": "two_independent_behaviors",
+      "review_outcome": "completed",
+      "final_outcome": "conflict",
+      "promote_reason": "model_contradicts",
+      "review_verdict": "contradicts",
+      "visible": true,
+      "expected_report_class": "formal",
+      "min_matched_observation_count": 2,
+      "max_matched_observation_count": 4,
+      "expected_citation_roles": ["B", "C"],
+      "visible_issue": {
+        "subtype": "motivation_goal_drift",
+        "judgement": "contradicts",
+        "required_evidence": [{"document_name": "02-character-profiles.md", "line": 25}],
+        "required_any_evidence": [
+          {"document_name": "04-draft-event-v1.1.md", "line": 17},
+          {"document_name": "04-draft-event-v1.1.md", "line": 18}
+        ],
+        "required_any_evidence_min_matches": 2,
+        "allowed_evidence": [
+          {"document_name": "02-character-profiles.md", "line_start": 25, "line_end": 25},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 17, "line_end": 17},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 18, "line_end": 18}
+        ]
+      }
+    },
+    {
+      "case_id": "suxian_published_growth",
+      "character_key": "苏弦",
+      "dimension": "core_personality",
+      "prepare_reason": "two_independent_behaviors",
+      "review_outcome": "completed",
+      "final_outcome": "no_issue",
+      "promote_reason": "model_explained",
+      "review_verdict": "explained",
+      "visible": false,
+      "expected_report_class": "none",
+      "min_matched_observation_count": 2,
+      "max_matched_observation_count": 4,
+      "expected_citation_roles": ["B", "C", "G"]
+    },
+    {
+      "case_id": "qiwu_active_disguise",
+      "character_key": "祁雾",
+      "dimension": "speech_pattern",
+      "prepare_reason": "two_independent_behaviors",
+      "review_outcome": "completed",
+      "final_outcome": "no_issue",
+      "promote_reason": "model_explained",
+      "review_verdict": "explained",
+      "visible": false,
+      "expected_report_class": "none",
+      "min_matched_observation_count": 2,
+      "max_matched_observation_count": 4,
+      "expected_citation_roles": ["B", "C", "X"]
+    }
+  ]
+}

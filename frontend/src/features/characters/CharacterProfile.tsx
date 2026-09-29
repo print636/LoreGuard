@@ -95,6 +95,7 @@ export default function CharacterProfile({
                         <span>生效中</span>
                         <span>{profileOriginNames[item.origin]}</span>
                         <span>{item.evidence_count} 条证据</span>
+                        {item.key_object && <span>对象：{item.key_object}</span>}
                         {item.dimension === "core_personality" && (
                           <span>{item.approved_axis_id ? "已绑定作者轴" : "未绑定作者轴"}</span>
                         )}
@@ -203,6 +204,7 @@ export default function CharacterProfile({
                   <div className="characterProfileMetadata">
                     <span>已撤销</span>
                     <span>{characterDimensionNames[candidate.dimension]}</span>
+                    {candidate.key_object && <span>对象：{candidate.key_object}</span>}
                     {candidate.scopes.slice(0, 2).map((scope) => (
                       <span key={scope.scope_id}>{scope.label}</span>
                     ))}

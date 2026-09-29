@@ -94,11 +94,14 @@ function parseBinding(value: unknown, evidence: ProfileEvidence[]): ProfileSuppo
   const context = raw.context.map((part) => parseSpan(part, source, points));
   if (context.some((part) => part === null)) return null;
   const parsedContext = context as ProfileSupportSpan[];
+  const postposed = raw.scope_relation === "postposed_label_summary";
   let priorEnd = 0;
   for (const span of parsedContext) {
     if (
       span.role === "target" || span.start_offset < priorEnd ||
-      span.end_offset > target.start_offset
+      (postposed
+        ? !(span.end_offset <= target.start_offset || span.start_offset >= target.end_offset)
+        : span.end_offset > target.start_offset)
     ) return null;
     priorEnd = span.end_offset;
   }
@@ -115,13 +118,22 @@ function parseBinding(value: unknown, evidence: ProfileEvidence[]): ProfileSuppo
   if (parsedContext.some((span) =>
     (span.role === "actor_anchor" && span.support_id !== actor) ||
     (span.role === "label_anchor" && span.support_id !== label))) return null;
+  const actorSpan = parsedContext.find((span) => span.support_id === actor);
+  const labelSpan = parsedContext.find((span) => span.support_id === label);
+  if (actorSpan && actorSpan.end_offset > target.start_offset) return null;
   if (
     (raw.scope_relation === "local" &&
       (actor !== null || (label !== null && label !== target.support_id) || parsedContext.length > 0)) ||
     (raw.scope_relation === "same_actor_continuation" &&
       (actor === null || (label !== null && label !== target.support_id))) ||
     (raw.scope_relation === "labelled_elaboration" && (label === null || label === target.support_id)) ||
-    !["local", "same_actor_continuation", "labelled_elaboration"].includes(raw.scope_relation as string)
+    (raw.scope_relation === "postposed_label_summary" &&
+      (label === null || label === target.support_id || !labelSpan ||
+        labelSpan.start_offset < target.end_offset)) ||
+    ![
+      "local", "same_actor_continuation", "labelled_elaboration",
+      "postposed_label_summary",
+    ].includes(raw.scope_relation as string)
   ) return null;
   return {
     evidence_index: index,

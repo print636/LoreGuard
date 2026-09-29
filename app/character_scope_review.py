@@ -15,10 +15,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
-SCOPE_REVIEW_SCHEMA_V1 = "character-scope-review-v1"
+SCOPE_REVIEW_SCHEMA_V2 = "character-scope-review-v2"
 SCOPE_REVIEW_PROMPT_V1 = "character-scope-review-prompt-v1"
 SCOPE_REVIEW_PROMPT_V2 = "character-scope-review-prompt-v2"
-SCOPE_REVIEW_PROMPT_V3 = "character-scope-review-prompt-v3"
+SCOPE_REVIEW_PROMPT_V4 = "character-scope-review-prompt-v4"
 ASSERTION_INDEX_V1 = "assertion-index-v1"
 MAX_SCOPE_REVIEW_REQUEST_BYTES = 131_072
 MAX_SCOPE_REVIEW_RESPONSE_BYTES = 32_768
@@ -123,11 +123,17 @@ class ScopeReviewProposal(BaseModel):
     support_id: str = Field(pattern=_SUPPORT_ID_PATTERN)
     actor_anchor_id: str | None = Field(default=None, pattern=_SUPPORT_ID_PATTERN)
     label_anchor_id: str | None = Field(default=None, pattern=_SUPPORT_ID_PATTERN)
-    scope_relation: Literal["local", "same_actor_continuation", "labelled_elaboration"]
+    scope_relation: Literal[
+        "local",
+        "same_actor_continuation",
+        "labelled_elaboration",
+        "postposed_label_summary",
+    ]
     character: str = Field(min_length=1, max_length=64)
     dimension: Literal[
         "core_personality", "preference", "value", "speech_pattern",
-        "behavior_boundary", "contextual_behavior", "current_state",
+        "relationship_attitude", "motivation_goal", "behavior_boundary",
+        "contextual_behavior", "current_state",
     ]
     trait_key: str = Field(min_length=1, max_length=80)
     statement: str = Field(min_length=2, max_length=300)
@@ -142,8 +148,8 @@ class ScopeReviewProposal(BaseModel):
 
 
 class ScopeReviewRequest(ScopeReviewSourceIdentity):
-    schema_version: Literal["character-scope-review-v1"] = SCOPE_REVIEW_SCHEMA_V1
-    prompt_version: Literal["character-scope-review-prompt-v3"] = SCOPE_REVIEW_PROMPT_V3
+    schema_version: Literal["character-scope-review-v2"] = SCOPE_REVIEW_SCHEMA_V2
+    prompt_version: Literal["character-scope-review-prompt-v4"] = SCOPE_REVIEW_PROMPT_V4
     assertion_index_version: Literal["assertion-index-v1"] = ASSERTION_INDEX_V1
     block_line_start: int = Field(ge=1, le=10_000_000)
     lines: tuple[ScopeReviewLine, ...] = Field(min_length=1, max_length=64)
@@ -186,19 +192,36 @@ class ScopeReviewRequest(ScopeReviewSourceIdentity):
                     raise ValueError("scope_review_relation_invalid")
             elif proposal.label_anchor_id in {None, proposal.support_id}:
                 raise ValueError("scope_review_relation_invalid")
-            for anchor_id, may_be_target in (
-                (proposal.actor_anchor_id, False),
-                (proposal.label_anchor_id, True),
+            actor = (
+                clauses.get(proposal.actor_anchor_id)
+                if proposal.actor_anchor_id is not None else None
+            )
+            if proposal.actor_anchor_id is not None and (
+                actor is None
+                or actor.line_number != target.line_number
+                or actor.start_offset >= target.start_offset
             ):
-                if anchor_id is None:
-                    continue
-                anchor = clauses.get(anchor_id)
-                if (
-                    anchor is None
-                    or anchor.line_number != target.line_number
-                    or anchor.start_offset > target.start_offset
-                    or (not may_be_target and anchor.start_offset == target.start_offset)
-                ):
+                raise ValueError("scope_review_anchor_invalid")
+            label = (
+                clauses.get(proposal.label_anchor_id)
+                if proposal.label_anchor_id is not None else None
+            )
+            if proposal.label_anchor_id is not None and (
+                label is None or label.line_number != target.line_number
+            ):
+                raise ValueError("scope_review_anchor_invalid")
+            if label is not None:
+                if proposal.scope_relation == "postposed_label_summary":
+                    target_line = next(
+                        line for line in self.lines
+                        if line.line_number == target.line_number
+                    )
+                    if (
+                        label.start_offset <= target.start_offset
+                        or label != target_line.clauses[-1]
+                    ):
+                        raise ValueError("scope_review_anchor_invalid")
+                elif label.start_offset > target.start_offset:
                     raise ValueError("scope_review_anchor_invalid")
         if len(_canonical_request_bytes(self)) > MAX_SCOPE_REVIEW_REQUEST_BYTES:
             raise ValueError("scope_review_request_too_large")
@@ -226,7 +249,7 @@ class ScopeReviewItem(BaseModel):
 class ScopeReviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    schema_version: Literal["character-scope-review-v1"]
+    schema_version: Literal["character-scope-review-v2"]
     request_digest: str = Field(pattern=_SHA256_PATTERN)
     items: tuple[ScopeReviewItem, ...] = Field(max_length=MAX_SCOPE_REVIEW_ITEMS)
 
@@ -327,9 +350,11 @@ def _required_basis_ids(
         if anchor_id is None:
             continue
         anchor = clauses[anchor_id]
+        path_start = min(anchor.start_offset, target.start_offset)
+        path_end = max(anchor.start_offset, target.start_offset)
         required.update(
             clause.support_id for clause in target_line.clauses
-            if anchor.start_offset <= clause.start_offset <= target.start_offset
+            if path_start <= clause.start_offset <= path_end
         )
     return frozenset(required)
 

@@ -78,6 +78,7 @@ from .character_traits import (
     _verify_reused_review_chain,
     _validated_comparison_key,
     axis_polarity_for_alignment,
+    candidate_snapshot_key_object,
     formal_target_fingerprint_matches,
     normalize_character_key,
     upsert_character_trait_candidate,
@@ -1158,6 +1159,7 @@ def serialize_character_trait_candidate(row: CharacterTraitCandidateRow) -> dict
         "axis_polarity": row.axis_polarity,
         "axis_positive_proposition_sha256": row.axis_positive_proposition_sha256,
         "comparison_key": row.comparison_key,
+        "key_object": row.key_object,
         "value": row.value,
         "polarity": row.polarity,
         "stability": row.stability,
@@ -5406,6 +5408,18 @@ def decide_character_profile_candidate(
                     )
                 ).all()
             )
+            try:
+                candidate_snapshot_key_object(row)
+                for other in confirmed:
+                    candidate_snapshot_key_object(other)
+            except ValueError:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "character_trait_object_identity_invalid",
+                        "message": "关系态度或长期动机的对象身份无法核对",
+                    },
+                ) from None
             if approved_axis is not None:
                 for other in confirmed:
                     if other.approved_axis_id == approved_axis.id:

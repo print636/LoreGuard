@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
@@ -149,6 +150,63 @@ DRAFT_ACTOR_REVIEW_SCHEMA_V1 = "character-draft-actor-review-v1"
 DRAFT_ACTOR_REVIEW_BATCH_SCHEMA_V1 = "character-draft-actor-review-batch-v1"
 DRAFT_ACTOR_REVIEW_PROMPT_V1 = "character-draft-actor-review-prompt-v1"
 DRAFT_ACTOR_CLAUSE_INDEX_V1 = "draft-actor-clause-index-v1"
+
+# V2 is an additive protocol.  The V1 request/response models and canonical
+# digests above remain unchanged so stored V1 diagnostics can still be read
+# and verified byte-for-byte.  V2 binds one server-owned recall target to
+# frozen source clauses; the reviewer never writes character, axis, object or
+# statement fields back to the server.
+TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2 = "character-target-bound-draft-review-v2"
+TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V2 = (
+    "character-target-bound-draft-review-batch-v2"
+)
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2 = (
+    "character-target-bound-draft-review-prompt-v2"
+)
+TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3 = "character-target-bound-draft-review-v3"
+TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V3 = (
+    "character-target-bound-draft-review-batch-v3"
+)
+TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4 = "character-target-bound-draft-review-v4"
+TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4 = (
+    "character-target-bound-draft-review-batch-v4"
+)
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V3 = (
+    "character-target-bound-draft-review-prompt-v3"
+)
+# V4 keeps the V3 request/response schemas and semantic admission rules.  It
+# versions only the model-facing output contract: the prompt now spells out
+# the complete nested batch envelope and every legal enum so a provider cannot
+# silently flatten ``windows[].request.proposals`` into top-level responses.
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V4 = (
+    "character-target-bound-draft-review-prompt-v4"
+)
+# V5 keeps every V3 semantic gate unchanged and removes ambiguity about the
+# coordinate space used by model-authored object offsets.  The provider prompt
+# projects the exact frozen fact clause next to each proposal and declares its
+# first Unicode codepoint as offset zero.
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V5 = (
+    "character-target-bound-draft-review-prompt-v5"
+)
+# V6 keeps the V3 schemas and every semantic admission gate, but distinguishes
+# an author-approved scoped value/boundary axis from a literal source object.
+# The comparison-key tail names the frozen axis; it is not draft text that the
+# reviewer may be required to locate as an object span.
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V6 = (
+    "character-target-bound-draft-review-prompt-v6"
+)
+# V7 adds a server-verifiable high-precision boundary for literal objects. If
+# the raw target object occurs exactly once in the frozen fact clause, every
+# accepted same/broader/narrower span must cover that complete occurrence.
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V7 = (
+    "character-target-bound-draft-review-prompt-v7"
+)
+# V8 accompanies the additive V4 wire protocol.  It lets the server provide
+# exact coordinates for one uniquely occurring frozen target literal while
+# leaving every semantic decision with the independent reviewer.
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8 = (
+    "character-target-bound-draft-review-prompt-v8"
+)
 
 _PROPOSAL_ID = r"^dap_[a-f0-9]{32}$"
 
@@ -1294,5 +1352,1478 @@ def evaluate_draft_actor_review_batch(
         )
     return DraftActorReviewBatchEvaluation(
         batch_digest=batch_digest,
+        evaluations=tuple(evaluations),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Target-bound draft semantic binding protocol V2
+# ---------------------------------------------------------------------------
+
+_TARGET_DIGEST = r"^[a-f0-9]{64}$"
+_TARGET_PROPOSAL_ID = r"^tdp_[a-f0-9]{32}$"
+_TARGET_DIMENSIONS = (
+    "core_personality",
+    "preference",
+    "value",
+    "relationship_attitude",
+    "motivation_goal",
+    "speech_pattern",
+    "behavior_boundary",
+    "contextual_behavior",
+    "current_state",
+)
+_TARGET_OBJECT_DIMENSIONS = frozenset(
+    {
+        "preference",
+        "value",
+        "relationship_attitude",
+        "motivation_goal",
+        "behavior_boundary",
+        "current_state",
+    }
+)
+_TARGET_SCOPED_AXIS_DIMENSIONS = frozenset({"value", "behavior_boundary"})
+_TARGET_ACTOR_LITERAL = re.compile(r"^[^\s\x00-\x1f]{1,64}$")
+UNSAFE_TARGET_ACTOR_LITERALS = frozenset(
+    {
+        # First, second and third person, including common plural/reflexive
+        # forms. These strings cannot uniquely identify one canonical actor.
+        "我", "我们", "咱", "咱们", "俺", "俺们", "吾", "吾等", "余", "予",
+        "你", "你们", "您", "您们", "尔", "汝", "阁下",
+        "他", "他们", "她", "她们", "它", "它们", "祂", "祂们",
+        "其", "本人", "自己", "人家", "彼此", "对方",
+        # Common demonstrative/generic referring expressions.
+        "这", "那", "这个", "那个", "这些", "那些", "这位", "那位",
+        "此", "该", "此人", "该人", "此位", "该位", "大家", "众人", "各位",
+        # English literals are equally non-unique if present in a formal
+        # profile or imported manuscript.
+        "i", "me", "we", "us", "you", "he", "him", "she", "her", "it",
+        "they", "them", "myself", "yourself", "himself", "herself", "itself",
+        "ourselves", "yourselves", "themselves", "this", "that", "these", "those",
+    }
+)
+
+
+def is_unsafe_target_actor_literal(value: object) -> bool:
+    if not isinstance(value, str):
+        return True
+    normalized = re.sub(
+        r"\s+", "", unicodedata.normalize("NFKC", value)
+    ).casefold()
+    return normalized in UNSAFE_TARGET_ACTOR_LITERALS
+
+
+def _target_actor_literals_are_safe(
+    character: object, aliases: object,
+) -> bool:
+    if not isinstance(character, str) or type(aliases) is not tuple:
+        return False
+    actors = (character, *aliases)
+    normalized: set[str] = set()
+    for actor in actors:
+        if not isinstance(actor, str):
+            return False
+        actor_key = re.sub(
+            r"\s+", "", unicodedata.normalize("NFKC", actor)
+        ).casefold()
+        if (
+            actor != actor.strip()
+            or _TARGET_ACTOR_LITERAL.fullmatch(actor) is None
+            or not actor_key
+            or actor_key in normalized
+            or is_unsafe_target_actor_literal(actor)
+        ):
+            return False
+        normalized.add(actor_key)
+    return True
+
+
+_TARGET_NARRATOR_ATTRIBUTION = re.compile(
+    r"^(?P<prefix>(?:旁白|叙述者?|作者旁注)(?:直接|明确)?"
+    r"(?:说明|写明|交代|指出|描述|叙述))(?P<actor>.+)$"
+)
+_TARGET_ZERO_SUBJECT_LEAD = re.compile(
+    r"^(?:(?:又|随后|接着|然后|继而|仍|却|再次|并|还|才|终于|"
+    r"明确|直接|同时|立即|马上|转而|最终|依然|继续|先|再){1,3})"
+)
+# A zero-subject continuation must actually omit its subject.  Check this
+# *after* consuming the safe connective: checking only ``text.startswith``
+# mistakes ``随后她……`` for an inherited subject and can manufacture a
+# canonical statement such as ``沈砚随后她……``.  The tuple is deliberately
+# conservative and covers first/second/third-person singular and plural
+# pronouns plus the reflexive forms admitted elsewhere in this protocol.
+_TARGET_ZERO_SUBJECT_OVERT_PRONOUNS = (
+    "我", "我们", "咱", "咱们", "你", "你们", "您", "您们",
+    "他", "他们", "她", "她们", "它", "它们", "祂", "祂们",
+    "其", "本人", "自己",
+)
+# Chinese has no reliable surface delimiter between a short name and a verb.
+# Therefore adjacency alone is not enough to infer an omitted subject.  After
+# the connective (and any connective-like adverbs already consumed above), we
+# admit only this bounded set of ordinary narrative predicates.  Unknown
+# two/three-character names and noun phrases cannot become candidates merely
+# because a reviewer might later call them the target actor.  Expanding this
+# list is a protocol change and must be backed by positive and other-subject
+# fixtures.
+_TARGET_ZERO_SUBJECT_PREDICATE = re.compile(
+    r"^(?:(?:主动|自愿|亲自|坚决|公开|当场|独自|悄悄|偷偷|"
+    r"仍然|依旧|已经|正在|始终|一直|逐渐|渐渐|完全|正式|擅自){0,2})"
+    r"(?:"
+    r"表示|声明|承认|坦言|答应|允许|要求|命令|决定|选择|坚持|"
+    r"拒绝|接受|放弃|撤回|反对|支持|喜欢|讨厌|厌恶|偏爱|"
+    r"信任|怀疑|保护|帮助|背叛|服从|违抗|遵守|违反|隐瞒|坦白|道歉|原谅|"
+    r"吃下|喝下|饮用|拿起|放下|带走|搬走|交出|归还|销毁|隐藏|"
+    r"打开|关闭|进入|离开|走进|退出|救下|救援|攻击|阻止|"
+    r"解散|重建|停止|保持|改变|转变|变得|开始|完成|执行|实施"
+    r")"
+)
+_TARGET_ZERO_SUBJECT_BA_CONSTRUCTION = re.compile(
+    r"^(?:把|将)[^，,。；;！？!?：:\n]{1,80}"
+    r"(?:拿起|放下|带走|搬走|交出|交给|归还|销毁|隐藏|打开|关闭|"
+    r"转卖|丢弃|扔掉|送出|救下|保护|移交|撤回|拆除|解散|重建)"
+    r"(?:了|掉|出去|回来|完毕)?$"
+)
+_TARGET_EXPLICIT_OTHER_ACTOR = re.compile(
+    r"^[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·._'-]{1,31}"
+    r"(?:本人|亲自|又|也|仍|却|再次)"
+    r"(?:把|将|让|请|叫|派|命令|指使|拒绝|允许|要求|表示|声明|"
+    r"决定|撤回|放弃|解散|搬|拿|交|救|看见|看到|听见|听到)"
+)
+_TARGET_NAMED_JOINT_TAIL = re.compile(
+    r"^(?:们|两人|二人|双方|众人|大家|各自|另一人|另一个人|其他人|"
+    r"她们|他们|共同|一起)"
+)
+_TARGET_UNSAFE_REALITY = re.compile(
+    r"(?:梦境|梦中|幻觉|幻象|想象|假想|幻想|排练|演练|彩排|模拟)"
+)
+_TARGET_QUESTION = re.compile(r"[？?]$")
+_TARGET_NON_FACTUAL = re.compile(
+    r"(?:并非事实|不是事实|并未发生|没有发生|未曾发生|纯属虚构)"
+)
+
+
+class TargetBoundDraftReviewTarget(BaseModel):
+    """Complete server-owned identity for one focused draft recall target."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    target_ordinal: int = Field(ge=1, le=12, strict=True)
+    character: str = Field(min_length=1, max_length=64)
+    authorized_aliases: tuple[str, ...] = ()
+    dimension: Literal[
+        "core_personality",
+        "preference",
+        "value",
+        "relationship_attitude",
+        "motivation_goal",
+        "speech_pattern",
+        "behavior_boundary",
+        "contextual_behavior",
+        "current_state",
+    ]
+    trait_key: str = Field(min_length=1, max_length=80)
+    comparison_key: str = Field(min_length=1, max_length=160)
+    key_object: str = Field(default="", max_length=80)
+    requested_polarity: Literal["positive", "negative"]
+    baseline_hint: str = Field(min_length=1, max_length=320)
+    approved_axis_id: str | None = Field(default=None, max_length=64)
+    approved_axis_version: int | None = Field(default=None, ge=1, strict=True)
+    approved_axis_definition: str | None = Field(
+        default=None, min_length=1, max_length=200
+    )
+    approved_axis_definition_sha256: str | None = Field(
+        default=None, pattern=_SHA256
+    )
+    approved_axis_comparison_key: str | None = Field(
+        default=None, min_length=1, max_length=160
+    )
+    approved_axis_applicability_scope: str | None = Field(
+        default=None, min_length=1, max_length=200
+    )
+    approved_axis_applicability_scope_sha256: str | None = Field(
+        default=None, pattern=_SHA256
+    )
+    axis_positive_proposition: str | None = Field(
+        default=None, min_length=1, max_length=200
+    )
+    axis_positive_proposition_sha256: str | None = Field(
+        default=None, pattern=_SHA256
+    )
+
+    @model_validator(mode="after")
+    def validate_server_target(self) -> "TargetBoundDraftReviewTarget":
+        if not _target_actor_literals_are_safe(
+            self.character, self.authorized_aliases
+        ):
+            raise ValueError("target_bound_actor_invalid")
+        if self.dimension in _TARGET_OBJECT_DIMENSIONS and not self.key_object.strip():
+            raise ValueError("target_bound_object_required")
+        if self.key_object and (
+            self.key_object != self.key_object.strip()
+            or any(
+                unicodedata.category(character).startswith("C")
+                for character in self.key_object
+            )
+        ):
+            raise ValueError("target_bound_object_invalid")
+        axis_values = (
+            self.approved_axis_id,
+            self.approved_axis_version,
+            self.approved_axis_definition,
+            self.approved_axis_definition_sha256,
+        )
+        if any(value is not None for value in axis_values) and any(
+            value is None for value in axis_values
+        ):
+            raise ValueError("target_bound_axis_incomplete")
+        scoped_values = (
+            self.approved_axis_comparison_key,
+            self.approved_axis_applicability_scope,
+            self.approved_axis_applicability_scope_sha256,
+            self.axis_positive_proposition,
+            self.axis_positive_proposition_sha256,
+        )
+        if any(value is not None for value in scoped_values):
+            if (
+                self.dimension not in _TARGET_SCOPED_AXIS_DIMENSIONS
+                or any(value is None for value in scoped_values)
+                or self.approved_axis_id is None
+            ):
+                raise ValueError("target_bound_scoped_axis_incomplete")
+        hashed_pairs = (
+            (self.approved_axis_definition, self.approved_axis_definition_sha256),
+            (
+                self.approved_axis_applicability_scope,
+                self.approved_axis_applicability_scope_sha256,
+            ),
+            (self.axis_positive_proposition, self.axis_positive_proposition_sha256),
+        )
+        for value, digest in hashed_pairs:
+            if value is not None and hashlib.sha256(value.encode("utf-8")).hexdigest() != digest:
+                raise ValueError("target_bound_axis_hash_invalid")
+        return self
+
+
+def target_bound_draft_target_digest(target: TargetBoundDraftReviewTarget) -> str:
+    if not isinstance(target, TargetBoundDraftReviewTarget):
+        raise TypeError("target bound draft target is invalid")
+    payload = json.dumps(
+        target.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+class TargetBoundDraftProposal(BaseModel):
+    """Server-derived clause proposal; no field is authored by the reviewer."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    source_sha256: str = Field(pattern=_SHA256)
+    line_start: int = Field(ge=1, le=10_000_000, strict=True)
+    line_end: int = Field(ge=1, le=10_000_000, strict=True)
+    evidence: str = Field(min_length=1, max_length=MAX_DRAFT_ACTOR_EVIDENCE_CHARS)
+    fact_clause_id: str = Field(pattern=_SUPPORT_ID)
+    actor_anchor_id: str | None = Field(default=None, pattern=_SUPPORT_ID)
+    binding_kind: Literal[
+        "explicit_named_subject",
+        "narrator_explicit_attribution",
+        "adjacent_zero_subject",
+    ]
+    target_digest: str = Field(pattern=_TARGET_DIGEST)
+    canonical_statement: str = Field(min_length=2, max_length=300)
+
+
+class TargetBoundDraftReviewProposal(TargetBoundDraftProposal):
+    proposal_id: str = Field(pattern=_TARGET_PROPOSAL_ID)
+
+
+class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal[
+        "character-target-bound-draft-review-v2",
+        "character-target-bound-draft-review-v3",
+        "character-target-bound-draft-review-v4",
+    ] = (
+        TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2
+    )
+    prompt_version: Literal[
+        "character-target-bound-draft-review-prompt-v2",
+        "character-target-bound-draft-review-prompt-v3",
+        "character-target-bound-draft-review-prompt-v4",
+        "character-target-bound-draft-review-prompt-v5",
+        "character-target-bound-draft-review-prompt-v6",
+        "character-target-bound-draft-review-prompt-v7",
+        "character-target-bound-draft-review-prompt-v8",
+    ] = (
+        TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
+    )
+    clause_index_version: Literal["draft-actor-clause-index-v1"] = (
+        DRAFT_ACTOR_CLAUSE_INDEX_V1
+    )
+    target: TargetBoundDraftReviewTarget
+    target_digest: str = Field(pattern=_TARGET_DIGEST)
+    review_line_start: int = Field(ge=1, le=10_000_000, strict=True)
+    review_line_end: int = Field(ge=1, le=10_000_000, strict=True)
+    lines: tuple[ScopeReviewLine, ...] = Field(min_length=1, max_length=3)
+    proposals: tuple[TargetBoundDraftReviewProposal, ...] = Field(
+        min_length=1, max_length=MAX_DRAFT_ACTOR_REVIEW_ITEMS
+    )
+
+    @model_validator(mode="after")
+    def validate_target_bound_request(self) -> "TargetBoundDraftReviewRequest":
+        if (
+            self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2
+            and self.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
+            or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3
+            and self.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V7
+            or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
+            and self.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8
+        ):
+            raise ValueError("target_bound_protocol_identity_invalid")
+        if self.target_digest != target_bound_draft_target_digest(self.target):
+            raise ValueError("target_bound_target_digest_invalid")
+        expected_lines = tuple(range(self.review_line_start, self.review_line_end + 1))
+        if (
+            self.review_line_end - self.review_line_start > 2
+            or tuple(line.line_number for line in self.lines) != expected_lines
+            or sum(len(line.clauses) for line in self.lines) > MAX_DRAFT_ACTOR_CLAUSES
+        ):
+            raise ValueError("target_bound_index_invalid")
+        clauses = {
+            clause.support_id: clause
+            for line in self.lines
+            for clause in line.clauses
+        }
+        if len(clauses) != sum(len(line.clauses) for line in self.lines):
+            raise ValueError("target_bound_index_invalid")
+        proposal_ids: set[str] = set()
+        ranges: set[tuple[int, int]] = set()
+        for proposal in self.proposals:
+            fact = clauses.get(proposal.fact_clause_id)
+            anchor = (
+                clauses.get(proposal.actor_anchor_id)
+                if proposal.actor_anchor_id is not None
+                else None
+            )
+            if (
+                proposal.proposal_id in proposal_ids
+                or proposal.proposal_id != _target_bound_proposal_id(proposal)
+                or proposal.source_sha256 != self.content_sha256
+                or proposal.target_digest != self.target_digest
+                or fact is None
+                or not (
+                    self.review_line_start <= proposal.line_start
+                    <= proposal.line_end <= self.review_line_end
+                    and proposal.line_start <= fact.line_number <= proposal.line_end
+                )
+                or proposal.binding_kind == "adjacent_zero_subject"
+                and (
+                    anchor is None
+                    or anchor.support_id == fact.support_id
+                    or not proposal.line_start <= anchor.line_number <= proposal.line_end
+                )
+                or proposal.binding_kind != "adjacent_zero_subject"
+                and proposal.actor_anchor_id is not None
+                or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2
+                and proposal.binding_kind == "explicit_named_subject"
+            ):
+                raise ValueError("target_bound_proposal_invalid")
+            proposal_ids.add(proposal.proposal_id)
+            ranges.add((proposal.line_start, proposal.line_end))
+        if len(ranges) != 1:
+            raise ValueError("target_bound_window_mismatch")
+        if len(_canonical_target_bound_request_bytes(self)) > (
+            MAX_DRAFT_ACTOR_REVIEW_REQUEST_BYTES
+        ):
+            raise ValueError("target_bound_request_too_large")
+        return self
+
+
+TargetBoundReviewVerdict = Literal["supported", "rejected", "uncertain"]
+TargetBoundReviewReason = Literal[
+    "supported",
+    "reviewer_rejected",
+    "reviewer_uncertain",
+    "source_context_veto",
+    "source_mismatch",
+    "response_too_large",
+    "response_invalid",
+    "response_mismatch",
+    "basis_invalid",
+    "slot_conflict",
+]
+TargetBoundSlotConflict = Literal[
+    "actor",
+    "actuality",
+    "statement_relation",
+    "axis_relation",
+    "object_relation",
+    "polarity_relation",
+    "correction_relation",
+    "observation_kind",
+    "object_span",
+    "rejected_without_negative_slot",
+]
+
+
+class TargetBoundDraftReviewItem(BaseModel):
+    """Only enums and frozen IDs may cross back from the model."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    proposal_id: str = Field(pattern=_TARGET_PROPOSAL_ID)
+    verdict: TargetBoundReviewVerdict
+    actor: Literal["proposed", "other", "ambiguous"]
+    actuality: Literal[
+        "asserted", "reported", "hypothetical", "question", "ambiguous"
+    ]
+    statement_relation: Literal["supported", "contradicted", "ambiguous"]
+    axis_relation: Literal[
+        "matches_target", "matches_scoped_axis", "different",
+        "requires_scoped_review", "ambiguous"
+    ]
+    object_relation: Literal[
+        "matches_target", "broader", "narrower", "different",
+        "not_applicable", "ambiguous"
+    ]
+    polarity_relation: Literal["requested", "opposite", "neutral", "ambiguous"]
+    correction_relation: Literal["none", "corrected", "ambiguous"]
+    observation_kind: Literal[
+        "preference_expression",
+        "speech_sample",
+        "action",
+        "decision",
+        "interaction",
+        "state_description",
+    ]
+    # V3/V4 return coordinates, never model-authored object text. Offsets are
+    # codepoint positions inside the frozen fact clause and are converted to
+    # an exact source slice only after every other semantic slot passes.
+    object_start_offset: int | None = Field(default=None, ge=0, le=20_000, strict=True)
+    object_end_offset: int | None = Field(default=None, ge=1, le=20_000, strict=True)
+    basis_ids: tuple[str, ...] = Field(max_length=MAX_DRAFT_ACTOR_CLAUSES)
+
+
+class TargetBoundDraftReviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal[
+        "character-target-bound-draft-review-v2",
+        "character-target-bound-draft-review-v3",
+        "character-target-bound-draft-review-v4",
+    ]
+    request_digest: str = Field(pattern=_SHA256)
+    items: tuple[TargetBoundDraftReviewItem, ...] = Field(
+        max_length=MAX_DRAFT_ACTOR_REVIEW_ITEMS
+    )
+
+
+class TargetBoundDraftReviewDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    proposal_id: str = Field(pattern=_TARGET_PROPOSAL_ID)
+    verdict: TargetBoundReviewVerdict
+    reason: TargetBoundReviewReason
+    basis_ids: tuple[str, ...] = Field(
+        default=(), max_length=MAX_DRAFT_ACTOR_CLAUSES
+    )
+    target_digest: str | None = Field(default=None, pattern=_TARGET_DIGEST)
+    target_ordinal: int | None = Field(default=None, ge=1, le=12, strict=True)
+    observation_kind: Literal[
+        "preference_expression",
+        "speech_sample",
+        "action",
+        "decision",
+        "interaction",
+        "state_description",
+    ] | None = None
+    object_relation: Literal[
+        "matches_target", "broader", "narrower", "not_applicable"
+    ] | None = None
+    observed_object: str | None = Field(default=None, max_length=80)
+    object_basis_id: str | None = Field(default=None, pattern=_SUPPORT_ID)
+    slot_conflicts: tuple[TargetBoundSlotConflict, ...] = Field(
+        default=(), exclude=True
+    )
+
+
+class TargetBoundDraftReviewEvaluation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    request_digest: str = Field(pattern=_SHA256)
+    decisions: tuple[TargetBoundDraftReviewDecision, ...] = Field(
+        max_length=MAX_DRAFT_ACTOR_REVIEW_ITEMS
+    )
+
+
+class TargetBoundDraftReviewBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal[
+        "character-target-bound-draft-review-batch-v2",
+        "character-target-bound-draft-review-batch-v3",
+        "character-target-bound-draft-review-batch-v4",
+    ]
+    batch_digest: str = Field(pattern=_SHA256)
+    responses: tuple[TargetBoundDraftReviewResponse, ...] = Field(
+        min_length=1, max_length=MAX_DRAFT_ACTOR_REVIEW_ITEMS
+    )
+
+
+class TargetBoundDraftReviewBatchEvaluation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    batch_digest: str = Field(pattern=_SHA256)
+    evaluations: tuple[TargetBoundDraftReviewEvaluation, ...] = Field(
+        min_length=1, max_length=MAX_DRAFT_ACTOR_REVIEW_ITEMS
+    )
+
+
+def _target_actor_literals(target: TargetBoundDraftReviewTarget) -> tuple[str, ...]:
+    return (target.character, *target.authorized_aliases)
+
+
+def _compact_actor(value: str) -> str:
+    return re.sub(r"\s+", "", value).casefold()
+
+
+def _exact_actor_occurrences(text: str, target: TargetBoundDraftReviewTarget) -> tuple[str, ...]:
+    compact = _compact_actor(text)
+    return tuple(
+        actor for actor in _target_actor_literals(target)
+        if _compact_actor(actor) in compact
+    )
+
+
+def _unsafe_target_clause(text: str) -> bool:
+    return bool(
+        any(mark in text for mark in _QUOTE_MARKS)
+        or _BRANCH.search(text)
+        or _TARGET_QUESTION.search(text)
+        or _TARGET_UNSAFE_REALITY.search(text)
+        or _TARGET_NON_FACTUAL.search(text)
+    )
+
+
+def _canonical_named_statement(
+    clause: ScopeReviewClause,
+    target: TargetBoundDraftReviewTarget,
+) -> tuple[str, Literal["explicit_named_subject", "narrator_explicit_attribution"]] | None:
+    text = clause.text.strip()
+    if _unsafe_target_clause(text):
+        return None
+    actors = _exact_actor_occurrences(text, target)
+    if len(actors) != 1:
+        return None
+    actor = actors[0]
+    if text.startswith(actor):
+        tail = text[len(actor):]
+        if (
+            not tail
+            or _NON_DIRECT_NAMED_TAIL.match(tail)
+            or _TARGET_NAMED_JOINT_TAIL.match(tail)
+        ):
+            return None
+        statement = target.character + tail
+        kind: Literal[
+            "explicit_named_subject", "narrator_explicit_attribution"
+        ] = "explicit_named_subject"
+    else:
+        match = _TARGET_NARRATOR_ATTRIBUTION.fullmatch(text)
+        if match is None or not match.group("actor").startswith(actor):
+            return None
+        actor_tail = match.group("actor")[len(actor):]
+        if (
+            not actor_tail
+            or _NON_DIRECT_NAMED_TAIL.match(actor_tail)
+            or _TARGET_NAMED_JOINT_TAIL.match(actor_tail)
+        ):
+            return None
+        statement = target.character + actor_tail
+        kind = "narrator_explicit_attribution"
+    if not 2 <= len(statement) <= 300:
+        return None
+    return statement, kind
+
+
+def _zero_subject_statement(
+    clause: ScopeReviewClause,
+    target: TargetBoundDraftReviewTarget,
+) -> str | None:
+    text = clause.text.strip()
+    lead = _TARGET_ZERO_SUBJECT_LEAD.match(text)
+    if (
+        not text
+        or len(text) + len(target.character) > 300
+        or _unsafe_target_clause(text)
+        or _VOICE.search(text)
+        or _JOINT.search(text)
+        or lead is None
+        or _exact_actor_occurrences(text, target)
+    ):
+        return None
+    tail = text[lead.end():].lstrip()
+    if (
+        not tail
+        or tail.startswith(_TARGET_ZERO_SUBJECT_OVERT_PRONOUNS)
+        or (
+            _TARGET_ZERO_SUBJECT_PREDICATE.match(tail) is None
+            and _TARGET_ZERO_SUBJECT_BA_CONSTRUCTION.fullmatch(tail) is None
+        )
+        or _TARGET_EXPLICIT_OTHER_ACTOR.match(tail)
+    ):
+        return None
+    return target.character + text
+
+
+def _target_bound_proposal_payload(
+    proposal: TargetBoundDraftProposal | TargetBoundDraftReviewProposal,
+) -> dict[str, object]:
+    return {
+        name: getattr(proposal, name)
+        for name in TargetBoundDraftProposal.model_fields
+    }
+
+
+def _target_bound_proposal_id(
+    proposal: TargetBoundDraftProposal | TargetBoundDraftReviewProposal,
+) -> str:
+    payload = json.dumps(
+        _target_bound_proposal_payload(proposal),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"tdp_{hashlib.sha256(payload).hexdigest()[:32]}"
+
+
+def build_target_bound_draft_proposals(
+    frozen_content: str,
+    source: ScopeReviewSourceIdentity,
+    target: TargetBoundDraftReviewTarget,
+    *,
+    line_start: int,
+    line_end: int,
+    protocol_version: Literal["v2", "v3", "v4"] = "v2",
+) -> tuple[DraftActorClauseIndex, tuple[TargetBoundDraftProposal, ...]]:
+    """Create bounded structural leads; this function never certifies semantics."""
+
+    if protocol_version not in {"v2", "v3", "v4"}:
+        raise ValueError("target_bound_protocol_invalid")
+    index = build_draft_actor_clause_index(
+        frozen_content, source, line_start=line_start, line_end=line_end
+    )
+    # Recheck at the actor-literal boundary instead of relying exclusively on
+    # model construction.  It keeps restored/tampered model instances from
+    # using a generic pronoun as if it were a unique formal alias.
+    if not _target_actor_literals_are_safe(
+        target.character, target.authorized_aliases
+    ):
+        return index, ()
+    evidence = _exact_evidence(frozen_content, line_start, line_end)
+    if (
+        any(mark in evidence for mark in _QUOTE_MARKS)
+        or _BRANCH.search(evidence)
+        or _TARGET_UNSAFE_REALITY.search(evidence)
+        or _TARGET_QUESTION.search(evidence.rstrip())
+    ):
+        return index, ()
+    digest = target_bound_draft_target_digest(target)
+    ordered = tuple(clause for line in index.lines for clause in line.clauses)
+    proposals: list[TargetBoundDraftProposal] = []
+    named_positions: list[int] = []
+    for position, clause in enumerate(ordered):
+        named = _canonical_named_statement(clause, target)
+        if named is None:
+            continue
+        statement, kind = named
+        # V2 deliberately left ordinary named subjects to the primary
+        # extractor. V3 is a bounded recall fallback, so the same frozen
+        # clause may be proposed when that extractor returned no usable
+        # observation. The independent reviewer still proves all semantics.
+        if kind == "narrator_explicit_attribution" or protocol_version in {"v3", "v4"}:
+            proposals.append(TargetBoundDraftProposal(
+                source_sha256=source.content_sha256,
+                line_start=line_start,
+                line_end=line_end,
+                evidence=evidence,
+                fact_clause_id=clause.support_id,
+                binding_kind=kind,
+                target_digest=digest,
+                canonical_statement=statement,
+            ))
+        named_positions.append(position)
+
+    # A zero-subject fact can inherit only the immediately previous direct
+    # named/narrator clause.  The semantic reviewer must still prove actor,
+    # actuality, axis/object and direction; adjacency is never treated as that
+    # proof by itself.
+    for position in named_positions:
+        next_position = position + 1
+        if next_position >= len(ordered):
+            continue
+        anchor = ordered[position]
+        fact = ordered[next_position]
+        if not (
+            fact.line_number == anchor.line_number
+            or fact.line_number == anchor.line_number + 1
+            and index.lines[0].clauses[-1] == anchor
+            and index.lines[-1].clauses[0] == fact
+        ):
+            continue
+        statement = _zero_subject_statement(fact, target)
+        if statement is None:
+            continue
+        proposals.append(TargetBoundDraftProposal(
+            source_sha256=source.content_sha256,
+            line_start=line_start,
+            line_end=line_end,
+            evidence=evidence,
+            fact_clause_id=fact.support_id,
+            actor_anchor_id=anchor.support_id,
+            binding_kind="adjacent_zero_subject",
+            target_digest=digest,
+            canonical_statement=statement,
+        ))
+    unique: dict[str, TargetBoundDraftProposal] = {}
+    for proposal in proposals:
+        unique.setdefault(_target_bound_proposal_id(proposal), proposal)
+    return index, tuple(unique.values())
+
+
+def _canonical_target_bound_request_bytes(
+    request: TargetBoundDraftReviewRequest,
+) -> bytes:
+    return json.dumps(
+        request.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def target_bound_draft_review_request_digest(
+    request: TargetBoundDraftReviewRequest,
+) -> str:
+    if not isinstance(request, TargetBoundDraftReviewRequest):
+        raise TypeError("target bound draft review request is invalid")
+    return hashlib.sha256(_canonical_target_bound_request_bytes(request)).hexdigest()
+
+
+def target_bound_draft_review_batch_digest(
+    requests: tuple[TargetBoundDraftReviewRequest, ...],
+) -> str:
+    if (
+        type(requests) is not tuple
+        or not 1 <= len(requests) <= MAX_DRAFT_ACTOR_REVIEW_ITEMS
+        or any(not isinstance(request, TargetBoundDraftReviewRequest) for request in requests)
+    ):
+        raise TypeError("target bound draft review batch is invalid")
+    digests = tuple(target_bound_draft_review_request_digest(item) for item in requests)
+    if (
+        len(set(digests)) != len(digests)
+        or len({request.schema_version for request in requests}) != 1
+        or sum(len(request.proposals) for request in requests)
+        > MAX_DRAFT_ACTOR_REVIEW_ITEMS
+    ):
+        raise ValueError("target_bound_batch_duplicate_or_too_large")
+    payload = json.dumps(
+        [request.model_dump(mode="json") for request in requests],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > MAX_DRAFT_ACTOR_REVIEW_BATCH_REQUEST_BYTES:
+        raise ValueError("target_bound_batch_too_large")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def required_target_bound_draft_basis_ids(
+    request: TargetBoundDraftReviewRequest,
+) -> tuple[str, ...]:
+    if not isinstance(request, TargetBoundDraftReviewRequest):
+        raise TypeError("target bound draft review request is invalid")
+    return tuple(
+        clause.support_id for line in request.lines for clause in line.clauses
+    )
+
+
+def build_target_bound_draft_review_request(
+    index: DraftActorClauseIndex,
+    target: TargetBoundDraftReviewTarget,
+    proposals: tuple[TargetBoundDraftProposal, ...],
+    *,
+    frozen_content: str,
+    expected_source: ScopeReviewSourceIdentity,
+    protocol_version: Literal["v2", "v3", "v4"] = "v2",
+) -> TargetBoundDraftReviewRequest:
+    if (
+        not isinstance(index, DraftActorClauseIndex)
+        or not isinstance(target, TargetBoundDraftReviewTarget)
+        or type(proposals) is not tuple
+        or not 1 <= len(proposals) <= MAX_DRAFT_ACTOR_REVIEW_ITEMS
+        or index.source != expected_source
+    ):
+        raise TypeError("target bound draft review input is invalid")
+    rebuilt_index, rebuilt_proposals = build_target_bound_draft_proposals(
+        frozen_content,
+        expected_source,
+        target,
+        line_start=index.line_start,
+        line_end=index.line_end,
+        protocol_version=protocol_version,
+    )
+    requested = {
+        json.dumps(
+            proposal.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ): proposal
+        for proposal in proposals
+    }
+    rebuilt = {
+        json.dumps(
+            proposal.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ): proposal
+        for proposal in rebuilt_proposals
+    }
+    if rebuilt_index != index or set(requested) - set(rebuilt):
+        raise ValueError("target_bound_proposal_not_eligible")
+    review_proposals = tuple(
+        TargetBoundDraftReviewProposal(
+            **requested[key].model_dump(mode="python"),
+            proposal_id=_target_bound_proposal_id(requested[key]),
+        )
+        for key in sorted(requested)
+    )
+    review_end = _review_context_end(
+        frozen_content,
+        line_start=index.line_start,
+        proposal_line_end=index.line_end,
+    )
+    lines = _build_draft_actor_review_lines(
+        frozen_content,
+        expected_source,
+        review_line_start=index.line_start,
+        review_line_end=review_end,
+    )
+    return TargetBoundDraftReviewRequest(
+        **expected_source.model_dump(mode="python"),
+        schema_version=(
+            TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
+            if protocol_version == "v4"
+            else (
+                TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3
+                if protocol_version == "v3"
+                else TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2
+            )
+        ),
+        prompt_version=(
+            TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8
+            if protocol_version == "v4"
+            else (
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V7
+                if protocol_version == "v3"
+                else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
+            )
+        ),
+        target=target,
+        target_digest=target_bound_draft_target_digest(target),
+        review_line_start=index.line_start,
+        review_line_end=review_end,
+        lines=lines,
+        proposals=review_proposals,
+    )
+
+
+def verify_target_bound_draft_review_source(
+    request: TargetBoundDraftReviewRequest,
+    expected_source: ScopeReviewSourceIdentity,
+    *,
+    frozen_content: str,
+) -> bool:
+    if not isinstance(request, TargetBoundDraftReviewRequest):
+        raise TypeError("target bound draft request is invalid")
+    if any(
+        getattr(request, name) != getattr(expected_source, name)
+        for name in ScopeReviewSourceIdentity.model_fields
+    ):
+        return False
+    try:
+        if hashlib.sha256(frozen_content.encode("utf-8")).hexdigest() != request.content_sha256:
+            return False
+        ranges = {(item.line_start, item.line_end) for item in request.proposals}
+        if len(ranges) != 1:
+            return False
+        line_start, line_end = next(iter(ranges))
+        index, eligible = build_target_bound_draft_proposals(
+            frozen_content,
+            expected_source,
+            request.target,
+            line_start=line_start,
+            line_end=line_end,
+            protocol_version=(
+                "v4"
+                if request.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
+                else (
+                    "v3"
+                    if request.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3
+                    else "v2"
+                )
+            ),
+        )
+        eligible_ids = {_target_bound_proposal_id(item) for item in eligible}
+        if any(item.proposal_id not in eligible_ids for item in request.proposals):
+            return False
+        rebuilt = build_target_bound_draft_review_request(
+            index,
+            request.target,
+            tuple(
+                TargetBoundDraftProposal.model_validate(
+                    _target_bound_proposal_payload(item), strict=True
+                )
+                for item in request.proposals
+            ),
+            frozen_content=frozen_content,
+            expected_source=expected_source,
+            protocol_version=(
+                "v4"
+                if request.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
+                else (
+                    "v3"
+                    if request.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3
+                    else "v2"
+                )
+            ),
+        )
+    except (TypeError, ValueError, ValidationError, UnicodeError):
+        return False
+    return rebuilt == request
+
+
+def _uncertain_target_bound_review(
+    request: TargetBoundDraftReviewRequest,
+    reason: TargetBoundReviewReason,
+) -> TargetBoundDraftReviewEvaluation:
+    return TargetBoundDraftReviewEvaluation(
+        request_digest=target_bound_draft_review_request_digest(request),
+        decisions=tuple(
+            TargetBoundDraftReviewDecision(
+                proposal_id=proposal.proposal_id,
+                verdict="uncertain",
+                reason=reason,
+            )
+            for proposal in request.proposals
+        ),
+    )
+
+
+def _target_bound_supported_conflicts(
+    request: TargetBoundDraftReviewRequest,
+    proposal: TargetBoundDraftReviewProposal,
+    item: TargetBoundDraftReviewItem,
+) -> tuple[TargetBoundSlotConflict, ...]:
+    conflicts: list[TargetBoundSlotConflict] = []
+    if item.actor != "proposed":
+        conflicts.append("actor")
+    if item.actuality != "asserted":
+        conflicts.append("actuality")
+    if item.statement_relation != "supported":
+        conflicts.append("statement_relation")
+    v3 = request.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3
+    v4 = request.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
+    semantic_protocol = v3 or v4
+    expected_axis = (
+        "matches_scoped_axis" if semantic_protocol else "requires_scoped_review"
+    ) if request.target.approved_axis_comparison_key is not None else "matches_target"
+    if item.axis_relation != expected_axis:
+        conflicts.append("axis_relation")
+    literal_object_required = _target_bound_literal_object_required(request.target)
+    if semantic_protocol and literal_object_required:
+        object_valid = item.object_relation in {"matches_target", "broader", "narrower"}
+    else:
+        expected_object = (
+            "matches_target"
+            if request.target.dimension in _TARGET_OBJECT_DIMENSIONS
+            and request.target.approved_axis_comparison_key is None
+            else "not_applicable"
+        )
+        object_valid = item.object_relation == expected_object
+    if not object_valid:
+        conflicts.append("object_relation")
+    if item.polarity_relation != "requested":
+        conflicts.append("polarity_relation")
+    if item.correction_relation != "none":
+        conflicts.append("correction_relation")
+    if not item.observation_kind:
+        conflicts.append("observation_kind")
+    if semantic_protocol:
+        object_fields_present = {
+            "object_start_offset", "object_end_offset"
+        } <= item.model_fields_set
+        if literal_object_required:
+            server_binding = (
+                v4
+                and item.object_relation == "matches_target"
+                and target_bound_object_binding_hint(
+                    request, proposal
+                ).mode == "server_unique_target_literal"
+            )
+            if server_binding:
+                object_span_invalid = (
+                    not object_fields_present
+                    or item.object_start_offset is not None
+                    or item.object_end_offset is not None
+                )
+            else:
+                object_span_invalid = (
+                    not object_fields_present
+                    or item.object_start_offset is None
+                    or item.object_end_offset is None
+                    or item.object_start_offset >= item.object_end_offset
+                )
+            if object_span_invalid:
+                conflicts.append("object_span")
+        elif (
+            not object_fields_present
+            or item.object_start_offset is not None
+            or item.object_end_offset is not None
+        ):
+            conflicts.append("object_span")
+    elif item.object_start_offset is not None or item.object_end_offset is not None:
+        conflicts.append("object_span")
+    return tuple(conflicts)
+
+
+def _target_bound_literal_object_required(
+    target: TargetBoundDraftReviewTarget,
+) -> bool:
+    """Return whether the semantic protocols bind a draft object literal.
+
+    An approved scoped value/behavior-boundary axis is already frozen by its
+    definition, applicability scope, positive proposition and comparison key.
+    That comparison-key tail is an axis identity, not necessarily a phrase in
+    the draft.  All other object-bearing dimensions retain the literal span
+    gate unchanged.
+    """
+
+    return bool(
+        target.dimension in _TARGET_OBJECT_DIMENSIONS
+        and not (
+            target.dimension in _TARGET_SCOPED_AXIS_DIMENSIONS
+            and target.approved_axis_comparison_key is not None
+        )
+    )
+
+
+TargetBoundObjectBindingMode = Literal[
+    "server_unique_target_literal", "model_span", "not_applicable"
+]
+
+
+@dataclass(frozen=True, slots=True)
+class TargetBoundObjectBindingHint:
+    """Server-recomputed V4 object-coordinate policy for one proposal."""
+
+    mode: TargetBoundObjectBindingMode
+    start_offset: int | None = None
+    end_offset: int | None = None
+
+
+def _raw_literal_occurrences(text: str, literal: str) -> tuple[int, ...]:
+    """Return raw-codepoint starts, including overlapping occurrences."""
+
+    if not literal:
+        return ()
+    starts: list[int] = []
+    cursor = 0
+    while cursor <= len(text) - len(literal):
+        found = text.find(literal, cursor)
+        if found < 0:
+            break
+        starts.append(found)
+        cursor = found + 1
+    return tuple(starts)
+
+
+def target_bound_object_binding_hint(
+    request: TargetBoundDraftReviewRequest,
+    proposal: TargetBoundDraftReviewProposal,
+) -> TargetBoundObjectBindingHint:
+    """Derive one V4 binding mode only from the frozen request.
+
+    The model-facing hint is never trusted on return.  Evaluation calls this
+    function again against the request's own fact clause and target literal.
+    """
+
+    if (
+        not isinstance(request, TargetBoundDraftReviewRequest)
+        or not isinstance(proposal, TargetBoundDraftReviewProposal)
+        or proposal not in request.proposals
+    ):
+        raise TypeError("target bound object binding input is invalid")
+    if not _target_bound_literal_object_required(request.target):
+        return TargetBoundObjectBindingHint(mode="not_applicable")
+    if request.schema_version != TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4:
+        return TargetBoundObjectBindingHint(mode="model_span")
+    clauses = {
+        clause.support_id: clause.text
+        for line in request.lines
+        for clause in line.clauses
+    }
+    fact = clauses.get(proposal.fact_clause_id)
+    if not isinstance(fact, str):
+        raise ValueError("target bound object binding fact is invalid")
+    occurrences = _raw_literal_occurrences(fact, request.target.key_object)
+    if len(occurrences) != 1:
+        return TargetBoundObjectBindingHint(mode="model_span")
+    start = occurrences[0]
+    return TargetBoundObjectBindingHint(
+        mode="server_unique_target_literal",
+        start_offset=start,
+        end_offset=start + len(request.target.key_object),
+    )
+
+
+def _target_bound_observed_object(
+    request: TargetBoundDraftReviewRequest,
+    proposal: TargetBoundDraftReviewProposal,
+    item: TargetBoundDraftReviewItem,
+) -> tuple[str | None, str | None]:
+    """Validate and bind one exact immutable fact-clause object."""
+
+    if request.schema_version not in {
+        TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3,
+        TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
+    }:
+        return None, None
+    if not _target_bound_literal_object_required(request.target):
+        return None, None
+    clauses = {
+        clause.support_id: clause
+        for line in request.lines
+        for clause in line.clauses
+    }
+    fact = clauses.get(proposal.fact_clause_id)
+    if fact is None:
+        return None, None
+    if request.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4:
+        binding = target_bound_object_binding_hint(request, proposal)
+        if (
+            binding.mode == "server_unique_target_literal"
+            and item.object_relation == "matches_target"
+        ):
+            if (
+                not {"object_start_offset", "object_end_offset"}
+                <= item.model_fields_set
+                or item.object_start_offset is not None
+                or item.object_end_offset is not None
+                or binding.start_offset is None
+                or binding.end_offset is None
+            ):
+                return None, None
+            return request.target.key_object, fact.support_id
+    start = item.object_start_offset
+    end = item.object_end_offset
+    if (
+        type(start) is not int
+        or type(end) is not int
+        or not 0 <= start < end <= len(fact.text)
+    ):
+        return None, None
+    observed = fact.text[start:end]
+    if (
+        observed != observed.strip()
+        or not observed
+        or len(observed) > 80
+        or all(not char.isalnum() for char in observed)
+        or any(char in "\r\n\x00" for char in observed)
+    ):
+        return None, None
+    # When the frozen target object has one unambiguous literal occurrence,
+    # the model-selected span must cover that complete occurrence.  This is a
+    # server-verifiable boundary: a nearby noun fragment cannot self-certify
+    # as a broader/narrower object merely by choosing valid source offsets.
+    literal = request.target.key_object
+    occurrences = _raw_literal_occurrences(fact.text, literal)
+    if request.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3:
+        if len(occurrences) == 1:
+            literal_start = occurrences[0]
+            literal_end = literal_start + len(literal)
+            if start > literal_start or end < literal_end:
+                return None, None
+    elif occurrences and not any(
+        start <= literal_start
+        and end >= literal_start + len(literal)
+        for literal_start in occurrences
+    ):
+        return None, None
+    return observed, fact.support_id
+
+
+def _target_bound_negative_slot(item: TargetBoundDraftReviewItem) -> bool:
+    return (
+        item.actor == "other"
+        or item.actuality in {"reported", "hypothetical", "question"}
+        or item.statement_relation == "contradicted"
+        or item.axis_relation == "different"
+        or item.object_relation == "different"
+        or item.polarity_relation in {"opposite", "neutral"}
+        or item.correction_relation == "corrected"
+    )
+
+
+def _target_bound_source_context_veto(
+    request: TargetBoundDraftReviewRequest,
+    proposal: TargetBoundDraftReviewProposal,
+) -> bool:
+    # Reuse the mature V1 trailing correction checks through a temporary V1
+    # view.  The character/statement fields are server-frozen here, not model
+    # output.  Direct/narrator proposals use their fact as both boundary ends;
+    # the V1 helper only needs the two IDs to locate the trailing union.
+    actor_anchor = proposal.actor_anchor_id or proposal.fact_clause_id
+    view = DraftActorReviewProposal(
+        source_sha256=proposal.source_sha256,
+        line_start=proposal.line_start,
+        line_end=proposal.line_end,
+        evidence=proposal.evidence,
+        target_clause_id=proposal.fact_clause_id,
+        actor_anchor_id=actor_anchor,
+        anchor_kind=(
+            "verified_prior_named_anchor"
+            if proposal.actor_anchor_id is not None
+            else "same_line_corroboration"
+        ),
+        character=request.target.character,
+        statement=proposal.canonical_statement,
+        proposal_id="dap_" + "0" * 32,
+    )
+    return _has_draft_actor_source_context_veto(request, view)
+
+
+def evaluate_target_bound_draft_review(
+    request: TargetBoundDraftReviewRequest,
+    raw_response: str,
+    *,
+    expected_source: ScopeReviewSourceIdentity,
+    frozen_content: str,
+) -> TargetBoundDraftReviewEvaluation:
+    if not isinstance(request, TargetBoundDraftReviewRequest) or not isinstance(raw_response, str):
+        raise TypeError("target bound draft review arguments are invalid")
+    if not verify_target_bound_draft_review_source(
+        request, expected_source, frozen_content=frozen_content
+    ):
+        return _uncertain_target_bound_review(request, "source_mismatch")
+    try:
+        if len(raw_response.encode("utf-8")) > MAX_DRAFT_ACTOR_REVIEW_RESPONSE_BYTES:
+            return _uncertain_target_bound_review(request, "response_too_large")
+        json.loads(
+            raw_response,
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_json_constant,
+        )
+        response = TargetBoundDraftReviewResponse.model_validate_json(
+            raw_response, strict=True
+        )
+    except (UnicodeError, ValidationError, ValueError, TypeError, RecursionError):
+        return _uncertain_target_bound_review(request, "response_invalid")
+    if response.schema_version != request.schema_version:
+        return _uncertain_target_bound_review(request, "response_mismatch")
+    if response.request_digest != target_bound_draft_review_request_digest(request):
+        return _uncertain_target_bound_review(request, "response_mismatch")
+    requested = {item.proposal_id: item for item in request.proposals}
+    returned = {item.proposal_id: item for item in response.items}
+    if len(returned) != len(response.items) or set(returned) != set(requested):
+        return _uncertain_target_bound_review(request, "response_mismatch")
+    basis = required_target_bound_draft_basis_ids(request)
+    allowed = set(basis)
+    decisions: list[TargetBoundDraftReviewDecision] = []
+    for proposal in request.proposals:
+        item = returned[proposal.proposal_id]
+        basis_valid = (
+            len(set(item.basis_ids)) == len(item.basis_ids)
+            and set(item.basis_ids) <= allowed
+            and (item.basis_ids == basis or item.verdict == "uncertain" and not item.basis_ids)
+        )
+        if not basis_valid:
+            decisions.append(TargetBoundDraftReviewDecision(
+                proposal_id=proposal.proposal_id,
+                verdict="uncertain",
+                reason="basis_invalid",
+            ))
+            continue
+        if item.verdict == "supported":
+            conflicts = _target_bound_supported_conflicts(request, proposal, item)
+            observed_object: str | None = None
+            object_basis_id: str | None = None
+            if (
+                not conflicts
+                and request.schema_version in {
+                    TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3,
+                    TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
+                }
+                and _target_bound_literal_object_required(request.target)
+            ):
+                observed_object, object_basis_id = _target_bound_observed_object(
+                    request, proposal, item
+                )
+                if observed_object is None or object_basis_id is None:
+                    conflicts = ("object_span",)
+            if conflicts:
+                decisions.append(TargetBoundDraftReviewDecision(
+                    proposal_id=proposal.proposal_id,
+                    verdict="uncertain",
+                    reason="slot_conflict",
+                    slot_conflicts=conflicts,
+                ))
+            elif _target_bound_source_context_veto(request, proposal):
+                decisions.append(TargetBoundDraftReviewDecision(
+                    proposal_id=proposal.proposal_id,
+                    verdict="uncertain",
+                    reason="source_context_veto",
+                ))
+            else:
+                decisions.append(TargetBoundDraftReviewDecision(
+                    proposal_id=proposal.proposal_id,
+                    verdict="supported",
+                    reason="supported",
+                    basis_ids=basis,
+                    target_digest=request.target_digest,
+                    target_ordinal=request.target.target_ordinal,
+                    observation_kind=item.observation_kind,
+                    object_relation=(
+                        item.object_relation
+                        if item.object_relation in {
+                            "matches_target", "broader", "narrower", "not_applicable"
+                        }
+                        else None
+                    ),
+                    observed_object=observed_object,
+                    object_basis_id=object_basis_id,
+                ))
+        elif item.verdict == "rejected":
+            negative = _target_bound_negative_slot(item)
+            decisions.append(TargetBoundDraftReviewDecision(
+                proposal_id=proposal.proposal_id,
+                verdict="rejected" if negative else "uncertain",
+                reason="reviewer_rejected" if negative else "slot_conflict",
+                basis_ids=basis if negative else (),
+                slot_conflicts=() if negative else ("rejected_without_negative_slot",),
+            ))
+        else:
+            decisions.append(TargetBoundDraftReviewDecision(
+                proposal_id=proposal.proposal_id,
+                verdict="uncertain",
+                reason="reviewer_uncertain",
+            ))
+    return TargetBoundDraftReviewEvaluation(
+        request_digest=target_bound_draft_review_request_digest(request),
+        decisions=tuple(decisions),
+    )
+
+
+def uncertain_target_bound_draft_review_batch(
+    requests: tuple[TargetBoundDraftReviewRequest, ...],
+    reason: TargetBoundReviewReason = "reviewer_uncertain",
+) -> TargetBoundDraftReviewBatchEvaluation:
+    return TargetBoundDraftReviewBatchEvaluation(
+        batch_digest=target_bound_draft_review_batch_digest(requests),
+        evaluations=tuple(
+            _uncertain_target_bound_review(request, reason) for request in requests
+        ),
+    )
+
+
+def evaluate_target_bound_draft_review_batch(
+    requests: tuple[TargetBoundDraftReviewRequest, ...],
+    raw_response: str,
+    *,
+    expected_sources: tuple[ScopeReviewSourceIdentity, ...],
+    frozen_contents: tuple[str, ...],
+) -> TargetBoundDraftReviewBatchEvaluation:
+    digest = target_bound_draft_review_batch_digest(requests)
+    if (
+        not isinstance(raw_response, str)
+        or type(expected_sources) is not tuple
+        or type(frozen_contents) is not tuple
+        or len(expected_sources) != len(requests)
+        or len(frozen_contents) != len(requests)
+    ):
+        raise TypeError("target bound draft batch arguments are invalid")
+    if any(
+        not verify_target_bound_draft_review_source(
+            request, source, frozen_content=content
+        )
+        for request, source, content in zip(requests, expected_sources, frozen_contents)
+    ):
+        return uncertain_target_bound_draft_review_batch(requests, "source_mismatch")
+    try:
+        if len(raw_response.encode("utf-8")) > MAX_DRAFT_ACTOR_REVIEW_RESPONSE_BYTES:
+            return uncertain_target_bound_draft_review_batch(requests, "response_too_large")
+        json.loads(
+            raw_response,
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_json_constant,
+        )
+        response = TargetBoundDraftReviewBatchResponse.model_validate_json(
+            raw_response, strict=True
+        )
+    except (UnicodeError, ValidationError, ValueError, TypeError, RecursionError):
+        return uncertain_target_bound_draft_review_batch(requests, "response_invalid")
+    expected_batch_schema = (
+        TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4
+        if requests[0].schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
+        else (
+            TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V3
+            if requests[0].schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3
+            else TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V2
+        )
+    )
+    if response.schema_version != expected_batch_schema:
+        return uncertain_target_bound_draft_review_batch(requests, "response_mismatch")
+    if requests[0].schema_version in {
+        TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3,
+        TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
+    } and any(
+        item.verdict == "supported"
+        and not {"object_start_offset", "object_end_offset"} <= item.model_fields_set
+        for nested in response.responses
+        for item in nested.items
+    ):
+        return uncertain_target_bound_draft_review_batch(requests, "response_invalid")
+    if response.batch_digest != digest:
+        return uncertain_target_bound_draft_review_batch(requests, "response_mismatch")
+    requested = {
+        target_bound_draft_review_request_digest(request): request
+        for request in requests
+    }
+    returned = {item.request_digest: item for item in response.responses}
+    if len(returned) != len(response.responses) or set(returned) != set(requested):
+        return uncertain_target_bound_draft_review_batch(requests, "response_mismatch")
+    source_map = {
+        target_bound_draft_review_request_digest(request): (source, content)
+        for request, source, content in zip(requests, expected_sources, frozen_contents)
+    }
+    evaluations: list[TargetBoundDraftReviewEvaluation] = []
+    for request in requests:
+        request_digest = target_bound_draft_review_request_digest(request)
+        source, content = source_map[request_digest]
+        evaluations.append(evaluate_target_bound_draft_review(
+            request,
+            returned[request_digest].model_dump_json(),
+            expected_source=source,
+            frozen_content=content,
+        ))
+    return TargetBoundDraftReviewBatchEvaluation(
+        batch_digest=digest,
         evaluations=tuple(evaluations),
     )

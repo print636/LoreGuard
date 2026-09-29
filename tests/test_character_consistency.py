@@ -36,6 +36,7 @@ from app.character_trait_extraction import (
     _evidence_bound_stability,
     _chunk_prompt,
     _matching_target,
+    _polarity_supported,
     _regeneration_prompt,
     _targeted_chunk_prompt,
     CharacterSignal,
@@ -154,6 +155,7 @@ def signal(
     trait_key: str = "社交主动性",
     context: str = "",
     character: str = "林澈",
+    key_object: str | None = None,
 ) -> CharacterSignal:
     return CharacterSignal(
         id=f"cs_{hashlib.sha256(identifier.encode()).hexdigest()[:32]}",
@@ -165,7 +167,11 @@ def signal(
         stability="core" if dimension == "core_personality" else "stable",
         observation_kind=observation_kind,
         context=context,
-        key_object="蜜瓜" if dimension == "preference" else "",
+        key_object=(
+            key_object
+            if key_object is not None
+            else "蜜瓜" if dimension == "preference" else ""
+        ),
         source_kind="draft",
         evidence=span(statement, document_id=f"draft-{line}", line=line),
     )
@@ -177,12 +183,14 @@ def baseline(
     trait_key: str = "社交主动性",
     polarity: str = "negative",
     contexts: tuple[str, ...] = (),
+    key_object: str = "",
 ) -> ConfirmedTraitSnapshot:
     return ConfirmedTraitSnapshot(
         id="ct_baseline",
         character="林澈",
         dimension=dimension,
         trait_key=trait_key,
+        key_object=key_object,
         statement="林澈在陌生人面前很少主动交谈",
         polarity=polarity,
         stability="core" if dimension == "core_personality" else "stable",
@@ -798,8 +806,18 @@ def test_signal_regeneration_prompt_guides_key_object_correction_without_raw_rec
     retry_prompt = provider.calls[1][1]
     assert '"record_index":0' in retry_prompt
     assert '"reason":"key_object_support"' in retry_prompt
-    assert "key_object 逐字出现在 evidence 范围内" in retry_prompt
+    assert "current_state 的 key_object 不得为空" in retry_prompt
+    assert "只从 statement 所在的同一个最小原文事实中逐字复制" in retry_prompt
+    assert "‘连续训练’只是原因" in retry_prompt
+    assert "训练、原因、条件或契机不得冒充" in retry_prompt
+    assert "不得由服务端猜测" in retry_prompt
     assert "private-unsupported-object" not in retry_prompt
+
+
+def test_signal_prompt_distinguishes_current_ability_from_its_cause():
+    assert "current_state 只表示在叙事当前时间已经成立" in CHARACTER_SIGNAL_SYSTEM_PROMPT
+    assert "key_object 是“面对陌生听众公开发言”" in CHARACTER_SIGNAL_SYSTEM_PROMPT
+    assert "不是“连续训练”" in CHARACTER_SIGNAL_SYSTEM_PROMPT
 
 
 @pytest.mark.parametrize(
@@ -3843,6 +3861,676 @@ def test_core_label_scope_subtypes_and_retry_accounting_are_observation_only():
     )
 
 
+def test_postposed_core_label_binds_only_bounded_same_actor_explanation_chain():
+    evidence = (
+        "林澈长期内向谨慎，面对初次见面的陌生人时会先观察，"
+        "不会主动与对方长谈；这是她稳定的核心性格。"
+    )
+    record = valid_signal_record(
+        character="林澈",
+        dimension="core_personality",
+        trait_key="social_initiative",
+        statement="林澈长期内向谨慎",
+        polarity="negative",
+        stability="core",
+        observation_kind="explicit_declaration",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "postposed-core", "profile.md", evidence, 20,
+        "formal_character_profile",
+    ))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].dimension == "core_personality"
+    assert result.signals[0].stability == "core"
+
+
+def test_postposed_core_label_accepts_explicit_training_phase_qualifier():
+    evidence = (
+        "林澈原本长期回避面对陌生听众公开发言，"
+        "这是她训练前稳定的核心性格。"
+    )
+    record = valid_signal_record(
+        character="林澈",
+        dimension="core_personality",
+        trait_key="public_speaking_participation",
+        statement="林澈原本长期回避面对陌生听众公开发言",
+        polarity="negative",
+        stability="core",
+        observation_kind="explicit_declaration",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "phase-core", "profile.md", evidence, 20,
+        "formal_character_profile",
+    ))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].stability == "core"
+
+
+@pytest.mark.parametrize(
+    "middle_and_label",
+    (
+        "喜欢热茶；这是她稳定的核心性格。",
+        "周尧会主动与人长谈；这是她稳定的核心性格。",
+        "“面对陌生人时会先观察”；这是她稳定的核心性格。",
+        "如果面对陌生人就会先观察；这是她稳定的核心性格。",
+        "面对陌生人时会先观察吗；这是她稳定的核心性格。",
+        "她们不会主动长谈；这是她们稳定的核心性格。",
+        "面对陌生人时会先观察；但这不是她的核心性格。",
+    ),
+)
+def test_postposed_core_chain_keeps_unsafe_or_competing_claims_fail_closed(
+    middle_and_label: str,
+):
+    evidence = f"林澈长期内向谨慎，{middle_and_label}"
+    record = valid_signal_record(
+        character="林澈", dimension="core_personality",
+        trait_key="social_initiative", statement="林澈长期内向谨慎",
+        polarity="negative", stability="core", key_object="",
+        source_line_start=20, source_line_end=20, evidence=evidence,
+    )
+    response = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(response, response), settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "unsafe-postposed-core", "profile.md", evidence, 20,
+        "formal_character_profile",
+    ))
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"core_label_scope": 2}
+
+
+def test_core_scope_retry_is_specific_and_directional_key_retry_is_exhaustive():
+    core_prompt = _regeneration_prompt(
+        "source", ("core_label_scope",),
+        failures=(_SignalValidationFailure(0, "core_label_scope"),),
+    )
+    assert "statement 只逐字沿用一个最小定义断言" in core_prompt
+    assert "新主体、引语、转述、假设、问句、否定" in core_prompt
+
+    key_prompt = _regeneration_prompt(
+        "source", ("directional_trait_key",),
+        failures=(_SignalValidationFailure(0, "directional_trait_key"),),
+    )
+    for token in ("anxiety", "avoidance", "dislike", "refusal", "likes", "hates", "detesting"):
+        assert token in key_prompt
+    assert "anxiety_control 改用 composure" in key_prompt
+    assert "anxiety_control 不合格" in CHARACTER_SIGNAL_SYSTEM_PROMPT
+    assert "不得把相邻动作、目的、原因或后果拼接" in (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT
+    )
+
+
+def test_combined_directional_key_and_object_failure_explicitly_allows_empty_retry():
+    prompt = _regeneration_prompt(
+        "source",
+        ("directional_trait_key", "key_object_required"),
+        failures=(
+            _SignalValidationFailure(0, "directional_trait_key"),
+            _SignalValidationFailure(0, "key_object_required"),
+        ),
+    )
+
+    assert "不得为了保留记录而猜测、补写或缩写 trait_key/key_object" in prompt
+    assert '必须严格返回 {"records":[]}' in prompt
+    assert "本任务允许空 records" in prompt
+
+
+def test_directness_axis_understands_negated_indirect_speech_cues():
+    combined = "白榆平常说话简短直接，从不使用冗长的奉承话"
+    assert _polarity_supported(
+        "positive", combined, combined,
+        character="白榆", trait_key="directness",
+    )
+    assert not _polarity_supported(
+        "negative", combined, combined,
+        character="白榆", trait_key="directness",
+    )
+    assert not _polarity_supported(
+        "positive", "白榆并非说话简短直接", "白榆并非说话简短直接",
+        character="白榆", trait_key="directness",
+    )
+    assert _polarity_supported(
+        "negative", "白榆并非说话简短直接", "白榆并非说话简短直接",
+        character="白榆", trait_key="directness",
+    )
+    assert _polarity_supported(
+        "negative", "白榆使用奉承话术迂回回答", "白榆使用奉承话术迂回回答",
+        character="白榆", trait_key="directness",
+    )
+    assert _polarity_supported(
+        "positive", "白榆从不说奉承话", "白榆从不说奉承话",
+        character="白榆", trait_key="directness",
+    )
+    # Similar-looking keys remain model-authored labels, not permission to
+    # activate the server-owned exact-axis vocabulary.
+    assert not _polarity_supported(
+        "positive", combined, combined,
+        character="白榆", trait_key="speech_directness",
+    )
+
+
+def test_formal_directness_record_accepts_two_consistent_surface_facts():
+    evidence = (
+        "白榆平常说话简短直接，从不使用冗长的奉承话；"
+        "这是她稳定的说话方式。"
+    )
+    record = valid_signal_record(
+        character="白榆",
+        dimension="speech_pattern",
+        trait_key="directness",
+        statement="白榆平常说话简短直接，从不使用冗长的奉承话",
+        polarity="positive",
+        stability="stable",
+        observation_kind="explicit_declaration",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "directness-compound", "profile.md", evidence, 20,
+        "formal_character_profile",
+    ))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].trait_key == "directness"
+    assert result.signals[0].polarity == "positive"
+
+
+def test_published_history_never_guesses_a_missing_current_state_object():
+    evidence = "苏弦已经学会控制紧张。"
+    record = valid_signal_record(
+        character="苏弦",
+        dimension="current_state",
+        trait_key="composure",
+        statement="苏弦已经学会控制紧张",
+        polarity="positive",
+        stability="temporary",
+        observation_kind="state_description",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+
+    response = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(response, response), settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "history-missing-state-object", "history.md", evidence, 20,
+        "published_history",
+    ))
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"key_object_required": 2}
+
+
+def test_published_history_never_guesses_a_missing_terminal_ability_object():
+    evidence = "苏弦已经能够面对陌生听众公开发言。"
+    record = valid_signal_record(
+        character="苏弦",
+        dimension="current_state",
+        trait_key="public_speaking_skill",
+        statement="苏弦已经能够面对陌生听众公开发言",
+        polarity="positive",
+        stability="stable",
+        observation_kind="state_description",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+
+    response = json.dumps({"records": [record]}, ensure_ascii=False)
+    result = CharacterSignalExtractor(
+        SequenceProvider(response, response), settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "history-missing-ability-object", "history.md", evidence, 20,
+        "published_history",
+    ))
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"key_object_required": 2}
+
+
+def test_published_history_accepts_explicit_current_state_object_in_own_fact():
+    evidence = "苏弦因完成连续六周的公开主持训练而获得面对陌生听众公开发言的能力。"
+    record = valid_signal_record(
+        character="苏弦",
+        dimension="current_state",
+        trait_key="public_speaking_ability",
+        statement=(
+            "苏弦因完成连续六周的公开主持训练而获得面对陌生听众公开发言的能力"
+        ),
+        polarity="positive",
+        stability="temporary",
+        observation_kind="state_description",
+        key_object="面对陌生听众公开发言",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "history-explicit-state-object", "history.md", evidence, 20,
+        "published_history",
+    ))
+
+    assert result.diagnostics.outcome == "completed"
+    assert len(result.signals) == 1
+    assert result.signals[0].key_object == "面对陌生听众公开发言"
+
+
+@pytest.mark.parametrize(
+    "key_object",
+    (
+        "并发系统优化",
+        "剧本创作",
+        "识别谣言",
+        "开展和平谈判",
+        "及时响应警报",
+        "进行兼容性分析",
+        "跟踪调试",
+        "进行或然推理",
+        "公开发言并回答问题",
+    ),
+)
+def test_explicit_current_ability_slot_does_not_reject_atomic_vocabulary(
+    key_object: str,
+):
+    statement = f"苏弦当前能够{key_object}"
+    evidence = f"{statement}。"
+    record = valid_signal_record(
+        character="苏弦",
+        dimension="current_state",
+        trait_key="current_ability",
+        statement=statement,
+        polarity="positive",
+        stability="temporary",
+        observation_kind="state_description",
+        key_object=key_object,
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+
+    result = CharacterSignalExtractor(
+        FakeProvider(json.dumps({"records": [record]}, ensure_ascii=False)),
+        settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "history-atomic-state-object", "history.md", evidence, 20,
+        "published_history",
+    ))
+
+    assert result.diagnostics.outcome == "completed"
+    assert result.signals[0].key_object == key_object
+
+
+@pytest.mark.parametrize(
+    ("evidence", "statement", "retry_object"),
+    (
+        (
+            "周尧已经学会控制呼吸；苏弦已经学会控制紧张。",
+            "苏弦已经学会控制紧张",
+            "控制呼吸",
+        ),
+        (
+            "苏弦已经学会控制呼吸；苏弦已经学会控制紧张。",
+            "苏弦已经学会控制紧张",
+            "控制呼吸",
+        ),
+        (
+            "记录写道：“周尧已经学会控制呼吸”；苏弦已经学会控制紧张。",
+            "苏弦已经学会控制紧张",
+            "控制呼吸",
+        ),
+        (
+            "如果训练成功，苏弦将学会控制呼吸；苏弦已经学会控制紧张。",
+            "苏弦已经学会控制紧张",
+            "控制呼吸",
+        ),
+        (
+            "苏弦已经能够公开发言并回答问题。",
+            "苏弦已经能够公开发言并回答问题",
+            "公开发言",
+        ),
+    ),
+)
+def test_current_state_retry_cannot_borrow_or_compound_an_object(
+    evidence: str,
+    statement: str,
+    retry_object: str,
+):
+    empty = valid_signal_record(
+        character="苏弦",
+        dimension="current_state",
+        trait_key="current_ability",
+        statement=statement,
+        polarity="positive",
+        stability="temporary",
+        observation_kind="state_description",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    crafted = {**empty, "key_object": retry_object}
+    provider = SequenceProvider(
+        json.dumps({"records": [empty]}, ensure_ascii=False),
+        json.dumps({"records": [crafted]}, ensure_ascii=False),
+    )
+
+    result = CharacterSignalExtractor(provider, settings=settings()).extract(
+        CharacterSignalChunk(
+            "history-object-borrow", "history.md", evidence, 20,
+            "published_history",
+        )
+    )
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {
+        "key_object_required": 1,
+        "key_object_support": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("evidence", "statement", "key_object"),
+    (
+        (
+            "假定：苏弦已经能够面对陌生听众公开发言。",
+            "苏弦已经能够面对陌生听众公开发言",
+            "面对陌生听众公开发言",
+        ),
+        (
+            "苏弦在梦中可以飞行。",
+            "苏弦在梦中可以飞行",
+            "飞行",
+        ),
+        (
+            "苏弦可以公开发言吗。",
+            "苏弦可以公开发言吗",
+            "公开发言",
+        ),
+        (
+            "苏弦可以公开发言；后来证实这只是谣言。",
+            "苏弦可以公开发言",
+            "公开发言",
+        ),
+        (
+            "苏弦若能控制紧张便可公开发言。",
+            "苏弦若能控制紧张便可公开发言",
+            "公开发言",
+        ),
+        (
+            "苏弦只有通过训练才可以公开发言。",
+            "苏弦只有通过训练才可以公开发言",
+            "公开发言",
+        ),
+        (
+            "苏弦明天将能够公开发言。",
+            "苏弦明天将能够公开发言",
+            "公开发言",
+        ),
+        (
+            "苏弦曾经能够公开发言。",
+            "苏弦曾经能够公开发言",
+            "公开发言",
+        ),
+        (
+            "苏弦在梦境中可以飞行。",
+            "苏弦在梦境中可以飞行",
+            "飞行",
+        ),
+        (
+            "苏弦究竟能否公开发言。",
+            "苏弦究竟能否公开发言",
+            "公开发言",
+        ),
+        (
+            "苏弦谎称已经能够公开发言。",
+            "苏弦谎称已经能够公开发言",
+            "公开发言",
+        ),
+        (
+            "苏弦已经能够公开发言；不过她后来再也做不到了。",
+            "苏弦已经能够公开发言",
+            "公开发言",
+        ),
+        (
+            "苏弦已经能够公开发言；后来她失去了这项能力。",
+            "苏弦已经能够公开发言",
+            "公开发言",
+        ),
+    ),
+)
+def test_published_current_state_rejects_nonactual_or_revoked_fact(
+    evidence: str,
+    statement: str,
+    key_object: str,
+):
+    record = valid_signal_record(
+        character="苏弦",
+        dimension="current_state",
+        trait_key="current_ability",
+        statement=statement,
+        polarity="positive",
+        stability="temporary",
+        observation_kind="state_description",
+        key_object=key_object,
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    response = json.dumps({"records": [record]}, ensure_ascii=False)
+
+    result = CharacterSignalExtractor(
+        SequenceProvider(response, response), settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "history-nonactual-state", "history.md", evidence, 20,
+        "published_history",
+    ))
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"key_object_support": 2}
+
+
+def test_published_history_does_not_bind_compound_terminal_ability_object():
+    evidence = "苏弦已经能够公开发言并且回答问题。"
+    record = valid_signal_record(
+        character="苏弦",
+        dimension="current_state",
+        trait_key="public_speaking_skill",
+        statement="苏弦已经能够公开发言并且回答问题",
+        polarity="positive",
+        stability="temporary",
+        observation_kind="state_description",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    response = json.dumps({"records": [record]}, ensure_ascii=False)
+
+    result = CharacterSignalExtractor(
+        SequenceProvider(response, response), settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "history-compound-ability", "history.md", evidence, 20,
+        "published_history",
+    ))
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"key_object_required": 2}
+
+
+@pytest.mark.parametrize(
+    ("evidence", "statement"),
+    (
+        (
+            "苏弦看见林岳已经能够公开发言。",
+            "苏弦看见林岳已经能够公开发言",
+        ),
+        (
+            "苏弦否认“林岳可以飞行”。",
+            "苏弦否认“林岳可以飞行”",
+        ),
+        (
+            "如果林岳离开，苏弦能够公开发言。",
+            "苏弦能够公开发言",
+        ),
+        (
+            "苏弦能够公开发言吗？",
+            "苏弦能够公开发言吗",
+        ),
+        (
+            "苏弦能够公开发言，林岳可以回答问题。",
+            "苏弦能够公开发言，林岳可以回答问题",
+        ),
+        (
+            "苏弦看着林岳，后者可以公开发言。",
+            "后者可以公开发言",
+        ),
+        (
+            "苏弦说林岳可以公开发言。",
+            "林岳可以公开发言",
+        ),
+        (
+            "苏弦认为林岳可以公开发言。",
+            "林岳可以公开发言",
+        ),
+        (
+            "苏弦已经能够控制紧张并平稳呼吸。",
+            "苏弦已经能够控制紧张并平稳呼吸",
+        ),
+        (
+            "苏弦能够公开发言并可以回答问题。",
+            "苏弦能够公开发言并可以回答问题",
+        ),
+    ),
+)
+def test_history_current_state_object_binding_never_reassigns_or_compounds(
+    evidence: str,
+    statement: str,
+):
+    record = valid_signal_record(
+        character="苏弦",
+        dimension="current_state",
+        trait_key="public_speaking_skill",
+        statement=statement,
+        polarity="positive",
+        stability="temporary",
+        observation_kind="state_description",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    response = json.dumps({"records": [record]}, ensure_ascii=False)
+
+    result = CharacterSignalExtractor(
+        SequenceProvider(response, response), settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "unsafe-history-ability-object", "history.md", evidence, 20,
+        "published_history",
+    ))
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"key_object_required": 2}
+
+
+@pytest.mark.parametrize(
+    ("evidence", "statement", "source_kind"),
+    (
+        (
+            "如果苏弦学会控制紧张，她就能登台。",
+            "如果苏弦学会控制紧张",
+            "published_history",
+        ),
+        (
+            "记录写道：“苏弦学会控制紧张”。",
+            "记录写道：“苏弦学会控制紧张”",
+            "published_history",
+        ),
+        (
+            "苏弦学会控制紧张并控制呼吸。",
+            "苏弦学会控制紧张并控制呼吸",
+            "published_history",
+        ),
+        (
+            "苏弦在演练中学会控制紧张。",
+            "苏弦在演练中学会控制紧张",
+            "draft",
+        ),
+    ),
+)
+def test_current_state_object_binding_keeps_unsafe_or_wrong_source_fail_closed(
+    evidence: str,
+    statement: str,
+    source_kind: str,
+):
+    record = valid_signal_record(
+        character="苏弦",
+        dimension="current_state",
+        trait_key="composure",
+        statement=statement,
+        polarity="positive",
+        stability="temporary",
+        observation_kind="state_description",
+        key_object="",
+        source_line_start=20,
+        source_line_end=20,
+        evidence=evidence,
+    )
+    response = json.dumps({"records": [record]}, ensure_ascii=False)
+
+    result = CharacterSignalExtractor(
+        SequenceProvider(response, response), settings=settings(),
+    ).extract(CharacterSignalChunk(
+        "unsafe-history-state-object", "history.md", evidence, 20,
+        source_kind,
+    ))
+
+    assert result.signals == ()
+    assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.reason_counts == {"key_object_required": 2}
+
+
 def test_accepted_model_core_without_literal_label_is_separate_observation():
     evidence = "甲一直谨慎核对记录。"
     record = valid_signal_record(
@@ -4874,6 +5562,299 @@ def test_temporary_or_situational_signal_never_becomes_stable_candidate():
     assert temporary.pending_candidates == ()
 
 
+def test_major_ooc_dimensions_bind_neutral_axis_and_object():
+    trust = stable_trait_identity(
+        "relationship_attitude", "trust_orientation", " 周\u3000尧 "
+    )
+    assert trust == stable_trait_identity(
+        "relationship_attitude", "trust_orientation", "周 尧"
+    )
+    assert trust != stable_trait_identity(
+        "relationship_attitude", "protection_commitment", "周尧"
+    )
+    assert trust != stable_trait_identity(
+        "relationship_attitude", "trust_orientation", "顾岚"
+    )
+    assert stable_trait_identity(
+        "motivation_goal", "pursuit_commitment", "重建北境"
+    ) != stable_trait_identity(
+        "motivation_goal", "preservation_commitment", "重建北境"
+    )
+
+    with pytest.raises(ValueError, match="key_object"):
+        signal(
+            identifier="missing-relationship-object",
+            statement="林澈信任周尧",
+            polarity="positive",
+            observation_kind="interaction",
+            line=20,
+            dimension="relationship_attitude",
+            trait_key="trust_orientation",
+        )
+
+    relationship = signal(
+        identifier="stable-relationship",
+        statement="林澈始终信任周尧",
+        polarity="positive",
+        observation_kind="explicit_declaration",
+        line=21,
+        dimension="relationship_attitude",
+        trait_key="trust_orientation",
+        key_object="周尧",
+    ).model_copy(update={"source_kind": "formal_character_profile"})
+    protection = signal(
+        identifier="stable-protection",
+        statement="林澈始终承诺保护周尧",
+        polarity="positive",
+        observation_kind="explicit_declaration",
+        line=22,
+        dimension="relationship_attitude",
+        trait_key="protection_commitment",
+        key_object="周尧",
+    ).model_copy(update={"source_kind": "formal_character_profile"})
+    temporary_goal = signal(
+        identifier="temporary-goal",
+        statement="林澈今天临时决定寻找钥匙",
+        polarity="positive",
+        observation_kind="decision",
+        line=23,
+        dimension="motivation_goal",
+        trait_key="pursuit_commitment",
+        key_object="寻找钥匙",
+    ).model_copy(
+        update={"source_kind": "formal_character_profile", "stability": "temporary"}
+    )
+    candidates = build_pending_trait_candidates(
+        (relationship, protection, temporary_goal)
+    )
+    assert {row.trait_key for row in candidates} == {
+        "trust_orientation", "protection_commitment"
+    }
+    assert len({row.comparison_key for row in candidates}) == 2
+    assert all(row.key_object == "周尧" for row in candidates)
+    assert "relationship_attitude" in CHARACTER_SIGNAL_SYSTEM_PROMPT
+    assert "motivation_goal" in CHARACTER_SIGNAL_SYSTEM_PROMPT
+    assert "一次任务、临时计划" in CHARACTER_SIGNAL_SYSTEM_PROMPT
+    assert "同一对象的信任、保护等不同关系轴不可互换" in (
+        TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
+    )
+    target = CharacterSignalTarget(
+        character="林澈",
+        dimension="relationship_attitude",
+        trait_key="trust_orientation",
+        comparison_key=stable_trait_identity(
+            "relationship_attitude", "trust_orientation", "周尧"
+        ),
+        baseline_polarity="positive",
+        requested_polarity="negative",
+        baseline_hint="林澈长期信任周尧",
+    )
+    assert target.key_object == "周尧"
+    targeted_packet = _targeted_chunk_prompt(
+        CharacterSignalChunk("draft", "draft.md", "林澈不再信任周尧。", 1, "draft"),
+        (target,),
+    )
+    assert '"key_object":"周尧"' in targeted_packet
+
+
+@pytest.mark.parametrize(
+    ("dimension", "trait_key", "key_object", "subtype"),
+    (
+        (
+            "relationship_attitude",
+            "trust_orientation",
+            "周尧",
+            "relationship_attitude_drift",
+        ),
+        (
+            "motivation_goal",
+            "pursuit_commitment",
+            "重建北境",
+            "motivation_goal_drift",
+        ),
+    ),
+)
+def test_major_ooc_dimensions_keep_single_declaration_as_clue_and_require_two_events(
+    dimension: str,
+    trait_key: str,
+    key_object: str,
+    subtype: str,
+):
+    base = baseline(
+        dimension=dimension,
+        trait_key=trait_key,
+        polarity="positive",
+        key_object=key_object,
+    )
+    first = signal(
+        identifier=f"{dimension}-one",
+        statement=f"林澈第一次明确背离{key_object}",
+        polarity="negative",
+        observation_kind="explicit_declaration",
+        line=31,
+        dimension=dimension,
+        trait_key=trait_key,
+        key_object=key_object,
+    )
+    single = prepare_character_drift(drift_case(first, base=base))
+    assert single.subtype == subtype
+    assert single.reason == "single_behavior_is_not_drift"
+    assert promote_character_drift(single, None).outcome == "needs_confirmation"
+
+    second = signal(
+        identifier=f"{dimension}-two",
+        statement=f"三周后，林澈再次明确背离{key_object}",
+        polarity="negative",
+        observation_kind="state_description",
+        line=72,
+        dimension=dimension,
+        trait_key=trait_key,
+        key_object=key_object,
+    )
+    prepared = prepare_character_drift(drift_case(first, second, base=base))
+    assert prepared.subtype == subtype
+    assert prepared.reason == "two_independent_behaviors"
+    provider = SequenceProvider(
+        json.dumps(
+            {
+                "verdict": "contradicts",
+                "explanation": "两次不同时间发生的行为均明确背离长期基线。",
+                "citations": ["B01", "C01", "C02"],
+                "event_independence": "yes",
+                "independent_event_citations": ["C01", "C02"],
+            },
+            ensure_ascii=False,
+        ),
+        event_identity_payload(),
+    )
+    review = CharacterConsistencyReviewer(provider, settings=settings()).review(
+        prepared
+    )
+    assert review.diagnostics.attempted_calls == 2
+    packet = json.loads(provider.calls[0][1])
+    assert packet["candidate"]["key_object"] == key_object
+    assert {
+        row["key_object"] for row in packet["evidence"] if row["role"] in {"baseline", "current"}
+    } == {key_object}
+    assert "同一中性 trait_key 语义轴且 key_object" in CHARACTER_REVIEW_SYSTEM_PROMPT
+    assert "一次即时任务、临时计划" in CHARACTER_REVIEW_SYSTEM_PROMPT
+    assert promote_character_drift(prepared, review).outcome == "conflict"
+
+
+@pytest.mark.parametrize(
+    ("dimension", "trait_key", "key_object"),
+    (
+        ("relationship_attitude", "trust_orientation", "周尧"),
+        ("motivation_goal", "pursuit_commitment", "重建北境"),
+    ),
+)
+def test_major_ooc_declarations_reject_copied_text_and_same_event(
+    dimension: str,
+    trait_key: str,
+    key_object: str,
+):
+    base = baseline(
+        dimension=dimension,
+        trait_key=trait_key,
+        polarity="positive",
+        key_object=key_object,
+    )
+    first = signal(
+        identifier=f"{dimension}-declared-once",
+        statement=f"林澈明确表示不再坚持{key_object}",
+        polarity="negative",
+        observation_kind="explicit_declaration",
+        line=31,
+        dimension=dimension,
+        trait_key=trait_key,
+        key_object=key_object,
+    )
+    copied = signal(
+        identifier=f"{dimension}-copied-declaration",
+        statement=f"记录再次声称林澈不再坚持{key_object}",
+        polarity="negative",
+        observation_kind="state_description",
+        line=72,
+        dimension=dimension,
+        trait_key=trait_key,
+        key_object=key_object,
+    ).model_copy(
+        update={
+            "evidence": first.evidence.model_copy(
+                update={
+                    "line_start": 72,
+                    "line_end": 72,
+                    "text": f"  林澈明确表示不再坚持{key_object}  ",
+                }
+            )
+        }
+    )
+
+    duplicate = prepare_character_drift(drift_case(first, copied, base=base))
+    assert duplicate.reason == "single_behavior_is_not_drift"
+    assert not duplicate.reviewer_eligible
+    assert promote_character_drift(duplicate, None).outcome == "needs_confirmation"
+
+    later = signal(
+        identifier=f"{dimension}-later-declaration",
+        statement=f"同一场争执中，林澈又宣称反对{key_object}",
+        polarity="negative",
+        observation_kind="state_description",
+        line=72,
+        dimension=dimension,
+        trait_key=trait_key,
+        key_object=key_object,
+    )
+    prepared = prepare_character_drift(drift_case(first, later, base=base))
+    assert prepared.reason == "two_independent_behaviors"
+    assert prepared.reviewer_eligible
+
+    review = CharacterConsistencyReviewer(
+        SequenceProvider(
+            json.dumps(
+                {
+                    "verdict": "contradicts",
+                    "explanation": "两次明确声明均与长期基线相反。",
+                    "citations": ["B01", "C01", "C02"],
+                    "event_independence": "yes",
+                    "independent_event_citations": ["C01", "C02"],
+                },
+                ensure_ascii=False,
+            ),
+            event_identity_payload("same_event"),
+        ),
+        settings=settings(),
+    ).review(prepared)
+    promoted = promote_character_drift(prepared, review)
+    assert review.diagnostics.attempted_calls == 2
+    assert promoted.outcome == "needs_confirmation"
+    assert promoted.reason == "event_identity_same_event"
+
+
+def test_relationship_same_object_different_axis_does_not_match_baseline():
+    prepared = prepare_character_drift(
+        drift_case(
+            signal(
+                identifier="protect-not-trust",
+                statement="林澈拒绝保护周尧",
+                polarity="negative",
+                observation_kind="decision",
+                line=24,
+                dimension="relationship_attitude",
+                trait_key="protection_commitment",
+                key_object="周尧",
+            ),
+            base=baseline(
+                dimension="relationship_attitude",
+                trait_key="trust_orientation",
+                polarity="positive",
+                key_object="周尧",
+            ),
+        )
+    )
+    assert prepared.reason == "no_matching_observation"
+
+
 def test_single_core_behavior_never_becomes_conflict_or_reviewer_candidate():
     prepared = prepare_character_drift(
         drift_case(
@@ -5262,8 +6243,126 @@ def test_adjacent_pair_with_explicit_later_time_boundary_can_be_formal():
     assert provider.calls[1][0] == CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT
     verification_input = json.loads(provider.calls[1][1])
     assert [row["id"] for row in verification_input["evidence"]] == ["C01", "C02"]
+    assert verification_input["explicit_time_boundary"] == {
+        "later_citation": "C02",
+        "boundary_marker": "三小时后",
+    }
     assert "candidate" not in verification_input
     assert promote_character_drift(prepared, review).outcome == "conflict"
+
+
+def test_same_event_cannot_silently_merge_across_explicit_time_boundary():
+    observations = tuple(
+        row.model_copy(
+            update={
+                "evidence": row.evidence.model_copy(
+                    update={"document_id": "next-day-scenes", "document_name": "draft.md"}
+                )
+            }
+        )
+        for row in (
+            signal(
+                identifier="next-day-a",
+                statement="林澈撤回重建申请并转卖修复材料",
+                polarity="positive",
+                observation_kind="decision",
+                line=12,
+            ),
+            signal(
+                identifier="next-day-b",
+                statement="次日，林澈解散重建小组并永久放弃重建海灯塔",
+                polarity="positive",
+                observation_kind="decision",
+                line=13,
+            ),
+        )
+    )
+    prepared = prepare_character_drift(drift_case(*observations))
+    provider = SequenceProvider(
+        json.dumps(
+            {
+                "verdict": "contradicts",
+                "explanation": "两次行为均与长期基线相反。",
+                "citations": ["B01", "C01", "C02"],
+                "event_independence": "yes",
+                "independent_event_citations": ["C01", "C02"],
+            },
+            ensure_ascii=False,
+        ),
+        event_identity_payload("same_event"),
+    )
+
+    review = CharacterConsistencyReviewer(provider, settings=settings()).review(
+        prepared
+    )
+
+    assert json.loads(provider.calls[1][1])["explicit_time_boundary"] == {
+        "later_citation": "C02",
+        "boundary_marker": "次日",
+    }
+    assert review.diagnostics.outcome == "degraded"
+    assert review.diagnostics.reason == "event_identity_time_boundary_unaddressed"
+    result = promote_character_drift(prepared, review)
+    assert result.outcome == "needs_confirmation"
+    assert result.reason == "event_identity_verification_unavailable"
+
+
+def test_same_event_across_time_boundary_requires_grounded_continuation_language():
+    observations = tuple(
+        row.model_copy(
+            update={
+                "evidence": row.evidence.model_copy(
+                    update={"document_id": "continued-scene", "document_name": "draft.md"}
+                )
+            }
+        )
+        for row in (
+            signal(
+                identifier="continued-a",
+                statement="撤离行动在午夜开始",
+                polarity="positive",
+                observation_kind="decision",
+                line=12,
+            ),
+            signal(
+                identifier="continued-b",
+                statement="次日，林澈仍在执行同一场未结束的撤离行动",
+                polarity="positive",
+                observation_kind="decision",
+                line=13,
+            ),
+        )
+    )
+    prepared = prepare_character_drift(drift_case(*observations))
+    first = json.dumps(
+        {
+            "verdict": "contradicts",
+            "explanation": "两条候选需要复核事件边界。",
+            "citations": ["B01", "C01", "C02"],
+            "event_independence": "yes",
+            "independent_event_citations": ["C01", "C02"],
+        },
+        ensure_ascii=False,
+    )
+    second = json.dumps(
+        {
+            "relation": "same_event",
+            "explanation": "虽然推进到次日，原文仍写明这是同一场未结束的撤离行动。",
+            "citations": ["C01", "C02"],
+        },
+        ensure_ascii=False,
+    )
+
+    review = CharacterConsistencyReviewer(
+        SequenceProvider(first, second), settings=settings()
+    ).review(prepared)
+
+    assert review.diagnostics.outcome == "completed"
+    assert review.event_identity_verification is not None
+    assert review.event_identity_verification.relation == "same_event"
+    result = promote_character_drift(prepared, review)
+    assert result.outcome == "needs_confirmation"
+    assert result.reason == "event_identity_same_event"
 
 
 def test_overlapping_source_spans_cannot_be_formal_even_with_time_boundary():
@@ -5352,6 +6451,97 @@ def test_negated_time_phrase_is_not_accepted_as_event_boundary():
             signal(
                 identifier="negated-boundary-b",
                 statement="第二天，并没有到来；这仍是迎新会当天的连续交谈",
+                polarity="positive",
+                observation_kind="interaction",
+                line=13,
+            ),
+        )
+    )
+    prepared = prepare_character_drift(drift_case(*rows))
+
+    assert _adjacent_pair_lacks_explicit_source_boundary(
+        prepared, ("C01", "C02")
+    )
+
+
+@pytest.mark.parametrize(
+    "later_statement",
+    (
+        "次日下午，林澈再次主动与记者交谈",
+        "次日傍晚，林澈再次主动与记者交谈",
+        "次日另一名记者到场时，林澈再次主动交谈",
+        "第二天他再次主动与记者交谈",
+    ),
+)
+def test_natural_chinese_day_openings_are_explicit_event_boundaries(
+    later_statement: str,
+):
+    rows = tuple(
+        row.model_copy(
+            update={
+                "evidence": row.evidence.model_copy(
+                    update={
+                        "document_id": "natural-day-boundary",
+                        "document_name": "draft.md",
+                    }
+                )
+            }
+        )
+        for row in (
+            signal(
+                identifier="natural-day-boundary-a",
+                statement="迎新会上，林澈主动与记者交谈",
+                polarity="positive",
+                observation_kind="interaction",
+                line=12,
+            ),
+            signal(
+                identifier="natural-day-boundary-b",
+                statement=later_statement,
+                polarity="positive",
+                observation_kind="interaction",
+                line=13,
+            ),
+        )
+    )
+    prepared = prepare_character_drift(drift_case(*rows))
+
+    assert not _adjacent_pair_lacks_explicit_source_boundary(
+        prepared, ("C01", "C02")
+    )
+
+
+@pytest.mark.parametrize(
+    "later_statement",
+    (
+        "次日下午并未到来；这仍是迎新会当天的连续交谈",
+        "第二天只是想象中的安排，并没有发生",
+        "次日傍晚只是排练剧本，不是现实事件",
+    ),
+)
+def test_joined_day_openings_still_reject_non_events(later_statement: str):
+    rows = tuple(
+        row.model_copy(
+            update={
+                "evidence": row.evidence.model_copy(
+                    update={
+                        "document_id": "joined-day-non-event",
+                        "document_name": "draft.md",
+                    }
+                )
+            }
+        )
+        for row in (
+            signal(
+                identifier="joined-day-non-event-a",
+                statement="迎新会上，林澈主动与记者交谈",
+                polarity="positive",
+                observation_kind="interaction",
+                line=12,
+            ),
+            signal(
+                identifier="joined-day-non-event-b",
+                statement=later_statement,
                 polarity="positive",
                 observation_kind="interaction",
                 line=13,
@@ -6069,14 +7259,22 @@ def test_signal_empty_package_is_complete_and_not_regenerated():
 
 def test_signal_regeneration_is_not_admitted_without_remaining_token_budget():
     provider = SequenceProvider('{"unexpected":[]}', '{"records":[]}')
-    result = CharacterSignalExtractor(
-        provider,
-        settings=settings(character_signal_token_budget=6_000),
-    ).extract(
-        CharacterSignalChunk(
-            "budget", "profile.md", "林澈一直喜欢蜜瓜。", 10, "formal_character_profile"
+    # Keep this admission-control test independent from ordinary prompt-text
+    # growth.  The first logical call fits, while a full frozen regeneration
+    # package cannot fit in the remaining shared budget.
+    with patch(
+        "app.character_trait_extraction.estimate_issue_evidence_review_tokens",
+        side_effect=(6_000, 7_000),
+    ):
+        result = CharacterSignalExtractor(
+            provider,
+            settings=settings(character_signal_token_budget=6_500),
+        ).extract(
+            CharacterSignalChunk(
+                "budget", "profile.md", "林澈一直喜欢蜜瓜。", 10,
+                "formal_character_profile",
+            )
         )
-    )
 
     assert result.diagnostics.outcome == "degraded"
     assert result.diagnostics.attempted_calls == 1
@@ -6633,7 +7831,9 @@ def test_default_signal_budget_admits_realistic_five_anchor_retry():
 
 
 def test_maximum_signal_chunk_with_five_anchors_fails_closed_when_retry_exceeds_budget():
-    configured = settings()
+    # An explicitly constrained deployment must still fail closed when the
+    # retry metadata and verified anchors no longer fit its configured cap.
+    configured = settings(character_signal_token_budget=22_000)
     lines, valid, invalid = _five_anchor_retry_records()
     original = "\n".join(lines) + "\n"
     content = original + "甲" * (configured.character_signal_max_chunk_chars - len(original))
@@ -6958,14 +8158,14 @@ def test_sensitivity_visibility_is_monotonic_without_upgrading_certainty():
 def test_default_flag_is_off_and_limits_are_internally_bounded():
     defaults = Settings(_env_file=None)
     assert defaults.enable_character_consistency is False
-    assert defaults.per_run_token_budget == 200_000
-    assert defaults.daily_token_budget == 600_000
-    assert defaults.character_consistency_stage_token_budget == 150_000
+    assert defaults.per_run_token_budget == 400_000
+    assert defaults.daily_token_budget == 2_000_000
+    assert defaults.character_consistency_stage_token_budget == 300_000
     assert (
         defaults.per_run_token_budget
         > defaults.character_consistency_stage_token_budget
     )
-    assert defaults.character_signal_token_budget == 22_000
+    assert defaults.character_signal_token_budget == 26_000
     # Two attempts must not share the former 30s envelope: after one 20s read
     # timeout the retry had less than 10s and was predictably weaker. These
     # remain hard per-call/total ceilings rather than unbounded waiting.
@@ -6987,8 +8187,10 @@ def test_default_flag_is_off_and_limits_are_internally_bounded():
         character_signal_token_budget=40_000,
     )
     assert high_quality_trial.character_signal_token_budget == 40_000
+    maximum_stage = settings(character_consistency_stage_token_budget=500_000)
+    assert maximum_stage.character_consistency_stage_token_budget == 500_000
     with pytest.raises(ValueError):
-        settings(character_consistency_stage_token_budget=150_001)
+        settings(character_consistency_stage_token_budget=500_001)
     with pytest.raises(ValueError):
         settings(character_signal_token_budget=40_001)
     with pytest.raises(ValueError):

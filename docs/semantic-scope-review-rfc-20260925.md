@@ -15,7 +15,7 @@ Phase B 只作用于 `formal_character_profile` 的 V5 主抽取；历史、草�
 1. **确定性硬拒。** 沿用严格 JSON/schema、字段白名单、服务端冻结文档、逐字完整证据行、目标分句 `support_id`、对象必须出现在目标分句、行号与代码点偏移、锚点存在且位于同一行目标之前、关系枚举和包大小等不可由语义推断弥补的约束。明确的结构冲突或字段矛盾硬拒，继续使用现有至多一次整包重生成。不要把“句首恰好出现角色名”“中间词未命中白名单”“标签与目标使用不同动词”当作充分语义证明或硬拒理由。
 2. **AI 语义复核。** 结构干净的 V5 正式资料候选均接受一次逐块批量复核，包括 `local` 单句，以覆盖嵌套主体。复核器只看候选涉及的冻结完整原文行、该行全部服务端分句及偏移、目标和候选字段；必须独立判断事实是否为现实断言、目标事实的主体、锚点之间是否换主体、核心/稳定标签是否确实覆盖目标语义轴、偏好对象和方向。不能因为同一行、同一个人名或相似词面就判“支持”。服务端仍做最终比对，复核器不能修改候选、签发来源或直接创建基线。语义 `rejected` 或 `uncertain` 不触发同一模型再生成整包；已核实的其他记录可保留，本块覆盖标为 `partial`。
 
-现已在 `app/character_trait_extraction.py` 区分结构准入与最终结果，并于整包校验后执行复核；`app/character_scope_review.py` 负责来源绑定和响应合同，`app/character_scope_review_provider.py` 负责有上限的模型调用。`app/character_consistency_stage.py` 传递冻结 run input 身份，且只把复核 `supported` 的信号交给 `build_pending_trait_candidates`。普通候选仍须作者确认后才由 `app/service.py` 冻结为可比较基线。
+现已在 `app/character_trait_extraction.py` 区分结构准入与最终结果，并于整包校验后执行复核；`app/character_scope_review.py` 负责来源绑定和响应合同，`app/character_scope_review_provider.py` 负责有上限的模型调用。`app/character_consistency_stage.py` 传递冻结 run input 身份，且只把复核 `supported` 的信号交给 `build_pending_trait_candidates`。semantic-scope v6 / scope-review schema v2 / prompt v4 新增 `postposed_label_summary`，用于“目标事实；这是她/他的核心或稳定……”这类同行后置总结：actor 仍只能锚定目标之前的断言，label 必须是该行最后一个断言且严格位于目标之后；服务端验证坐标、方向和末尾位置，复核器再确认同角色、同轴、层级及目标到标签的完整依据路径。标签之后仍有否定、更正或任何断言，以及新主体、独立语义轴或路径缺口，均失败关闭。普通候选仍须作者确认后才由 `app/service.py` 冻结为可比较基线。
 
 ## 复核合同与来源绑定
 

@@ -69,6 +69,7 @@
       "promote_reason": "model_contradicts",
       "review_verdict": "contradicts",
       "visible": true,
+      "expected_report_class": "formal",
       "min_matched_observation_count": 2,
       "max_matched_observation_count": 3,
       "expected_citation_roles": ["B", "C"],
@@ -101,13 +102,14 @@
         "reported_opposed_preference"
       ],
       "review_outcome": "completed",
-      "final_outcome": "conflict",
-      "promote_reason": "model_contradicts",
+      "final_outcome": "needs_confirmation",
+      "promote_reason": "single_opposition_not_repeated",
       "review_verdict": "contradicts",
       "visible": true,
+      "expected_report_class": "review_clue",
       "matched_observation_count": 1,
       "expected_citation_roles": ["B", "C"],
-      "visible_issue": {
+      "review_clue": {
         "subtype": "stable_preference_conflict",
         "judgement": "contradicts",
         "required_evidence": [
@@ -132,6 +134,7 @@
       "promote_reason": "model_explained",
       "review_verdict": "explained",
       "visible": false,
+      "expected_report_class": "none",
       "min_matched_observation_count": 2,
       "expected_citation_roles": ["B", "C", "G"]
     },
@@ -145,6 +148,7 @@
       "promote_reason": "model_explained",
       "review_verdict": "explained",
       "visible": false,
+      "expected_report_class": "none",
       "matched_observation_count": 2,
       "expected_citation_roles": ["B", "C", "X"]
     },
@@ -156,10 +160,25 @@
       "prepare_reason": "single_behavior_is_not_drift",
       "review_outcome": "not_run",
       "review_verdict": null,
-      "visible": false,
+      "visible": true,
+      "expected_report_class": "review_clue",
       "promote_reason": "single_behavior_is_not_drift",
       "matched_observation_count": 1,
-      "expected_citation_roles": []
+      "expected_citation_roles": [],
+      "review_clue": {
+        "subtype": "core_trait_drift",
+        "judgement": "needs_confirmation",
+        "required_evidence": [
+          {"document_name": "02-character-profiles.md", "line": 20},
+          {"document_name": "04-draft-event-v1.1.md", "line": 22}
+        ],
+        "required_any_evidence": [],
+        "required_any_evidence_min_matches": 0,
+        "allowed_evidence": [
+          {"document_name": "02-character-profiles.md", "line_start": 20, "line_end": 20},
+          {"document_name": "04-draft-event-v1.1.md", "line_start": 22, "line_end": 22}
+        ]
+      }
     }
   ]
 }

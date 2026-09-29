@@ -107,6 +107,28 @@ def test_v5_nonliteral_core_relation_remains_unresolved_after_context_clause():
     )
 
 
+def test_postposed_summary_is_never_admitted_without_independent_scope_review():
+    source = "沈砚一直喜欢甜味栗子糕，这是他长期稳定的食物偏好。"
+    proposed = row(
+        source,
+        "沈砚一直喜欢甜味栗子糕",
+        support_id="L10:A1",
+        actor_anchor_id="",
+        label_anchor_id="L10:A2",
+        scope_relation="postposed_label_summary",
+        character="沈砚",
+        dimension="preference",
+        stability="stable",
+        key_object="甜味栗子糕",
+        trait_key="chestnut_cake_preference",
+    )
+
+    result, _ = extract(source, proposed)
+
+    assert result.signals == result.pending_candidates == ()
+    assert result.diagnostics.reason_counts == {"scope_relation_invalid": 1}
+
+
 def test_v5_literal_core_definition_repeated_across_a_context_clause_is_pending():
     source = "桑衍的核心性格是说明风险，在日常值守中，她会说明风险。"
     proposed = row(

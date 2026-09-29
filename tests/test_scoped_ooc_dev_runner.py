@@ -44,23 +44,70 @@ def test_default_port_fails_before_any_http(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("support_enabled", "segmenter_version", "expected_failure"),
+    ("changes", "missing", "expected_failure"),
     [
-        (False, None, "signal_support_id_v4_not_enabled"),
-        (None, None, "signal_support_id_v4_not_enabled"),
-        (True, "unexpected-version", "signal_support_segmenter_version_mismatch"),
+        (
+            {"signal_support_id_v4": False,
+             "signal_support_segmenter_version": None,
+             "signal_semantic_scope_v5": False,
+             "signal_semantic_scope_version": None,
+             "signal_scope_review_v1": False,
+             "signal_scope_review_schema_version": None,
+             "signal_scope_review_prompt_version": None},
+            (), "signal_support_id_v4_not_enabled",
+        ),
+        ({}, ("signal_support_id_v4",), "signal_support_id_v4_not_enabled"),
+        (
+            {"signal_support_segmenter_version": "unexpected-version"},
+            (), "signal_support_segmenter_version_mismatch",
+        ),
+        (
+            {"signal_semantic_scope_v5": False,
+             "signal_semantic_scope_version": None,
+             "signal_scope_review_v1": False,
+             "signal_scope_review_schema_version": None,
+             "signal_scope_review_prompt_version": None},
+            (), "signal_semantic_scope_v5_not_enabled",
+        ),
+        (
+            {"signal_semantic_scope_version": "unexpected-version"},
+            (), "signal_semantic_scope_version_mismatch",
+        ),
+        (
+            {"signal_scope_review_v1": False,
+             "signal_scope_review_schema_version": None,
+             "signal_scope_review_prompt_version": None},
+            (), "signal_scope_review_v1_not_enabled",
+        ),
+        (
+            {"signal_scope_review_schema_version": "unexpected-version"},
+            (), "signal_scope_review_schema_version_mismatch",
+        ),
+        (
+            {"signal_scope_review_prompt_version": "character-scope-review-prompt-v2"},
+            (), "signal_scope_review_prompt_version_mismatch",
+        ),
     ],
 )
-def test_prepare_requires_v4_health_before_project_create(
-    monkeypatch, support_enabled, segmenter_version, expected_failure,
+def test_prepare_requires_exact_support_binding_health_before_project_create(
+    monkeypatch, changes, missing, expected_failure,
 ):
     fixture = runner.verify_fixture()
-    provenance = {"character_consistency_limits": {
+    limits = {
         "scoped_axis_drift_v1": True,
         "signal_full_line_echo_v2": True,
-        "signal_support_id_v4": support_enabled,
-        "signal_support_segmenter_version": segmenter_version,
-    }}
+        "signal_support_id_v4": True,
+        "signal_support_segmenter_version": "assertion-index-v1",
+        "signal_semantic_scope_v5": True,
+        "signal_semantic_scope_version": "semantic-scope-v6",
+        "signal_scope_review_v1": True,
+        "signal_scope_review_schema_version": "character-scope-review-v2",
+        "signal_scope_review_prompt_version": "character-scope-review-prompt-v4",
+    }
+    limits.update(changes)
+    for field in missing:
+        limits.pop(field)
+    provenance = {"character_consistency_limits": limits}
     health = {"runtime_provenance": provenance, "model": {"configured": True}}
     monkeypatch.setattr(runner.isolation, "_verify_live_isolation",
                         lambda *_args, **_kwargs: {})

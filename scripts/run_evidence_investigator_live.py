@@ -314,7 +314,10 @@ _CHARACTER_CONSISTENCY_SENSITIVITIES = frozenset(
     {"conservative", "balanced", "exploratory"}
 )
 _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS = {
-    "stage_token_budget": (256, 150_000),
+    # Mirror the Settings boundary: deployments may choose a larger finite
+    # quality-first stage budget, while reports above the configured hard cap
+    # still fail closed instead of being trusted as runtime provenance.
+    "stage_token_budget": (256, 500_000),
     "max_chunks_per_run": (1, 128),
     "max_candidates_per_run": (1, 256),
     "signal_max_chunk_chars": (256, 12_000),
@@ -362,7 +365,12 @@ _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_KEY = "signal_support_segmenter_version"
 _CHARACTER_SIGNAL_SUPPORT_SEGMENTER_VERSION = "assertion-index-v1"
 _CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY = "signal_semantic_scope_v5"
 _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY = "signal_semantic_scope_version"
-_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION = "semantic-scope-v5"
+_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION = "semantic-scope-v6"
+_CHARACTER_SIGNAL_SEMANTIC_SCOPE_LEGACY_VERSION = "semantic-scope-v5"
+_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSIONS = frozenset({
+    _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION,
+    _CHARACTER_SIGNAL_SEMANTIC_SCOPE_LEGACY_VERSION,
+})
 _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY = "signal_scope_review_v1"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS = frozenset({
     _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY,
@@ -379,11 +387,13 @@ _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS = frozenset({
     "signal_scope_review_provider_max_response_bytes",
     "signal_scope_review_provider_max_attempts",
 })
-_CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION = "character-scope-review-v1"
-_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v3"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION = "character-scope-review-v2"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_SCHEMA_VERSION = "character-scope-review-v1"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v4"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSIONS = frozenset({
     "character-scope-review-prompt-v1",
     "character-scope-review-prompt-v2",
+    "character-scope-review-prompt-v3",
 })
 _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEY = "history_semantic_review_v1"
 _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS = frozenset({
@@ -433,6 +443,67 @@ _CHARACTER_DRAFT_ACTOR_REVIEW_SIGNAL_PROMPT_VERSION = (
     "character-draft-actor-signal-prompt-v1"
 )
 _CHARACTER_DRAFT_ACTOR_REVIEW_CLAUSE_INDEX_VERSION = "draft-actor-clause-index-v1"
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEY = "target_bound_draft_review_v2"
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEY = "target_bound_draft_review_v3"
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS = frozenset({
+    _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEY,
+    "target_bound_draft_review_schema_version",
+    "target_bound_draft_review_batch_schema_version",
+    "target_bound_draft_review_prompt_version",
+    "target_bound_draft_review_signal_prompt_version",
+    "target_bound_draft_review_clause_index_version",
+})
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS = frozenset({
+    *_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS,
+    _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEY,
+})
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_SCHEMA_VERSION = (
+    "character-target-bound-draft-review-v2"
+)
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_VERSION = (
+    "character-target-bound-draft-review-batch-v2"
+)
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_PROMPT_VERSION = (
+    "character-target-bound-draft-review-prompt-v2"
+)
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_SIGNAL_PROMPT_VERSION = (
+    "character-target-bound-draft-signal-prompt-v2"
+)
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_CLAUSE_INDEX_VERSION = (
+    "draft-actor-clause-index-v1"
+)
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_VERSIONS = {
+    "target_bound_draft_review_schema_version": (
+        "character-target-bound-draft-review-v4"
+    ),
+    "target_bound_draft_review_batch_schema_version": (
+        "character-target-bound-draft-review-batch-v4"
+    ),
+    "target_bound_draft_review_prompt_version": (
+        "character-target-bound-draft-review-prompt-v8"
+    ),
+    "target_bound_draft_review_signal_prompt_version": (
+        "character-target-bound-draft-signal-prompt-v3"
+    ),
+    "target_bound_draft_review_clause_index_version": (
+        "draft-actor-clause-index-v1"
+    ),
+}
+_CHARACTER_OOC_PROTOCOL_KEY = "ooc_protocol_version"
+_CHARACTER_OOC_DIMENSIONS_KEY = "ooc_supported_dimensions"
+_CHARACTER_OOC_PROTOCOL_VERSION = "character-ooc-v1"
+_CHARACTER_OOC_SUPPORTED_DIMENSIONS = (
+    "core_trait",
+    "stable_preference",
+    "speech_pattern",
+    "value_boundary",
+    "relationship_attitude",
+    "motivation_goal",
+)
+_CHARACTER_OOC_PROTOCOL_KEYS = frozenset({
+    _CHARACTER_OOC_PROTOCOL_KEY,
+    _CHARACTER_OOC_DIMENSIONS_KEY,
+})
 _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY = "signal_support_trace_v1"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY = "signal_support_trace_version"
 _CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION = "support-trace-v1"
@@ -452,10 +523,45 @@ _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS = frozenset({
 })
 _CHARACTER_EXPLANATION_REVIEW_KEY = "explanation_review_v1"
 _CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY = "explanation_token_budget"
-_CHARACTER_EXPLANATION_REVIEW_KEYS = frozenset({
+_CHARACTER_EXPLANATION_MAX_WINDOWS_KEY = "explanation_max_windows_per_case"
+_CHARACTER_EXPLANATION_MAX_COMPLETION_KEY = (
+    "explanation_max_completion_tokens"
+)
+_CHARACTER_EXPLANATION_PROVIDER_MAX_COMPLETION_KEY = (
+    "explanation_provider_max_completion_tokens"
+)
+_CHARACTER_EXPLANATION_SCHEMA_VERSION_KEY = (
+    "explanation_review_schema_version"
+)
+_CHARACTER_EXPLANATION_PROMPT_VERSION_KEY = (
+    "explanation_review_prompt_version"
+)
+_CHARACTER_EXPLANATION_SCHEMA_VERSION = "character-explanation-review-v2"
+_CHARACTER_EXPLANATION_PROMPT_VERSION = (
+    "character-explanation-review-prompt-v2"
+)
+_CHARACTER_EXPLANATION_REVIEW_LEGACY_KEYS = frozenset({
     _CHARACTER_EXPLANATION_REVIEW_KEY,
     _CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY,
 })
+_CHARACTER_EXPLANATION_REVIEW_WINDOW_KEYS = (
+    _CHARACTER_EXPLANATION_REVIEW_LEGACY_KEYS
+    | {_CHARACTER_EXPLANATION_MAX_WINDOWS_KEY}
+)
+_CHARACTER_EXPLANATION_REVIEW_V1_KEYS = (
+    _CHARACTER_EXPLANATION_REVIEW_WINDOW_KEYS
+    | {
+        _CHARACTER_EXPLANATION_MAX_COMPLETION_KEY,
+        _CHARACTER_EXPLANATION_PROVIDER_MAX_COMPLETION_KEY,
+    }
+)
+_CHARACTER_EXPLANATION_REVIEW_KEYS = (
+    _CHARACTER_EXPLANATION_REVIEW_V1_KEYS
+    | {
+        _CHARACTER_EXPLANATION_SCHEMA_VERSION_KEY,
+        _CHARACTER_EXPLANATION_PROMPT_VERSION_KEY,
+    }
+)
 _INVESTIGATOR_INTEGER_LIMIT_KEYS = frozenset(
     {
         "max_seeds",
@@ -2877,19 +2983,32 @@ def _valid_character_scope_review_limits(
 
     enabled = limits.get(_CHARACTER_SIGNAL_SCOPE_REVIEW_KEY)
     prompt_version = limits.get("signal_scope_review_prompt_version")
-    allowed_prompt_versions = {_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION}
-    if allow_legacy_prompt_version:
-        allowed_prompt_versions.update(_CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSIONS)
     if (
         type(enabled) is not bool
         or (enabled and limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_KEY) is not True)
-        or limits.get("signal_scope_review_schema_version") != (
-            _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION if enabled else None
+    ):
+        return False
+    if enabled:
+        current_identity = (
+            limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY)
+            == _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION
+            and limits.get("signal_scope_review_schema_version")
+            == _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION
+            and prompt_version == _CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION
         )
-        or (
-            (type(prompt_version) is not str or prompt_version not in allowed_prompt_versions)
-            if enabled else prompt_version is not None
+        legacy_identity = (
+            allow_legacy_prompt_version
+            and limits.get(_CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION_KEY)
+            == _CHARACTER_SIGNAL_SEMANTIC_SCOPE_LEGACY_VERSION
+            and limits.get("signal_scope_review_schema_version")
+            == _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_SCHEMA_VERSION
+            and prompt_version in _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSIONS
         )
+        if not (current_identity or legacy_identity):
+            return False
+    elif (
+        limits.get("signal_scope_review_schema_version") is not None
+        or prompt_version is not None
     ):
         return False
     integers = {
@@ -3109,6 +3228,55 @@ def _valid_character_draft_actor_review_limits(limits: dict[str, Any]) -> bool:
     )
 
 
+def _valid_character_target_bound_draft_review_limits(
+    limits: dict[str, Any],
+) -> bool:
+    """Validate legacy V2 or the current mutually exclusive review identity."""
+
+    present = set(limits) & _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS
+    if present not in (
+        set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS),
+        set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS),
+    ):
+        return False
+    enabled_v2 = limits[_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEY]
+    enabled_v3 = limits.get(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEY, False)
+    if (
+        type(enabled_v2) is not bool
+        or type(enabled_v3) is not bool
+        or enabled_v2 and enabled_v3
+    ):
+        return False
+    enabled = enabled_v2 or enabled_v3
+    if enabled and limits.get(_CHARACTER_DRAFT_ACTOR_REVIEW_KEY) is not True:
+        return False
+    v2_expected = {
+        "target_bound_draft_review_schema_version": (
+            _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_SCHEMA_VERSION
+        ),
+        "target_bound_draft_review_batch_schema_version": (
+            _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_VERSION
+        ),
+        "target_bound_draft_review_prompt_version": (
+            _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_PROMPT_VERSION
+        ),
+        "target_bound_draft_review_signal_prompt_version": (
+            _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_SIGNAL_PROMPT_VERSION
+        ),
+        "target_bound_draft_review_clause_index_version": (
+            _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_CLAUSE_INDEX_VERSION
+        ),
+    }
+    expected = (
+        _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_VERSIONS
+        if enabled_v3 else v2_expected
+    )
+    return all(
+        limits.get(key) == (version if enabled else None)
+        for key, version in expected.items()
+    )
+
+
 def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
     root = value if type(value) is dict else None
     if root is None or set(root) != {
@@ -3194,8 +3362,16 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         set(character_limits) & _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
         if type(character_limits) is dict else set()
     )
+    target_bound_draft_review_keys = (
+        set(character_limits) & _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS
+        if type(character_limits) is dict else set()
+    )
     explanation_review_keys = (
         set(character_limits) & _CHARACTER_EXPLANATION_REVIEW_KEYS
+        if type(character_limits) is dict else set()
+    )
+    ooc_protocol_keys = (
+        set(character_limits) & _CHARACTER_OOC_PROTOCOL_KEYS
         if type(character_limits) is dict else set()
     )
     if (
@@ -3210,15 +3386,29 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         or draft_actor_review_keys not in (
             set(), set(_CHARACTER_DRAFT_ACTOR_REVIEW_KEYS)
         )
+        or target_bound_draft_review_keys not in (
+            set(),
+            set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS),
+            set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS),
+        )
         or explanation_review_keys not in (
-            set(), set(_CHARACTER_EXPLANATION_REVIEW_KEYS)
+            set(),
+            set(_CHARACTER_EXPLANATION_REVIEW_LEGACY_KEYS),
+            set(_CHARACTER_EXPLANATION_REVIEW_WINDOW_KEYS),
+            set(_CHARACTER_EXPLANATION_REVIEW_V1_KEYS),
+            set(_CHARACTER_EXPLANATION_REVIEW_KEYS),
+        )
+        or ooc_protocol_keys not in (
+            set(), set(_CHARACTER_OOC_PROTOCOL_KEYS)
         )
         or set(character_limits) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
             | _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
             | _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
+            | _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS
             | _CHARACTER_EXPLANATION_REVIEW_KEYS
+            | _CHARACTER_OOC_PROTOCOL_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
@@ -3292,6 +3482,20 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
     safe_character_limits: dict[str, Any] = {
         "sensitivity": character_limits["sensitivity"]
     }
+    if ooc_protocol_keys:
+        protocol_version = character_limits[_CHARACTER_OOC_PROTOCOL_KEY]
+        supported_dimensions = character_limits[_CHARACTER_OOC_DIMENSIONS_KEY]
+        if (
+            protocol_version != _CHARACTER_OOC_PROTOCOL_VERSION
+            or type(supported_dimensions) is not list
+            or tuple(supported_dimensions) != _CHARACTER_OOC_SUPPORTED_DIMENSIONS
+            or any(type(dimension) is not str for dimension in supported_dimensions)
+        ):
+            return None
+        safe_character_limits[_CHARACTER_OOC_PROTOCOL_KEY] = protocol_version
+        safe_character_limits[_CHARACTER_OOC_DIMENSIONS_KEY] = list(
+            supported_dimensions
+        )
     if _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY in character_limits:
         variant = character_limits[_CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY]
         if type(variant) is not bool:
@@ -3328,8 +3532,9 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         if (
             type(variant) is not bool
             or (variant and character_limits[_CHARACTER_SIGNAL_SUPPORT_ID_KEY] is not True)
-            or scope_version != (
-                _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION if variant else None
+            or (
+                scope_version not in _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSIONS
+                if variant else scope_version is not None
             )
         ):
             return None
@@ -3355,6 +3560,15 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         safe_character_limits.update({
             key: character_limits[key] for key in _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS
         })
+    if target_bound_draft_review_keys:
+        if not _valid_character_target_bound_draft_review_limits(
+            character_limits
+        ):
+            return None
+        safe_character_limits.update({
+            key: character_limits[key]
+            for key in _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS
+        })
     if explanation_review_keys:
         enabled = character_limits[_CHARACTER_EXPLANATION_REVIEW_KEY]
         token_budget = _safe_int(
@@ -3370,6 +3584,64 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         safe_character_limits[_CHARACTER_EXPLANATION_TOKEN_BUDGET_KEY] = (
             token_budget
         )
+        if _CHARACTER_EXPLANATION_MAX_WINDOWS_KEY in character_limits:
+            max_windows = _safe_int(
+                character_limits[_CHARACTER_EXPLANATION_MAX_WINDOWS_KEY]
+            )
+            if max_windows is None or not 1 <= max_windows <= 64:
+                return None
+            safe_character_limits[_CHARACTER_EXPLANATION_MAX_WINDOWS_KEY] = (
+                max_windows
+            )
+        if _CHARACTER_EXPLANATION_MAX_COMPLETION_KEY in character_limits:
+            max_completion = _safe_int(
+                character_limits[_CHARACTER_EXPLANATION_MAX_COMPLETION_KEY]
+            )
+            provider_max_completion = _safe_int(
+                character_limits[
+                    _CHARACTER_EXPLANATION_PROVIDER_MAX_COMPLETION_KEY
+                ]
+            )
+            if (
+                max_completion is None
+                or not 256 <= max_completion <= 4_096
+                or provider_max_completion is None
+                or not 1 <= provider_max_completion <= max_completion
+                or token_budget < max_completion
+            ):
+                return None
+            safe_character_limits[_CHARACTER_EXPLANATION_MAX_COMPLETION_KEY] = (
+                max_completion
+            )
+            safe_character_limits[
+                _CHARACTER_EXPLANATION_PROVIDER_MAX_COMPLETION_KEY
+            ] = provider_max_completion
+        if _CHARACTER_EXPLANATION_SCHEMA_VERSION_KEY in character_limits:
+            schema_version = character_limits[
+                _CHARACTER_EXPLANATION_SCHEMA_VERSION_KEY
+            ]
+            prompt_version = character_limits[
+                _CHARACTER_EXPLANATION_PROMPT_VERSION_KEY
+            ]
+            if (
+                schema_version
+                != (
+                    _CHARACTER_EXPLANATION_SCHEMA_VERSION
+                    if enabled else None
+                )
+                or prompt_version
+                != (
+                    _CHARACTER_EXPLANATION_PROMPT_VERSION
+                    if enabled else None
+                )
+            ):
+                return None
+            safe_character_limits[
+                _CHARACTER_EXPLANATION_SCHEMA_VERSION_KEY
+            ] = schema_version
+            safe_character_limits[
+                _CHARACTER_EXPLANATION_PROMPT_VERSION_KEY
+            ] = prompt_version
     if _CHARACTER_SIGNAL_SUPPORT_TRACE_KEY in character_limits:
         variant = character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_KEY]
         trace_version = character_limits[_CHARACTER_SIGNAL_SUPPORT_TRACE_VERSION_KEY]
@@ -3426,7 +3698,6 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         ):
             return None
         safe_character_limits[key] = float(parsed)
-
     limits = root.get("investigator_limits")
     if type(limits) is not dict or set(limits) != _INVESTIGATOR_LIMIT_KEYS:
         return None

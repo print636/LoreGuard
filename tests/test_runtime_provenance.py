@@ -8,6 +8,7 @@ import pytest
 
 import scripts.run_evidence_investigator_live as live_runner
 import scripts.run_character_axis_live as axis_live
+import scripts.run_character_consistency_live as character_live_runner
 
 from app.config import Settings
 from app.runtime_provenance import (
@@ -49,13 +50,29 @@ def test_character_explanation_runtime_identity_is_strict_and_legacy_safe():
     enabled = safe_runtime_provenance(configured_settings(
         character_explanation_review_v1=True,
         character_explanation_token_budget=32_000,
+        character_explanation_max_completion_tokens=3_072,
+        character_explanation_max_windows_per_case=37,
     ))
     disabled_limits = disabled["character_consistency_limits"]
     enabled_limits = enabled["character_consistency_limits"]
     assert disabled_limits["explanation_review_v1"] is False
+    assert disabled_limits["explanation_review_schema_version"] is None
+    assert disabled_limits["explanation_review_prompt_version"] is None
     assert disabled_limits["explanation_token_budget"] == 24_000
+    assert disabled_limits["explanation_max_completion_tokens"] == 2_048
+    assert disabled_limits["explanation_provider_max_completion_tokens"] == 1_024
+    assert disabled_limits["explanation_max_windows_per_case"] == 48
     assert enabled_limits["explanation_review_v1"] is True
+    assert enabled_limits["explanation_review_schema_version"] == (
+        "character-explanation-review-v2"
+    )
+    assert enabled_limits["explanation_review_prompt_version"] == (
+        "character-explanation-review-prompt-v2"
+    )
     assert enabled_limits["explanation_token_budget"] == 32_000
+    assert enabled_limits["explanation_max_completion_tokens"] == 3_072
+    assert enabled_limits["explanation_provider_max_completion_tokens"] == 1_024
+    assert enabled_limits["explanation_max_windows_per_case"] == 37
     assert live_runner._safe_runtime_provenance(enabled) == enabled
     assert axis_live._safe_character_runtime_provenance(enabled) is not None
 
@@ -63,23 +80,126 @@ def test_character_explanation_runtime_identity_is_strict_and_legacy_safe():
         {"explanation_review_v1": "true"},
         {"explanation_token_budget": 511},
         {"explanation_token_budget": 60_001},
+        {"explanation_max_windows_per_case": True},
+        {"explanation_max_windows_per_case": 0},
+        {"explanation_max_windows_per_case": 65},
+        {"explanation_max_completion_tokens": True},
+        {"explanation_max_completion_tokens": 255},
+        {"explanation_max_completion_tokens": 4_097},
+        {"explanation_provider_max_completion_tokens": 3_073},
+        {"explanation_review_schema_version": "character-explanation-review-v1"},
+        {"explanation_review_prompt_version": "character-explanation-review-prompt-v1"},
     ):
         malformed = json.loads(json.dumps(enabled))
         malformed["character_consistency_limits"].update(changes)
         assert live_runner._safe_runtime_provenance(malformed) is None
         assert axis_live._safe_character_runtime_provenance(malformed) is None
 
-    for missing in ("explanation_review_v1", "explanation_token_budget"):
+    for missing in (
+        "explanation_review_v1",
+        "explanation_token_budget",
+        "explanation_max_completion_tokens",
+        "explanation_provider_max_completion_tokens",
+        "explanation_review_schema_version",
+        "explanation_review_prompt_version",
+    ):
         malformed = json.loads(json.dumps(enabled))
         del malformed["character_consistency_limits"][missing]
         assert live_runner._safe_runtime_provenance(malformed) is None
         assert axis_live._safe_character_runtime_provenance(malformed) is None
 
-    legacy = json.loads(json.dumps(enabled))
-    del legacy["character_consistency_limits"]["explanation_review_v1"]
-    del legacy["character_consistency_limits"]["explanation_token_budget"]
+    protocol_v1 = json.loads(json.dumps(enabled))
+    del protocol_v1["character_consistency_limits"][
+        "explanation_review_schema_version"
+    ]
+    del protocol_v1["character_consistency_limits"][
+        "explanation_review_prompt_version"
+    ]
+    assert live_runner._safe_runtime_provenance(protocol_v1) == protocol_v1
+    assert axis_live._safe_character_runtime_provenance(protocol_v1) is not None
+    assert not character_live_runner._alpha_runtime_ready(protocol_v1)
+
+    window_legacy = json.loads(json.dumps(protocol_v1))
+    del window_legacy["character_consistency_limits"][
+        "explanation_max_completion_tokens"
+    ]
+    del window_legacy["character_consistency_limits"][
+        "explanation_provider_max_completion_tokens"
+    ]
+    assert live_runner._safe_runtime_provenance(window_legacy) == window_legacy
+    assert axis_live._safe_character_runtime_provenance(window_legacy) is not None
+
+    legacy = json.loads(json.dumps(window_legacy))
+    del legacy["character_consistency_limits"][
+        "explanation_max_windows_per_case"
+    ]
     assert live_runner._safe_runtime_provenance(legacy) == legacy
     assert axis_live._safe_character_runtime_provenance(legacy) is not None
+
+    older_legacy = json.loads(json.dumps(legacy))
+    del older_legacy["character_consistency_limits"]["explanation_review_v1"]
+    del older_legacy["character_consistency_limits"]["explanation_token_budget"]
+    assert live_runner._safe_runtime_provenance(older_legacy) == older_legacy
+    assert axis_live._safe_character_runtime_provenance(older_legacy) is not None
+
+
+def test_character_ooc_protocol_identity_is_strict_digestible_and_legacy_safe(
+    monkeypatch,
+):
+    from app import main, service
+
+    expected_dimensions = [
+        "core_trait",
+        "stable_preference",
+        "speech_pattern",
+        "value_boundary",
+        "relationship_attitude",
+        "motivation_goal",
+    ]
+    shared_settings = configured_settings()
+    monkeypatch.setattr(main, "settings", shared_settings)
+    api_provenance = main.health()["runtime_provenance"]
+    worker_provenance = service.safe_runtime_provenance(shared_settings)
+    limits = api_provenance["character_consistency_limits"]
+
+    assert limits["ooc_protocol_version"] == "character-ooc-v1"
+    assert limits["ooc_supported_dimensions"] == expected_dimensions
+    assert api_provenance == worker_provenance
+    assert live_runner._safe_runtime_provenance(api_provenance) == api_provenance
+    assert axis_live._safe_character_runtime_provenance(api_provenance) is not None
+    assert axis_live._runtime_provenance_digest(api_provenance) == (
+        axis_live._runtime_provenance_digest(worker_provenance)
+    )
+    summary = axis_live._runtime_summary({"runtime_provenance": api_provenance})
+    assert summary["ooc_protocol_version"] == "character-ooc-v1"
+    assert summary["ooc_supported_dimensions"] == expected_dimensions
+    assert summary["explanation_max_windows_per_case"] == 48
+
+    for changes in (
+        {"ooc_protocol_version": "character-ooc-v0"},
+        {"ooc_supported_dimensions": list(reversed(expected_dimensions))},
+        {"ooc_supported_dimensions": expected_dimensions[:-1]},
+        {"ooc_supported_dimensions": tuple(expected_dimensions)},
+    ):
+        malformed = json.loads(json.dumps(api_provenance))
+        malformed["character_consistency_limits"].update(changes)
+        assert live_runner._safe_runtime_provenance(malformed) is None, changes
+        assert axis_live._safe_character_runtime_provenance(malformed) is None, changes
+
+    for missing in ("ooc_protocol_version", "ooc_supported_dimensions"):
+        malformed = json.loads(json.dumps(api_provenance))
+        del malformed["character_consistency_limits"][missing]
+        assert live_runner._safe_runtime_provenance(malformed) is None, missing
+        assert axis_live._safe_character_runtime_provenance(malformed) is None, missing
+
+    legacy = json.loads(json.dumps(api_provenance))
+    del legacy["character_consistency_limits"]["ooc_protocol_version"]
+    del legacy["character_consistency_limits"]["ooc_supported_dimensions"]
+    assert live_runner._safe_runtime_provenance(legacy) == legacy
+    assert axis_live._safe_character_runtime_provenance(legacy) is not None
+    legacy_summary = axis_live._runtime_summary({"runtime_provenance": legacy})
+    assert legacy_summary["ooc_protocol_version"] is None
+    assert legacy_summary["ooc_supported_dimensions"] is None
 
 
 def test_draft_source_excerpt_repair_is_default_off_and_versioned_in_provenance():
@@ -315,7 +435,10 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     assert result["character_consistency_limits"][
         "signal_package_max_attempts"
     ] == 2
-    assert result["character_consistency_limits"]["signal_token_budget"] == 22_000
+    assert result["character_consistency_limits"]["stage_token_budget"] == 300_000
+    assert result["character_consistency_limits"]["per_run_token_budget"] == 400_000
+    assert result["character_consistency_limits"]["daily_token_budget"] == 2_000_000
+    assert result["character_consistency_limits"]["signal_token_budget"] == 26_000
     assert result["character_consistency_limits"][
         "signal_max_completion_tokens"
     ] == 4_096
@@ -367,6 +490,25 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     assert live_runner._safe_runtime_provenance(result) == result
 
 
+def test_character_admission_event_uses_stage_configuration_ceiling():
+    event = {
+        "stage_phase": "targeted_verification",
+        "signal_phase": "initial",
+        "chunk_ordinal": 2,
+        "target_ordinal": 3,
+        "estimated_tokens": 9_000,
+        "available_tokens": 7_000,
+        "stage_remaining_before": 500_000,
+        "reviewer_reserve_tokens": 4_000,
+        "model_calls_before_failure": 0,
+    }
+
+    assert character_live_runner._safe_token_admission_events([event]) == [event]
+    assert character_live_runner._safe_token_admission_events([
+        {**event, "stage_remaining_before": 500_001}
+    ]) == []
+
+
 def _character_limits_digest(settings: Settings) -> str:
     limits = safe_runtime_provenance(settings)["character_consistency_limits"]
     encoded = json.dumps(
@@ -405,6 +547,8 @@ def test_character_runtime_fingerprint_tracks_stage_and_effective_provider_limit
         {"character_drift_timeout_seconds": 20},
         {"character_drift_max_completion_tokens": 900},
         {"character_drift_max_response_bytes": 16_000},
+        {"character_explanation_max_windows_per_case": 47},
+        {"character_explanation_max_completion_tokens": 3_000},
         {"provider_total_deadline_seconds": 20},
         {"provider_max_completion_tokens": 512},
         {"provider_max_response_bytes": 16_000},
@@ -529,7 +673,7 @@ def test_v5_runtime_identity_and_both_runner_boundaries_are_versioned_and_strict
     v5_limits = v5["character_consistency_limits"]
     assert v5_limits["signal_support_id_v4"] is True
     assert v5_limits["signal_semantic_scope_v5"] is True
-    assert v5_limits["signal_semantic_scope_version"] == "semantic-scope-v5"
+    assert v5_limits["signal_semantic_scope_version"] == "semantic-scope-v6"
     assert live_runner._safe_runtime_provenance(v5) == v5
     assert axis_live._safe_character_runtime_provenance(v5) is not None
     assert axis_live._runtime_provenance_digest(v5) != axis_live._runtime_provenance_digest(v4)
@@ -538,7 +682,7 @@ def test_v5_runtime_identity_and_both_runner_boundaries_are_versioned_and_strict
     ] is False
     summary = axis_live._runtime_summary({"runtime_provenance": v5})
     assert summary["signal_semantic_scope_v5"] is True
-    assert summary["signal_semantic_scope_version"] == "semantic-scope-v5"
+    assert summary["signal_semantic_scope_version"] == "semantic-scope-v6"
     assert "character_signal_semantic_scope_v5" not in json.dumps(v5)
     assert "test-only-secret" not in json.dumps(v5)
 
@@ -596,8 +740,8 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     ))
     limits = on["character_consistency_limits"]
     assert limits["signal_scope_review_v1"] is True
-    assert limits["signal_scope_review_schema_version"] == "character-scope-review-v1"
-    assert limits["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v3"
+    assert limits["signal_scope_review_schema_version"] == "character-scope-review-v2"
+    assert limits["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v4"
     assert limits["signal_scope_review_token_reserve"] == 6_000
     assert limits["signal_scope_review_completion_tokens"] == 2_048
     assert limits["signal_scope_review_max_response_bytes"] == 32_768
@@ -612,8 +756,8 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     assert axis_live._runtime_provenance_digest(on) != axis_live._runtime_provenance_digest(off)
     summary = axis_live._runtime_summary({"runtime_provenance": on})
     assert summary["signal_scope_review_v1"] is True
-    assert summary["signal_scope_review_schema_version"] == "character-scope-review-v1"
-    assert summary["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v3"
+    assert summary["signal_scope_review_schema_version"] == "character-scope-review-v2"
+    assert summary["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v4"
     assert summary["signal_scope_review_limits"][
         "signal_scope_review_provider_max_completion_tokens"
     ] == 1_024
@@ -623,9 +767,14 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     for old_prompt_version in (
         "character-scope-review-prompt-v1",
         "character-scope-review-prompt-v2",
+        "character-scope-review-prompt-v3",
     ):
         old_report = json.loads(json.dumps(on))
         old_limits = old_report["character_consistency_limits"]
+        old_limits["signal_semantic_scope_version"] = "semantic-scope-v5"
+        old_limits["signal_scope_review_schema_version"] = (
+            "character-scope-review-v1"
+        )
         old_limits["signal_scope_review_prompt_version"] = old_prompt_version
         assert live_runner._safe_runtime_provenance(old_report) == old_report
         old_axis = axis_live._safe_character_runtime_provenance(old_report)
