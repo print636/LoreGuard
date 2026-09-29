@@ -271,6 +271,14 @@ The [sanitized Alpha v20 checkpoint](docs/character-ooc-alpha-v20-checkpoint-202
 records one V4 / Prompt V8 real-model workflow: all eight known DEV cases and
 20/20 required gates matched, with no independent repeat trial. It remains a
 developer-visible synthetic result, not blind, production, or open-text evidence.
+The protocol and offline tools for the next step are documented in
+[Character OOC human closed evaluation V1](docs/character-ooc-closed-evaluation-v1.md).
+The 36-case public freeze and separate A/B offline annotation pages now exist
+outside the repository. Two real humans have not yet completed the independent
+annotations or adjudication, and no real-model sealed run, formal score, or
+failure-driven repair has been completed. Formal scoring accepts only the
+runner-native sealed HTTP report bound to the exact frozen run config, never a
+standalone extracted prediction artifact; this is not a completed blind test.
 The later [fixed DEV v2 prompt A/B checkpoint](docs/character-axis-v2-dev-checkpoint-20260924.md)
 records six independent, developer-visible trials. Fewer evidence-excerpt
 rejections did not complete the review workflow: all 30 case evaluations
