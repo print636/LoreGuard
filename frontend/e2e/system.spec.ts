@@ -122,12 +122,18 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
   await page.getByLabel("上传文档类型").selectOption("canon");
   await chooseDocx(page, "world.docx", worldDocx);
   await page.getByRole("button", { name: "上传 1 个文件" }).click();
-  await expect(page.getByRole("cell", { name: "world.docx" })).toBeVisible();
+  await expect(
+    page.getByRole("list", { name: "文稿列表", exact: true })
+      .getByRole("button", { name: /^world\.docx/ }),
+  ).toBeVisible();
 
   await page.getByLabel("上传文档类型").selectOption("chapter");
   await chooseDocx(page, "chapter.docx", chapterDocx);
   await page.getByRole("button", { name: "上传 1 个文件" }).click();
-  await expect(page.getByRole("cell", { name: "chapter.docx" })).toBeVisible();
+  await expect(
+    page.getByRole("list", { name: "文稿列表", exact: true })
+      .getByRole("button", { name: /^chapter\.docx/ }),
+  ).toBeVisible();
 
   await confirmPublishedDocument(page, "world.docx", "canon");
   await confirmPublishedDocument(page, "chapter.docx", "chapter");

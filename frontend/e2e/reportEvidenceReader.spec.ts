@@ -11,7 +11,7 @@ const traitIssueId = "issue-trait-source";
 const reviewClueId = "71475dcc-1d0c-4dd2-a014-06941adf1bf3";
 const provisionalClueId = `pc_${"a".repeat(32)}`;
 const now = "2026-10-02T00:00:00Z";
-const screenshotFolder = "C:/Users/dell/Desktop/doc/creative-media/LoreGuard-报告原文-v1";
+const screenshotFolder = `${process.env.LOREGUARD_E2E_SCREENSHOT_DIR ?? "../artifacts/playwright/screenshots"}/report-evidence-v1`;
 type EvidenceKind = "issue" | "review_clue" | "provisional_clue";
 type Evidence = { document_id: string; document_name: string; line_start: number; line_end: number; text: string };
 

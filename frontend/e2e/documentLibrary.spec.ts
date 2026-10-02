@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 const projectId = "document-library-project";
 const root = `/api/v1/projects/${projectId}`;
 const now = "2026-10-02T00:00:00Z";
-const screenshotFolder = "C:/Users/dell/Desktop/doc/creative-media/LoreGuard-资料库-v1";
+const screenshotFolder = `${process.env.LOREGUARD_E2E_SCREENSHOT_DIR ?? "../artifacts/playwright/screenshots"}/document-library-v1`;
 
 type DocumentFixture = {
   id: string;
