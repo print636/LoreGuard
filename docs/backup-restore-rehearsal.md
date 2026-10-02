@@ -125,3 +125,26 @@ CI 是否实际通过以对应提交的运行结果为准；新增 job 本身不
 约束的两种纯结构表达式分别复现其源／恢复 SHA-256，确认具体差异为上述数组 cast
 位置变化，随后只修此形态并增加真实变更不能被吞掉的负例。此定位本身仍不是恢复验收
 通过；最终成绩须以修复后的同一真实 CI 入口结果为准。
+
+### 已通过的隔离演练
+
+受测代码提交 `c0b7e3846ed2f66f2c59950eb358da79012cb825` 的
+[真实恢复 CI job](https://github.com/print636/LoreGuard/actions/runs/37017664079/job/110872430673)
+已通过，结果为 `status=passed`、`stage=complete`、`failure_code=null`：
+
+- 迁移 head：`0023_major_ooc_dimensions`；源／恢复 30 张 public 表的行数与数据指纹相等，
+  列、索引、约束、触发器及扩展通过上述有版本的严格结构比较。
+- 恢复后的冻结文档版本、UTF-8 正文、合成凭据解密与 SQL 工作区归属检查通过；
+  这不是恢复后的 HTTP 账户授权或真实账户 Key 验证。
+- 6 项约束拒绝探测通过，探测事务回滚后再次确认数据及结构指纹不变。
+- dump 大小：115734 bytes；SHA-256：
+  `ee188cbd6a3b0b64985faa14f6482a62bd077c7bcbaa6e47de3afa5944f1ff27`。
+- 容器清理：`removed_owned_container_and_its_anonymous_volumes`；仅清理本次专用容器
+  与匿名卷，演练 dump／报告只位于 CI 的临时工作目录，未上传作为 artifact。
+- 工具保护、编排、窄结构归一化和真实变更负例的集中受影响单元测试：37 项通过。
+
+该证据只支持合成隔离库的迁移和恢复演练，不代表生产旧库迁移、正式备份保留策略、
+真实密钥托管恢复、公网部署验收或角色 OOC 准确率。
+
+同一受测代码提交的[完整 CI](https://github.com/print636/LoreGuard/actions/runs/37017664079)
+五项也全部通过；后续仅补验收文档的提交不改变该受测代码。
