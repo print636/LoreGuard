@@ -142,6 +142,39 @@ def test_canonical_row_fingerprints_include_json_values_and_unicode():
     assert rehearsal.fingerprint_rows(first) != rehearsal.fingerprint_rows(changed)
 
 
+def test_snapshot_diagnostic_keeps_names_counts_hashes_but_no_sql_or_row_values():
+    private = "PRIVATE-SYNTHETIC-PASSWORD-OR-STORY-MUST-NOT-APPEAR"
+    entries = rehearsal.schema_entry_fingerprints(
+        indexes=[("documents", "index_name", f"CREATE INDEX ... {private}")],
+        constraints=[("documents", "constraint_name", "c", f"CHECK (...) {private}")],
+        columns=[("documents", "content", "text", "text", "YES", private)],
+        triggers=[], extensions=[("vector", "synthetic-version")],
+    )
+    source = {
+        "tables": {"documents": {"row_count": 2, "sha256": rehearsal.fingerprint_rows([private])}},
+        "constraints_sha256": "a" * 64, "schema_entries": entries,
+    }
+    restored_entries = {key: dict(value) for key, value in entries.items()}
+    restored_entries["constraints"]["documents.constraint_name"] = "b" * 64
+    restored = {
+        "tables": {"documents": {"row_count": 3, "sha256": "c" * 64}},
+        "constraints_sha256": "b" * 64, "schema_entries": restored_entries,
+    }
+    diagnostic = rehearsal.snapshot_difference(source, restored)
+    assert diagnostic["changed_sections"] == ["constraints_sha256", "schema_entries", "tables"]
+    assert diagnostic["table_change_count"] == diagnostic["schema_change_count"] == 1
+    assert diagnostic["table_changes"][0]["name"] == "documents"
+    assert diagnostic["table_changes"][0]["source_row_count"] == 2
+    assert diagnostic["table_changes"][0]["restored_row_count"] == 3
+    assert diagnostic["schema_changes"][0]["name"] == "documents.constraint_name"
+    assert diagnostic["schema_changes"][0]["section"] == "constraints"
+    serialized = json.dumps({"entries": entries, "diagnostic": diagnostic})
+    assert private not in serialized and "CREATE INDEX" not in serialized and "CHECK (" not in serialized
+    assert rehearsal.snapshot_difference(source, source)["changed_sections"] == []
+    limited = rehearsal.snapshot_difference(source, restored, limit=0)
+    assert limited["schema_change_count"] == 1 and limited["schema_changes"] == []
+
+
 @pytest.mark.parametrize("host", ("ssh://some-server", "tcp://127.0.0.1:2375", "tcp://10.0.0.1:2376", "npipe:////other-server/pipe/docker_engine"))
 def test_remote_docker_transport_is_rejected_before_daemon_or_database_use(monkeypatch, host):
     monkeypatch.delenv("DOCKER_CONTEXT", raising=False)

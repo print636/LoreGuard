@@ -345,6 +345,48 @@ def fingerprint_rows(rows: list[Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def schema_entry_fingerprints(*, indexes, constraints, columns, triggers, extensions) -> dict:
+    """Keep names and hashes only; never return SQL definitions/defaults."""
+    return {
+        "indexes": {f"{row[0]}.{row[1]}": fingerprint_rows([row]) for row in indexes},
+        "constraints": {f"{row[0]}.{row[1]}": fingerprint_rows([row]) for row in constraints},
+        "columns": {f"{row[0]}.{row[1]}": fingerprint_rows([row]) for row in columns},
+        "triggers": {f"{row[0]}.{row[1]}": fingerprint_rows([row]) for row in triggers},
+        "extensions": {row[0]: fingerprint_rows([row]) for row in extensions},
+    }
+
+
+def snapshot_difference(source: dict, restored: dict, *, limit: int = 20) -> dict:
+    """Bounded safe diagnostics, without weakening exact snapshot comparison."""
+    changed_sections = [key for key in sorted(set(source) | set(restored)) if source.get(key) != restored.get(key)]
+    source_tables, restored_tables = source.get("tables", {}), restored.get("tables", {})
+    table_changes = []
+    for name in sorted(set(source_tables) | set(restored_tables)):
+        before, after = source_tables.get(name, {}), restored_tables.get(name, {})
+        if before != after:
+            table_changes.append({
+                "name": name, "source_row_count": before.get("row_count"),
+                "restored_row_count": after.get("row_count"),
+                "source_sha256": before.get("sha256"), "restored_sha256": after.get("sha256"),
+            })
+    source_schema, restored_schema = source.get("schema_entries", {}), restored.get("schema_entries", {})
+    schema_changes = []
+    for section in sorted(set(source_schema) | set(restored_schema)):
+        before, after = source_schema.get(section, {}), restored_schema.get(section, {})
+        for name in sorted(set(before) | set(after)):
+            if before.get(name) != after.get(name):
+                schema_changes.append({
+                    "section": section, "name": name,
+                    "source_sha256": before.get(name), "restored_sha256": after.get(name),
+                })
+    return {
+        "changed_sections": changed_sections,
+        "table_change_count": len(table_changes), "schema_change_count": len(schema_changes),
+        "table_changes": table_changes[:limit], "schema_changes": schema_changes[:limit],
+        "detail_limit": limit,
+    }
+
+
 def _snapshot(connection) -> dict:
     from psycopg import sql
 
@@ -381,6 +423,10 @@ def _snapshot(connection) -> dict:
         "columns_sha256": fingerprint_rows(columns),
         "triggers_sha256": fingerprint_rows(triggers),
         "extensions_sha256": fingerprint_rows(extensions),
+        "schema_entries": schema_entry_fingerprints(
+            indexes=indexes, constraints=constraints, columns=columns,
+            triggers=triggers, extensions=extensions,
+        ),
     }
 
 
@@ -520,6 +566,7 @@ def run_rehearsal(repo_root: Path = REPO_ROOT) -> dict:
             _seed(source, key)
             _verify_data(source, head, key)
             source_snapshot = _snapshot(source)
+            report["source_fingerprints"] = source_snapshot
             # No DROP/clean operation: the restored target is newly created here.
             source.execute(f"CREATE DATABASE {RESTORED_DB}")
         report["stage"] = "dump"
@@ -545,11 +592,17 @@ def run_rehearsal(repo_root: Path = REPO_ROOT) -> dict:
         ], password=password, input_bytes=dump, code="restore_failed", timeout=120)
         report["stage"] = "restored_verification"
         with connect_rehearsal(port, password, RESTORED_DB) as restored:
-            if _snapshot(restored) != source_snapshot:
+            restored_snapshot = _snapshot(restored)
+            report["restored_fingerprints"] = restored_snapshot
+            if restored_snapshot != source_snapshot:
+                report["snapshot_difference"] = snapshot_difference(source_snapshot, restored_snapshot)
                 raise RehearsalError("restored_schema_or_data_mismatch")
             report["verification"] = _verify_data(restored, head, key)
             report["verification"]["constraint_probes"] = _verify_constraints(restored)
-            if _snapshot(restored) != source_snapshot:
+            after_probes = _snapshot(restored)
+            if after_probes != source_snapshot:
+                report["restored_fingerprints"] = after_probes
+                report["snapshot_difference"] = snapshot_difference(source_snapshot, after_probes)
                 raise RehearsalError("constraint_probe_modified_restored_data")
         report["source_and_restored_fingerprints"] = source_snapshot
         report["status"] = "passed"
@@ -576,6 +629,8 @@ def run_rehearsal(repo_root: Path = REPO_ROOT) -> dict:
         "stage": report["stage"], "container_cleanup": report["container_cleanup"],
         "image_id": report.get("image_id"), "report": str(artifact / "report.json"),
     }
+    if report.get("snapshot_difference") is not None:
+        summary["snapshot_difference"] = report["snapshot_difference"]
     if report["status"] == "passed":
         summary.update({
             "migration_head": report["verification"]["migration_head"],
