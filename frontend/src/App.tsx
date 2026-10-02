@@ -2791,7 +2791,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     { replace },
                   )
                 }
-                onDocumentsChanged={async () => { await loadProject(project, false, run); }}
+                onDocumentsChanged={() => loadProject(project, false, run)}
               />
             </Suspense>
           )}

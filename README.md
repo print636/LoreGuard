@@ -1,5 +1,10 @@
 # LoreGuard
 
+See [current delivery status and remaining work](docs/current-stage-status.md) for
+the latest product contracts, recovery boundaries, pending human evaluation and
+separately scoped enhancements/deployment work. Historical model results remain
+bound to their original builds and configurations.
+
 LoreGuard is an evidence-first narrative consistency review platform for game writers and narrative designers. It extracts versioned facts and events from authorized story material, detects deterministic continuity conflicts, and optionally augments its baseline extractor with a validated OpenAI-compatible provider. Provider failures fall back to the baseline; model and baseline records are deduplicated and bound to source lines. A separate default-off Evidence Investigator uses provider-native function calls to search and read authorized snapshots before submitting one untrusted candidate or abstaining; deterministic promotion remains the only path from that candidate to an issue.
 
 See [README.zh-CN.md](README.zh-CN.md) for the full guide. Deployment

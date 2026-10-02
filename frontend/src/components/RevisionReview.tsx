@@ -5,8 +5,9 @@ import {
   apiJsonIdempotent,
   apiUrl,
   createBoundedSessionProbe,
+  SESSION_EXPIRED_EVENT,
 } from "../api/client";
-import { documentContext, documentRoles, type DocumentRole } from "../documentContext";
+import { documentRoles, type DocumentRole } from "../documentContext";
 import {
   comparisonBelongsToRevision,
   comparisonOutcomes,
@@ -28,6 +29,9 @@ import {
 } from "../revisionWorkflow";
 import { runSnapshotDocuments, shortIdentifier, type RunInputSnapshot } from "../runSnapshot";
 import { supportedUploadAccept, supportedUploadLabel } from "../uploadFormats";
+import { importFailure, ImportResultUnknown, verifiedImportReceipt } from "../features/imports/importQueueModel";
+import { frozenRevisionUpload, revisionUploadBelongsTo, revisionUploadMatchesInput, revisionUploadMaySend, type RevisionUploadOperation } from "../revisionUploadRecovery";
+import { workspacePath } from "../routing";
 
 type Evidence = {
   document_id: string;
@@ -127,7 +131,7 @@ type RevisionReviewProps = {
   baselineIssues: RevisionIssue[];
   routeSearch: string;
   onRouteChange: (search: string, replace?: boolean) => void;
-  onDocumentsChanged: () => Promise<void>;
+  onDocumentsChanged: () => Promise<boolean>;
 };
 
 const stepLabels: Record<RevisionRouteState["step"], string> = {
@@ -261,6 +265,7 @@ export default function RevisionReview({
 }: RevisionReviewProps) {
   const route = useMemo(() => revisionRouteStateFromSearch(routeSearch), [routeSearch]);
   const baselineDocuments = baselineRun ? runSnapshotDocuments(baselineRun) : [];
+  const baselineReady = baselineRun?.status === "completed" && baselineDocuments.length > 0;
   const delta = useMemo(
     () => revisionDelta(baselineDocuments, documents),
     [baselineDocuments, documents],
@@ -272,6 +277,11 @@ export default function RevisionReview({
   const [role, setRole] = useState<DocumentRole>("chapter");
   const [scope, setScope] = useState("global");
   const [uploading, setUploading] = useState(false);
+  const [uploadOperation, setUploadOperation] = useState<RevisionUploadOperation | null>(null);
+  const uploadOperationRef = useRef<RevisionUploadOperation | null>(null);
+  const uploadEpochRef = useRef(0);
+  const uploadAliveRef = useRef(true);
+  const uploadControllerRef = useRef<AbortController | null>(null);
   const [starting, setStarting] = useState(false);
   const [comparison, setComparison] = useState<ComparisonResponse | null>(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
@@ -284,6 +294,8 @@ export default function RevisionReview({
   const [visualState, setVisualState] = useState<"idle" | "generating" | "ready" | "failed">("idle");
   const fileInput = useRef<HTMLInputElement | null>(null);
   const fileContext = `${projectId}:${baselineRun?.id || ""}`;
+  const fileContextRef = useRef(fileContext);
+  fileContextRef.current = fileContext;
   const previousFileContext = useRef(fileContext);
   const generatedVisuals = useRef(new Set<string>());
   const recheckGuard = useRef(createMutationGuard());
@@ -310,6 +322,24 @@ export default function RevisionReview({
     setComparisonRefresh((current) => current + 1);
   }
 
+  function changeUpload(next: RevisionUploadOperation | null) {
+    uploadOperationRef.current = next;
+    setUploadOperation(next);
+  }
+
+  function currentUpload(operation: RevisionUploadOperation, epoch: number): boolean {
+    return uploadAliveRef.current && uploadEpochRef.current === epoch &&
+      fileContextRef.current === `${operation.projectId}:${operation.baselineRunId}` &&
+      uploadOperationRef.current?.entry.operationKey === operation.entry.operationKey;
+  }
+
+  useEffect(() => {
+    uploadAliveRef.current = true;
+    const expire = () => { uploadAliveRef.current = false; uploadEpochRef.current += 1; uploadControllerRef.current?.abort(); };
+    window.addEventListener(SESSION_EXPIRED_EVENT, expire);
+    return () => { expire(); window.removeEventListener(SESSION_EXPIRED_EVENT, expire); };
+  }, []);
+
   useEffect(() => {
     comparisonRequest.current.epoch += 1;
     comparisonRequest.current.controller?.abort();
@@ -329,6 +359,12 @@ export default function RevisionReview({
 
   useEffect(() => {
     const contextChanged = previousFileContext.current !== fileContext;
+    if (contextChanged) {
+      uploadEpochRef.current += 1;
+      uploadControllerRef.current?.abort();
+      changeUpload(null);
+      setUploading(false);
+    }
     if (route.step !== "upload" || contextChanged) {
       setFile(null);
       if (fileInput.current) fileInput.current.value = "";
@@ -346,6 +382,7 @@ export default function RevisionReview({
   }, [route.issueId, baselineIssues]);
 
   useEffect(() => {
+    if (uploadOperationRef.current && ["uploading", "unknown", "succeeded"].includes(uploadOperationRef.current.entry.status)) return;
     if (route.documentId && activeDocuments.some((document) => document.id === route.documentId)) {
       const document = activeDocuments.find((row) => row.id === route.documentId)!;
       setRole((document.document_role || "chapter") as DocumentRole);
@@ -525,57 +562,117 @@ export default function RevisionReview({
     });
   }, [safeComparison?.status, route.recheckRunId, route.generateGraph, route.generateTimeline]);
 
-  async function uploadRevision(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!file) {
+  async function refreshSavedUpload(operation: RevisionUploadOperation, epoch: number) {
+    if (!operation.entry.receipt || !currentUpload(operation, epoch)) return;
+    changeUpload({ ...operation, refresh: "reading" });
+    try {
+      const loaded = await onDocumentsChanged();
+      if (!currentUpload(operation, epoch)) return;
+      if (!loaded) throw new Error("Project documents were not refreshed");
+      changeUpload({ ...operation, refresh: "ready" });
+      setFile(null);
+      if (fileInput.current) fileInput.current.value = "";
+      setProblem("");
+      setNotice(operation.entry.receipt.deduplicated
+        ? "已核对原上传记录，没有新增文档版本。项目资料已重新读取；请核对输入变化后自行启动复检。"
+        : "新版本已保存，项目资料已重新读取。请核对输入变化后自行启动复检。");
+      updateRoute({ step: "run", recheckRunId: null, outcome: "all", page: 1 });
+    } catch {
+      if (!currentUpload(operation, epoch)) return;
+      changeUpload({ ...operation, refresh: "failed" });
+      setProblem("");
+      setNotice("新版本已保存，但项目资料刷新未完成。请只重新读取项目资料，不要重复上传已保存的文稿。");
+    }
+  }
+
+  async function reloadSavedUpload() {
+    const operation = uploadOperationRef.current;
+    if (!operation || operation.entry.status !== "succeeded" || uploading || operation.refresh === "reading") return;
+    const epoch = ++uploadEpochRef.current;
+    setUploading(true);
+    await refreshSavedUpload(operation, epoch);
+    if (currentUpload(operation, epoch)) setUploading(false);
+  }
+
+  async function sendRevisionUpload(explicitRetry = false) {
+    if (uploading || !baselineRun?.id || !baselineReady) return;
+    let operation = uploadOperationRef.current;
+    if (operation?.entry.status === "succeeded") return;
+    if (operation?.entry.status === "unknown" && !explicitRetry) return;
+    if (operation?.entry.status !== "unknown" && !file) {
       setProblem("请选择要上传的新版本文件。");
       fileInput.current?.focus();
       return;
     }
-    const validation = validateRevisionUploadSelection(
-      uploadMode,
-      file.name,
-      route.documentId,
-      documents,
-    );
-    if (!validation.ok) {
-      setProblem(validation.message);
-      if (validation.field === "document") {
-        document.getElementById("revision-document")?.focus();
-      } else if (validation.field === "mode") {
-        document.getElementById("revision-mode-replace")?.focus();
-      } else {
-        fileInput.current?.focus();
+    if (operation?.entry.status !== "unknown") {
+      const validation = validateRevisionUploadSelection(uploadMode, file!.name, route.documentId, documents);
+      if (!validation.ok) {
+        setProblem(validation.message);
+        document.getElementById(validation.field === "document" ? "revision-document" : validation.field === "mode" ? "revision-mode-replace" : "revision-file")?.focus();
+        return;
       }
-      return;
+      try {
+        const input = { projectId, baselineRunId: baselineRun.id, file: file!, documentRole: role, storyScope: scope,
+          replaceDocumentId: uploadMode === "replace" ? route.documentId || "" : "" };
+        if (!operation || !revisionUploadMatchesInput(operation, input)) {
+          operation = frozenRevisionUpload({ ...input, replacement: validation.replacement });
+        }
+      } catch {
+        setProblem("故事作用域格式不符合要求，请修改后再上传。");
+        return;
+      }
     }
-    if (!uploadGuard.current.tryBegin()) return;
+    if (!operation || !revisionUploadBelongsTo(operation, projectId, baselineRun.id) || !revisionUploadMaySend(operation, explicitRetry)) return;
+    const guard = uploadGuard.current;
+    if (!guard.tryBegin()) return;
+    const target = operation;
+    const epoch = ++uploadEpochRef.current;
+    const controller = new AbortController();
+    uploadControllerRef.current = controller;
+    changeUpload({ ...target, entry: { ...target.entry, status: "uploading", message: "" } });
     try {
       setUploading(true);
       setProblem("");
-      const context = documentContext(role, scope);
+      setNotice("");
       const form = new FormData();
-      form.append("file", file);
-      form.append("document_role", context.document_role);
-      form.append("story_scope", context.story_scope);
-      if (uploadMode === "replace" && route.documentId) {
-        form.append("replace_document_id", route.documentId);
-      }
-      await apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/documents`, {
-        method: "POST",
-        body: form,
+      form.append("file", target.entry.file);
+      Object.entries(target.fields).forEach(([name, value]) => form.append(name, value));
+      const response = await apiJson<unknown>("/api/v1/projects/" + encodeURIComponent(target.projectId) + "/documents", {
+        method: "POST", headers: { "Idempotency-Key": target.entry.operationKey }, body: form, signal: controller.signal,
       });
-      await onDocumentsChanged();
-      setFile(null);
-      if (fileInput.current) fileInput.current.value = "";
-      setNotice("新版本已保存。请核对输入变化后启动复检。");
-      updateRoute({ step: "run", recheckRunId: null, outcome: "all", page: 1 });
+      const receipt = verifiedImportReceipt(response, target.projectId, target.entry.file.name);
+      if (!receipt) throw new ImportResultUnknown();
+      if (!currentUpload(target, epoch)) return;
+      const saved: RevisionUploadOperation = { ...target, entry: { ...target.entry, status: "succeeded", receipt, message: "" } };
+      changeUpload(saved);
+      await refreshSavedUpload(saved, epoch);
     } catch (error) {
-      setProblem(`上传失败：${errorCopy(error)}`);
+      if (!currentUpload(target, epoch)) return;
+      const failure = importFailure(error);
+      changeUpload({ ...target, entry: { ...target.entry, status: failure.status, message: failure.message } });
+      setProblem((failure.status === "unknown" ? "上传结果待核对：" : "上传未完成：") + failure.message);
     } finally {
-      setUploading(false);
-      uploadGuard.current.end();
+      if (currentUpload(target, epoch)) setUploading(false);
+      if (uploadControllerRef.current === controller) uploadControllerRef.current = null;
+      guard.end();
     }
+  }
+
+  async function uploadRevision(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await sendRevisionUpload();
+  }
+
+  function beginAnotherUpload() {
+    if (uploadOperationRef.current?.entry.status !== "succeeded" || uploadOperationRef.current.refresh !== "ready") return;
+    uploadEpochRef.current += 1;
+    changeUpload(null);
+    setFile(null);
+    if (fileInput.current) fileInput.current.value = "";
+    setNotice("");
+    setProblem("");
+    const inferred = revisionDocumentForIssue(selectedIssue?.evidence[0]?.document_name, documents);
+    updateRoute({ documentId: inferred }, true);
   }
 
   async function startRecheck() {
@@ -604,7 +701,10 @@ export default function RevisionReview({
     }
   }
 
-  const baselineReady = baselineRun?.status === "completed" && baselineDocuments.length > 0;
+  const visibleUpload = uploadOperation && revisionUploadBelongsTo(uploadOperation, projectId, baselineRun?.id || "") ? uploadOperation : null;
+  const uploadLocked = !baselineReady || uploading || !!visibleUpload && ["uploading", "unknown", "succeeded"].includes(visibleUpload.entry.status);
+  const displayedMode = uploadLocked && visibleUpload ? visibleUpload.entry.replaceDocumentId ? "replace" : "related" : uploadMode;
+  const displayedTarget = uploadLocked && visibleUpload ? visibleUpload.entry.replaceDocumentId : route.documentId || "";
   const visibleComparisonItems = safeComparison?.items || [];
 
   return (
@@ -658,6 +758,33 @@ export default function RevisionReview({
             </button>
           )}
         </div>
+      )}
+
+      {visibleUpload && (
+        <aside className="revisionTarget" aria-label="修订稿上传状态" role="status" aria-live="polite">
+          <small>{visibleUpload.entry.status === "succeeded" ? "上传已保存" : visibleUpload.entry.status === "unknown" ? "上传结果待核对" : visibleUpload.entry.status === "uploading" ? "正在上传" : "本次上传"}</small>
+          <b>{visibleUpload.entry.file.name}{visibleUpload.entry.receipt ? ` · v${visibleUpload.entry.receipt.version}` : ""}</b>
+          <p>{visibleUpload.entry.replaceDocumentId ? `替换 ${visibleUpload.replacementName} · v${visibleUpload.replacementVersion}` : "新增相关文档"} · {visibleUpload.entry.documentRole} · {visibleUpload.entry.storyScope}</p>
+          {visibleUpload.entry.status === "unknown" && (
+            <>
+              <p>请求可能已经保存，请先核对项目文档；不要改换文件或版本关系重复提交。安全重试只发送同一份文件和同一操作标识，已保存时将返回原版本。</p>
+              <div className="revisionFormActions">
+                <button type="button" disabled={uploading || !baselineReady} onClick={() => void sendRevisionUpload(true)}>{uploading ? "正在核对上传…" : "安全重试同一上传"}</button>
+                <a href={workspacePath("projects", projectId)} target="_blank" rel="noopener noreferrer">在新标签页核对项目文档</a>
+              </div>
+            </>
+          )}
+          {visibleUpload.entry.status === "succeeded" && visibleUpload.refresh === "failed" && (
+            <>
+              <p>新版本已保存，当前项目资料尚未重新读取。只需重新读取，不会再次上传或自动启动复检。</p>
+              <button type="button" disabled={uploading} onClick={() => void reloadSavedUpload()}>{uploading ? "正在读取项目资料…" : "重新读取项目资料"}</button>
+            </>
+          )}
+          {visibleUpload.entry.status === "succeeded" && visibleUpload.refresh === "reading" && <p>新版本已保存，正在重新读取项目资料…</p>}
+          {visibleUpload.entry.status === "succeeded" && visibleUpload.refresh === "ready" && route.step === "upload" && (
+            <button type="button" onClick={beginAnotherUpload}>上传另一份修订稿</button>
+          )}
+        </aside>
       )}
 
       {route.step === "review" && (
@@ -716,7 +843,14 @@ export default function RevisionReview({
 
       {route.step === "upload" && (
         <div className="revisionStage">
-          <div className="revisionStageHead"><div><h2>上传修订后的文档</h2><p>浏览器不会保存所选本地文件；刷新后需要重新选择，但已成功上传的版本不会丢失。</p></div></div>
+          <div className="revisionStageHead"><div><h2>上传修订后的文档</h2><p>所选文件及重试标识仅留在本页内存，不会写入浏览器存储。刷新后需要重新选择；若之前结果待核对，应先核对项目文档，避免重复导入。已成功上传的版本保存在项目中。</p></div></div>
+          {!baselineReady && (
+            <aside className="revisionTarget" role="status" aria-label="复检基线尚未核验">
+              <b>基线尚未核验或不可用于复检</b>
+              <p>仅已完成且包含冻结输入的基线运行可上传修订稿。请等待基线读取完成，或返回报告核对；当前上传字段和提交已禁用。</p>
+              <a href={workspacePath("report", projectId, baselineRun?.id)}>{baselineRun ? "返回基线报告核对" : "返回项目报告核对"}</a>
+            </aside>
+          )}
           {selectedIssue && (
             <aside className="revisionTarget">
               <small>当前修订目标</small><b>{selectedIssue.title}</b>
@@ -724,16 +858,16 @@ export default function RevisionReview({
             </aside>
           )}
           <form className="revisionUpload" onSubmit={(event) => void uploadRevision(event)}>
-            <fieldset>
+            <fieldset disabled={uploadLocked}>
               <legend>版本关系</legend>
-              <label htmlFor="revision-mode-replace"><input id="revision-mode-replace" type="radio" name="revision-mode" value="replace" checked={uploadMode === "replace"} onChange={() => {
+              <label htmlFor="revision-mode-replace"><input id="revision-mode-replace" type="radio" name="revision-mode" value="replace" checked={displayedMode === "replace"} onChange={() => {
                 setUploadMode("replace");
                 if (file) {
                   const validation = validateRevisionUploadSelection("replace", file.name, route.documentId, documents);
                   setProblem(validation.ok ? "" : validation.message);
                 }
               }} />替换现有文档，生成新版本</label>
-              <label htmlFor="revision-mode-related"><input id="revision-mode-related" type="radio" name="revision-mode" value="related" checked={uploadMode === "related"} onChange={() => {
+              <label htmlFor="revision-mode-related"><input id="revision-mode-related" type="radio" name="revision-mode" value="related" checked={displayedMode === "related"} onChange={() => {
                 setUploadMode("related");
                 if (file) {
                   const validation = validateRevisionUploadSelection("related", file.name, route.documentId, documents);
@@ -741,10 +875,10 @@ export default function RevisionReview({
                 }
               }} />新增相关文档</label>
             </fieldset>
-            {uploadMode === "replace" && (
+            {displayedMode === "replace" && (
               <label className="revisionField" htmlFor="revision-document">
                 <span>替换目标</span>
-                <select id="revision-document" name="document" value={route.documentId || ""} onChange={(event) => {
+                <select id="revision-document" name="document" value={displayedTarget || ""} disabled={uploadLocked} onChange={(event) => {
                   const documentId = event.target.value || null;
                   updateRoute({ documentId }, true);
                   if (file) {
@@ -753,6 +887,7 @@ export default function RevisionReview({
                   }
                 }}>
                   <option value="">选择当前文档</option>
+                  {visibleUpload?.entry.replaceDocumentId && !activeDocuments.some((document) => document.id === visibleUpload.entry.replaceDocumentId) && <option value={visibleUpload.entry.replaceDocumentId}>{visibleUpload.replacementName} · v{visibleUpload.replacementVersion}（本次固定目标）</option>}
                   {activeDocuments.map((document) => <option key={document.id} value={document.id}>{document.name} · v{document.version}</option>)}
                 </select>
               </label>
@@ -765,6 +900,7 @@ export default function RevisionReview({
                 name="file"
                 type="file"
                 accept={supportedUploadAccept}
+                disabled={uploadLocked}
                 onChange={(event) => {
                   const nextFile = event.target.files?.[0] || null;
                   setFile(nextFile);
@@ -785,17 +921,17 @@ export default function RevisionReview({
             </label>
             <label className="revisionField" htmlFor="revision-role">
               <span>文档类型</span>
-              <select id="revision-role" name="role" value={role} onChange={(event) => setRole(event.target.value as DocumentRole)}>
+              <select id="revision-role" name="role" value={uploadLocked && visibleUpload ? visibleUpload.entry.documentRole || role : role} disabled={uploadLocked} onChange={(event) => setRole(event.target.value as DocumentRole)}>
                 {documentRoles.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
             <label className="revisionField" htmlFor="revision-scope">
               <span>故事作用域</span>
-              <input id="revision-scope" name="scope" autoComplete="off" maxLength={80} value={scope} onChange={(event) => setScope(event.target.value)} placeholder="例如 global 或 route_a…" />
+              <input id="revision-scope" name="scope" autoComplete="off" maxLength={80} value={uploadLocked && visibleUpload ? visibleUpload.entry.storyScope : scope} disabled={uploadLocked} onChange={(event) => setScope(event.target.value)} placeholder="例如 global 或 route_a…" />
             </label>
             <div className="revisionFormActions">
               <button type="button" onClick={() => updateRoute({ step: "review" })}>返回问题</button>
-              <button type="submit" disabled={uploading}>{uploading ? "上传中…" : "保存新版本"}</button>
+              <button type="submit" disabled={uploadLocked}>{uploading ? "上传中…" : "保存新版本"}</button>
             </div>
           </form>
         </div>

@@ -9,6 +9,7 @@ import type {
   CharacterProfileItem,
 } from "./types";
 import AxisAlignmentPanel from "./AxisAlignmentPanel";
+import { scopedAxisReviewBoundary } from "./scopedAxisReviewCopy";
 
 const dimensions = Object.keys(characterDimensionNames) as CharacterDimension[];
 
@@ -100,7 +101,7 @@ export default function CharacterProfile({
                           <span>{item.approved_axis_id ? "已绑定作者轴" : "未绑定作者轴"}</span>
                         )}
                         {(item.dimension === "value" || item.dimension === "behavior_boundary") && item.approved_axis_id && (
-                          <span>对象与情境轴已由作者确认 · 新稿漂移检测待开发</span>
+                          <span>对象与情境轴已由作者确认。{scopedAxisReviewBoundary}</span>
                         )}
                         {item.dimension === "core_personality" && item.approved_axis_id && (
                           <span>{item.axis_alignment

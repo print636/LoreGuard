@@ -22,6 +22,7 @@ import {
   submitCandidateDecision,
 } from "./api";
 import CandidateReview from "./CandidateReview";
+import { scopedAxisReviewBoundary } from "./scopedAxisReviewCopy";
 import { appendAxisPage, isScopedAxisDimension, scopedCandidateCanBind, validScopedComparisonKey } from "./axisReview";
 import {
   advanceReviewScope,
@@ -679,21 +680,21 @@ export default function CharacterWorkspace({
     selectedAxis: CharacterTraitAxis | null,
     alignment: "same" | "opposite" | null,
     scopeApplicabilityConfirmed: boolean,
-  ) {
+  ): Promise<boolean> {
     if (
       !candidate || !route.characterId || !route.candidateId ||
       candidate.id !== route.candidateId ||
       candidate.character_id !== route.characterId ||
       decisionBusy || decisionPendingRef.current
-    ) return;
+    ) return false;
     if (decision === "confirm" && candidate.dimension === "core_personality" && !selectedAxis) {
       setActionError("请先为核心性格候选选择或创建作者轴。");
-      return;
+      return false;
     }
     if (decision === "confirm" && candidate.dimension === "core_personality" &&
       (!selectedAxis?.positive_proposition_sha256 || !alignment)) {
       setActionError("请先核对作者轴正向命题，再明确选择同向或反向；不确定时保留待审。");
-      return;
+      return false;
     }
     if (decision === "confirm" && selectedAxis && isScopedAxisDimension(candidate.dimension) && (
       !scopedCandidateCanBind(candidate) ||
@@ -703,7 +704,7 @@ export default function CharacterWorkspace({
       !selectedAxis.positive_proposition_sha256 || !alignment || !scopeApplicabilityConfirmed
     )) {
       setActionError("请重新核对候选证据、比较对象、适用情境与方向，并勾选适用性后再确认。");
-      return;
+      return false;
     }
     const startedScope = reviewScopeRef.current;
     const requestId = ++decisionRequestRef.current;
@@ -738,7 +739,7 @@ export default function CharacterWorkspace({
             : {}),
         },
       );
-      if (!isCurrentRequest()) return;
+      if (!isCurrentRequest()) return false;
       // The mutation response is intentionally compact and does not carry
       // verified frozen evidence. Re-read the detail instead of replacing it
       // with a misleading unverified candidate, including on replay.
@@ -747,7 +748,7 @@ export default function CharacterWorkspace({
       setAnnouncement(
         decision === "confirm"
           ? selectedAxis && isScopedAxisDimension(candidate.dimension)
-            ? "归纳与适用情境已由作者确认，写入角色档案基线。价值观和行为边界的新稿漂移检测仍在开发中；既有报告不变。"
+            ? `归纳与适用情境已由作者确认，写入角色档案基线。${scopedAxisReviewBoundary}既有报告不变。`
             : "归纳已确认并写入角色档案；作者轴只影响之后创建的分析，既有报告不会改写。"
           : "归纳已驳回，决定已保留在审核记录中。",
       );
@@ -755,8 +756,9 @@ export default function CharacterWorkspace({
       setDetailReload((value) => value + 1);
       setSectionReload((value) => value + 1);
       setNeighborReload((value) => value + 1);
+      return true;
     } catch (error) {
-      if (!isCurrentRequest()) return;
+      if (!isCurrentRequest()) return false;
       const message = requestError(error);
       setActionError(message);
       if (error instanceof ApiError && error.status === 409) {
@@ -778,6 +780,7 @@ export default function CharacterWorkspace({
           ].includes(String(error.detail.detail.code))
         ) setAxisReload((value) => value + 1);
       }
+      return false;
     } finally {
       if (isCurrentRequest()) {
         decisionPendingRef.current = false;
@@ -1072,7 +1075,7 @@ export default function CharacterWorkspace({
                         onLoadMoreAxes={() => void loadMoreAxes()}
                         onCreateAxis={createAxis}
                         onSetAxisProposition={defineAxisProposition}
-                        onDecision={(decision, comment, axis, alignment, scopeConfirmed) => void decide(decision, comment, axis, alignment, scopeConfirmed)}
+                        onDecision={(decision, comment, axis, alignment, scopeConfirmed) => decide(decision, comment, axis, alignment, scopeConfirmed)}
                       />
                     )}
                     {route.section === "drift" && (

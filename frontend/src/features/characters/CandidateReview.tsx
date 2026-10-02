@@ -1,9 +1,12 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { ApiError } from "../../api/client";
+import { ApiError, SESSION_EXPIRED_EVENT } from "../../api/client";
+import { registerBrowserNavigationBlocker } from "../../routing";
 import EvidenceList from "./EvidenceList";
 import TargetEvidencePreview from "./TargetEvidencePreview";
 import { canCreateNewAxis, confirmedAxisPolarity, isScopedAxisDimension, previewAxisPolarity, scopedCandidateCanBind, selectableAxesForCandidate, selectedProjectAxis, selectedReviewAxis, validateApplicabilityScope, validateAxisDraft, validateAxisPositiveProposition, validScopedComparisonKey } from "./axisReview";
 import { advanceReviewScope, isCurrentReviewRequest } from "./reviewScope";
+import { candidateBusyLeaveConfirmation, candidateInputAfterSubmission, candidateLeaveConfirmation, hasPendingCandidateInput } from "./candidateDraftProtection";
+import { scopedAxisReviewBoundary } from "./scopedAxisReviewCopy";
 import {
   candidateOriginNames,
   candidateDecisionLabel,
@@ -68,7 +71,7 @@ type CandidateReviewProps = {
     applicability_scope?: string;
   }) => Promise<CharacterTraitAxis>;
   onSetAxisProposition: (axis: CharacterTraitAxis, positiveProposition: string) => Promise<CharacterTraitAxis>;
-  onDecision: (decision: CandidateDecision, comment: string, axis: CharacterTraitAxis | null, alignment: "same" | "opposite" | null, scopeApplicabilityConfirmed: boolean) => void;
+  onDecision: (decision: CandidateDecision, comment: string, axis: CharacterTraitAxis | null, alignment: "same" | "opposite" | null, scopeApplicabilityConfirmed: boolean) => Promise<boolean>;
 };
 
 const polarityNames: Record<NonNullable<ProfileCandidate["polarity"]>, string> = {
@@ -187,6 +190,16 @@ export default function CandidateReview({
   const createErrorSummaryRef = useRef<HTMLDivElement | null>(null);
   const createPendingRef = useRef(false);
   const createRequestRef = useRef(0);
+  const decisionPendingRef = useRef(false);
+  const decisionRequestRef = useRef(0);
+  const legacyRequestRef = useRef(0);
+  const aliveRef = useRef(true);
+  const pendingInput = hasPendingCandidateInput({ comment, axisChoice, axisName, axisDefinition,
+    axisPositiveProposition, applicabilityScope, legacyAxisProposition, alignmentChoice, scopeConfirmed });
+  const pendingRef = useRef(false);
+  const requestBusyRef = useRef(false);
+  pendingRef.current = pendingInput;
+  requestBusyRef.current = Boolean(decisionBusy) || axisCreateBusy || legacyAxisPropositionBusy;
   const candidateLinkRefs = useRef(new Map<string, HTMLAnchorElement>());
   const queueTitleRef = useRef<HTMLHeadingElement | null>(null);
   const detailRegionRef = useRef<HTMLElement | null>(null);
@@ -199,8 +212,32 @@ export default function CandidateReview({
   const review = selected ? candidateReviewState(selected) : null;
 
   useEffect(() => {
+    aliveRef.current = true;
+    const expire = () => { aliveRef.current = false; };
+    const unregister = registerBrowserNavigationBlocker(() => {
+      const busy = requestBusyRef.current || createPendingRef.current || decisionPendingRef.current;
+      if (!aliveRef.current || (!pendingRef.current && !busy)) return true;
+      return window.confirm(busy ? candidateBusyLeaveConfirmation : candidateLeaveConfirmation);
+    });
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!aliveRef.current || (!pendingRef.current && !requestBusyRef.current && !createPendingRef.current && !decisionPendingRef.current)) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, expire);
+    window.addEventListener("beforeunload", warn);
+    return () => {
+      aliveRef.current = false;
+      unregister();
+      window.removeEventListener(SESSION_EXPIRED_EVENT, expire);
+      window.removeEventListener("beforeunload", warn);
+    };
+  }, []);
+
+  useEffect(() => {
     if (reviewScopeRef.current.key !== scopeKey) return;
     createPendingRef.current = false;
+    decisionPendingRef.current = false;
     setComment("");
     setAxisMode("existing");
     setAxisChoice("");
@@ -319,7 +356,31 @@ export default function CandidateReview({
     setAxisChoiceError("");
     setAlignmentError("");
     setScopeError("");
-    onDecision("confirm", comment, selectedAxis, selectedAxis && alignmentChoice !== "uncertain" ? alignmentChoice : null, scopedCandidate && Boolean(selectedAxis) && scopeConfirmed);
+    void submitDecision("confirm");
+  }
+
+  async function submitDecision(decision: CandidateDecision) {
+    if (decisionPendingRef.current || decisionBusy || !selected || !review?.allowed) return;
+    const startedScope = reviewScopeRef.current;
+    const requestId = ++decisionRequestRef.current;
+    const submitted = { comment, axisChoice, alignmentChoice, scopeConfirmed };
+    const isCurrent = () => aliveRef.current &&
+      isCurrentReviewRequest(reviewScopeRef.current, startedScope, decisionRequestRef.current, requestId);
+    decisionPendingRef.current = true;
+    try {
+      const saved = await onDecision(decision, comment, decision === "confirm" ? selectedAxis : null,
+        decision === "confirm" && selectedAxis && alignmentChoice !== "uncertain" ? alignmentChoice : null,
+        decision === "confirm" && scopedCandidate && Boolean(selectedAxis) && scopeConfirmed);
+      if (!saved || !isCurrent()) return;
+      setComment((current) => candidateInputAfterSubmission(current, submitted.comment, ""));
+      if (decision === "confirm") {
+        setAxisChoice((current) => candidateInputAfterSubmission(current, submitted.axisChoice, ""));
+        setAlignmentChoice((current) => candidateInputAfterSubmission(current, submitted.alignmentChoice, "uncertain"));
+        setScopeConfirmed((current) => candidateInputAfterSubmission(current, submitted.scopeConfirmed, false));
+      }
+    } finally {
+      if (isCurrent()) decisionPendingRef.current = false;
+    }
   }
 
   async function submitLegacyAxisProposition(event: FormEvent<HTMLFormElement>) {
@@ -328,19 +389,25 @@ export default function CandidateReview({
     const validated = validateAxisPositiveProposition(legacyAxisProposition);
     setLegacyAxisPropositionError(validated.error);
     if (validated.error) return;
+    const submitted = legacyAxisProposition;
+    const startedScope = reviewScopeRef.current;
+    const requestId = ++legacyRequestRef.current;
+    const isCurrent = () => aliveRef.current &&
+      isCurrentReviewRequest(reviewScopeRef.current, startedScope, legacyRequestRef.current, requestId);
     setLegacyAxisPropositionBusy(true);
     try {
       const result = await onSetAxisProposition(selectedAxis, validated.value);
+      if (!isCurrent()) return;
       setUpdatedAxis(result);
       setAxisNeedsRecheck(false);
       setAxisChoiceError("");
       setLegacyAxisPropositionError("");
-      setLegacyAxisProposition("");
+      setLegacyAxisProposition((current) => candidateInputAfterSubmission(current, submitted, ""));
       setAlignmentChoice("uncertain");
     } catch (error) {
-      setLegacyAxisPropositionError(axisPropositionError(error));
+      if (isCurrent()) setLegacyAxisPropositionError(axisPropositionError(error));
     } finally {
-      setLegacyAxisPropositionBusy(false);
+      if (isCurrent()) setLegacyAxisPropositionBusy(false);
     }
   }
 
@@ -365,9 +432,10 @@ export default function CandidateReview({
       return;
     }
     const startedScope = reviewScopeRef.current;
+    const submitted = { axisName, axisDefinition, axisPositiveProposition, applicabilityScope };
     const requestId = ++createRequestRef.current;
     const isCurrentRequest = () =>
-      isCurrentReviewRequest(reviewScopeRef.current, startedScope, createRequestRef.current, requestId);
+      aliveRef.current && isCurrentReviewRequest(reviewScopeRef.current, startedScope, createRequestRef.current, requestId);
     createPendingRef.current = true;
     try {
       if (!selected || (scopedCandidate && !scopedEligible)) return;
@@ -381,6 +449,10 @@ export default function CandidateReview({
       });
       if (!isCurrentRequest()) return;
       setCreatedAxis(created);
+      setAxisName((current) => candidateInputAfterSubmission(current, submitted.axisName, ""));
+      setAxisDefinition((current) => candidateInputAfterSubmission(current, submitted.axisDefinition, ""));
+      setAxisPositiveProposition((current) => candidateInputAfterSubmission(current, submitted.axisPositiveProposition, ""));
+      if (scopedCandidate) setApplicabilityScope((current) => candidateInputAfterSubmission(current, submitted.applicabilityScope, ""));
       setAxisChoice(created.id);
       setAxisNeedsRecheck(false);
       setAxisMode("existing");
@@ -418,6 +490,12 @@ export default function CandidateReview({
           <b>{coverage.label}</b>
           <p>{coverage.detail}</p>
         </section>
+      )}
+      {pendingInput && (
+        <div className="characterCoverage" role="status" aria-label="候选审核未提交输入">
+          <b>还有未提交的审核输入</b>
+          <p>备注、未创建的作者轴内容及未提交的绑定选择仅在本页内存，尚未保存；切换或离开前会询问。刷新或关闭只提供浏览器离开警示，不会跨刷新恢复。已创建的作者轴保存在项目中，离开不会撤销。</p>
+        </div>
       )}
 
       <div className={`candidateLayout ${selectedId ? "candidateSelected" : ""}`}>
@@ -675,7 +753,7 @@ export default function CandidateReview({
                   <section className="candidateAxisBinding" aria-labelledby={`candidate-axis-heading-${selected.id}`}>
                     <h4 id={`candidate-axis-heading-${selected.id}`}>作者批准比较轴</h4>
                     <p>{scopedCandidate
-                      ? "先核对原文，再决定这条候选是否属于所选对象与情境。确认仅建立作者认可的角色基线；价值观和行为边界的新稿漂移检测仍在开发中。"
+                      ? `先核对原文，再决定这条候选是否属于所选对象与情境。确认仅建立作者认可的角色基线；${scopedAxisReviewBoundary}`
                       : "轴只定义“比较什么”，不代表当前候选一定正确。创建与确认分两步；绑定只影响之后创建的分析，既有报告不会改写。"}</p>
                     {scopedCandidate && (
                       <div className="candidateAxisScopeReview">
@@ -933,7 +1011,7 @@ export default function CandidateReview({
                   <button
                     type="button"
                     disabled={Boolean(decisionBusy) || !review?.allowed}
-                    onClick={() => onDecision("reject", comment, null, null, false)}
+                    onClick={() => void submitDecision("reject")}
                   >
                     {candidateDecisionLabel("reject", decisionBusy)}
                   </button>
