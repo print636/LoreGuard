@@ -2,12 +2,23 @@ import { useCallback, useEffect, useState } from "react";
 
 const HISTORY_INDEX_KEY = "__loreguardHistoryIndex";
 
-type BrowserNavigationBlocker = () => boolean;
+export type BrowserNavigationBlocker = () => boolean;
+export type BrowserNavigationApproval = {
+  blocker: BrowserNavigationBlocker;
+  stillValid: () => boolean;
+};
+type BrowserNavigationOptions = {
+  replace?: boolean;
+  /** Only trusted authentication transitions may bypass unsaved editors. */
+  bypassBlockers?: boolean;
+  approval?: BrowserNavigationApproval | null;
+};
 
 const browserNavigationBlockers = new Set<BrowserNavigationBlocker>();
 let currentHistoryIndex: number | null = null;
 let restoringHistoryIndex: number | null = null;
 let dispatchingProgrammaticNavigation = false;
+const popStateDecisions = new WeakMap<PopStateEvent, boolean>();
 
 function historyIndex(value: unknown): number | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -24,9 +35,10 @@ function historyState(value: unknown, index: number): Record<string, unknown> {
   return { ...base, [HISTORY_INDEX_KEY]: index };
 }
 
-function navigationAllowed(): boolean {
+function navigationAllowed(approval?: BrowserNavigationApproval | null): boolean {
   for (const blocker of browserNavigationBlockers) {
     try {
+      if (approval?.blocker === blocker && approval.stillValid()) continue;
       if (!blocker()) return false;
     } catch {
       return false;
@@ -65,6 +77,14 @@ export function registerBrowserNavigationBlocker(
  * popstate is recognized by index and never asks the user a second time.
  */
 export function handleBrowserPopState(event: PopStateEvent): boolean {
+  const known = popStateDecisions.get(event);
+  if (known !== undefined) return known;
+  const accepted = decideBrowserPopState(event);
+  popStateDecisions.set(event, accepted);
+  return accepted;
+}
+
+function decideBrowserPopState(event: PopStateEvent): boolean {
   const targetIndex = historyIndex(event.state ?? window.history.state);
   if (dispatchingProgrammaticNavigation) {
     if (targetIndex !== null) currentHistoryIndex = targetIndex;
@@ -328,7 +348,9 @@ export function safeReturnTo(value: string | null | undefined): string {
   }
 }
 
-export function browserNavigate(path: string, options?: { replace?: boolean }): void {
+export function browserNavigate(path: string, options?: BrowserNavigationOptions): boolean {
+  if (path === `${window.location.pathname}${window.location.search || ""}${window.location.hash || ""}`) return true;
+  if (!options?.bypassBlockers && !navigationAllowed(options?.approval)) return false;
   const activeIndex = currentHistoryIndex ?? initializeBrowserNavigation();
   const method = options?.replace ? "replaceState" : "pushState";
   const nextIndex = options?.replace ? activeIndex : activeIndex + 1;
@@ -343,6 +365,7 @@ export function browserNavigate(path: string, options?: { replace?: boolean }): 
   } finally {
     dispatchingProgrammaticNavigation = false;
   }
+  return true;
 }
 
 export function useWorkspaceRoute(): [
@@ -357,7 +380,8 @@ export function useWorkspaceRoute(): [
   );
 
   useEffect(() => {
-    const handlePopState = () => {
+    const handlePopState = (event: PopStateEvent) => {
+      if (!handleBrowserPopState(event)) return;
       setRoute(
         workspaceRouteFromPath(window.location.pathname, window.location.search),
       );

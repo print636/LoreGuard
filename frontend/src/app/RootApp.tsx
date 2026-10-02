@@ -121,7 +121,7 @@ export default function RootApp() {
     ) {
       browserNavigate(
         loginPath(route.kind === "root" ? undefined : currentLocation()),
-        { replace: true },
+        { replace: true, bypassBlockers: true },
       );
     }
   }, [locationKey, route.kind, startup.status]);
@@ -202,6 +202,7 @@ export default function RootApp() {
     return (
       <Suspense fallback={<main className="startupPage productPage" aria-busy="true"><p>正在打开项目工作台…</p></main>}>
         <WorkspaceApp
+          key={`${startup.identity.user.id}:${startup.identity.workspace.id}`}
           identity={startup.identity}
           onLoggedOut={loggedOut}
         />

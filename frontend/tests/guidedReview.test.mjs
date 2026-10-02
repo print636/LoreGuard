@@ -6,6 +6,8 @@ import {
   blocksDraftOnlyReview,
   contextNavigationLocked,
   contextDraft,
+  canPreserveProjectRefresh,
+  contextDraftsEqual,
   contextStatus,
   findCurrentBaselineRun,
   formalBackgroundStillCurrent,
@@ -14,10 +16,55 @@ import {
   isLoadedContextForDocument,
   narrativeContextPayload,
   normalizeNarrativeContextInference,
+  readableNarrativeContext,
   responseBelongsToSelectedDocument,
   requiresDedicatedChapterPublish,
   selectedDraftsStillCurrent,
 } from "../src/features/workflow/guidedReview.ts";
+
+test("context editor dirty comparison covers each of the nine author fields without mutating its accepted baseline", () => {
+  const baseline = contextDraft(document());
+  assert.equal(contextDraftsEqual(baseline, { ...baseline }), true);
+  const edits = {
+    documentRole: "character", publicationStatus: "draft", timelineKey: "parallel",
+    releaseKey: "2.0", releaseOrdinal: "20", branchPath: "北港 / 支线",
+    exclusiveGroup: "choice", activityKey: "festival", confirmed: true,
+  };
+  for (const [field, value] of Object.entries(edits)) {
+    assert.equal(contextDraftsEqual({ ...baseline, [field]: value }, baseline), false, field);
+  }
+  assert.equal(contextDraftsEqual(null, baseline), false);
+  assert.equal(contextDraftsEqual(baseline, null), false);
+  assert.equal(contextDraftsEqual(null, null), true);
+  assert.equal(baseline.timelineKey, "main");
+});
+
+test("context reads reject missing or malformed current context while accepting explicit legacy revision zero", () => {
+  const legacy = document().narrative_context;
+  assert.equal(readableNarrativeContext(legacy), true);
+  for (const invalid of [undefined, null, {}, { ...legacy, scope: undefined },
+    { ...legacy, context_revision: -1 }, { ...legacy, context_revision: "0" },
+    { ...legacy, resolution_state: "maybe" }, { ...legacy, publication_status: "future" },
+    { ...legacy, scope: { schema_version: 1, timeline_key: "" } },
+    { ...legacy, scope: { ...legacy.scope, release: { key: "2.0", ordinal: "20" } } },
+    { ...legacy, scope: { ...legacy.scope, branch: { path: "北港" } } },
+    { ...legacy, scope: { ...legacy.scope, activity_key: {} } }]) {
+    assert.equal(readableNarrativeContext(invalid), false);
+  }
+  assert.equal(readableNarrativeContext({ ...legacy, revision: 0 }), true);
+  assert.equal(readableNarrativeContext({ ...legacy, revision: 1 }), false);
+});
+
+test("project refresh retains only a successfully loaded accessible frame and normalizes absent runs", () => {
+  const current = { projectId: "p1", activeProjectId: "p1", loadedProjectId: "p1", requestedRunId: "", selectedRunId: null, routeBlocked: false };
+  assert.equal(canPreserveProjectRefresh(current), true, "uploads pass an empty run string for a valid unanalysed project");
+  assert.equal(canPreserveProjectRefresh({ ...current, loadedProjectId: "" }), false, "first read is not a verified frame");
+  assert.equal(canPreserveProjectRefresh({ ...current, projectId: "p2" }), false);
+  assert.equal(canPreserveProjectRefresh({ ...current, routeBlocked: true }), false);
+  assert.equal(canPreserveProjectRefresh({ ...current, requestedRunId: "r2", selectedRunId: "r1" }), false);
+  assert.equal(canPreserveProjectRefresh({ ...current, requestedRunId: "r1", selectedRunId: "r1" }), true);
+  assert.equal(canPreserveProjectRefresh({ ...current, projectId: "", activeProjectId: "", loadedProjectId: "" }), false);
+});
 
 function document(overrides = {}) {
   return {

@@ -61,6 +61,14 @@ and description. Revision checks prevent silent overwrites; a conflicting edit
 can be explicitly merged with the latest metadata before a separate save.
 Document content, authority and frozen reports remain unchanged.
 
+[Document-context edit protection](docs/context-editor-protection-v1.md) keeps
+unsaved identity and scope fields in page memory. Switching documents, leaving,
+reloading or replacing them with an AI suggestion requires explicit consent;
+failed reads preserve existing input. Upload refreshes do not silently move an
+old-version draft onto a new document. AI inference stores an unconfirmed
+suggestion revision, not author confirmation or publication. This form is not
+browser-persisted, and an unload warning is not crash or session-expiry recovery.
+
 For character-OOC coverage, the recommended path is `baseline_build` -> human confirmation of character-profile candidates -> `draft_review`:
 
 1. Import documents and confirm each document's role, publication status and narrative scope. An explicit AI inference request may propose these fields with source evidence, but the server always stores it as `origin=model_inferred`, `resolution_state=inferred`, and unresolved authority. It never auto-confirms or promotes model output.

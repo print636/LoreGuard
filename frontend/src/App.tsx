@@ -98,6 +98,7 @@ import {
   useWorkspaceRoute,
   workspacePath,
   type IssueStatusFilter,
+  type BrowserNavigationApproval,
   type WorkspaceView,
 } from "./routing";
 import type { SessionIdentity } from "./app/session";
@@ -105,6 +106,7 @@ import NarrativeContextWorkbench from "./features/workflow/NarrativeContextWorkb
 import GuidedReviewLaunch from "./features/workflow/GuidedReviewLaunch";
 import {
   guidedDocumentState,
+  canPreserveProjectRefresh,
   type AnalysisRunRequest,
   type NarrativeContext,
 } from "./features/workflow/guidedReview";
@@ -527,6 +529,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [uploadRole, setUploadRole] = useState<DocumentRole | null>(null);
   const [uploadScope, setUploadScope] = useState("");
   const [projectLoading, setProjectLoading] = useState(false);
+  const [projectRefreshProblem, setProjectRefreshProblem] = useState("");
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [providerConnection, setProviderConnection] =
     useState<ProviderConnectionView>(unknownProviderConnection);
@@ -553,6 +556,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const catalogSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const catalogCriteriaRef = useRef({ page: 1, query: "", sort: "recent" as "recent" | "name" });
   const currentProjectRef = useRef("");
+  const loadedProjectRef = useRef("");
+  const contextLeaveGuardRef = useRef<(() => BrowserNavigationApproval | null) | null>(null);
   const evidenceReaderScope = JSON.stringify([project, run, activeView, routedProjectId, routedRunId, routeSearch]);
   const diffAbortRef = useRef<AbortController | null>(null);
   const diffRequestRef = useRef(0);
@@ -863,30 +868,37 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     id: string,
     syncRoute = true,
     requestedRunId: string | null = null,
-  ) {
+    approval?: BrowserNavigationApproval | null,
+  ): Promise<boolean> {
+    requestedRunId = requestedRunId || null;
+    const sameProject = currentProjectRef.current === id;
+    const sameProjectRefresh = canPreserveProjectRefresh({ projectId: id, activeProjectId: currentProjectRef.current,
+      loadedProjectId: loadedProjectRef.current, requestedRunId, selectedRunId: run, routeBlocked: !!routeProblem });
+    if (syncRoute) {
+      const nextPath = workspacePath(activeView, id || null);
+      if (window.location.pathname !== nextPath && !browserNavigate(nextPath, { approval })) return false;
+    }
     const epoch = ++viewEpochRef.current;
     cancelDocumentComparison();
     currentProjectRef.current = id;
+    if (!sameProject) loadedProjectRef.current = "";
     const knownProject = projects.find((row) => row.id === id);
     if (knownProject) setSelectedProjectSummary(knownProject);
     else if (selectedProjectSummary?.id !== id) setSelectedProjectSummary(null);
     void loadSelectedProjectSummary(id);
     loadedRouteRef.current = `${id}:${requestedRunId || ""}`;
     setRouteProblem(null);
-    if (syncRoute) {
-      const nextPath = workspacePath(activeView, id || null);
-      if (window.location.pathname !== nextPath) browserNavigate(nextPath);
-    }
+    setProjectRefreshProblem("");
     setProject(id);
     setDocumentDiff(null);
-    setDocs([]);
-    setRuns([]);
+    if (!sameProject) setDocs([]);
+    if (!sameProjectRefresh) setRuns([]);
     setDiffFrom("");
     setDiffTo("");
-    clearAnalysisView();
+    if (!sameProjectRefresh) clearAnalysisView();
     if (!id) {
       setMessage("已取消项目选择");
-      return;
+      return true;
     }
     try {
       setProjectLoading(true);
@@ -897,7 +909,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         ),
         apiJson<RunInfo[]>(`/api/v1/projects/${id}/analysis-runs`),
       ]);
-      if (epoch !== viewEpochRef.current) return;
+      if (epoch !== viewEpochRef.current) return false;
+      loadedProjectRef.current = id;
       const documentRows = documents as Doc[];
       setDocs(documentRows);
       setRuns(history);
@@ -918,13 +931,18 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       }
       const selection = resolveRunSelection(history, id, requestedRunId);
       if (selection.kind === "not-found") {
+        if (sameProjectRefresh) {
+          setProjectRefreshProblem("刷新目录中暂未找到当前运行。仍保留原选中报告，没有改为其他运行；请重新加载项目资料核对。");
+          setMessage("当前运行目录需要核对");
+          return false;
+        }
         setRouteProblem({
           projectId: id,
           runId: requestedRunId,
           message: "这次运行不存在，或不属于当前项目。页面没有改为显示其他运行。",
         });
         setMessage("无法打开指定运行");
-        return;
+        return false;
       }
       if (selection.kind === "selected") {
         await restoreRun(selection.run, true, epoch);
@@ -937,6 +955,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       }
     } catch (error) {
       if (epoch === viewEpochRef.current) {
+        if (sameProjectRefresh && !(error instanceof ApiError && [401, 403, 404].includes(error.status))) {
+          setProjectRefreshProblem("项目资料刷新未完成。仍显示上次读取的资料列表；未保存资料身份修改保持在本页。请重新加载核对，当前列表不保证是最新状态。");
+          setMessage("项目资料刷新未完成，本页修改仍保留");
+          return false;
+        }
+        loadedProjectRef.current = "";
         setRouteProblem({
           projectId: id,
           runId: requestedRunId,
@@ -947,9 +971,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         });
         setMessage("加载项目失败");
       }
+      return false;
     } finally {
       if (epoch === viewEpochRef.current) setProjectLoading(false);
     }
+    return epoch === viewEpochRef.current;
   }
   async function loadFeedback(rows: Issue[], epoch: number) {
     const pairs = await Promise.all(
@@ -1122,13 +1148,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   }
 
   async function logout() {
+    if (contextLeaveGuardRef.current && !contextLeaveGuardRef.current()) return;
     try {
       setLogoutPending(true);
       await apiJson("/api/v1/auth/logout", { method: "POST" });
       streamRef.current?.close();
       streamRef.current = null;
       onLoggedOut();
-      browserNavigate("/login", { replace: true });
+      browserNavigate("/login", { replace: true, bypassBlockers: true });
     } catch (error) {
       setMessage(`退出失败：${String(error)}`);
       setLogoutPending(false);
@@ -1282,8 +1309,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     }
   }
   async function createProject() {
+    if (!projectName.trim()) return;
+    const approval = contextLeaveGuardRef.current?.();
+    if (approval === null) return;
     try {
-      if (!projectName.trim()) return;
       setAction("create");
       const created = await apiJson<Project>("/api/v1/projects", {
         method: "POST",
@@ -1295,7 +1324,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       });
       setProjectName("");
       await loadProjects();
-      await loadProject(created.id);
+      await loadProject(created.id, true, null, approval);
     } catch (error) {
       setMessage(`新建项目失败：${String(error)}`);
     } finally {
@@ -1347,14 +1376,16 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     );
   }
   async function demo(kind: "simple" | "advanced") {
+    const approval = contextLeaveGuardRef.current?.();
+    if (approval === null) return;
     try {
       setAction(kind);
       const url =
         kind === "advanced" ? "/api/v1/demo/advanced" : "/api/v1/demo";
       const created = await apiJson<Project>(url, { method: "POST" });
       await loadProjects();
-      await loadProject(created.id);
-      await runProject(created.id);
+      if (await loadProject(created.id, true, null, approval)) await runProject(created.id);
+      else setAction("");
     } catch (error) {
       setBusy(false);
       setAction("");
@@ -1363,6 +1394,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   }
   async function custom() {
     if (quickMutationRef.current) return;
+    const approval = contextLeaveGuardRef.current?.();
+    if (approval === null) return;
     quickMutationRef.current = true;
     const submitted = { world, chapter, mode: quickMode, role: quickRole, scope: quickScope };
     try {
@@ -1392,8 +1425,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         });
       quickDraft.markSubmitted(submitted);
       await loadProjects();
-      await loadProject(created.id);
-      await runProject(created.id);
+      if (await loadProject(created.id, true, null, approval)) await runProject(created.id);
+      else { setBusy(false); setAction(""); }
     } catch (error) {
       setBusy(false);
       setAction("");
@@ -1976,6 +2009,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             </section>
           )}
 
+          {!routeProblem && projectRefreshProblem && (
+            <section className="contextDraftNotice" role="status" aria-label="项目资料刷新未完成">
+              <p>{projectRefreshProblem}</p>
+              <button type="button" disabled={projectLoading} onClick={() => void loadProject(project, false, run)}>重新加载项目资料</button>
+            </section>
+          )}
+
           {!routeProblem && (activeView === "projects" ||
             activeView === "diff" ||
             activeView === "audit") && (
@@ -2154,13 +2194,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     支持 {supportedUploadLabel}。{docxImportBoundary} 上方选项只决定新选文件的默认设置，已有队列可逐文件调整。上传后请在下方核对资料身份，系统不会根据文件名冒充 AI 判断。
                   </p>
                   <ImportQueuePanel entries={importQueue.entries} busy={importQueue.busy} notice={importQueue.notice} replacements={docs.filter((row) => row.active).map((row) => ({ id: row.id, name: row.name, version: row.version }))} onEdit={importQueue.edit} onRemove={importQueue.remove} onClearCompleted={importQueue.clearCompleted} onRetry={(id) => void uploadDocuments(id)} onCheckDocuments={() => document.getElementById("document-library-title")?.scrollIntoView({ block: "start" })} />
-                  {project && activeDocuments.length > 0 && (
+                  {project && (
                     <NarrativeContextWorkbench
+                      key={project}
                       projectId={project}
                       documents={docs}
                       disabled={projectLoading || importQueue.busy}
                       onSaved={applyNarrativeContext}
                       onOpenProvider={() => navigateWorkspace("provider")}
+                      onLeaveGuardChange={(guard) => { contextLeaveGuardRef.current = guard; }}
                     />
                   )}
                 </div>
@@ -2749,7 +2791,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     { replace },
                   )
                 }
-                onDocumentsChanged={() => loadProject(project, false, run)}
+                onDocumentsChanged={async () => { await loadProject(project, false, run); }}
               />
             </Suspense>
           )}

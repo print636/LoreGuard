@@ -251,6 +251,53 @@ export function normalizeNarrativeContextInference(
   };
 }
 
+/** Compare all nine fields against the last explicitly accepted server draft. */
+export function contextDraftsEqual(left: NarrativeContextDraft | null, right: NarrativeContextDraft | null): boolean {
+  if (!left || !right) return left === right;
+  return left.documentRole === right.documentRole && left.publicationStatus === right.publicationStatus &&
+    left.timelineKey === right.timelineKey && left.releaseKey === right.releaseKey &&
+    left.releaseOrdinal === right.releaseOrdinal && left.branchPath === right.branchPath &&
+    left.exclusiveGroup === right.exclusiveGroup && left.activityKey === right.activityKey &&
+    left.confirmed === right.confirmed;
+}
+
+export function canPreserveProjectRefresh(input: {
+  projectId: string;
+  activeProjectId: string;
+  loadedProjectId: string;
+  requestedRunId: string | null;
+  selectedRunId: string | null;
+  routeBlocked: boolean;
+}): boolean {
+  return !!input.projectId && input.projectId === input.activeProjectId &&
+    input.projectId === input.loadedProjectId && !input.routeBlocked &&
+    (input.requestedRunId || null) === (input.selectedRunId || null);
+}
+
+/** A successful read must contain a real context, never an import-list fallback. */
+export function readableNarrativeContext(value: unknown): value is NarrativeContext {
+  const context = record(value);
+  const scope = record(context?.scope);
+  const revision = context?.context_revision ?? context?.revision;
+  if (!context || !scope || !Number.isSafeInteger(revision) || (revision as number) < 0 ||
+    !["unresolved", "inferred", "confirmed"].includes(String(context.resolution_state)) ||
+    !publicationStatusValues.has(context.publication_status as PublicationStatus) ||
+    scope.schema_version !== 1 || typeof scope.timeline_key !== "string" || !scope.timeline_key.trim()) return false;
+  if (context.context_revision != null && context.revision != null && context.context_revision !== context.revision) return false;
+  if (scope.release != null) {
+    const release = record(scope.release);
+    if (!release || typeof release.key !== "string" || !release.key.trim() ||
+      !Number.isSafeInteger(release.ordinal) || (release.ordinal as number) < 0) return false;
+  }
+  if (scope.branch != null) {
+    const branch = record(scope.branch);
+    if (!branch || !Array.isArray(branch.path) || !branch.path.length ||
+      !branch.path.every((part) => typeof part === "string" && !!part.trim()) ||
+      (branch.exclusive_group != null && typeof branch.exclusive_group !== "string")) return false;
+  }
+  return scope.activity_key == null || typeof scope.activity_key === "string";
+}
+
 export function contextRevision(context?: NarrativeContext): number {
   const value = context?.revision ?? context?.context_revision ?? 0;
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;

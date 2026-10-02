@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, apiJson } from "../../api/client";
+import { ApiError, apiJson, SESSION_EXPIRED_EVENT } from "../../api/client";
 import { documentRoles } from "../../documentContext";
+import { registerBrowserNavigationBlocker, type BrowserNavigationApproval } from "../../routing";
 import {
   contextDraft,
+  contextDraftsEqual,
   contextNavigationLocked,
   contextRevision,
   contextStatus,
   isLoadedContextForDocument,
   narrativeContextPayload,
   normalizeNarrativeContextInference,
+  readableNarrativeContext,
   publicationStatuses,
   requiresDedicatedChapterPublish,
-  responseBelongsToSelectedDocument,
   type GuidedDocument,
   type NarrativeContext,
   type NarrativeContextDraft,
@@ -33,6 +35,7 @@ type Props = {
     context: NarrativeContext,
   ) => void;
   onOpenProvider: () => void;
+  onLeaveGuardChange?: (guard: (() => BrowserNavigationApproval | null) | null) => void;
 };
 
 type InferenceRecovery = "reload" | "provider" | "retry" | "manual";
@@ -109,6 +112,10 @@ function contextPath(projectId: string, documentId: string): string {
   return `/api/v1/projects/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/narrative-context`;
 }
 
+function writeResultUnknown(reason: unknown): boolean {
+  return !(reason instanceof ApiError && reason.status >= 400 && reason.status < 500);
+}
+
 function inferenceFailure(error: unknown): InferenceFailure {
   if (error instanceof ApiError) {
     if (error.status === 409) {
@@ -180,20 +187,24 @@ export default function NarrativeContextWorkbench({
   disabled = false,
   onSaved,
   onOpenProvider,
+  onLeaveGuardChange,
 }: Props) {
   const activeDocuments = useMemo(
     () => documents.filter((document) => document.active),
     [documents],
   );
   const [selectedId, setSelectedId] = useState("");
+  const [acceptedDocument, setAcceptedDocument] = useState<GuidedDocument | null>(null);
   const selected =
     activeDocuments.find((document) => document.id === selectedId) ||
+    (acceptedDocument?.id === selectedId ? acceptedDocument : null) ||
     activeDocuments[0] ||
     null;
   const selectedIdRef = useRef("");
   selectedIdRef.current = selected?.id || "";
   const [remoteContext, setRemoteContext] = useState<NarrativeContext | null>(null);
   const [draft, setDraft] = useState<NarrativeContextDraft | null>(null);
+  const [baseline, setBaseline] = useState<NarrativeContextDraft | null>(null);
   const [loadedDocumentId, setLoadedDocumentId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -204,6 +215,7 @@ export default function NarrativeContextWorkbench({
   const [error, setError] = useState("");
   const [inferenceError, setInferenceError] = useState<InferenceFailure | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [writeNeedsReview, setWriteNeedsReview] = useState(false);
   const errorRef = useRef<HTMLDivElement | null>(null);
   const publishErrorRef = useRef<HTMLDivElement | null>(null);
   const publishDialogRef = useRef<HTMLDialogElement | null>(null);
@@ -211,12 +223,90 @@ export default function NarrativeContextWorkbench({
   const publishInFlightRef = useRef(false);
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
+  const aliveRef = useRef(true);
+  const requestRef = useRef(0);
+  const editRef = useRef(0);
+  const dirty = !!draft && !!baseline && !contextDraftsEqual(draft, baseline);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
+  const busyRef = useRef(false);
+  busyRef.current = saving || inferring || publishing;
+  const currentDocumentRef = useRef<GuidedDocument | null>(null);
+  currentDocumentRef.current = activeDocuments.find((document) => document.id === selected?.id) || null;
+  const selectedObsolete = !!selected && !currentDocumentRef.current;
+  const leaveBlockerRef = useRef(() => {
+    if (!dirtyRef.current && !busyRef.current) return true;
+    return window.confirm(busyRef.current
+      ? "资料身份操作仍在进行，结果可能已写入服务器。离开后本页修改将丢失，返回时需重新读取核对。确定离开吗？"
+      : "资料身份还有未保存修改，仅保留在本页内存。确定放弃修改并离开吗？");
+  });
+
+  useEffect(() => {
+    aliveRef.current = true;
+    const expire = () => { aliveRef.current = false; requestRef.current += 1; };
+    window.addEventListener(SESSION_EXPIRED_EVENT, expire);
+    const unregister = registerBrowserNavigationBlocker(leaveBlockerRef.current);
+    onLeaveGuardChange?.(() => {
+      if (!leaveBlockerRef.current()) return null;
+      const stamp = JSON.stringify([projectIdRef.current, selectedIdRef.current, editRef.current]);
+      return {
+        blocker: leaveBlockerRef.current,
+        stillValid: () => aliveRef.current && stamp === JSON.stringify([projectIdRef.current, selectedIdRef.current, editRef.current]),
+      };
+    });
+    return () => {
+      aliveRef.current = false;
+      requestRef.current += 1;
+      window.removeEventListener(SESSION_EXPIRED_EVENT, expire);
+      unregister();
+      onLeaveGuardChange?.(null);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!dirty && !busyRef.current) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty, saving, inferring, publishing]);
+
+  function requestCurrent(project: string, documentId: string, generation: number): boolean {
+    return aliveRef.current && projectIdRef.current === project &&
+      selectedIdRef.current === documentId && requestRef.current === generation;
+  }
+
+  function mutationCurrent(project: string, documentId: string, generation: number): boolean {
+    return requestCurrent(project, documentId, generation) && currentDocumentRef.current?.id === documentId;
+  }
+
+  function confirmReplacement(action: string): boolean {
+    return !dirtyRef.current || window.confirm(`${action}将放弃本页尚未保存的资料身份修改，不会自动合并。确定继续吗？`);
+  }
+
+  function chooseDocument(document: GuidedDocument) {
+    if (document.id === selected?.id || busyRef.current || !confirmReplacement("切换资料")) return;
+    requestRef.current += 1;
+    editRef.current += 1;
+    setAcceptedDocument(null);
+    setRemoteContext(null);
+    setDraft(null);
+    setBaseline(null);
+    setLoadedDocumentId(null);
+    setWriteNeedsReview(false);
+    setSelectedId(document.id);
+  }
+
+  function reread() {
+    if (!selected || selectedObsolete || busyRef.current || !confirmReplacement("重新读取并采纳服务器最新内容")) return;
+    void loadContext(selected);
+  }
 
   useEffect(() => {
     if (!selected) {
       setSelectedId("");
       setRemoteContext(null);
       setDraft(null);
+      setBaseline(null);
       setLoadedDocumentId(null);
       return;
     }
@@ -224,8 +314,9 @@ export default function NarrativeContextWorkbench({
   }, [selected?.id]);
 
   async function loadContext(document: GuidedDocument, signal?: AbortSignal) {
+    const targetProject = projectId;
+    const generation = ++requestRef.current;
     setLoading(true);
-    setLoadedDocumentId(null);
     setError("");
     setInferenceError(null);
     setAnnouncement("");
@@ -237,21 +328,24 @@ export default function NarrativeContextWorkbench({
       if (payload.document_id !== document.id) {
         throw new TypeError("服务返回的资料上下文不属于当前文档。");
       }
-      if (!responseBelongsToSelectedDocument(document.id, selectedIdRef.current)) return;
+      if (!readableNarrativeContext(payload.current)) throw new TypeError("资料身份响应缺少可核对的上下文。");
+      if (!requestCurrent(targetProject, document.id, generation) || signal?.aborted) return;
+      const nextDraft = contextDraft(document, payload.current);
+      setAcceptedDocument(document);
       setRemoteContext(payload.current);
-      setDraft(contextDraft(document, payload.current));
+      setDraft(nextDraft);
+      setBaseline(nextDraft);
       setLoadedDocumentId(document.id);
+      setWriteNeedsReview(false);
+      editRef.current += 1;
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === "AbortError") return;
-      if (!responseBelongsToSelectedDocument(document.id, selectedIdRef.current)) return;
-      setError(requestMessage(reason));
-      setRemoteContext(document.narrative_context || null);
-      setDraft(contextDraft(document));
-      setLoadedDocumentId(document.id);
+      if (!requestCurrent(targetProject, document.id, generation)) return;
+      setError("无法读取最新资料身份。当前修改和已读取基准保持不变，请重试读取；不会以旧列表内容冒充最新结果。");
     } finally {
       if (
         !signal?.aborted &&
-        responseBelongsToSelectedDocument(document.id, selectedIdRef.current)
+        requestCurrent(targetProject, document.id, generation)
       ) setLoading(false);
     }
   }
@@ -276,8 +370,11 @@ export default function NarrativeContextWorkbench({
     value: NarrativeContextDraft[K],
   ) {
     setDraft((current) => (current ? { ...current, [key]: value } : current));
-    setError("");
-    setInferenceError(null);
+    editRef.current += 1;
+    if (!writeNeedsReview) {
+      setError("");
+      setInferenceError(null);
+    }
     setAnnouncement("");
   }
 
@@ -286,12 +383,16 @@ export default function NarrativeContextWorkbench({
       !selected ||
       !draft ||
       loadedDocumentId !== selected.id ||
+      selectedObsolete || disabled || loading || writeNeedsReview ||
       saving ||
       inferring ||
       publishing
     ) return;
     const document = selected;
+    const targetProject = projectId;
+    const generation = ++requestRef.current;
     const draftSnapshot = { ...draft };
+    let dispatched = false;
     if (requiresDedicatedChapterPublish(
       document.document_role,
       remoteContext || document.narrative_context,
@@ -310,6 +411,7 @@ export default function NarrativeContextWorkbench({
         draftSnapshot,
         contextRevision(remoteContext || document.narrative_context),
       );
+      dispatched = true;
       const context = await apiJson<NarrativeContext>(
         `${contextPath(projectId, document.id)}/revisions`,
         {
@@ -318,27 +420,42 @@ export default function NarrativeContextWorkbench({
           body: JSON.stringify(body),
         },
       );
+      if (!context || !["unresolved", "inferred", "confirmed"].includes(context.resolution_state) || !context.scope || contextRevision(context) <= contextRevision(remoteContext || document.narrative_context)) {
+        throw new TypeError("资料身份响应无法核对，请重新读取服务器状态。");
+      }
+      if (!mutationCurrent(targetProject, document.id, generation)) return;
       onSaved(document.id, draftSnapshot.documentRole, context);
-      if (!responseBelongsToSelectedDocument(document.id, selectedIdRef.current)) return;
+      const updatedDocument = { ...document, document_role: draftSnapshot.documentRole };
+      const nextDraft = contextDraft(updatedDocument, context);
+      setAcceptedDocument(updatedDocument);
       setRemoteContext(context);
-      setDraft(contextDraft({ ...document, document_role: draftSnapshot.documentRole }, context));
+      setDraft(nextDraft);
+      setBaseline(nextDraft);
+      editRef.current += 1;
       setAnnouncement(
         draftSnapshot.confirmed
           ? `已确认“${document.name}”的资料上下文。`
           : `已保存“${document.name}”，仍需人工确认后才能用于角色审查。`,
       );
     } catch (reason) {
-      if (!responseBelongsToSelectedDocument(document.id, selectedIdRef.current)) return;
-      setError(requestMessage(reason));
+      if (!requestCurrent(targetProject, document.id, generation)) return;
+      const unknown = dispatched && writeResultUnknown(reason);
+      if (unknown) setWriteNeedsReview(true);
+      setError(unknown
+        ? "保存结果待核对：请求可能已写入服务器，本页输入仍保留。请重新读取最新资料身份后核对，不要直接重复保存。"
+        : requestMessage(reason));
       requestAnimationFrame(() => errorRef.current?.focus());
     } finally {
-      setSaving(false);
+      if (requestCurrent(targetProject, document.id, generation)) setSaving(false);
     }
   }
 
   async function inferContext() {
-    if (!selected || loadedDocumentId !== selected.id || inferring || saving || publishing) return;
+    if (!selected || loadedDocumentId !== selected.id || selectedObsolete || disabled || loading || writeNeedsReview || inferring || saving || publishing) return;
+    if (!confirmReplacement("AI 识别会保存一条待确认建议，并替换本页字段；此操作")) return;
     const document = selected;
+    const targetProject = projectId;
+    const generation = ++requestRef.current;
     try {
       setInferring(true);
       setError("");
@@ -356,18 +473,25 @@ export default function NarrativeContextWorkbench({
         throw new TypeError("AI 返回的资料标识与当前文档不一致，请重新读取后重试。");
       }
       const updatedDocument = { ...document, document_role: result.document_role };
+      if (!mutationCurrent(targetProject, document.id, generation)) return;
       onSaved(document.id, result.document_role, result.suggestion);
-      if (!responseBelongsToSelectedDocument(document.id, selectedIdRef.current)) return;
+      const nextDraft = contextDraft(updatedDocument, result.suggestion);
+      setAcceptedDocument(updatedDocument);
       setRemoteContext(result.suggestion);
-      setDraft(contextDraft(updatedDocument, result.suggestion));
+      setDraft(nextDraft);
+      setBaseline(nextDraft);
+      editRef.current += 1;
       setLoadedDocumentId(document.id);
       setAnnouncement(`已生成“${document.name}”的 AI 资料建议，请核对依据后另行保存并确认。`);
     } catch (reason) {
-      if (!responseBelongsToSelectedDocument(document.id, selectedIdRef.current)) return;
-      setInferenceError(inferenceFailure(reason));
+      if (!requestCurrent(targetProject, document.id, generation)) return;
+      if (writeResultUnknown(reason)) {
+        setWriteNeedsReview(true);
+        setInferenceError({ message: "AI 识别写入结果待核对。当前输入仍保留，但服务器可能已有待确认修订；请重新读取后核对，不要直接重复识别。", recovery: "reload" });
+      } else setInferenceError(inferenceFailure(reason));
       requestAnimationFrame(() => errorRef.current?.focus());
     } finally {
-      setInferring(false);
+      if (requestCurrent(targetProject, document.id, generation)) setInferring(false);
     }
   }
 
@@ -379,7 +503,7 @@ export default function NarrativeContextWorkbench({
       !["draft", "in_review"].includes(remoteContext.publication_status) ||
       contextRevision(remoteContext) < 1 ||
       selected.version < 1 ||
-      JSON.stringify(draft) !== JSON.stringify(contextDraft(selected, remoteContext)) ||
+      !contextDraftsEqual(draft, baseline) || selectedObsolete || writeNeedsReview || loading ||
       disabled || saving || inferring || publishing ||
       loadedDocumentId !== selected.id
     ) return;
@@ -402,6 +526,7 @@ export default function NarrativeContextWorkbench({
   async function publishChapter() {
     if (!publishTarget || publishInFlightRef.current) return;
     const target = publishTarget;
+    const generation = ++requestRef.current;
     publishInFlightRef.current = true;
     setPublishing(true);
     setPublishError("");
@@ -427,32 +552,35 @@ export default function NarrativeContextWorkbench({
       ) {
         throw new TypeError("发布响应与当前文稿不一致，请重新读取状态。");
       }
-      if (projectIdRef.current !== target.projectId || selectedIdRef.current !== target.documentId) return;
+      if (!mutationCurrent(target.projectId, target.documentId, generation)) return;
       onSaved(target.documentId, "chapter", published);
+      const nextDraft = contextDraft({ ...selected!, document_role: "chapter" }, published);
       setRemoteContext(published);
-      setDraft(contextDraft({ ...selected!, document_role: "chapter" }, published));
+      setDraft(nextDraft);
+      setBaseline(nextDraft);
+      editRef.current += 1;
       setAnnouncement(`“${target.documentName}”已由你定稿并发布。后续新稿审查可将这份历史正文作为正式背景；系统未据此认定剧情无误。`);
       publishDialogRef.current?.close();
     } catch (reason) {
-      if (projectIdRef.current !== target.projectId || selectedIdRef.current !== target.documentId) return;
+      if (!requestCurrent(target.projectId, target.documentId, generation)) return;
+      if (writeResultUnknown(reason)) setWriteNeedsReview(true);
       setPublishError(publishFailure(reason));
       requestAnimationFrame(() => publishErrorRef.current?.focus());
     } finally {
-      publishInFlightRef.current = false;
-      setPublishing(false);
+      if (requestCurrent(target.projectId, target.documentId, generation)) {
+        publishInFlightRef.current = false;
+        setPublishing(false);
+      }
     }
   }
 
-  if (!activeDocuments.length) return null;
+  if (!selected) return null;
   const status = contextStatus(remoteContext || selected?.narrative_context);
   const inference = remoteContext?.inference || null;
   const selectedContextReady = isLoadedContextForDocument(loadedDocumentId, selected?.id);
-  const editorDisabled = disabled || saving || inferring || publishing || !selectedContextReady;
+  const editorDisabled = disabled || loading || saving || inferring || publishing || selectedObsolete || !selectedContextReady;
   const navigationLocked = contextNavigationLocked(saving || publishing, inferring);
-  const unsavedContextChanges = Boolean(
-    draft && selected && remoteContext &&
-    JSON.stringify(draft) !== JSON.stringify(contextDraft(selected, remoteContext)),
-  );
+  const unsavedContextChanges = dirty;
   const showPublishAction = Boolean(
     selected?.document_role === "chapter" &&
     remoteContext &&
@@ -464,6 +592,7 @@ export default function NarrativeContextWorkbench({
     contextRevision(remoteContext) >= 1 &&
     selected && selected.version >= 1 &&
     !unsavedContextChanges &&
+    !writeNeedsReview &&
     !editorDisabled,
   );
 
@@ -491,7 +620,7 @@ export default function NarrativeContextWorkbench({
                 className={document.id === selected?.id ? "selected" : ""}
                 aria-current={document.id === selected?.id ? "true" : undefined}
                 disabled={navigationLocked}
-                onClick={() => setSelectedId(document.id)}
+                onClick={() => chooseDocument(document)}
               >
                 <span>
                   <b>{document.name}</b>
@@ -504,8 +633,34 @@ export default function NarrativeContextWorkbench({
         </nav>
 
         <div className="contextEditor" aria-busy={loading || inferring}>
+          {dirty && (
+            <p className="contextDraftNotice" role="status">资料身份有未保存修改 · 仅在本页内存，尚未写入项目；刷新或离开将丢失，不会跨刷新恢复。</p>
+          )}
+          {selectedObsolete && (
+            <section className="contextObsoleteNotice" aria-label="旧版本资料身份修改">
+              <b>正在保留旧文档“{selected.name}”v{selected.version} 的本页字段</b>
+              <p>这份文档已不再是活动版本。字段没有套用到新稿，当前不能保存、AI 识别或发布；请先核对，再明确放弃旧字段并选择活动资料。</p>
+              {activeDocuments.length > 0 && <button type="button" disabled={navigationLocked} onClick={() => chooseDocument(activeDocuments[0])}>放弃旧字段并选择活动资料</button>}
+            </section>
+          )}
+          {error && (
+            <div ref={errorRef} className="contextError" role="alert" tabIndex={-1}>
+              <b>{writeNeedsReview ? "保存结果待核对" : "资料身份操作未完成"}</b>
+              <p>{error}</p>
+              <button type="button" disabled={navigationLocked || loading || selectedObsolete} onClick={reread}>重新读取</button>
+            </div>
+          )}
+          {inferenceError && (
+            <div ref={errorRef} className="contextError" role="alert" tabIndex={-1}>
+              <b>AI 资料识别未完成</b>
+              <p>{inferenceError.message}</p>
+              {inferenceError.recovery === "reload" && <button type="button" disabled={navigationLocked || loading || selectedObsolete} onClick={reread}>重新读取</button>}
+              {inferenceError.recovery === "provider" && <button type="button" onClick={onOpenProvider}>前往模型连接</button>}
+              {inferenceError.recovery === "retry" && <button type="button" onClick={() => void inferContext()}>重新识别</button>}
+            </div>
+          )}
           {loading || !draft || !selected || !selectedContextReady ? (
-            <div className="contextLoading">正在读取资料上下文…</div>
+            <div className="contextLoading">{loading ? "正在读取资料上下文…" : "尚未读取可核对的资料身份，请重新读取后再编辑。"}</div>
           ) : (
             <>
               <div className={`contextOrigin ${status.tone}`} role="status">
@@ -513,40 +668,18 @@ export default function NarrativeContextWorkbench({
                 <p>{status.detail}</p>
               </div>
 
-              {error && (
-                <div ref={errorRef} className="contextError" role="alert" tabIndex={-1}>
-                  <b>资料上下文没有保存</b>
-                  <p>{error}</p>
-                  <button type="button" onClick={() => void loadContext(selected)}>重新读取</button>
-                </div>
-              )}
-              {inferenceError && (
-                <div ref={errorRef} className="contextError" role="alert" tabIndex={-1}>
-                  <b>AI 资料识别未完成</b>
-                  <p>{inferenceError.message}</p>
-                  {inferenceError.recovery === "reload" && (
-                    <button type="button" onClick={() => void loadContext(selected)}>重新读取</button>
-                  )}
-                  {inferenceError.recovery === "provider" && (
-                    <button type="button" onClick={onOpenProvider}>前往模型连接</button>
-                  )}
-                  {inferenceError.recovery === "retry" && (
-                    <button type="button" onClick={() => void inferContext()}>重新识别</button>
-                  )}
-                </div>
-              )}
               <div className="contextAnnouncement" aria-live="polite">{announcement}</div>
 
               {status.tone !== "confirmed" && (
                 <div className="contextInferenceAction">
                   <div>
                     <b>让 AI 先读一遍资料</b>
-                    <p>只生成可核对的资料类型、版本与分支建议，不会替你确认，也不会改写正文。</p>
+                    <p>会保存一条待确认的资料类型、版本与分支建议并替换本页字段，不会替你确认或改写正文。</p>
                   </div>
                   <button
                     className="contextInferenceButton"
                     type="button"
-                    disabled={editorDisabled}
+                    disabled={editorDisabled || writeNeedsReview}
                     onClick={() => void inferContext()}
                   >
                     {inferring ? "AI 正在识别…" : "AI 识别资料"}
@@ -659,9 +792,10 @@ export default function NarrativeContextWorkbench({
               </label>
 
               <div className="contextActions">
-                <button className="quietPrimary" type="button" disabled={editorDisabled} onClick={() => void save()}>
+                <button className="quietPrimary" type="button" disabled={editorDisabled || writeNeedsReview} onClick={() => void save()}>
                   {saving ? "保存中…" : draft.confirmed ? "保存并确认" : "保存草稿"}
                 </button>
+                {!error && inferenceError?.recovery !== "reload" && <button type="button" disabled={editorDisabled} onClick={reread}>重新读取</button>}
                 <small>保存会生成新的上下文修订，不会改写文稿内容。</small>
               </div>
               {showPublishAction && (
@@ -708,7 +842,7 @@ export default function NarrativeContextWorkbench({
                     <p>{publishError}</p>
                     <button type="button" disabled={publishing} onClick={() => {
                       closePublishDialog();
-                      if (selected) void loadContext(selected);
+                      reread();
                     }}>关闭并重新读取</button>
                   </div>
                 )}

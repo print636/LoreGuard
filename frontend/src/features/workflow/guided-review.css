@@ -94,6 +94,10 @@
 .contextError p { margin: 4px 0 9px; color: var(--color-text-secondary, var(--text-2)); font-size: 12px; }
 .contextError button { min-height: 36px; padding: 6px 10px; }
 .contextAnnouncement { min-height: 22px; padding-top: 6px; color: var(--color-success, var(--success)); font-size: 12px; }
+.contextDraftNotice, .contextObsoleteNotice { margin: 0 0 12px; padding: 12px; border-left: 3px solid var(--color-warning, var(--warning)); background: var(--color-subtle, rgba(183,162,255,.08)); color: var(--color-text-secondary, var(--text-2)); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.contextObsoleteNotice b { color: var(--color-warning, var(--warning)); }
+.contextObsoleteNotice p { margin: 4px 0 10px; }
+.contextObsoleteNotice button { min-height: 44px; padding: 8px 12px; }
 
 .contextInferenceAction {
   display: flex;

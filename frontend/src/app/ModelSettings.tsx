@@ -191,10 +191,6 @@ export default function ModelSettings({ identity, onLoggedOut }: ModelSettingsPr
   }, [dirty]);
 
   function followSettingsLink(event: MouseEvent<HTMLAnchorElement>) {
-    if (dirty && !window.confirm("模型配置还有未保存更改，确定离开吗？")) {
-      event.preventDefault();
-      return;
-    }
     followSpaLink(event);
   }
 
@@ -313,7 +309,7 @@ export default function ModelSettings({ identity, onLoggedOut }: ModelSettingsPr
       setLogoutPending(true);
       await apiJson("/api/v1/auth/logout", { method: "POST" });
       onLoggedOut();
-      browserNavigate("/login", { replace: true });
+      browserNavigate("/login", { replace: true, bypassBlockers: true });
     } catch {
       setOperationError("退出没有完成，请重试。模型配置没有改变。");
       setLogoutPending(false);

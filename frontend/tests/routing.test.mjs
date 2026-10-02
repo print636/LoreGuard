@@ -232,12 +232,18 @@ test("native back and forward can be cancelled without losing the active history
       confirmations += 1;
       return false;
     });
+    const beforeNoOp = fakeWindow.history.state;
+    assert.equal(browserNavigate("/app/settings/model"), true);
+    assert.equal(confirmations, 0, "the current menu is not a leave operation");
+    assert.equal(fakeWindow.history.state, beforeNoOp, "a no-op adds no history entry");
+    assert.equal(browserNavigate("/app/projects/other/check"), false);
+    assert.equal(location.pathname, "/app/settings/model", "cancelled SPA navigation must not change history or location");
+    confirmations = 0;
     applyUrl("/app");
     fakeWindow.history.state = projectState;
-    assert.equal(
-      handleBrowserPopState(new FakePopStateEvent("popstate", { state: projectState })),
-      false,
-    );
+    const rejectedTraversal = new FakePopStateEvent("popstate", { state: projectState });
+    assert.equal(handleBrowserPopState(rejectedTraversal), false);
+    assert.equal(handleBrowserPopState(rejectedTraversal), false, "Root and workspace share the same event decision");
     assert.deepEqual(goCalls, [1]);
     assert.equal(confirmations, 1);
 
@@ -282,6 +288,23 @@ test("native back and forward can be cancelled without losing the active history
     );
     assert.equal(confirmations, 3);
     releaseForwardCancel();
+
+    let approvalQuestions = 0;
+    const authorBlocker = () => { approvalQuestions += 1; return false; };
+    const unregisterAuthor = registerBrowserNavigationBlocker(authorBlocker);
+    let approvalValid = true;
+    const approval = { blocker: authorBlocker, stillValid: () => approvalValid };
+    assert.equal(browserNavigate("/app/settings/model", { replace: true, approval }), true);
+    assert.equal(approvalQuestions, 0, "a still-current explicit approval avoids asking the same editor twice");
+    approvalValid = false;
+    assert.equal(browserNavigate("/app/projects/new/check", { approval }), false);
+    assert.equal(approvalQuestions, 1, "editing while creation awaits invalidates the earlier approval");
+    approvalValid = true;
+    const unregisterOther = registerBrowserNavigationBlocker(() => false);
+    assert.equal(browserNavigate("/app/projects/new/check", { approval }), false, "one editor approval cannot bypass another editor or queue");
+    assert.equal(browserNavigate("/login", { replace: true, bypassBlockers: true }), true, "forced authentication transitions cannot be held by private dirty forms");
+    unregisterOther();
+    unregisterAuthor();
   } finally {
     globalThis.window = originalWindow;
     globalThis.PopStateEvent = originalPopStateEvent;
