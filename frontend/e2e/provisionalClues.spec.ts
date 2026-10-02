@@ -86,6 +86,21 @@ async function mockCompletedReport(page: Page, state: MockState) {
     else if (path === "/api/v1/account/model-provider") body = {};
     else if (path === `/api/v1/projects/${projectId}/documents`) body = [];
     else if (path === `/api/v1/projects/${projectId}/analysis-runs`) body = state.secondClueResponse ? [run, secondRun] : [run];
+    else if (path === `/api/v1/projects/${projectId}/run-catalog` && route.request().method() === "GET") {
+      const pageNumber = Number(url.searchParams.get("page") || 1);
+      const pageSize = Number(url.searchParams.get("page_size") || 20);
+      const status = url.searchParams.get("status") || "all";
+      const all = (state.secondClueResponse ? [run, secondRun] : [run])
+        .filter((item) => status === "all" || item.status === status)
+        .sort((left, right) => right.created_at.localeCompare(left.created_at) || right.id.localeCompare(left.id));
+      const offset = (pageNumber - 1) * pageSize;
+      body = { project_id: projectId, page: pageNumber, page_size: pageSize, total: all.length,
+        has_more: offset + pageSize < all.length,
+        items: all.slice(offset, offset + pageSize).map((item) => ({
+          ...item, started_at: null, completed_at: now, input_chars: 0,
+          frozen_document_count: 0, retried_from: null, batch_mode: null,
+        })) };
+    }
     else if (path === `/api/v1/analysis-runs/${runId}`) body = run;
     else if (path === `/api/v1/analysis-runs/${secondRunId}` && state.secondClueResponse) body = secondRun;
     else if (path === `/api/v1/analysis-runs/${runId}/issues` || (state.secondClueResponse && path === `/api/v1/analysis-runs/${secondRunId}/issues`)) body = state.issueResponse ?? [issue];
@@ -382,8 +397,9 @@ test("a late clue response from a previous run cannot replace the selected run",
   const clues = page.getByRole("region", { name: /待复核线索/ });
   await expect(clues).toContainText("正在读取待复核线索");
   await page.locator(".sideNav").getByRole("button", { name: "运行审计" }).click();
-  const history = page.getByRole("heading", { name: "运行历史（冻结输入）" }).locator("..");
-  await history.getByRole("row").nth(2).getByRole("button", { name: "查看报告" }).click();
+  const history = page.getByRole("region", { name: "运行历史", exact: true });
+  await history.getByRole("row").filter({ has: page.locator(`code[title="${secondRunId}"]`) })
+    .getByRole("button", { name: /^查看报告/ }).click();
   await expect(page).toHaveURL(new RegExp(`/runs/${secondRunId}/report`));
   await expect(clues).toContainText(secondClue.proposed_statement);
   releaseOldClue();

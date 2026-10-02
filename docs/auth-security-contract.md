@@ -94,8 +94,12 @@ ports, uses development database credentials, and leaves `/metrics` for an
 operator-controlled monitoring boundary. It must not be published unchanged.
 
 The workspace migration is exercised through SQLite upgrade/downgrade tests.
-A real PostgreSQL migration rehearsal and backup/restore drill are still
-required before the first public release. Migration `0004` rejects incompatible
+The [disposable PostgreSQL backup/restore rehearsal](backup-restore-rehearsal.md)
+provides a separate clean-database migration and recovery check using only
+synthetic data. Its CI result is evidence for that isolated rehearsal, not for
+an existing deployment: migration and recovery checks against a sanitized copy
+of the intended production database are still required before the first public
+release. Migration `0004` rejects incompatible
 column sets in pre-existing authentication tables, but complete validation of
 pre-existing unique constraints and foreign-key deletion policies remains a
 hardening item; clean databases receive the intended constraints directly.

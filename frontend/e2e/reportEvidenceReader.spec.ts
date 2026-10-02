@@ -157,6 +157,24 @@ async function mockApi(page: Page, state: MockState) {
     else if (/^\/api\/v1\/projects\/[^/]+\/analysis-runs$/.test(path)) {
       body = path.includes(otherProjectId) ? [run(otherRunId)] : [run(), run(nextRunId)];
     }
+    else if ([projectId, otherProjectId].some((id) => path === `/api/v1/projects/${id}/run-catalog`) && method === "GET") {
+      const activeProjectId = path.split("/")[4];
+      const pageNumber = Number(url.searchParams.get("page") || 1);
+      const pageSize = Number(url.searchParams.get("page_size") || 20);
+      const status = url.searchParams.get("status") || "all";
+      const all = (activeProjectId === otherProjectId ? [run(otherRunId)] : [run(), run(nextRunId)])
+        .filter((item) => status === "all" || item.status === status)
+        .sort((left, right) => right.created_at.localeCompare(left.created_at) || right.id.localeCompare(left.id));
+      const offset = (pageNumber - 1) * pageSize;
+      body = { project_id: activeProjectId, page: pageNumber, page_size: pageSize, total: all.length,
+        has_more: offset + pageSize < all.length,
+        items: all.slice(offset, offset + pageSize).map((item) => ({
+          id: item.id, project_id: item.project_id, status: item.status, created_at: item.created_at,
+          started_at: null, completed_at: now, input_chars: 0, prompt_tokens: item.prompt_tokens,
+          completion_tokens: item.completion_tokens, estimated_cost_usd: item.estimated_cost_usd,
+          frozen_document_count: item.input_documents.length, retried_from: null, batch_mode: item.review_batch.mode,
+        })) };
+    }
     else if (path.endsWith("/narrative-context")) {
       const parts = path.split("/");
       const document = documents(parts[4]).find((item) => item.id === parts.at(-2));
@@ -349,8 +367,9 @@ test("切换运行与项目会清除旧阅读面板，迟到原文不能覆盖�
   state.delayedRunId = runId;
   await openReport(page, state, nextRunId);
   await page.locator(".sideNav").getByRole("button", { name: "运行审计", exact: true }).click();
-  const history = page.getByRole("heading", { name: "运行历史（冻结输入）" }).locator("..");
-  await history.getByRole("row").filter({ has: page.locator(`code[title="${runId}"]`) }).getByRole("button", { name: "查看报告" }).click();
+  const history = page.getByRole("region", { name: "运行历史", exact: true });
+  await history.getByRole("row").filter({ has: page.locator(`code[title="${runId}"]`) })
+    .getByRole("button", { name: /^查看报告/ }).click();
   await expect(page).toHaveURL(new RegExp(`/runs/${runId}/report`));
   await primaryTrigger(page).click();
   const dialog = page.getByRole("dialog", { name: "分析时原文" });

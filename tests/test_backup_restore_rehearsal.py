@@ -142,6 +142,95 @@ def test_canonical_row_fingerprints_include_json_values_and_unicode():
     assert rehearsal.fingerprint_rows(first) != rehearsal.fingerprint_rows(changed)
 
 
+def _array_check(*, restored=False, values=("usable", "superseded", "revoked", "scrubbed")):
+    if restored:
+        array = "ARRAY[" + ", ".join(f"('{value}'::character varying)::text" for value in values) + "]"
+    else:
+        array = "(ARRAY[" + ", ".join(f"'{value}'::character varying" for value in values) + "])::text[]"
+    return "CHECK (((state)::text = ANY (" + array + ")))"
+
+
+def test_narrow_cast_rule_matches_both_exact_ci_deparser_fingerprints():
+    source, restored = _array_check(), _array_check(restored=True)
+    prefix = ("account_provider_configs", "ck_account_provider_config_state", "c")
+    # These are the two actual schema-only hashes from CI 37016326429, not an
+    # assumption that every pg_get_constraintdef difference is harmless.
+    assert rehearsal.fingerprint_rows([(*prefix, source)]) == "4b4b35fa07e658bb65ed8a64fe6981cea8b450e748f74addf6b24b801c76b31b"
+    assert rehearsal.fingerprint_rows([(*prefix, restored)]) == "a1836437814cc6255add9a333fbee90982a9ac9b1e6b2d7d8354cca60afe59cc"
+    expected = "CHECK (((state)::text = ANY (ARRAY['usable'::text, 'superseded'::text, 'revoked'::text, 'scrubbed'::text])))"
+    assert rehearsal.canonical_schema_definition(source) == expected
+    assert rehearsal.canonical_schema_definition(restored) == expected
+    escaped = "(ARRAY['author''s choice'::character varying, 'a,b]'::character varying])::text[]"
+    assert rehearsal.canonical_schema_definition(escaped) == "ARRAY['author''s choice'::text, 'a,b]'::text]"
+
+
+def test_cast_rule_retains_actual_predicate_and_index_property_changes():
+    source = _array_check()
+    original = rehearsal.canonical_schema_definition(source)
+    changed = [
+        _array_check(restored=True, values=("usable", "superseded", "revoked", "other")),
+        _array_check(restored=True, values=("usable", "superseded", "revoked")),
+        _array_check(restored=True, values=("usable", "superseded", "revoked", "scrubbed", "other")),
+        _array_check(restored=True, values=("superseded", "usable", "revoked", "scrubbed")),
+        _array_check(restored=True).replace(" = ANY", " <> ANY"),
+        _array_check(restored=True).replace("state", "different_column"),
+        _array_check(restored=True).replace("CHECK (", "CHECK (state IS NULL OR ", 1),
+        _array_check(restored=True) + " NOT VALID",
+    ]
+    for definition in changed:
+        assert rehearsal.canonical_schema_definition(definition) != original
+    index = "CREATE UNIQUE INDEX sample ON public.example USING btree (project_id, state) WHERE " + source[7:-1]
+    equivalent = index.replace(source[7:-1], _array_check(restored=True)[7:-1])
+    assert rehearsal.canonical_schema_definition(index) == rehearsal.canonical_schema_definition(equivalent)
+    for definition in (
+        equivalent.replace("CREATE UNIQUE INDEX", "CREATE INDEX"),
+        equivalent.replace("project_id, state", "project_id, different_column"),
+        equivalent.replace("(project_id, state)", "(project_id, state varchar_pattern_ops)"),
+        equivalent.replace("USING btree", "USING hash"),
+        equivalent + " AND state IS NOT NULL",
+    ):
+        assert rehearsal.canonical_schema_definition(index) != rehearsal.canonical_schema_definition(definition)
+
+
+def test_cast_rule_does_not_rewrite_unsupported_sql_or_quoted_lookalikes():
+    unsupported = (
+        "(ARRAY['usable'::character varying, NULL])::text[]",
+        "(ARRAY['usable'::character varying(10)])::text[]",
+        "(ARRAY['usable'::custom_domain])::text[]",
+        "(ARRAY['usable'::character varying COLLATE \"C\"])::text[]",
+        "(ARRAY[lower('usable')::character varying])::text[]",
+        "(ARRAY[E'usable'::character varying])::text[]",
+        r"(ARRAY['back\slash'::character varying])::text[]",
+        "ARRAY[('usable'::character varying(10))::text]",
+        "ARRAY[('usable'::character varying)::text, NULL]",
+        "CHECK (state IS NOT NULL)",
+        "CHECK ((count > 0) AND (count < 100))",
+        'CHECK ("ARRAY[(\'usable\'::character varying)::text]" IS NOT NULL)',
+        "CHECK (note <> 'ARRAY[(''usable''::character varying)::text]')",
+        "CHECK (note <> $$ARRAY[('usable'::character varying)::text]$$)",
+        "CHECK (note <> $tag$(ARRAY['usable'::character varying])::text[]$tag$)",
+        "CHECK (true) /* ARRAY[('usable'::character varying)::text] */",
+        "CHECK (true) -- ARRAY[('usable'::character varying)::text]",
+        "CHECK (XARRAY[('usable'::character varying)::text])",
+    )
+    for definition in unsupported:
+        assert rehearsal.canonical_schema_definition(definition) == definition
+
+
+def test_only_check_and_index_definitions_use_the_explicit_schema_cast_rule():
+    source, restored = _array_check(), _array_check(restored=True)
+    indexes, constraints = rehearsal.canonical_schema_rows(
+        [("table", "index", source)],
+        [("table", "check", "c", source), ("table", "foreign", "f", source)],
+    )
+    assert indexes == [("table", "index", rehearsal.canonical_schema_definition(restored))]
+    assert constraints == [
+        ("table", "check", "c", rehearsal.canonical_schema_definition(restored)),
+        ("table", "foreign", "f", source),
+    ]
+    assert rehearsal.SCHEMA_NORMALIZATION == "varchar_literal_array_to_text_v1"
+
+
 def test_snapshot_diagnostic_keeps_names_counts_hashes_but_no_sql_or_row_values():
     private = "PRIVATE-SYNTHETIC-PASSWORD-OR-STORY-MUST-NOT-APPEAR"
     entries = rehearsal.schema_entry_fingerprints(

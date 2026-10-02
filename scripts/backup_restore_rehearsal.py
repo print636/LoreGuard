@@ -32,6 +32,18 @@ RESTORED_DB = "loreguard_rehearsal_restored"
 DATABASES = frozenset({SOURCE_DB, RESTORED_DB})
 DB_USER = "rehearsal"
 MAX_DUMP_BYTES = 64 * 1024 * 1024
+SCHEMA_NORMALIZATION = "varchar_literal_array_to_text_v1"
+# PostgreSQL 16 dump/restore may move this lossless built-in cast from the
+# constant ARRAY to each constant. Match only the two observed deparser forms;
+# no NULLs, typmods, domains, collations, expressions or arbitrary casts.
+_SQL_LITERAL = r"'(?:[^'\\]|'')*'"
+_VARCHAR_LITERAL = _SQL_LITERAL + r"::character varying"
+_TEXT_CAST_LITERAL = r"\(" + _VARCHAR_LITERAL + r"\)::text"
+_ARRAY_CAST_FORMS = (
+    re.compile(r"\(ARRAY\[(?P<items>" + _VARCHAR_LITERAL + r"(?:, " + _VARCHAR_LITERAL + r")*)\]\)::text\[\]"),
+    re.compile(r"ARRAY\[(?P<items>" + _TEXT_CAST_LITERAL + r"(?:, " + _TEXT_CAST_LITERAL + r")*)\]"),
+)
+_PLAIN_LITERAL = re.compile(_SQL_LITERAL)
 IDENTITY_FORMAT = (
     '{"id":{{json .Id}},"name":{{json .Name}},'
     '"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}}}'
@@ -345,6 +357,72 @@ def fingerprint_rows(rows: list[Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def canonical_schema_definition(definition: str) -> str:
+    """Normalize one proven deparser difference, never quoted SQL contents.
+
+    Preserve every literal (including order/escaping), surrounding predicate,
+    operator, column and index property. Unsupported forms remain byte-exact.
+    This deliberately is not a general SQL equivalence checker.
+    """
+    parts = []
+    position = 0
+    while position < len(definition):
+        # SQL definitions can contain string/identifier literals which happen
+        # to look like this ARRAY syntax. Never rewrite inside either kind.
+        if definition[position] in ("'", '"'):
+            quote = definition[position]
+            end = position + 1
+            while end < len(definition):
+                if definition[end] == "\\":
+                    end += 2  # conservatively protect E-string escapes too
+                elif definition[end] == quote:
+                    if end + 1 < len(definition) and definition[end + 1] == quote:
+                        end += 2
+                    else:
+                        end += 1
+                        break
+                else:
+                    end += 1
+            parts.append(definition[position:end])
+            position = end
+            continue
+        # Dollar-quoted bodies and comments are not deparser ARRAY expressions.
+        dollar_quote = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", definition[position:])
+        if dollar_quote:
+            delimiter = dollar_quote.group()
+            end = definition.find(delimiter, position + len(delimiter))
+            end = len(definition) if end == -1 else end + len(delimiter)
+            parts.append(definition[position:end])
+            position = end
+            continue
+        if definition.startswith("--", position) or definition.startswith("/*", position):
+            # Conservatively keep the entire remainder untouched. Neither
+            # observed pg_get_* definition contains comments.
+            parts.append(definition[position:])
+            break
+        match = None
+        if not position or not (definition[position - 1].isalnum() or definition[position - 1] in "_$"):
+            match = next((candidate for pattern in _ARRAY_CAST_FORMS
+                          if (candidate := pattern.match(definition, position))), None)
+        if match:
+            constants = _PLAIN_LITERAL.findall(match.group("items"))
+            parts.append("ARRAY[" + ", ".join(value + "::text" for value in constants) + "]")
+            position = match.end()
+        else:
+            parts.append(definition[position])
+            position += 1
+    return "".join(parts)
+
+
+def canonical_schema_rows(indexes: list, constraints: list) -> tuple[list, list]:
+    """Only CHECK bodies and index definitions receive the narrow cast rule."""
+    return (
+        [(*row[:2], canonical_schema_definition(row[2])) for row in indexes],
+        [(*row[:3], canonical_schema_definition(row[3]) if row[2] == "c" else row[3])
+         for row in constraints],
+    )
+
+
 def schema_entry_fingerprints(*, indexes, constraints, columns, triggers, extensions) -> dict:
     """Keep names and hashes only; never return SQL definitions/defaults."""
     return {
@@ -407,6 +485,7 @@ def _snapshot(connection) -> dict:
         "FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace "
         "WHERE n.nspname='public' ORDER BY c.relname,k.conname"
     ).fetchall()
+    indexes, constraints = canonical_schema_rows(indexes, constraints)
     columns = connection.execute(
         "SELECT table_name,column_name,data_type,udt_name,is_nullable,column_default "
         "FROM information_schema.columns WHERE table_schema='public' ORDER BY table_name,ordinal_position"
@@ -417,6 +496,7 @@ def _snapshot(connection) -> dict:
     ).fetchall()
     extensions = connection.execute("SELECT extname,extversion FROM pg_extension ORDER BY extname").fetchall()
     return {
+        "schema_normalization": SCHEMA_NORMALIZATION,
         "tables": table_fingerprints,
         "indexes_sha256": fingerprint_rows(indexes),
         "constraints_sha256": fingerprint_rows(constraints),

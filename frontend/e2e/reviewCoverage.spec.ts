@@ -42,6 +42,19 @@ async function mockCompletedRun(page: Page, state: { character: CharacterDiagnos
     else if (path === "/api/v1/account/model-provider") response = {};
     else if (path === `/api/v1/projects/${projectId}/documents`) response = [];
     else if (path === `/api/v1/projects/${projectId}/analysis-runs`) response = [run];
+    else if (path === `/api/v1/projects/${projectId}/run-catalog` && method === "GET") {
+      const pageNumber = Number(url.searchParams.get("page") || 1);
+      const pageSize = Number(url.searchParams.get("page_size") || 20);
+      const status = url.searchParams.get("status") || "all";
+      const all = status === "all" || status === run.status ? [run] : [];
+      const offset = (pageNumber - 1) * pageSize;
+      response = { project_id: projectId, page: pageNumber, page_size: pageSize, total: all.length,
+        has_more: offset + pageSize < all.length,
+        items: all.slice(offset, offset + pageSize).map((item) => ({
+          ...item, started_at: null, completed_at: item.created_at, input_chars: 0,
+          frozen_document_count: 0, retried_from: null, batch_mode: null,
+        })) };
+    }
     else if (path === `/api/v1/analysis-runs/${runId}`) response = run;
     else if (path === `/api/v1/analysis-runs/${runId}/issues`) response = [];
     else if (path === `/api/v1/analysis-runs/${runId}/records`) response = { records: [], warnings: [] };
