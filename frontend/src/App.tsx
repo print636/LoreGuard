@@ -105,12 +105,14 @@ import {
   type AnalysisRunRequest,
   type NarrativeContext,
 } from "./features/workflow/guidedReview";
+import { documentNameKey, initialLibraryState } from "./features/documents/libraryModel";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
 const RevisionReview = lazy(() => import("./components/RevisionReview"));
 const CharacterWorkspace = lazy(
   () => import("./features/characters/CharacterWorkspace"),
 );
+const DocumentLibrary = lazy(() => import("./features/documents/DocumentLibrary"));
 
 type FeedbackState = {
   id: string;
@@ -427,6 +429,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [project, setProject] = useState("");
   const [projectName, setProjectName] = useState("");
   const [docs, setDocs] = useState<Doc[]>([]);
+  const [documentLibraryState, setDocumentLibraryState] = useState(() => initialLibraryState(""));
   const [runs, setRuns] = useState<RunInfo[]>([]);
   const [replaceId, setReplaceId] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -434,6 +437,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [diffTo, setDiffTo] = useState("");
   const [documentDiff, setDocumentDiff] = useState<DocumentDiff | null>(null);
   const [diffBusy, setDiffBusy] = useState(false);
+  const [diffError, setDiffError] = useState("");
   const [world, setWorld] = useState(defaultWorld);
   const [chapter, setChapter] = useState(defaultChapter);
   const [run, setRun] = useState("");
@@ -515,6 +519,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const catalogSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const catalogCriteriaRef = useRef({ page: 1, query: "", sort: "recent" as "recent" | "name" });
   const currentProjectRef = useRef("");
+  const diffAbortRef = useRef<AbortController | null>(null);
+  const diffRequestRef = useRef(0);
   const visibleIssues = useMemo(
     () =>
       issues.filter((issue) => {
@@ -783,6 +789,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     requestedRunId: string | null = null,
   ) {
     const epoch = ++viewEpochRef.current;
+    cancelDocumentComparison();
     currentProjectRef.current = id;
     const knownProject = projects.find((row) => row.id === id);
     if (knownProject) setSelectedProjectSummary(knownProject);
@@ -1423,7 +1430,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       setExportPending(false);
     }
   }
+  function cancelDocumentComparison() {
+    diffAbortRef.current?.abort();
+    diffAbortRef.current = null;
+    ++diffRequestRef.current;
+    setDiffBusy(false);
+    setDiffError("");
+  }
   function selectDiffFrom(id: string) {
+    cancelDocumentComparison();
     setDiffFrom(id);
     setDocumentDiff(null);
     const source = docs.find((row) => row.id === id);
@@ -1436,21 +1451,50 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       : [];
     setDiffTo(candidates.sort((a, b) => b.version - a.version)[0]?.id || "");
   }
-  async function compareVersions() {
+  async function compareVersions(fromId = diffFrom, toId = diffTo) {
+    if (!project || !fromId || !toId) return;
+    cancelDocumentComparison();
+    const sequence = ++diffRequestRef.current;
+    const epoch = viewEpochRef.current;
+    const projectId = project;
+    const controller = new AbortController();
+    diffAbortRef.current = controller;
+    const source = docs.find((document) => document.id === fromId);
+    const destination = docs.find((document) => document.id === toId);
+    setDocumentDiff(null);
     try {
-      if (!project || !diffFrom || !diffTo) return;
       setDiffBusy(true);
-      setDocumentDiff(
-        await apiJson<DocumentDiff>(
-          `/api/v1/projects/${project}/documents/diff?from_document_id=${encodeURIComponent(diffFrom)}&to_document_id=${encodeURIComponent(diffTo)}`,
-        ),
+      const result = await apiJson<DocumentDiff>(
+        `/api/v1/projects/${projectId}/documents/diff?from_document_id=${encodeURIComponent(fromId)}&to_document_id=${encodeURIComponent(toId)}`,
+        { signal: controller.signal },
       );
+      if (controller.signal.aborted || sequence !== diffRequestRef.current || epoch !== viewEpochRef.current || currentProjectRef.current !== projectId) return;
+      if (!source || !destination || result.from_document?.id !== fromId || result.to_document?.id !== toId ||
+        result.from_document.project_id !== projectId || result.to_document.project_id !== projectId ||
+        result.from_document.version !== source.version || result.to_document.version !== destination.version) {
+        throw new TypeError("比较结果与所选文稿版本不一致，请重试。");
+      }
+      setDocumentDiff(result);
     } catch (error) {
-      setMessage(String(error));
+      if (controller.signal.aborted || sequence !== diffRequestRef.current || epoch !== viewEpochRef.current) return;
+      setDiffError(error instanceof TypeError && error.message.startsWith("比较结果") ? error.message : "读取版本差异失败，请检查连接后重试。");
       setDocumentDiff(null);
     } finally {
-      setDiffBusy(false);
+      if (sequence === diffRequestRef.current && epoch === viewEpochRef.current) {
+        setDiffBusy(false);
+        diffAbortRef.current = null;
+      }
     }
+  }
+  function openLibraryComparison(fromId: string, toId: string) {
+    const source = docs.find((document) => document.id === fromId && document.project_id === project);
+    const destination = docs.find((document) => document.id === toId && document.project_id === project);
+    if (!source || !destination || source.active || !destination.active || fromId === toId || documentNameKey(source.name) !== documentNameKey(destination.name)) return;
+    setDiffFrom(fromId);
+    setDiffTo(toId);
+    setDocumentDiff(null);
+    navigateWorkspace("diff");
+    void compareVersions(fromId, toId);
   }
   function selectReplacement(id: string) {
     setReplaceId(id);
@@ -1676,7 +1720,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </button>
         </div>
       </header>
-      <main className={`appShell ${activeView === "characters" ? "characterMode" : ""}`}>
+      <main className={`appShell ${activeView === "characters" ? "characterMode" : activeView === "projects" ? "documentMode" : ""}`}>
         <aside className="sideNav" aria-label="创作工作台导航">
           <div className="sideNavTitle">
             <span>CREATIVE INDEX</span>
@@ -1998,55 +2042,17 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               {activeView !== "diff" && (
                 <div className="tables">
                   {activeView === "projects" && (
-                    <div>
-                      <h3>文档版本</h3>
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>文件</th>
-                            <th>版本</th>
-                            <th>类型</th>
-                            <th>作用域</th>
-                            <th>状态</th>
-                            <th>创建时间</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {docs.length === 0 ? (
-                            <tr>
-                              <td className="tableEmpty" colSpan={6}>
-                                {project
-                                  ? `暂无文档，请上传${supportedUploadLabel}`
-                                  : "选择项目后查看文档版本"}
-                              </td>
-                            </tr>
-                          ) : (
-                            docs.map((row) => (
-                              <tr key={row.id}>
-                                <td>{row.name}</td>
-                                <td>v{row.version}</td>
-                                <td>
-                                  {documentRoles.find(
-                                    ([value]) => value === row.document_role,
-                                  )?.[1] || row.document_role}
-                                </td>
-                                <td>{row.story_scope}</td>
-                                <td>
-                                  <span
-                                    className={`badge ${row.active ? "ok" : "muted"}`}
-                                  >
-                                    {row.active ? "active" : "history"}
-                                  </span>
-                                </td>
-                                <td>
-                                  {new Date(row.created_at).toLocaleString()}
-                                </td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                    <Suspense fallback={<p role="status">正在打开资料库…</p>}>
+                      <DocumentLibrary
+                        key={project}
+                        projectId={project}
+                        documents={docs}
+                        loading={projectLoading}
+                        state={documentLibraryState}
+                        onStateChange={setDocumentLibraryState}
+                        onCompare={openLibraryComparison}
+                      />
+                    </Suspense>
                   )}
                   {activeView === "audit" && (
                     <div>
@@ -2174,6 +2180,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       <h3>版本内容差异</h3>
                     </div>
                     <small>本地行级比较，不调用模型、不消耗 Token</small>
+                    <button type="button" onClick={() => navigateWorkspace("projects")}>返回资料库</button>
                   </div>
                   <div className="diffControls">
                     <select
@@ -2191,6 +2198,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     <select
                       value={diffTo}
                       onChange={(event) => {
+                        cancelDocumentComparison();
                         setDiffTo(event.target.value);
                         setDocumentDiff(null);
                       }}
@@ -2216,11 +2224,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </select>
                     <button
                       disabled={!diffFrom || !diffTo || diffBusy}
-                      onClick={compareVersions}
+                      onClick={() => void compareVersions()}
                     >
                       {diffBusy ? "比较中…" : "查看差异"}
                     </button>
                   </div>
+                  {diffError && <p role="alert">{diffError}</p>}
                   {documentDiff && (
                     <div className="diffResult">
                       <div className="diffSummary">
@@ -3132,7 +3141,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           )}
         </div>
 
-        {activeView !== "characters" && (
+        {activeView !== "characters" && activeView !== "projects" && (
         <aside className="resultRail" aria-label="运行与冲突报告">
           <div className="resultRailHead">
             <div>

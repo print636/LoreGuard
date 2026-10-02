@@ -157,6 +157,10 @@ body {
   overflow: hidden;
 }
 
+.appShell.documentMode {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
 .sideNav,
 .mainCanvas,
 .resultRail {
@@ -724,6 +728,7 @@ footer {
   .topContext > button:first-child span { display: none; }
   .topActions > button { padding-inline: 9px; }
   .appShell { grid-template-columns: 72px minmax(0, 1fr) minmax(330px, 350px); gap: 12px; padding-inline: 12px; }
+  .appShell.documentMode { grid-template-columns: 72px minmax(0, 1fr); }
   .sideNav { padding-inline: 8px; }
   .sideNavTitle { justify-items: center; padding-inline: 0; }
   .sideNavTitle span, .sideNavTitle b { display: none; }
@@ -760,6 +765,7 @@ footer {
   .topActions .accountSettingsAction { display: inline-flex !important; min-width: 44px; justify-content: center; padding-inline: 8px; font-size: 11px; }
   .topActions .topRunButton { display: inline-flex !important; min-width: 96px; justify-content: center; }
   .appShell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 9px; height: calc(100dvh - 64px); padding: 8px; }
+  .appShell.documentMode { grid-template-columns: minmax(0, 1fr); }
   .sideNav { display: block; padding: 6px; border-radius: 15px; overflow-x: auto; overflow-y: hidden; }
   .sideNavTitle, .sideNavBottom { display: none; }
   .sideNav nav { display: flex; width: max-content; gap: 3px; }

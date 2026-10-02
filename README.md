@@ -13,6 +13,13 @@ a non-secret provider revision before Celery dispatch. See the
 
 ## Guided review workflow
 
+The document library groups stored versions by filename and supports filters,
+on-demand line-numbered reading, literal text search, and comparison of a selected
+historical version with the current one. It is read-only: opening a document never
+changes its narrative authority or publishes a draft. DOCX previews show the
+imported text, not the original Word layout. See the
+[document-library V1 contract](docs/document-library-v1.md).
+
 For character-OOC coverage, the recommended path is `baseline_build` -> human confirmation of character-profile candidates -> `draft_review`:
 
 1. Import documents and confirm each document's role, publication status and narrative scope. An explicit AI inference request may propose these fields with source evidence, but the server always stores it as `origin=model_inferred`, `resolution_state=inferred`, and unresolved authority. It never auto-confirms or promotes model output.

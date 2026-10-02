@@ -94,6 +94,7 @@ from .character_consistency_stage import (
     project_provisional_draft_clues,
 )
 from .document_diff import build_document_diff
+from .document_preview import build_document_preview
 from .docx_import import DocxImportError, extract_docx_text
 from .domain import CertaintyLevel, ConsistencyIssue, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
 from .evaluation import run_evaluation
@@ -2456,6 +2457,44 @@ def compare_document_versions(
                 "line_count": len(new.content.splitlines()),
             },
             **diff,
+        }
+
+
+@app.get("/api/v1/projects/{project_id}/documents/{document_id}/preview")
+def preview_document(
+    project_id: str,
+    document_id: str,
+    response: Response,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=120, ge=1, le=200),
+    query: str = Query(default="", max_length=160),
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Read stored active or historical content without changing its state."""
+    response.headers["Cache-Control"] = "no-store"
+    with SessionLocal() as db:
+        document = db.scalar(
+            select(DocumentRow)
+            .join(ProjectRow, ProjectRow.id == DocumentRow.project_id)
+            .where(
+                DocumentRow.id == document_id,
+                DocumentRow.project_id == project_id,
+                ProjectRow.workspace_id == context.workspace_id,
+            )
+        )
+        if document is None:
+            raise HTTPException(
+                404, "文档不存在", headers={"Cache-Control": "no-store"}
+            )
+        preview = build_document_preview(
+            document.content, offset=offset, limit=limit, query=query
+        )
+        return {
+            **preview,
+            "document": {
+                **serialize_document(document, include_content=False, db=db),
+                **preview["document"],
+            },
         }
 
 

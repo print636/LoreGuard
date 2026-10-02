@@ -1,0 +1,84 @@
+.documentLibrary {
+  min-width: 0;
+  color: var(--color-text);
+  font-family: "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+}
+
+.documentLibraryHeading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-4); }
+.documentLibraryHeading h3 { margin: 0; font-size: 24px; }
+.documentLibraryHeading > span { color: var(--color-text-secondary); font-size: 14px; }
+.documentLibrarySurface { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-field); overflow: hidden; }
+.documentLibraryCatalog { min-width: 0; border-right: 1px solid var(--color-border); background: var(--color-surface); }
+.documentLibraryCatalog > form, .documentLibraryFilters { padding: var(--space-4); }
+.documentLibrary label { display: grid; min-width: 0; gap: var(--space-2); color: var(--color-text-secondary); font-size: 14px; }
+.documentLibrary :is(input, select) { width: 100%; min-width: 0; min-height: 44px; margin: 0; padding: var(--space-2) var(--space-3); color: var(--color-text); font: inherit; border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-field); }
+.documentLibrary button { min-height: 44px; margin: 0; padding: var(--space-2) var(--space-3); color: var(--color-text-secondary); font: inherit; border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-field); transition: background-color 180ms ease-out, border-color 180ms ease-out; }
+.documentLibrary button:hover:not(:disabled) { color: var(--color-text); border-color: var(--color-lavender); background: var(--color-surface-raised); transform: none; }
+.documentLibrary button:active:not(:disabled) { opacity: .8; }
+.documentLibrary button:disabled { opacity: .48; cursor: default; }
+.documentLibrary :is(button, input, select, h4, ul, ol):focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.documentLibrarySearch { display: grid; gap: var(--space-2); }
+.documentLibrarySearch > div, .documentLibraryTextSearch > div { display: flex; gap: var(--space-2); min-width: 0; }
+.documentLibrarySearch button, .documentLibraryTextSearch button { flex: 0 0 auto; }
+.documentLibraryFilters { display: grid; gap: var(--space-3); padding-top: 0; }
+.documentLibraryListHeading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
+.documentLibrary h4 { margin: 0; font-size: 18px; }
+.documentLibraryListHeading button { padding: var(--space-2); font-size: 13px; }
+.documentLibraryList { max-height: clamp(260px, 42dvh, 600px); margin: 0; padding: 0; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior-y: contain; list-style: none; }
+.documentLibraryList li + li { border-top: 1px solid var(--color-border); }
+.documentLibrary .documentLibraryList button { display: grid; gap: var(--space-2); width: 100%; min-height: 98px; padding: var(--space-4); text-align: left; border: 0; border-left: 3px solid transparent; border-radius: 0; background: transparent; }
+.documentLibrary .documentLibraryList button.selected { border-left-color: var(--color-cyan); background: var(--color-subtle-strong); }
+.documentLibraryList button strong { color: var(--color-text); font-size: 16px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
+.documentLibraryList button > span { display: flex; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2); font-size: 13px; }
+.documentLibraryList button small { color: var(--color-text-muted); font-size: 13px; line-height: 1.5; }
+.documentLibrary .documentLibraryList button:focus-visible { outline-offset: -3px; }
+.documentLibraryNotice { margin: 0; padding: var(--space-5) var(--space-4); color: var(--color-text-secondary); font-size: 15px; line-height: 1.7; }
+.documentLibraryNotice p { margin: 0 0 var(--space-3); }
+.documentLibraryReader { min-width: 0; padding: var(--space-5); }
+.documentLibraryReader > h4 { margin-bottom: var(--space-4); scroll-margin-top: var(--space-4); color: var(--color-text); font-size: 20px; line-height: 1.5; overflow-wrap: anywhere; }
+.documentLibraryReader > .documentLibraryNotice { padding: var(--space-5) 0; }
+.documentLibraryVersionPicker { display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--space-3); }
+.documentLibraryVersionPicker label { flex: 1 1 200px; }
+.documentLibraryVersionPicker button { max-width: 100%; }
+.documentLibraryMetadata { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-5); margin: var(--space-4) 0; padding-bottom: var(--space-4); border-bottom: 1px solid var(--color-border); font-size: 14px; }
+.documentLibraryMetadata > div { min-width: 0; }
+.documentLibraryMetadata dt { color: var(--color-text-muted); font-size: 12px; }
+.documentLibraryMetadata dd { margin: var(--space-1) 0 0; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.documentLibrarySourceNote { margin: 0 0 var(--space-4); color: var(--color-text-secondary); font-size: 14px; line-height: 1.6; }
+.documentLibraryTextSearch { display: grid; gap: var(--space-2); }
+.documentLibraryTextSearch > p { margin: 0; color: var(--color-text-muted); font-size: 13px; line-height: 1.6; }
+.documentLibraryReadingStatus { min-height: 180px; }
+.documentLibraryError { margin-top: var(--space-5); padding: var(--space-4); border: 1px solid var(--color-border-strong); border-left: 3px solid var(--color-warning); }
+.documentLibraryError p { margin: 0 0 var(--space-3); color: var(--color-text-secondary); line-height: 1.65; }
+.documentLibraryReadingSummary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); margin: var(--space-5) 0 var(--space-3); color: var(--color-text-secondary); font-size: 13px; }
+.documentLibraryLines { max-height: clamp(280px, 60dvh, 720px); margin: 0; padding: var(--space-3) var(--space-2) var(--space-3) 0; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior-y: contain; list-style: none; border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
+.documentLibrary :is(.documentLibraryList, .documentLibraryLines):focus-visible { outline-offset: -3px; }
+.documentLibraryLines > li { display: grid; grid-template-columns: 4ch minmax(0, 1fr); gap: var(--space-3); min-height: 1.9em; padding: var(--space-1) 0; font-size: 16px; line-height: 1.85; }
+.documentLibraryLineNumber { padding-top: 2px; color: var(--color-text-muted); font-family: "Cascadia Code", "SFMono-Regular", monospace; font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; user-select: none; }
+.documentLibraryLines p { min-width: 0; max-width: 75ch; margin: 0; color: var(--color-text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.documentLibraryLines mark { padding: 0; color: var(--color-on-primary); background: var(--color-cyan); }
+.documentLibraryPagination { display: grid; gap: var(--space-3); padding: var(--space-4); border-top: 1px solid var(--color-border); }
+.documentLibraryPagination p { margin: 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
+.documentLibraryPagination > div { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.documentLibraryPagination > div > span { color: var(--color-text-muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.documentLibraryBodyPagination { padding: var(--space-4) 0 0; border-top: 0; }
+
+@media (max-width: 1023px) {
+  .documentLibrarySurface { grid-template-columns: 1fr; }
+  .documentLibraryCatalog { border-right: 0; border-bottom: 1px solid var(--color-border); }
+  .documentLibraryFilters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .documentLibrary .documentLibraryList button { min-height: 88px; }
+}
+
+@media (max-width: 767px) {
+  .documentLibraryReader { padding: var(--space-4); }
+  .documentLibraryTextSearch > div { flex-wrap: wrap; }
+  .documentLibraryTextSearch input { flex: 1 1 100%; }
+  .documentLibrary :is(input, select) { font-size: 16px; }
+  .documentLibraryNotice { font-size: 16px; }
+  .documentLibraryLines > li { grid-template-columns: 3.5ch minmax(0, 1fr); gap: var(--space-2); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .documentLibrary button { transition: none; }
+}
