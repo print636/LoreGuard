@@ -108,6 +108,8 @@ import {
 import { documentNameKey, initialLibraryState } from "./features/documents/libraryModel";
 import EvidenceReader from "./features/evidence/EvidenceReader";
 import type { EvidenceKind, EvidenceSelection } from "./features/evidence/evidenceReaderModel";
+import UserGuide from "./features/help/UserGuide";
+import type { UserGuideTopicId } from "./features/help/userGuideContent";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
 const RevisionReview = lazy(() => import("./components/RevisionReview"));
@@ -135,6 +137,11 @@ type Issue = {
 };
 type EvidenceReaderSelection = {
   selection: EvidenceSelection;
+  scope: string;
+  trigger: HTMLButtonElement;
+};
+type UserGuideSelection = {
+  topic: UserGuideTopicId;
   scope: string;
   trigger: HTMLButtonElement;
 };
@@ -491,6 +498,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [visualTab, setVisualTab] = useState<"graph" | "timeline">("graph");
   const [focusedIssue, setFocusedIssue] = useState<string | null>(null);
   const [evidenceReaderSelection, setEvidenceReaderSelection] = useState<EvidenceReaderSelection | null>(null);
+  const [userGuideSelection, setUserGuideSelection] = useState<UserGuideSelection | null>(null);
   const [visualLoading, setVisualLoading] = useState<
     "graph" | "timeline" | null
   >(null);
@@ -1595,9 +1603,17 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     });
   }
 
+  function openUserGuide(topic: UserGuideTopicId, trigger: HTMLButtonElement) {
+    setUserGuideSelection({ topic, trigger, scope: evidenceReaderScope });
+  }
+
   useEffect(() => {
     setEvidenceReaderSelection((current) => current && (current.scope !== evidenceReaderScope || projectLoading || routeProblem) ? null : current);
   }, [evidenceReaderScope, projectLoading, routeProblem]);
+
+  useEffect(() => {
+    setUserGuideSelection((current) => current && current.scope !== evidenceReaderScope ? null : current);
+  }, [evidenceReaderScope]);
 
   useEffect(() => {
     void loadProjects().catch((error) => setMessage(String(error)));
@@ -1807,6 +1823,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             </button>
             <details className="sampleShelf">
               <summary>样例与帮助</summary>
+              <button type="button" onClick={(event) => openUserGuide("start", event.currentTarget)}>阅读使用指南</button>
               <p>原创演示文本；运行模型时可能消耗 Token。</p>
               <button disabled={busy} onClick={() => demo("simple")}>
                 {action === "simple" ? "分析中…" : "运行简单样例"}
@@ -1830,7 +1847,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             <section className="workbenchIntro">
               <div>
                 <p className="eyebrow">NARRATIVE CONSISTENCY REVIEW</p>
-                <h1>文稿校验台</h1>
+                <div className="workbenchTitleLine">
+                  <h1>文稿校验台</h1>
+                  <button className="userGuideTrigger" type="button" onClick={(event) => openUserGuide("review", event.currentTarget)}>使用指南</button>
+                </div>
                 <p>让每一条伏笔都沿着星轨归位，所有判断回到原文证据。</p>
               </div>
               <span className="workbenchMascot" aria-hidden="true">
@@ -2758,6 +2778,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           )}
           {!routeProblem && activeView === "report" && (
             <>
+              <div className="reportHelpHeading">
+                <h1>审查报告</h1>
+                <div>
+                  <button className="userGuideTrigger" type="button" onClick={(event) => openUserGuide("report", event.currentTarget)}>阅读报告帮助</button>
+                  <button className="userGuideTrigger" type="button" onClick={(event) => openUserGuide("coverage", event.currentTarget)}>理解覆盖范围</button>
+                </div>
+              </div>
               {runInfo?.review_batch?.mode === "draft_review" && (
                 <section
                   className={`reviewCoverage ${runInfo.review_batch.no_formal_context_expected ? "limited" : ""}`}
@@ -3338,6 +3365,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           selection={evidenceReaderSelection.selection}
           trigger={evidenceReaderSelection.trigger}
           onClose={() => setEvidenceReaderSelection(null)}
+        />
+      )}
+      {userGuideSelection && userGuideSelection.scope === evidenceReaderScope && (
+        <UserGuide
+          key={`${userGuideSelection.scope}:${userGuideSelection.topic}`}
+          initialTopic={userGuideSelection.topic}
+          trigger={userGuideSelection.trigger}
+          onClose={() => setUserGuideSelection(null)}
         />
       )}
       <footer>

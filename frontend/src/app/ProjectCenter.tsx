@@ -24,6 +24,7 @@ import {
   parseAccountModelProvider,
 } from "./modelProviderSettings";
 import { describeRunModelExecution } from "../runModelExecution";
+import UserGuide from "../features/help/UserGuide";
 
 type RunSummary = {
   id: string;
@@ -165,6 +166,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
   const [entryFiles, setEntryFiles] = useState<ImportFilePlan[]>([]);
   const [entryPending, setEntryPending] = useState(false);
   const [entryError, setEntryError] = useState("");
+  const [helpTrigger, setHelpTrigger] = useState<HTMLButtonElement | null>(null);
   const entryNameRef = useRef<HTMLInputElement | null>(null);
   const catalogRequestRef = useRef(0);
   const catalogBusyRef = useRef(false);
@@ -248,6 +250,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
     void loadProjects();
     void loadModelSource();
     const syncCatalogFromHistory = () => {
+      setHelpTrigger(null);
       if (window.location.pathname !== "/app") return;
       const criteria = catalogCriteriaFromUrl();
       const current = catalogCriteriaRef.current;
@@ -388,9 +391,12 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
             <h1>项目</h1>
             <p>继续最近的故事审查，或从一份文稿开始。</p>
           </div>
-          <button className={`${entryMode ? "" : "quietPrimary"} compactPrimary`} type="button" onClick={() => openEntry("create")}>
-            新建项目
-          </button>
+          <div className="projectHelpActions">
+            <button type="button" onClick={(event) => setHelpTrigger(event.currentTarget)}>使用指南</button>
+            <button className={`${entryMode ? "" : "quietPrimary"} compactPrimary`} type="button" onClick={() => openEntry("create")}>
+              新建项目
+            </button>
+          </div>
         </header>
 
         {error && (
@@ -577,6 +583,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
           )}
         </section>
       </main>
+      {helpTrigger && <UserGuide initialTopic="start" trigger={helpTrigger} onClose={() => setHelpTrigger(null)} />}
     </div>
   );
 }

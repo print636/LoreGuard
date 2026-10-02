@@ -28,6 +28,12 @@ excerpt survives, the reader says that full context is unavailable instead of
 substituting the current draft. See the
 [report evidence reader V1 contract](docs/report-evidence-reader-v1.md).
 
+An in-product Simplified Chinese [usage guide](docs/product-help-v1.md) opens
+in place from the project center, check workspace and report. Six topics explain
+first-review paths, document identity, character baselines, review selection,
+evidence and execution coverage. Reading it does not navigate away, clear drafts,
+call APIs or invoke a model; Escape or the close button returns to the trigger.
+
 For character-OOC coverage, the recommended path is `baseline_build` -> human confirmation of character-profile candidates -> `draft_review`:
 
 1. Import documents and confirm each document's role, publication status and narrative scope. An explicit AI inference request may propose these fields with source evidence, but the server always stores it as `origin=model_inferred`, `resolution_state=inferred`, and unresolved authority. It never auto-confirms or promotes model output.

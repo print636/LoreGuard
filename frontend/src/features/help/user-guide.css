@@ -1,0 +1,86 @@
+.userGuide {
+  width: min(1040px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  color: var(--color-text);
+  font: 16px/1.7 "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 16px;
+  background: var(--color-surface);
+  box-shadow: 0 20px 80px var(--color-shadow);
+  overflow: hidden;
+}
+.userGuide[open] { display: flex; flex-direction: column; }
+.userGuide::backdrop { background: var(--color-backdrop); }
+.userGuideHeading { display: flex; flex: 0 0 auto; align-items: flex-start; justify-content: space-between; gap: var(--space-4); padding: var(--space-5); border-bottom: 1px solid var(--color-border); }
+.userGuideHeading > div { min-width: 0; }
+.userGuideHeading h2 { margin: 0; color: var(--color-text); font: 700 26px/1.4 "Noto Serif SC", "Source Han Serif SC", "STKaiti", serif; }
+.userGuideHeading p { max-width: 46ch; margin: var(--space-2) 0 0; color: var(--color-text-secondary); font-size: 16px; line-height: 1.6; }
+.userGuideHeadingActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: var(--space-2); }
+.userGuide.userGuide button { min-height: 44px; margin: 0; padding: var(--space-2) var(--space-3); color: var(--color-text-secondary); font: inherit; font-weight: 500; border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-field); box-shadow: none; transition: background-color 180ms ease-out, border-color 180ms ease-out; cursor: pointer; touch-action: manipulation; }
+.userGuide.userGuide button:hover { color: var(--color-text); border-color: var(--color-lavender); background: var(--color-surface-raised); transform: none; }
+.userGuide.userGuide button:active { background: var(--color-subtle-strong); }
+.userGuide :is(button, [tabindex]):focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; box-shadow: none; }
+.userGuideReading { flex: 1 1 auto; min-height: 0; padding: var(--space-5); overflow-y: auto; overflow-x: hidden; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+.userGuideReading:focus-visible { outline-offset: -3px; }
+.userGuideLayout { display: grid; grid-template-columns: 192px minmax(0, 1fr); align-items: start; gap: var(--space-6); }
+.userGuideDirectory { position: sticky; top: 0; min-width: 0; padding-bottom: var(--space-4); }
+.userGuideDirectory h3 { margin: 0 0 var(--space-3); color: var(--color-text-muted); font-size: 16px; font-weight: 600; line-height: 1.6; }
+.userGuideDirectory ul { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.userGuideDirectory li { min-width: 0; }
+.userGuide.userGuide .userGuideDirectory button { width: 100%; padding: var(--space-2) var(--space-3); text-align: left; overflow-wrap: anywhere; border-color: var(--color-border); }
+.userGuideTopics { min-width: 0; }
+.userGuideTopic { margin: 0 0 var(--space-6); padding: 0 0 var(--space-6); border-bottom: 1px solid var(--color-border); }
+.userGuideTopic:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
+.userGuideTopic h3 { margin: 0 0 var(--space-3); color: var(--color-text); font-size: 24px; font-weight: 700; line-height: 1.5; overflow-wrap: anywhere; }
+.userGuideSummary { margin: 0 0 var(--space-5); padding-left: var(--space-3); color: var(--color-text-secondary); border-left: 3px solid var(--color-lavender); }
+.userGuideBlock { margin: 0 0 var(--space-5); }
+.userGuideBlock h4 { margin: 0 0 var(--space-2); color: var(--color-text); font-size: 18px; line-height: 1.6; font-weight: 600; }
+.userGuideBlock p { margin: 0 0 var(--space-3); }
+.userGuideBlock p:last-child { margin-bottom: 0; }
+.userGuideBlock :is(p, li), .userGuideSummary { max-width: 70ch; font-size: 16px; line-height: 1.8; overflow-wrap: anywhere; }
+.userGuideBlock ul, .userGuideBlock ol { display: grid; gap: var(--space-3); margin: 0 0 var(--space-3); padding-left: 1.5em; }
+.userGuideBlock :is(ul, ol):last-child { margin-bottom: 0; }
+.userGuideBlock li { padding-left: var(--space-1); }
+.userGuideBlock li::marker { color: var(--color-lavender); }
+.userGuide.userGuide .userGuideReturn { color: var(--color-cyan); }
+.projectCenterHeader .projectHelpActions { display: flex; flex-wrap: wrap; flex: 0 0 auto; align-items: center; gap: var(--space-2); }
+.workbenchTitleLine { position: relative; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.mainCanvas .userGuideTrigger { min-height: 44px; padding: var(--space-2) var(--space-3); color: var(--color-text-secondary); font-size: 14px; border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-field); box-shadow: none; touch-action: manipulation; }
+.mainCanvas .userGuideTrigger:hover { color: var(--color-text); border-color: var(--color-lavender); background: var(--color-surface-raised); transform: none; }
+.mainCanvas .userGuideTrigger:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.reportHelpHeading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-4) 0; }
+.reportHelpHeading h1 { margin: 0; color: var(--color-text); font: 700 24px/1.5 "Noto Serif SC", "Source Han Serif SC", "STKaiti", serif; }
+.reportHelpHeading > div { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+@media (max-width: 767px) {
+  .userGuide { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); border-radius: 12px; }
+  .userGuideHeading { flex-direction: column; gap: var(--space-3); padding: var(--space-4); }
+  .userGuideHeading h2 { font-size: 22px; }
+  .userGuideHeading p { margin-top: var(--space-1); }
+  .userGuideHeadingActions { width: 100%; }
+  .userGuideHeadingActions button { flex: 1 1 auto; }
+  .userGuideReading { padding: var(--space-4); }
+  .userGuideLayout { grid-template-columns: minmax(0, 1fr); gap: var(--space-5); }
+  .userGuideDirectory { position: static; padding-bottom: var(--space-4); border-bottom: 1px solid var(--color-border); }
+  .userGuideDirectory ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .userGuideTopic h3 { font-size: 22px; }
+  .workbenchTitleLine { gap: var(--space-2); }
+  .reportHelpHeading > div { width: 100%; }
+  .reportHelpHeading .userGuideTrigger { flex: 1 1 auto; }
+}
+
+@media (max-height: 500px) {
+  .userGuideHeading { flex-direction: row; align-items: center; padding: var(--space-3) var(--space-4); }
+  .userGuideHeading p { display: none; }
+  .userGuideHeadingActions { width: auto; }
+  .userGuideLayout { grid-template-columns: minmax(0, 1fr); }
+  .userGuideDirectory { position: static; }
+  .userGuideDirectory ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .userGuide.userGuide button { transition: none; }
+}
