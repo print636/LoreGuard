@@ -12,6 +12,30 @@ import {
   readCookie,
 } from "../src/api/client.ts";
 
+test("exact POST logout 401 identifies explicit exit without exposing request bodies", async (context) => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  context.after(() => { globalThis.fetch = originalFetch; globalThis.window = originalWindow; globalThis.document = originalDocument; });
+  const target = new EventTarget();
+  const events = [];
+  target.addEventListener(SESSION_EXPIRED_EVENT, (event) => events.push(event));
+  globalThis.window = target;
+  globalThis.document = { cookie: "" };
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: "expired" }), { status: 401 });
+  await assert.rejects(apiJson("/api/v1/auth/logout", { method: "POST", body: "not-a-secret-fixture" }));
+  assert.deepEqual(events[0].detail, { explicitLogout: true });
+  await assert.rejects(apiJson("/api/v1/issues/fixture/feedback", { method: "POST" }));
+  assert.equal(events[1].detail, undefined);
+  await assert.rejects(apiJson("/api/v1/auth/me"));
+  assert.equal(events.length, 2, "ordinary auth/me remains a startup-owned expiry decision");
+  await assert.rejects(apiJson("/api/v1/auth/logout", { method: "GET" }));
+  assert.equal(events[2].detail, undefined);
+  globalThis.fetch = async () => new Response("{}", { status: 200 });
+  await apiJson("/api/v1/auth/logout", { method: "POST" });
+  assert.equal(events.length, 3, "successful logout follows its existing callback");
+});
+
 test("API paths stay relative by default and reject ambiguous paths", () => {
   assert.equal(apiUrl("/api/v1/projects"), "/api/v1/projects");
   assert.throws(() => apiUrl("api/v1/projects"), /must start/);

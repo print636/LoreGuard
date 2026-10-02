@@ -34,6 +34,19 @@ first-review paths, document identity, character baselines, review selection,
 evidence and execution coverage. Reading it does not navigate away, clear drafts,
 call APIs or invoke a model; Escape or the close button returns to the trigger.
 
+In authenticated mode, [tab-local draft recovery](docs/session-draft-recovery-v1.md)
+preserves edited quick-text inputs and unsent formal-issue comments in
+`sessionStorage`. Only the original verified account can restore them through the
+product; explicit logout clears that account's cache. This is unencrypted local
+storage, not cloud autosave, and never stores passwords or provider settings.
+Anonymous local mode does not enable recovery; storage failures remain visible.
+
+The audit view now uses a [paged run catalog](docs/run-history-v1.md) with status
+filters and 20 metadata rows per page. Paging does not change the open run, and
+recorded token counts do not establish model participation or complete coverage.
+Other baseline-guidance consumers still use the legacy all-run metadata path;
+this is not a claim that the whole workspace is free of unbounded list reads.
+
 For character-OOC coverage, the recommended path is `baseline_build` -> human confirmation of character-profile candidates -> `draft_review`:
 
 1. Import documents and confirm each document's role, publication status and narrative scope. An explicit AI inference request may propose these fields with source evidence, but the server always stores it as `origin=model_inferred`, `resolution_state=inferred`, and unresolved authority. It never auto-confirms or promotes model output.

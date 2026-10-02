@@ -144,6 +144,13 @@ from .run_comparison import (
     mark_comparison_unverifiable,
     materialize_run_comparison,
 )
+from .run_catalog import (
+    NO_STORE_HEADERS as RUN_CATALOG_NO_STORE_HEADERS,
+    NOT_FOUND_MESSAGE as RUN_CATALOG_NOT_FOUND_MESSAGE,
+    RunCatalogNotFound,
+    RunCatalogStatus,
+    build_run_catalog,
+)
 from .service import (
     DEFAULT_DOCUMENT_ROLE,
     DEFAULT_STORY_SCOPE,
@@ -212,6 +219,11 @@ async def account_provider_no_store(request, call_next):
     response = await call_next(request)
     if request.url.path.startswith("/api/v1/account/model-provider"):
         response.headers.update(ACCOUNT_PROVIDER_NO_STORE_HEADERS)
+    if (
+        request.url.path.startswith("/api/v1/projects/")
+        and request.url.path.endswith("/run-catalog")
+    ):
+        response.headers.update(RUN_CATALOG_NO_STORE_HEADERS)
     return response
 
 
@@ -5893,6 +5905,35 @@ def list_analysis_runs(
             )
         ).all()
         return [serialize_run(row, db) for row in rows]
+
+
+@app.get("/api/v1/projects/{project_id}/run-catalog")
+def list_run_catalog(
+    project_id: str,
+    page: Annotated[int, Query(ge=1, le=100_000)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=50)] = 20,
+    status: RunCatalogStatus = "all",
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    with SessionLocal() as db:
+        try:
+            return build_run_catalog(
+                db,
+                project_id=project_id,
+                workspace_id=context.workspace_id,
+                page=page,
+                page_size=page_size,
+                status=status,
+                prices_configured=(
+                    settings.model_input_price_per_million is not None
+                    and settings.model_output_price_per_million is not None
+                ),
+            )
+        except RunCatalogNotFound:
+            raise HTTPException(
+                404, RUN_CATALOG_NOT_FOUND_MESSAGE,
+                headers=RUN_CATALOG_NO_STORE_HEADERS,
+            ) from None
 
 
 @app.post("/api/v1/analysis-runs/{run_id}/cancel", status_code=202)

@@ -33,7 +33,6 @@ import {
   documentRoles,
   quickTextDocuments,
   type DocumentRole,
-  type QuickTextMode,
 } from "./documentContext";
 import {
   retryLineage,
@@ -110,6 +109,14 @@ import EvidenceReader from "./features/evidence/EvidenceReader";
 import type { EvidenceKind, EvidenceSelection } from "./features/evidence/evidenceReaderModel";
 import UserGuide from "./features/help/UserGuide";
 import type { UserGuideTopicId } from "./features/help/userGuideContent";
+import { useQuickTextDraft } from "./features/drafts/useQuickTextDraft";
+import DraftNotice from "./features/drafts/DraftNotice";
+import {
+  draftLease, draftLeaseActive, readTabDraft, removeTabDraft, verifiedFeedbackNotes, writeTabDraft,
+  type DraftScope, type DraftWriteStatus, type FeedbackDraft,
+} from "./features/drafts/sessionDraftStorage";
+import RunHistoryPanel from "./features/run-history/RunHistoryPanel";
+import type { RunCatalogItem } from "./features/run-history/runHistoryModel";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
 const RevisionReview = lazy(() => import("./components/RevisionReview"));
@@ -452,8 +459,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [documentDiff, setDocumentDiff] = useState<DocumentDiff | null>(null);
   const [diffBusy, setDiffBusy] = useState(false);
   const [diffError, setDiffError] = useState("");
-  const [world, setWorld] = useState(defaultWorld);
-  const [chapter, setChapter] = useState(defaultChapter);
+  const draftOwner = useMemo(() => ({ userId: identity.user.id, workspaceId: identity.workspace.id }), [identity.user.id, identity.workspace.id]);
+  const feedbackLease = useMemo(() => draftLease(draftOwner), [draftOwner]);
+  const quickDraft = useQuickTextDraft(draftOwner, { world: defaultWorld, chapter: defaultChapter }, identity.mode === "required");
+  const { world, chapter, mode: quickMode, role: quickRole, scope: quickScope } = quickDraft;
   const [run, setRun] = useState("");
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState("准备就绪");
@@ -486,6 +495,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     Record<string, FeedbackState | null>
   >({});
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const notesRef = useRef<Record<string, string>>({});
+  const feedbackDraftScopeRef = useRef<DraftScope | null>(null);
+  const [notesDraftStatus, setNotesDraftStatus] = useState<DraftWriteStatus | "invalid">("empty");
+  const [notesRestored, setNotesRestored] = useState(false);
+  const [notesReadyRun, setNotesReadyRun] = useState("");
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [runCatalogRefresh, setRunCatalogRefresh] = useState(0);
   const [feedbackPending, setFeedbackPending] = useState<
     Record<string, boolean>
   >({});
@@ -505,9 +521,6 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [visualError, setVisualError] = useState("");
   const [uploadRole, setUploadRole] = useState<DocumentRole>("reference");
   const [uploadScope, setUploadScope] = useState("global");
-  const [quickMode, setQuickMode] = useState<QuickTextMode>("body");
-  const [quickRole, setQuickRole] = useState<DocumentRole>("chapter");
-  const [quickScope, setQuickScope] = useState("global");
   const [projectLoading, setProjectLoading] = useState(false);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [providerConnection, setProviderConnection] =
@@ -652,6 +665,47 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   );
   const guidedState = useMemo(() => guidedDocumentState(docs), [docs]);
 
+  function clearNotesView() {
+    notesRef.current = {};
+    feedbackDraftScopeRef.current = null;
+    setNotes({});
+    setNotesDraftStatus("empty");
+    setNotesRestored(false);
+    setNotesReadyRun("");
+    setNotesLoading(false);
+  }
+
+  function persistNotes(next: Record<string, string>) {
+    const scope = feedbackDraftScopeRef.current;
+    if (!scope || scope.projectId !== project || scope.runId !== run || !draftLeaseActive(feedbackLease)) return;
+    const pendingNotes = Object.fromEntries(Object.entries(next).filter(([id, comment]) =>
+      comment.length > 0 && (feedbacks[id]?.comment || "") !== comment,
+    ));
+    setNotesDraftStatus(Object.keys(pendingNotes).length
+      ? writeTabDraft(scope, feedbackLease, { notes: pendingNotes })
+      : removeTabDraft(scope, feedbackLease));
+  }
+
+  function editNote(id: string, value: string) {
+    const next = { ...notesRef.current, [id]: value };
+    notesRef.current = next;
+    setNotes(next);
+    setNotesRestored(false);
+    if (identity.mode === "required") persistNotes(next);
+  }
+
+  function discardNotes() {
+    if (!window.confirm("丢弃本次运行中未提交的暂存备注？已提交的反馈不会改变。")) return;
+    const scope = feedbackDraftScopeRef.current;
+    if (!scope) return;
+    const result = removeTabDraft(scope, feedbackLease);
+    setNotesDraftStatus(result);
+    if (result !== "empty") return;
+    notesRef.current = {};
+    setNotes({});
+    setNotesRestored(false);
+  }
+
   function clearPendingClues() {
     ++provisionalClueRequestRef.current;
     provisionalClueAbortRef.current?.abort();
@@ -679,7 +733,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setWarnings([]);
     setFeedbacks({});
     setFeedbackPending({});
-    setNotes({});
+    clearNotesView();
     setDiagnostics({});
     setGraph(null);
     setTimeline(null);
@@ -901,7 +955,9 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         return [issue.id, value.latest] as const;
       }),
     );
-    if (epoch === viewEpochRef.current) setFeedbacks(Object.fromEntries(pairs));
+    const result = Object.fromEntries(pairs);
+    if (epoch === viewEpochRef.current) setFeedbacks(result);
+    return result;
   }
   async function loadProvisionalClues(runId: string, epoch: number) {
     if (epoch !== viewEpochRef.current) return;
@@ -940,6 +996,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     }
   }
   async function loadCompleted(runId: string, epoch = viewEpochRef.current) {
+    const memoryNotes = feedbackDraftScopeRef.current?.runId === runId ? { ...notesRef.current } : {};
+    const memoryStatus = notesDraftStatus;
+    setNotesReadyRun("");
+    setNotesLoading(true);
     void loadProvisionalClues(runId, epoch);
     void loadReviewClues(runId, epoch);
     const paths = completedResultPaths(runId);
@@ -949,7 +1009,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       apiJson<RunInfo>(paths.status),
       apiJson<Diagnostics>(paths.diagnostics),
       apiJson<ClarificationView[]>(paths.clarifications),
-    ]);
+    ]).catch((error) => { if (epoch === viewEpochRef.current) setNotesLoading(false); throw error; });
     if (epoch !== viewEpochRef.current) return;
     setIssues(loadedIssues);
     setClarifications(reviewItems);
@@ -961,7 +1021,25 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setTimeline(null);
     setVisualLoading(null);
     setVisualError("");
-    await loadFeedback(loadedIssues, epoch);
+    let loadedFeedback: Record<string, FeedbackState | null>;
+    try { loadedFeedback = await loadFeedback(loadedIssues, epoch); }
+    catch (error) { if (epoch === viewEpochRef.current) setNotesLoading(false); throw error; }
+    if (epoch !== viewEpochRef.current || status.project_id !== currentProjectRef.current) return;
+    const scope: DraftScope = { ...draftOwner, projectId: status.project_id, kind: "feedback", runId };
+    feedbackDraftScopeRef.current = scope;
+    if (identity.mode === "required") {
+      const cached = readTabDraft<FeedbackDraft>(scope, feedbackLease);
+      const restoredNotes = Object.fromEntries(Object.entries(verifiedFeedbackNotes({ notes: { ...(cached.draft?.notes || {}), ...memoryNotes } }, loadedIssues.map((row) => row.id)))
+        .filter(([id, text]) => (loadedFeedback[id]?.comment || "") !== text));
+      notesRef.current = restoredNotes;
+      setNotes(restoredNotes);
+      setNotesRestored(Object.keys(restoredNotes).length > 0 && Object.keys(memoryNotes).length === 0);
+      setNotesDraftStatus(Object.keys(memoryNotes).length > 0 && ["unavailable", "too_large"].includes(memoryStatus) ? memoryStatus :
+        cached.status === "ready" ? (Object.keys(restoredNotes).length ? "saved" : "empty") :
+        cached.status === "invalid" ? "invalid" : cached.status === "unavailable" ? "unavailable" : "empty");
+    }
+    setNotesReadyRun(runId);
+    setNotesLoading(false);
   }
   function subscribe(
     runId: string,
@@ -1056,6 +1134,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setRuns(
       await apiJson<RunInfo[]>(`/api/v1/projects/${id}/analysis-runs`),
     );
+    setRunCatalogRefresh((current) => current + 1);
   }
   async function restoreRun(
     info: RunInfo,
@@ -1081,7 +1160,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setWarnings([]);
     setFeedbacks({});
     setFeedbackPending({});
-    setNotes({});
+    clearNotesView();
     setDiagnostics({});
     setGraph(null);
     setTimeline(null);
@@ -1112,6 +1191,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         setMessage(`恢复运行失败：${String(error)}`);
       });
     }
+  }
+  async function openCatalogRun(row: RunCatalogItem, signal?: AbortSignal) {
+    const epoch = viewEpochRef.current;
+    const info = await apiJson<RunInfo>(`/api/v1/analysis-runs/${encodeURIComponent(row.id)}`, { signal });
+    if (signal?.aborted || epoch !== viewEpochRef.current || info.project_id !== project || row.project_id !== project) return;
+    if (info.id !== row.id) throw new Error("运行身份不一致，页面没有切换。请重试读取详情。");
+    restoreSelectedRun(info);
   }
   async function runProject(id: string, request?: AnalysisRunRequest) {
     if (!id) throw new Error("请先选择项目");
@@ -1289,6 +1375,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   async function custom() {
     if (quickMutationRef.current) return;
     quickMutationRef.current = true;
+    const submitted = { world, chapter, mode: quickMode, role: quickRole, scope: quickScope };
     try {
       const inputs = quickTextDocuments({
         mode: quickMode,
@@ -1314,6 +1401,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(input),
         });
+      quickDraft.markSubmitted(submitted);
       await loadProjects();
       await loadProject(created.id);
       await runProject(created.id);
@@ -1391,6 +1479,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   }
   async function submitFeedback(id: string, label: string) {
     if (feedbackPending[id]) return;
+    const submittedRun = run;
+    const submittedProject = project;
+    const submittedEpoch = viewEpochRef.current;
+    const submittedScope = feedbackDraftScopeRef.current;
     try {
       setFeedbackPending((current) => ({ ...current, [id]: true }));
       const comment = notes[id] || "";
@@ -1401,7 +1493,19 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ label, comment }),
       });
+      if (submittedEpoch !== viewEpochRef.current || submittedRun !== run || submittedProject !== project ||
+        (identity.mode === "required" && !draftLeaseActive(feedbackLease))) return;
       setFeedbacks((current) => ({ ...current, [id]: value }));
+      // Remove only this successfully submitted comment; other drafts and newer in-flight edits survive.
+      if (identity.mode === "required" && notesRef.current[id] === comment && submittedScope) {
+        const next = { ...notesRef.current };
+        delete next[id];
+        notesRef.current = next;
+        setNotes(next);
+        const pending = Object.fromEntries(Object.entries(next).filter(([noteId, text]) => text.length > 0 && (feedbacks[noteId]?.comment || "") !== text));
+        setNotesDraftStatus(Object.keys(pending).length ? writeTabDraft(submittedScope, feedbackLease, { notes: pending }) : removeTabDraft(submittedScope, feedbackLease));
+        setNotesRestored(false);
+      }
       setMessage(
         value.duplicate_ignored
           ? "相同反馈已存在，未重复写入"
@@ -2099,120 +2203,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </Suspense>
                   )}
                   {activeView === "audit" && (
-                    <div>
-                      <h3>运行历史（冻结输入）</h3>
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>运行 / 时间</th>
-                            <th>状态</th>
-                            <th>输入快照</th>
-                            <th>Token</th>
-                            <th></th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {runs.length === 0 ? (
-                            <tr>
-                              <td className="tableEmpty" colSpan={5}>
-                                {project
-                                  ? "暂无分析运行"
-                                  : "选择项目后查看运行历史"}
-                              </td>
-                            </tr>
-                          ) : (
-                            runs.map((row) => {
-                              const usage = describeRunUsage(row);
-                              const modelExecution =
-                                describeRunModelExecution(
-                                  row.model_execution,
-                                  row.status,
-                                );
-                              return (
-                                <tr key={row.id}>
-                                  <td>
-                                    <code title={row.id}>
-                                      {shortIdentifier(row.id)}
-                                    </code>
-                                    <small>
-                                      {new Date(
-                                        row.created_at,
-                                      ).toLocaleString()}
-                                    </small>
-                                    {retryLineage(row) && (
-                                      <small
-                                        className="retryLineage"
-                                        title={row.retried_from || ""}
-                                      >
-                                        {retryLineage(row)}
-                                      </small>
-                                    )}
-                                  </td>
-                                  <td>
-                                    <span className={`badge ${row.status}`}>
-                                      {row.status}
-                                    </span>
-                                  </td>
-                                  <td>
-                                    {runSnapshotDocuments(row).length ? (
-                                      <div className="runSnapshotCompact">
-                                        {runSnapshotDocuments(row).map(
-                                          (input) => {
-                                            const labels =
-                                              snapshotDocumentLabels(input);
-                                            return (
-                                              <span
-                                                key={`${input.document_id}:${input.ordinal ?? 0}`}
-                                              >
-                                                <b>{labels.identity}</b>
-                                                <small>{labels.context}</small>
-                                                <code
-                                                  title={input.content_sha256}
-                                                >
-                                                  sha256 {labels.hash}
-                                                </code>
-                                              </span>
-                                            );
-                                          },
-                                        )}
-                                      </div>
-                                    ) : (
-                                      <span className="snapshotUnknown">
-                                        <b>{runInputState(row)}</b>
-                                        <small>不可同输入重试</small>
-                                      </span>
-                                    )}
-                                  </td>
-                                  <td>
-                                    <b>{usage.tokens}</b>
-                                    {usage.detail && (
-                                      <small>{usage.detail}</small>
-                                    )}
-                                    <RunModelExecutionNote
-                                      view={modelExecution}
-                                      compact
-                                    />
-                                  </td>
-                                  <td>
-                                    <button
-                                      onClick={() =>
-                                        restoreSelectedRun(row)
-                                      }
-                                    >
-                                      {row.status === "completed"
-                                        ? "查看报告"
-                                        : ["queued", "running"].includes(row.status)
-                                          ? "查看进度"
-                                          : "查看详情"}
-                                    </button>
-                                  </td>
-                                </tr>
-                              );
-                            })
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                    <RunHistoryPanel
+                      projectId={project}
+                      selectedRunId={run}
+                      search={routeSearch}
+                      refreshKey={runCatalogRefresh}
+                      onOpen={openCatalogRun}
+                      disabled={projectLoading}
+                    />
                   )}
                 </div>
               )}
@@ -2371,21 +2369,22 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </button>
                   </div>
                   <div className="quickMode">
-                    <button className={quickMode === "body" ? "active" : ""} onClick={() => setQuickMode("body")}>只有故事正文</button>
-                    <button className={quickMode === "advanced" ? "active" : ""} onClick={() => setQuickMode("advanced")}>高级：设定 + 章节</button>
-                    <select aria-label="快速文本类型" disabled={quickMode === "advanced"} value={quickMode === "advanced" ? "chapter" : quickRole} onChange={(event) => setQuickRole(event.target.value as DocumentRole)}>
+                    <button className={quickMode === "body" ? "active" : ""} onClick={() => quickDraft.update("mode", "body")}>只有故事正文</button>
+                    <button className={quickMode === "advanced" ? "active" : ""} onClick={() => quickDraft.update("mode", "advanced")}>高级：设定 + 章节</button>
+                    <select aria-label="快速文本类型" disabled={quickMode === "advanced"} value={quickMode === "advanced" ? "chapter" : quickRole} onChange={(event) => quickDraft.update("role", event.target.value as DocumentRole)}>
                       {documentRoles.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                     </select>
-                    <input aria-label="快速文本故事作用域" maxLength={80} value={quickScope} onChange={(event) => setQuickScope(event.target.value)} placeholder="故事作用域，默认 global" />
+                    <input aria-label="快速文本故事作用域" maxLength={80} value={quickScope} onChange={(event) => quickDraft.update("scope", event.target.value)} placeholder="故事作用域，默认 global" />
                   </div>
                   {quickMode === "body" ? (
-                    <div className="editors single"><label><span>需要审查的故事正文 / chapter.md</span><textarea value={chapter} onChange={(event) => setChapter(event.target.value)} /></label></div>
+                    <div className="editors single"><label><span>需要审查的故事正文 / chapter.md</span><textarea value={chapter} onChange={(event) => quickDraft.update("chapter", event.target.value)} /></label></div>
                   ) : (
                     <div className="editors">
-                      <label><span>可选权威设定 / world.md</span><textarea value={world} onChange={(event) => setWorld(event.target.value)} /></label>
-                      <label><span>待审章节 / chapter.md</span><textarea value={chapter} onChange={(event) => setChapter(event.target.value)} /></label>
+                      <label><span>可选权威设定 / world.md</span><textarea value={world} onChange={(event) => quickDraft.update("world", event.target.value)} /></label>
+                      <label><span>待审章节 / chapter.md</span><textarea value={chapter} onChange={(event) => quickDraft.update("chapter", event.target.value)} /></label>
                     </div>
                   )}
+                  <DraftNotice status={quickDraft.status} restored={quickDraft.restored} kind="正文" hasDraft={quickDraft.hasDraft} onDiscard={quickDraft.discard} enabled={identity.mode === "required"} />
                   <p className="contextHint">高级模式会把设定标为“权威世界观”、章节标为“故事正文”；只有正文时无需提前准备世界观。启用模型时可能消耗 Token。</p>
                 </div>
               )}
@@ -2851,6 +2850,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                 ))}
               </section>
               <section className="issues">
+                {issues.length > 0 && notesReadyRun !== run && <p className="hint" role="status">
+                  {notesLoading ? "正在读取本次运行的反馈和暂存备注，读取完成后才能编辑，避免覆盖你的输入。" : "反馈状态尚未读完，备注暂不可编辑。"}
+                  {!notesLoading && <button type="button" onClick={() => void loadCompleted(run).catch((error) => setMessage(`反馈状态读取失败：${String(error)}`))}>重试读取反馈状态</button>}
+                </p>}
+                {runInfo?.status === "completed" && issues.length > 0 && <DraftNotice
+                  status={notesDraftStatus} restored={notesRestored} kind="备注"
+                  hasDraft={Object.values(notes).some((text) => text.length > 0)}
+                  onDiscard={discardNotes} enabled={identity.mode === "required"}
+                />}
                 <div className="sectionHead">
                   <div>
                     <p className="eyebrow">EVIDENCE REPORT</p>
@@ -3019,15 +3027,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                         </div>
                         <input
                           className="note"
+                          aria-label={`问题备注 ${shortIdentifier(issue.id)}`}
                           value={notes[issue.id] || ""}
-                          disabled={feedbackPending[issue.id]}
+                          disabled={feedbackPending[issue.id] || notesReadyRun !== run}
                           onClick={(event) => event.stopPropagation()}
-                          onChange={(event) =>
-                            setNotes((current) => ({
-                              ...current,
-                              [issue.id]: event.target.value,
-                            }))
-                          }
+                          onChange={(event) => editNote(issue.id, event.target.value)}
                           placeholder="可选备注（会进入审计历史）"
                         />
                         <div className="feedback">
@@ -3037,6 +3041,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                                 key={label}
                                 disabled={
                                   feedbackPending[issue.id] ||
+                                  notesReadyRun !== run ||
                                   (feedbacks[issue.id]?.label === label &&
                                     (feedbacks[issue.id]?.comment || "") ===
                                       (notes[issue.id] || ""))

@@ -390,6 +390,7 @@ body {
 .scanLaunchHead h2 { margin: 5px 0 7px; font: 700 28px/1.3 "STKaiti", "KaiTi", "Microsoft YaHei UI", serif; }
 .scanLaunchHead p:last-child { margin: 0; color: var(--text-2); line-height: 1.7; }
 .scanLaunchHead .startValidation { flex: 0 0 auto; min-width: 132px; }
+.legacyQuickReview .startValidation { flex-shrink: 0; min-width: 124px; white-space: nowrap; }
 
 .scanInputList { margin-top: 4px; }
 .scanInputList > div {

@@ -12,6 +12,8 @@ import AuthPage from "./AuthPage";
 import AccountSettings from "./AccountSettings";
 import ProjectCenter from "./ProjectCenter";
 import { apiErrorDetail, type SessionIdentity } from "./session";
+import { activateDraftSession, discardDraftSession, suspendDraftSession } from "../features/drafts/sessionDraftStorage";
+import "../features/drafts/draft-notice.css";
 
 const WorkspaceApp = lazy(() => import("../App"));
 const ModelSettings = lazy(() => import("./ModelSettings"));
@@ -36,14 +38,35 @@ export default function RootApp() {
   const [startup, setStartup] = useState<StartupState>({ status: "checking", identity: null });
   const route = productRouteFromPath(window.location.pathname);
   const previousRouteKind = useRef(route.kind);
+  const [draftLogoutWarning, setDraftLogoutWarning] = useState("");
+  const identityRef = useRef<SessionIdentity | null>(null);
+
+  function authenticated(identity: SessionIdentity) {
+    identityRef.current = identity;
+    if (identity.mode === "required") activateDraftSession({ userId: identity.user.id, workspaceId: identity.workspace.id });
+    else suspendDraftSession();
+    setStartup({ status: "ready", identity });
+  }
+
+  function loggedOut() {
+    const identity = identityRef.current;
+    if (identity?.mode === "required") {
+      const cleared = discardDraftSession({ userId: identity.user.id, workspaceId: identity.workspace.id });
+      setDraftLogoutWarning(cleared ? "" : "已退出，但浏览器未能清理本账户的标签页暂存。请在共享设备上清除该站点数据；本页面不会再次恢复这份旧暂存。");
+    } else suspendDraftSession();
+    identityRef.current = null;
+    setStartup({ status: "signed-out", identity: null });
+  }
 
   const checkSession = useCallback(async () => {
     try {
       setStartup({ status: "checking", identity: null });
       const identity = await apiJson<SessionIdentity>("/api/v1/auth/me");
-      setStartup({ status: "ready", identity });
+      authenticated(identity);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
+        suspendDraftSession();
+        identityRef.current = null;
         setStartup({ status: "signed-out", identity: null });
         return;
       }
@@ -57,7 +80,13 @@ export default function RootApp() {
       if (!handleBrowserPopState(event)) return;
       setLocationKey(currentLocation());
     };
-    const handleExpired = () => {
+    const handleExpired = (event: Event) => {
+      if ((event as CustomEvent<{ explicitLogout?: boolean }>).detail?.explicitLogout === true) {
+        loggedOut();
+        return;
+      }
+      suspendDraftSession();
+      identityRef.current = null;
       setStartup({ status: "signed-out", identity: null });
     };
     window.addEventListener("popstate", handleLocation);
@@ -136,7 +165,7 @@ export default function RootApp() {
     if (startup.status === "ready") {
       return <main className="startupPage productPage" aria-busy="true"><p>正在返回项目中心…</p></main>;
     }
-    return <AuthPage mode={route.kind} onAuthenticated={(identity) => setStartup({ status: "ready", identity })} />;
+    return <>{draftLogoutWarning && <p className="logoutDraftWarning" role="alert">{draftLogoutWarning}</p>}<AuthPage mode={route.kind} onAuthenticated={authenticated} /></>;
   }
 
   if (startup.status !== "ready") {
@@ -144,14 +173,14 @@ export default function RootApp() {
   }
 
   if (route.kind === "projects" || route.kind === "root") {
-    return <ProjectCenter identity={startup.identity} onLoggedOut={() => setStartup({ status: "signed-out", identity: null })} />;
+    return <ProjectCenter identity={startup.identity} onLoggedOut={loggedOut} />;
   }
 
   if (route.kind === "settings-account") {
     if (startup.identity.mode !== "required") {
       return <main className="startupPage productPage" aria-busy="true"><p>正在返回项目中心…</p></main>;
     }
-    return <AccountSettings identity={startup.identity} onLoggedOut={() => setStartup({ status: "signed-out", identity: null })} />;
+    return <AccountSettings identity={startup.identity} onLoggedOut={loggedOut} />;
   }
 
   if (route.kind === "settings-model") {
@@ -159,7 +188,7 @@ export default function RootApp() {
       <Suspense fallback={<main className="startupPage productPage" aria-busy="true"><p>正在打开模型与密钥设置…</p></main>}>
         <ModelSettings
           identity={startup.identity}
-          onLoggedOut={() => setStartup({ status: "signed-out", identity: null })}
+          onLoggedOut={loggedOut}
         />
       </Suspense>
     );
@@ -174,7 +203,7 @@ export default function RootApp() {
       <Suspense fallback={<main className="startupPage productPage" aria-busy="true"><p>正在打开项目工作台…</p></main>}>
         <WorkspaceApp
           identity={startup.identity}
-          onLoggedOut={() => setStartup({ status: "signed-out", identity: null })}
+          onLoggedOut={loggedOut}
         />
       </Suspense>
     );

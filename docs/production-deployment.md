@@ -77,6 +77,13 @@ or expose API/Prometheus directly merely to work around proxy configuration.
 
 ## Operator responsibilities before public traffic
 
+The repository also provides a [disposable PostgreSQL backup/restore rehearsal](backup-restore-rehearsal.md).
+It upgrades a clean isolated database, uses only synthetic accounts and story
+records, and restores a custom-format dump into a separate empty database. The
+CI job uses its own labelled container, not an application service database. This
+practice does not replace encrypted backups, restricted keyring recovery,
+production-scale migration checks, or the operator responsibilities below.
+
 1. Take and restore-test encrypted PostgreSQL backups; snapshot the volume
    before every migration and define retention off the application host.
 2. Rehearse Alembic upgrade and rollback against the same PostgreSQL major

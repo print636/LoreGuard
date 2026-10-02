@@ -1,0 +1,44 @@
+.runHistoryPanel { min-width: 0; }
+.runHistoryHeader { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 12px; }
+.runHistoryHeader > div { flex: 1; min-width: 0; }
+.runHistoryHeader h3 { margin: 0 0 8px; }
+.runHistoryHeader p, .runHistoryBoundary, .runHistorySelectedNotice { margin: 0; font-size: 14px; line-height: 1.6; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.runHistoryHeader label { display: grid; gap: 6px; font-size: 14px; color: var(--color-text-secondary); }
+.runHistoryHeader select { min-width: 136px; min-height: 44px; }
+.runHistoryPanel button { min-height: 44px; }
+.runHistoryPanel button:focus-visible, .runHistoryPanel select:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.runHistoryBoundary { margin-bottom: 16px; }
+.runHistorySelectedNotice { color: var(--color-cyan); margin: 12px 0; }
+.runHistoryError { color: var(--color-warning); line-height: 1.6; overflow-wrap: anywhere; }
+.runHistoryEmpty { padding: 24px 0; min-height: 100px; color: var(--color-text-secondary); line-height: 1.6; }
+.runHistoryEmpty p { margin-top: 0; }
+.runHistoryTable { width: 100%; min-width: 0; max-width: 100%; table-layout: fixed; }
+.runHistoryTable th:first-child { width: 25%; }
+.runHistoryTable th:last-child { width: 18%; }
+.runHistoryTable th, .runHistoryTable td { overflow-wrap: anywhere; white-space: normal; vertical-align: top; font-size: 14px; }
+.runHistoryTable th[scope="row"] { font-weight: 400; text-align: left; }
+.runHistoryTable small { display: block; margin-top: 4px; font-size: 12px; line-height: 1.6; color: var(--color-text-secondary); }
+.runHistoryTable .runHistoryCurrent { color: var(--color-cyan); font-weight: 600; }
+.runHistoryTable button { white-space: nowrap; font-size: 14px; padding-inline: 10px; }
+.runHistorySelected { background: var(--color-surface-raised); }
+.runHistoryPager { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid var(--color-border); padding-top: 16px; }
+.runHistoryPager p { font-size: 14px; line-height: 1.6; color: var(--color-text-secondary); }
+.runHistoryPager > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.runHistorySrOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+@media (max-width: 767px) {
+  .runHistoryHeader { align-items: stretch; flex-wrap: wrap; }
+  .runHistoryHeader > div { flex-basis: 100%; }
+  .runHistoryHeader label { flex: 1; min-width: 0; }
+  .runHistoryHeader p, .runHistoryBoundary, .runHistorySelectedNotice, .runHistoryEmpty, .runHistoryPager p { font-size: 16px; }
+  .runHistoryTable, .runHistoryTable tbody { display: block; width: 100%; }
+  .runHistoryTable thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .runHistoryTable tr { display: grid; grid-template-columns: minmax(0, 1fr); border-top: 1px solid var(--color-border); padding: 16px 0; }
+  .runHistoryTable th[scope="row"], .runHistoryTable td { width: auto; border: 0; padding: 6px 12px; font-size: 16px; }
+  .runHistoryTable td { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px 8px; }
+  .runHistoryTable td::before { content: attr(data-label); color: var(--color-text-secondary); }
+  .runHistoryTable td > small { grid-column: 2; margin: 0; font-size: 13px; }
+  .runHistoryTable td > .badge { justify-self: start; }
+  .runHistoryTable button { width: 100%; font-size: 16px; }
+  .runHistoryPager { align-items: stretch; flex-direction: column; }
+  .runHistoryPager > div { justify-content: space-between; }
+}

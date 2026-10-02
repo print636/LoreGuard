@@ -1,0 +1,9 @@
+.draftNotice { display: flex; align-items: center; gap: var(--space-4, 16px); border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); padding: 14px 0; margin: 12px 0; color: var(--color-text-secondary); }
+.draftNotice > div { min-width: 0; flex: 1; }
+.draftNotice p { margin: 0 0 4px; line-height: 1.6; font-size: 16px; overflow-wrap: anywhere; }
+.draftNotice small { display: block; line-height: 1.6; font-size: 13px; color: var(--color-text-secondary); }
+.draftNotice button { min-height: 44px; white-space: normal; flex-shrink: 0; }
+.draftNotice button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.draftNoticeWarning { color: var(--color-warning); }
+.logoutDraftWarning { max-width: 840px; margin: 20px auto; padding: 16px; color: var(--color-warning); background: var(--color-surface); line-height: 1.6; }
+@media (max-width: 767px) { .draftNotice { align-items: stretch; flex-direction: column; } .draftNotice button { align-self: flex-start; } .logoutDraftWarning { margin: 16px; } }

@@ -81,14 +81,16 @@ export async function apiFetch(
     !AUTH_ENTRY_PATHS.has(path) &&
     typeof window !== "undefined"
   ) {
-    dispatchSessionExpired();
+    dispatchSessionExpired(path === "/api/v1/auth/logout" && requestMethod(init) === "POST");
   }
   return response;
 }
 
-export function dispatchSessionExpired(): void {
+export function dispatchSessionExpired(explicitLogout = false): void {
   if (typeof window !== "undefined") {
-    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+    window.dispatchEvent(explicitLogout
+      ? new CustomEvent(SESSION_EXPIRED_EVENT, { detail: { explicitLogout: true } })
+      : new Event(SESSION_EXPIRED_EVENT));
   }
 }
 
