@@ -47,6 +47,20 @@ recorded token counts do not establish model participation or complete coverage.
 Other baseline-guidance consumers still use the legacy all-run metadata path;
 this is not a claim that the whole workspace is free of unbounded list reads.
 
+[Per-file import recovery](docs/import-queue-v2.md) keeps successful uploads,
+failed files and uncertain responses distinct. Each file has its own role and
+scope; manual replay of the same upload uses a server receipt rather than
+creating another version. A created project is reused for remaining files;
+an uncertain project-creation response never triggers automatic re-creation.
+Inspect the queue, then explicitly enter the created project. File objects live
+only in page memory, not in tab-local draft storage. Importing does not confirm
+authority, publish chapters or start an analysis.
+
+[Project metadata editing](docs/project-metadata-v1.md) changes only the name
+and description. Revision checks prevent silent overwrites; a conflicting edit
+can be explicitly merged with the latest metadata before a separate save.
+Document content, authority and frozen reports remain unchanged.
+
 For character-OOC coverage, the recommended path is `baseline_build` -> human confirmation of character-profile candidates -> `draft_review`:
 
 1. Import documents and confirm each document's role, publication status and narrative scope. An explicit AI inference request may propose these fields with source evidence, but the server always stores it as `origin=model_inferred`, `resolution_state=inferred`, and unresolved authority. It never auto-confirms or promotes model output.

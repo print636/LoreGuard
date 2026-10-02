@@ -52,7 +52,7 @@ async function chooseDocx(
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     buffer,
   });
-  await expect(page.locator(".uploadSelection")).toContainText(name);
+  await expect(page.getByRole("region", { name: "文稿导入队列", exact: true }).locator(".importQueueIdentity > strong").filter({ hasText: name })).toBeVisible();
 }
 
 async function confirmPublishedDocument(
@@ -121,7 +121,7 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
 
   await page.getByLabel("上传文档类型").selectOption("canon");
   await chooseDocx(page, "world.docx", worldDocx);
-  await page.getByRole("button", { name: "上传 1 个文件" }).click();
+  await page.getByRole("button", { name: "导入待处理文稿", exact: true }).click();
   await expect(
     page.getByRole("list", { name: "文稿列表", exact: true })
       .getByRole("button", { name: /^world\.docx/ }),
@@ -129,7 +129,7 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
 
   await page.getByLabel("上传文档类型").selectOption("chapter");
   await chooseDocx(page, "chapter.docx", chapterDocx);
-  await page.getByRole("button", { name: "上传 1 个文件" }).click();
+  await page.getByRole("button", { name: "导入待处理文稿", exact: true }).click();
   await expect(
     page.getByRole("list", { name: "文稿列表", exact: true })
       .getByRole("button", { name: /^chapter\.docx/ }),

@@ -1,0 +1,32 @@
+.projectMetadataEditor { width: min(640px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 32px); margin: auto; padding: var(--space-5); overflow-y: auto; overflow-x: hidden; color: var(--color-text); font: 16px/1.6 "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif; border: 1px solid var(--color-border-strong); border-radius: 16px; background: var(--color-surface); box-shadow: 0 20px 80px var(--color-shadow); }
+.projectMetadataEditor::backdrop { background: var(--color-backdrop); }
+.projectMetadataHeading h2 { margin: 0; font: 700 24px/1.5 "Noto Serif SC", "Source Han Serif SC", "STKaiti", serif; }
+.projectMetadataHeading p { margin: var(--space-2) 0 var(--space-5); color: var(--color-text-secondary); }
+.projectMetadataEditor form { display: grid; gap: var(--space-3); min-width: 0; }
+.projectMetadataEditor form > label { display: grid; gap: var(--space-2); color: var(--color-text-secondary); }
+.projectMetadataEditor.projectMetadataEditor :is(input, textarea) { width: 100%; min-width: 0; min-height: 44px; margin: 0; padding: var(--space-2) var(--space-3); color: var(--color-text); font: inherit; border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-field); box-shadow: none; }
+.projectMetadataEditor textarea { resize: vertical; }
+.projectMetadataEditor.projectMetadataEditor button { min-height: 44px; margin: 0; padding: var(--space-2) var(--space-3); color: var(--color-text-secondary); font: inherit; border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-field); box-shadow: none; cursor: pointer; }
+.projectMetadataEditor.projectMetadataEditor button.quietPrimary { color: var(--color-on-primary); border-color: var(--color-lavender); background: var(--color-lavender); }
+.projectMetadataEditor.projectMetadataEditor button:hover:not(:disabled) { border-color: var(--color-lavender); transform: none; }
+.projectMetadataEditor.projectMetadataEditor :is(input, textarea, button):focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.projectMetadataEditor.projectMetadataEditor :disabled { opacity: .55; cursor: not-allowed; }
+.projectMetadataEditor form p { margin: 0; overflow-wrap: anywhere; }
+.projectMetadataEditor .metadataError { color: var(--color-danger); }
+.projectMetadataEditor .metadataNotice { color: var(--color-success); }
+.metadataConflict { display: grid; gap: var(--space-3); min-width: 0; padding: var(--space-4); border: 1px solid var(--color-warning); border-radius: 12px; background: var(--color-field); }
+.metadataConflict h3 { margin: 0 0 var(--space-2); font-size: 18px; }
+.metadataConflict dl { margin: 0 0 var(--space-3); }
+.metadataConflict dt { color: var(--color-text-muted); font-size: 14px; }
+.metadataConflict dd { margin: var(--space-1) 0 var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--color-text); }
+.metadataConflictActions, .projectMetadataActions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.metadataConflictActions { margin-top: var(--space-3); }
+.projectMetadataActions { padding-top: var(--space-3); border-top: 1px solid var(--color-border); }
+.projectList .projectRowWithEdit { display: flex; align-items: center; gap: var(--space-2); }
+.projectList .projectRowWithEdit > .projectRow { flex: 1 1 auto; min-width: 0; }
+.projectList .projectRowWithEdit > .projectMetadataTrigger { flex: 0 0 auto; min-height: 44px; margin: 0; padding: var(--space-2) var(--space-3); white-space: nowrap; color: var(--color-text-secondary); border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-field); box-shadow: none; }
+.projectList .projectMetadataTrigger:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.workbenchMetadataSummary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.workbenchMetadataSummary > p { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.workbenchMetadataSummary > button { min-height: 44px; margin: 0; }
+@media (max-width: 767px) { .projectMetadataEditor { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); padding: var(--space-4); border-radius: 12px; } .projectMetadataActions { flex-direction: column; } .projectList .projectRowWithEdit { align-items: stretch; flex-direction: column; gap: 0; padding-bottom: var(--space-3); } .projectList .projectRowWithEdit > .projectMetadataTrigger { align-self: flex-start; margin-left: 48px; } .metadataConflict { padding: var(--space-3); } }

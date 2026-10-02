@@ -54,6 +54,7 @@ from .db import (
     DocumentContextRow,
     DocumentNarrativeContextRevisionRow,
     DocumentRow,
+    DocumentUploadReceiptRow,
     FeedbackRow,
     IssueComparisonItemRow,
     IssueRow,
@@ -103,6 +104,11 @@ from .report_evidence_preview import (
     build_report_evidence_preview,
 )
 from .docx_import import DocxImportError, extract_docx_text
+from .document_upload_receipts import (
+    find_upload_receipt,
+    replay_upload_receipt,
+    upload_request_sha256,
+)
 from .domain import CertaintyLevel, ConsistencyIssue, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
 from .evaluation import run_evaluation
 from .observability import AnalysisMetricsUnavailable, render_analysis_metrics
@@ -128,6 +134,12 @@ from .narrative_context_inference import (
 )
 from .projections import project_graph, project_timeline, record_sort_key
 from .project_sort import project_name_sort_key
+from .project_metadata import (
+    NO_STORE_HEADERS as PROJECT_METADATA_NO_STORE_HEADERS,
+    ProjectMetadataInput,
+    get_project_metadata,
+    update_project_metadata,
+)
 from .provider import (
     OpenAICompatibleProvider,
     ProviderError,
@@ -224,6 +236,11 @@ async def account_provider_no_store(request, call_next):
         and request.url.path.endswith("/run-catalog")
     ):
         response.headers.update(RUN_CATALOG_NO_STORE_HEADERS)
+    if (
+        request.url.path.startswith("/api/v1/projects/")
+        and request.url.path.endswith("/metadata")
+    ):
+        response.headers.update(PROJECT_METADATA_NO_STORE_HEADERS)
     return response
 
 
@@ -2396,6 +2413,25 @@ def get_project(
         }
 
 
+@app.get("/api/v1/projects/{project_id}/metadata")
+def read_project_metadata(
+    project_id: str,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    with SessionLocal() as db:
+        return get_project_metadata(db, project_id, context.workspace_id)
+
+
+@app.patch("/api/v1/projects/{project_id}/metadata")
+def patch_project_metadata(
+    project_id: str,
+    payload: ProjectMetadataInput,
+    context: AuthContext = Depends(require_csrf),
+) -> dict:
+    with SessionLocal() as db:
+        return update_project_metadata(db, project_id, context.workspace_id, payload)
+
+
 @app.get("/api/v1/projects/{project_id}/documents")
 def list_documents(
     project_id: str,
@@ -3297,8 +3333,12 @@ async def upload_document(
         pattern=r"^[A-Za-z0-9_\-\u4e00-\u9fff]+$",
     ),
     narrative_context: str | None = Form(None, max_length=8_000),
+    idempotency_key: Annotated[
+        str | None, Header(alias="Idempotency-Key", max_length=128)
+    ] = None,
     context: AuthContext = Depends(require_csrf),
 ) -> dict:
+    upload_key = _normalize_idempotency_key(idempotency_key)
     parsed_narrative_context = parse_multipart_narrative_context(
         narrative_context
     )
@@ -3307,6 +3347,11 @@ async def upload_document(
         raise HTTPException(413, "文件超过上传限制")
     if not file.filename or not file.filename.lower().endswith((".md", ".txt", ".json", ".docx")):
         raise HTTPException(415, "仅支持 Markdown、TXT、JSON 与标准 DOCX")
+    request_hash = upload_request_sha256(
+        filename=file.filename, data=data, replace_document_id=replace_document_id,
+        document_role=document_role.value if document_role is not None else None,
+        story_scope=story_scope, narrative_context=narrative_context,
+    ) if upload_key is not None else None
     if file.filename.lower().endswith(".docx"):
         try:
             content = extract_docx_text(data, max_text_bytes=settings.max_upload_bytes)
@@ -3329,6 +3374,13 @@ async def upload_document(
         )
         if project is None:
             raise HTTPException(404, "项目不存在")
+        receipt = find_upload_receipt(db, project_id, upload_key)
+        if receipt is not None:
+            original, original_superseded = replay_upload_receipt(db, receipt, request_hash)
+            return {
+                **serialize_document(original, db=db),
+                "superseded_document_ids": original_superseded, "deduplicated": True,
+            }
         version, superseded, resolved_role, resolved_scope = prepare_document_version(
             db,
             project_id,
@@ -3361,9 +3413,25 @@ async def upload_document(
                 narrative_context=parsed_narrative_context,
                 user_id=context.user_id,
             )
+            if upload_key is not None:
+                db.add(DocumentUploadReceiptRow(
+                    project_id=project_id, idempotency_key=upload_key,
+                    request_sha256=request_hash, document_id=row.id,
+                    superseded_document_ids=list(superseded),
+                ))
             db.commit()
         except IntegrityError:
             db.rollback()
+            # The unique receipt key is authoritative if a concurrent sender
+            # won. Failed transaction changes (including active versions and
+            # context rows) have all rolled back before reading the winner.
+            winner = find_upload_receipt(db, project_id, upload_key)
+            if winner is not None:
+                original, original_superseded = replay_upload_receipt(db, winner, request_hash)
+                return {
+                    **serialize_document(original, db=db),
+                    "superseded_document_ids": original_superseded, "deduplicated": True,
+                }
             raise HTTPException(
                 409,
                 detail={
@@ -3371,7 +3439,10 @@ async def upload_document(
                     "message": "同名文档版本正在被更新，请刷新后重试",
                 },
             ) from None
-        return {**serialize_document(row, db=db), "superseded_document_ids": superseded}
+        result = {**serialize_document(row, db=db), "superseded_document_ids": superseded}
+        if upload_key is not None:
+            result["deduplicated"] = False
+        return result
 
 
 @app.get("/api/v1/projects/{project_id}/character-trait-axes")

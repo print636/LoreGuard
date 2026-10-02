@@ -5,15 +5,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { apiJson } from "../api/client";
+import { ApiError, apiJson } from "../api/client";
 import { browserNavigate, workspacePath } from "../routing";
-import { documentRoles, type DocumentRole } from "../documentContext";
 import { supportedUploadAccept, supportedUploadLabel } from "../uploadFormats";
-import {
-  createImportFilePlan,
-  updateImportFileRole,
-  type ImportFilePlan,
-} from "./importPlan";
+import ImportQueuePanel from "../features/imports/ImportQueuePanel";
+import { useImportQueue } from "../features/imports/useImportQueue";
+import ProjectMetadataEditor from "../features/projects/ProjectMetadataEditor";
+import { verifiedCreatedProjectId, type ProjectMetadata } from "../features/projects/projectMetadata";
 import {
   projectNextAction,
   relativeProjectDate,
@@ -163,10 +161,14 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
   );
   const [entryMode, setEntryMode] = useState<"create" | "import" | null>(null);
   const [entryName, setEntryName] = useState("");
-  const [entryFiles, setEntryFiles] = useState<ImportFilePlan[]>([]);
+  const entryQueue = useImportQueue("project-center-entry");
+  const [createdEntryId, setCreatedEntryId] = useState("");
+  const [creationUnknown, setCreationUnknown] = useState(false);
   const [entryPending, setEntryPending] = useState(false);
   const [entryError, setEntryError] = useState("");
   const [helpTrigger, setHelpTrigger] = useState<HTMLButtonElement | null>(null);
+  const [metadataEditor, setMetadataEditor] = useState<{ projectId: string; trigger: HTMLButtonElement } | null>(null);
+  const [metadataNotice, setMetadataNotice] = useState("");
   const entryNameRef = useRef<HTMLInputElement | null>(null);
   const catalogRequestRef = useRef(0);
   const catalogBusyRef = useRef(false);
@@ -195,10 +197,12 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
       setProjects(result.items);
       setPage(result.page);
       setTotal(result.total);
+      return true;
     } catch (reason) {
       if (request === catalogRequestRef.current) {
         setCatalogError(`${apiErrorDetail(reason)} 请重试加载这一页。`);
       }
+      return false;
     } finally {
       if (request === catalogRequestRef.current) {
         catalogBusyRef.current = false;
@@ -296,7 +300,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
   }
 
   function openEntry(mode: "create" | "import") {
-    setEntryMode(mode);
+    setEntryMode(createdEntryId ? "import" : mode);
     setEntryError("");
     requestAnimationFrame(() => entryNameRef.current?.focus());
   }
@@ -309,45 +313,61 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
       entryNameRef.current?.focus();
       return;
     }
-    if (entryMode === "import" && entryFiles.length === 0) {
+    if (creationUnknown) return;
+    if (entryMode === "import" && entryQueue.entries.length === 0 && !createdEntryId) {
       setEntryError("请选择至少一份故事文稿。");
       return;
     }
-    let createdId = "";
+    let createdId = createdEntryId;
     try {
       setEntryPending(true);
       setEntryError("");
-      const created = await apiJson<{ id: string }>("/api/v1/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name,
-          description: entryMode === "import" ? "从已有故事文稿创建" : "空白故事审查项目",
-        }),
-      });
-      createdId = created.id;
-      if (entryMode === "import") {
-        for (const entry of entryFiles) {
-          const form = new FormData();
-          form.append("file", entry.file);
-          form.append("document_role", entry.documentRole);
-          form.append("story_scope", "global");
-          await apiJson(`/api/v1/projects/${created.id}/documents`, {
-            method: "POST",
-            body: form,
-          });
-        }
+      if (!createdId) {
+        const created = await apiJson("/api/v1/projects", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, description: entryMode === "import" ? "从已有故事文稿创建" : "空白故事审查项目" }),
+        });
+        createdId = verifiedCreatedProjectId(created) || "";
+        if (!createdId) throw new Error("Unknown project creation result");
+        setCreatedEntryId(createdId);
       }
-      browserNavigate(workspacePath("projects", created.id));
+      if (entryMode === "import") {
+        await entryQueue.run(createdId);
+        // Keep the queue visible, including successful receipts and unprocessed files.
+        await loadProjects();
+      } else {
+        browserNavigate(workspacePath("projects", createdId));
+      }
     } catch (reason) {
+      if (!createdId && (!(reason instanceof ApiError) || reason.status >= 500 || reason.status === 408 || reason.status < 400)) {
+        setCreationUnknown(true);
+        setEntryError("创建结果待核对。服务器可能已经创建项目；请先核对项目目录，不会自动再次创建，也不会凭同名项目猜测导入目标。选中文稿仍保留在本页。");
+        await loadProjects();
+        return;
+      }
       const recovery = createdId
-        ? "项目已经创建；请进入项目工作台重新导入失败的文件。"
+        ? "项目已经创建，导入状态仍保留在队列中；可继续处理未完成文件。"
         : "项目没有创建，你可以修改后重试。";
       setEntryError(`${apiErrorDetail(reason)} ${recovery}`);
       if (createdId) await loadProjects();
     } finally {
       setEntryPending(false);
     }
+  }
+
+  async function retryEntry(id: string) {
+    if (!createdEntryId || entryPending) return;
+    setEntryPending(true);
+    try { await entryQueue.run(createdEntryId, id); await loadProjects(); }
+    finally { setEntryPending(false); }
+  }
+
+  async function metadataSaved(metadata: ProjectMetadata) {
+    setProjects((current) => current.map((row) => row.id === metadata.id ? { ...row, name: metadata.name, description: metadata.description } : row));
+    setMetadataNotice("项目信息已保存。项目列表将按当前搜索和排序重新加载。");
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = null;
+    if (await loadProjects({ query: query.trim() }) === false) throw new Error("Catalog refresh failed after metadata save");
   }
 
   return (
@@ -435,8 +455,8 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
                   value={entryName}
                   onChange={(event) => { setEntryName(event.target.value); setEntryError(""); }}
                   autoComplete="off"
-                  maxLength={120}
-                  disabled={entryPending}
+                  maxLength={200}
+                  disabled={entryPending || !!createdEntryId || creationUnknown}
                   aria-invalid={entryError.includes("项目名称") || undefined}
                 />
               </label>
@@ -449,48 +469,25 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
                     accept={supportedUploadAccept}
                     aria-label={`选择${supportedUploadLabel}文件`}
                     onChange={(event) => {
-                      setEntryFiles(createImportFilePlan(event.target.files || []));
+                      entryQueue.add(event.target.files || [], { documentRole: "reference", storyScope: "global", replaceDocumentId: "" });
+                      event.target.value = "";
                       setEntryError("");
                     }}
                     disabled={entryPending}
                   />
-                  <small className="fieldHelp">支持 {supportedUploadLabel}；可一次选择多份文件。默认按参考材料导入，进入工作台后仍需确认发布状态与故事位置。</small>
+                  <small className="fieldHelp">支持 {supportedUploadLabel}；可分批选择多份文件。新项目初始按“参考材料／全局”导入，可以逐份调整。上传仅添加文稿，进入工作台后仍需核对资料身份、发布状态与故事位置。</small>
                 </label>
               )}
-              {entryMode === "import" && entryFiles.length > 0 && (
-                <ul className="quickFileRoles" aria-label="逐文件初步设置资料类型">
-                  {entryFiles.map((entry, index) => (
-                    <li key={`${entry.file.name}-${entry.file.size}-${entry.file.lastModified}-${index}`}>
-                      <span title={entry.file.name}>{entry.file.name}</span>
-                      <label>
-                        <span className="srOnly">{entry.file.name} 的文档类型</span>
-                        <select
-                          value={entry.documentRole}
-                          disabled={entryPending}
-                          onChange={(event) =>
-                            setEntryFiles((current) =>
-                              updateImportFileRole(
-                                current,
-                                index,
-                                event.target.value as DocumentRole,
-                              ),
-                            )
-                          }
-                        >
-                          {documentRoles.map(([value, label]) => (
-                            <option key={value} value={value}>{label}</option>
-                          ))}
-                        </select>
-                      </label>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              {entryMode === "import" && <ImportQueuePanel entries={entryQueue.entries} busy={entryPending || entryQueue.busy} notice={entryQueue.notice} onEdit={entryQueue.edit} onRemove={entryQueue.remove} onClearCompleted={entryQueue.clearCompleted} onRetry={(id) => void retryEntry(id)} checkDocumentsHref={createdEntryId ? workspacePath("projects", createdEntryId) : undefined} />}
+              {createdEntryId && <p className="fieldHelp">{entryQueue.counts.pending === 0 && entryQueue.counts.unknown === 0 ? "全部文稿已导入。点击‘进入已创建项目’核对资料并准备首次审查。" : "项目已创建。继续导入会复用这个项目，成功文稿不会重复上传。"}</p>}
               {entryError && <p className="quickEntryError" role="alert">{entryError}</p>}
               <div className="quickEntryActions">
-                <button className="quietPrimary" type="submit" disabled={entryPending}>
-                  {entryPending ? "正在处理…" : entryMode === "import" ? "创建并导入" : "创建项目"}
+                <button className="quietPrimary" type="submit" disabled={entryPending || creationUnknown || (!!createdEntryId && entryQueue.counts.pending === 0)}>
+                  {entryPending ? "正在处理…" : createdEntryId ? "继续导入待处理文稿" : entryMode === "import" ? "创建并导入" : "创建项目"}
                 </button>
+                {createdEntryId && <button type="button" disabled={entryPending} onClick={() => browserNavigate(workspacePath("projects", createdEntryId))}>进入已创建项目</button>}
+                {creationUnknown && <button type="button" onClick={() => { if (!window.confirm("请先核对项目目录：原创建请求可能已经生效。放弃本次创建记录后，下一次提交会创建另一个新项目；不会自动绑定到同名项目。仍要重新创建吗？")) return; setCreationUnknown(false); setEntryError(""); }}>已核对目录，重新创建另一个项目</button>}
+                {creationUnknown && <a href="/app" target="_blank" rel="noopener noreferrer">在新标签页核对项目目录</a>}
                 <button type="button" disabled={entryPending} onClick={() => browserNavigate("/projects")}>
                   使用完整项目工作台
                 </button>
@@ -517,6 +514,8 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
               </label>
             </div>
           </div>
+
+          {metadataNotice && <p role="status">{metadataNotice}</p>}
 
           <div className="projectCatalogResults" aria-busy={loading}>
           {loading ? (
@@ -556,7 +555,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
                     )
                   : null;
                 return (
-                <li key={project.id}>
+                <li key={project.id} className="projectRowWithEdit">
                   <a className="projectRow" href={nextAction.path} onClick={followSpaLink}>
                     <span className="projectRowIdentity"><ProjectIcon /><span><strong>{project.name}</strong><small>{project.description || "尚未添加项目说明"}</small></span></span>
                     <span><small>文档</small><b>{project.active_document_count}</b></span>
@@ -565,6 +564,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
                     <span className="projectRowAction"><small>下一步</small><b>{nextAction.label}</b></span>
                     <svg className="rowChevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
                   </a>
+                  <button className="projectMetadataTrigger" type="button" data-project-metadata-id={project.id} aria-label={`编辑${project.name}的项目信息`} onClick={(event) => setMetadataEditor({ projectId: project.id, trigger: event.currentTarget })}>编辑信息</button>
                 </li>
                 );
               })}
@@ -584,6 +584,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
         </section>
       </main>
       {helpTrigger && <UserGuide initialTopic="start" trigger={helpTrigger} onClose={() => setHelpTrigger(null)} />}
+      {metadataEditor && <ProjectMetadataEditor key={`${identity.user.id}:${identity.workspace.id}:${metadataEditor.projectId}`} projectId={metadataEditor.projectId} trigger={metadataEditor.trigger} onClose={() => setMetadataEditor(null)} onSaved={metadataSaved} />}
     </div>
   );
 }

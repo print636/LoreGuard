@@ -185,6 +185,7 @@ class ProjectRow(Base):
     __tablename__ = "projects"
     __table_args__ = (
         Index("ix_projects_workspace_name_sort_id", "workspace_id", "name_sort_key", "id"),
+        CheckConstraint("metadata_revision > 0", name="ck_projects_metadata_revision"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -204,6 +205,7 @@ class ProjectRow(Base):
         ),
     )
     description: Mapped[str] = mapped_column(Text, default="")
+    metadata_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
     documents: Mapped[list["DocumentRow"]] = relationship(cascade="all, delete-orphan")
 
@@ -240,6 +242,32 @@ Index(
     sqlite_where=DocumentRow.active.is_(True),
     postgresql_where=DocumentRow.active.is_(True),
 )
+
+
+class DocumentUploadReceiptRow(Base):
+    """Successful multipart import operation, committed with its document.
+
+    The request digest includes bytes and explicit import semantics. Identical
+    content with a NEW operation key remains a legitimate new document version.
+    """
+
+    __tablename__ = "document_upload_receipts"
+    __table_args__ = (
+        UniqueConstraint("project_id", "idempotency_key", name="uq_document_upload_receipt_project_key"),
+        ForeignKeyConstraint(
+            ["project_id", "document_id"], ["documents.project_id", "documents.id"],
+            name="fk_document_upload_receipt_project_document", ondelete="RESTRICT",
+        ),
+        CheckConstraint("length(idempotency_key) BETWEEN 1 AND 128", name="ck_document_upload_receipt_key_length"),
+        CheckConstraint("length(request_sha256) = 64", name="ck_document_upload_receipt_request_hash"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    document_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    superseded_document_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
 class DocumentContextRow(Base):

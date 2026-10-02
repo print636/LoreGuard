@@ -21,7 +21,7 @@ from app.narrative_context import payload_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 EMBEDDING_TABLES = {"embedding_profiles", "evidence_chunks", "evidence_embeddings"}
-HEAD_REVISION = "0023_major_ooc_dimensions"
+HEAD_REVISION = "0024_project_import_foundation"
 
 
 class EmbeddingMigrationTests(unittest.TestCase):

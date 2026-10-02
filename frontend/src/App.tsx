@@ -58,6 +58,10 @@ import {
   supportedUploadAccept,
   supportedUploadLabel,
 } from "./uploadFormats";
+import ImportQueuePanel from "./features/imports/ImportQueuePanel";
+import { useImportQueue } from "./features/imports/useImportQueue";
+import ProjectMetadataEditor from "./features/projects/ProjectMetadataEditor";
+import type { ProjectMetadata } from "./features/projects/projectMetadata";
 import {
   unknownProviderConnection,
   type ProviderConnectionView,
@@ -453,7 +457,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [documentLibraryState, setDocumentLibraryState] = useState(() => initialLibraryState(""));
   const [runs, setRuns] = useState<RunInfo[]>([]);
   const [replaceId, setReplaceId] = useState("");
-  const [files, setFiles] = useState<File[]>([]);
+  const importQueue = useImportQueue(`workspace:${identity.user.id}:${identity.workspace.id}:${project}`);
+  const [metadataEditor, setMetadataEditor] = useState<{ projectId: string; trigger: HTMLButtonElement } | null>(null);
   const [diffFrom, setDiffFrom] = useState("");
   const [diffTo, setDiffTo] = useState("");
   const [documentDiff, setDocumentDiff] = useState<DocumentDiff | null>(null);
@@ -519,8 +524,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     "graph" | "timeline" | null
   >(null);
   const [visualError, setVisualError] = useState("");
-  const [uploadRole, setUploadRole] = useState<DocumentRole>("reference");
-  const [uploadScope, setUploadScope] = useState("global");
+  const [uploadRole, setUploadRole] = useState<DocumentRole | null>(null);
+  const [uploadScope, setUploadScope] = useState("");
   const [projectLoading, setProjectLoading] = useState(false);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [providerConnection, setProviderConnection] =
@@ -1297,48 +1302,32 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       setAction("");
     }
   }
-  async function uploadDocuments() {
+  async function uploadDocuments(retryId?: string) {
+    const targetProject = project;
+    const targetEpoch = viewEpochRef.current;
     try {
-      if (!project || files.length === 0) return;
-      if (replaceId && files.length !== 1)
-        throw new Error("替换版本时只能选择一个同名文件");
-      const context = documentContext(uploadRole, uploadScope);
-      setAction("upload");
-      let uploaded = 0;
-      const failed: string[] = [];
-      for (const file of files) {
-        try {
-          const form = new FormData();
-          form.append("file", file);
-          form.append("document_role", context.document_role);
-          form.append("story_scope", context.story_scope);
-          if (replaceId) form.append("replace_document_id", replaceId);
-          await apiJson(`/api/v1/projects/${project}/documents`, {
-            method: "POST",
-            body: form,
-          });
-          uploaded += 1;
-        } catch (error) {
-          failed.push(`${file.name}（${String(error)}）`);
-        }
+      if (!targetProject || importQueue.busy || importQueue.entries.length === 0) return;
+      const result = await importQueue.run(targetProject, retryId);
+      if (targetProject !== currentProjectRef.current || targetEpoch !== viewEpochRef.current) return;
+      if (result.uploaded > 0) {
+        const refreshed = await loadProjects();
+        if (targetProject !== currentProjectRef.current || targetEpoch !== viewEpochRef.current) return;
+        if (refreshed === "failed") importQueue.setNotice("文稿已导入，但项目目录暂未刷新。导入成功项不会重传；请重试加载列表。");
+        await loadProject(targetProject, false, run);
       }
-      if (uploaded > 0) {
-        await loadProjects();
-        await loadProject(project);
-      }
-      setFiles([]);
-      setReplaceId("");
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      setMessage(
-        failed.length
-          ? `已上传 ${uploaded}/${uploaded + failed.length} 个文件；失败：${failed.join("、")}`
-          : `已上传 ${uploaded} 个文件；同名文件已自动生成新版本`,
-      );
+      if (targetProject === currentProjectRef.current) setMessage("导入状态已更新。请在逐文件队列核对成功、失败或待核对项；尚未启动分析或发布。");
     } catch (error) {
-      setMessage(String(error));
-    } finally {
-      setAction("");
+      if (targetProject === currentProjectRef.current) setMessage("导入状态保留在队列中。列表未能更新，请重试加载；不要重复上传已导入文稿。");
     }
+  }
+  async function metadataSaved(metadata: ProjectMetadata) {
+    if (metadata.id !== currentProjectRef.current) return;
+    setProjects((current) => current.map((row) => row.id === metadata.id ? { ...row, name: metadata.name, description: metadata.description } : row));
+    setSelectedProjectSummary((current) => current?.id === metadata.id ? { ...current, name: metadata.name, description: metadata.description } : current);
+    if (catalogSearchTimerRef.current) clearTimeout(catalogSearchTimerRef.current);
+    catalogSearchTimerRef.current = null;
+    const loaded = await loadProjects({ query: catalogQuery.trim() });
+    if (loaded === "failed") throw new Error("Catalog refresh failed after metadata save");
   }
   function applyNarrativeContext(
     documentId: string,
@@ -2090,10 +2079,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     <p className="hint">正在读取文档版本和运行历史…</p>
                   ) : (
                     selectedProject && (
-                      <p className="hint">
+                      <div className="workbenchMetadataSummary"><p className="hint">
                         当前：{selectedProject.name} ·{" "}
                         {selectedProject.description || "无描述"}
-                      </p>
+                      </p><button type="button" data-project-metadata-id={project} onClick={(event) => setMetadataEditor({ projectId: project, trigger: event.currentTarget })}>编辑项目信息</button></div>
                     )
                   )}
                   <div className="uploadRow">
@@ -2104,13 +2093,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       multiple
                       accept={supportedUploadAccept}
                       aria-label={`选择${supportedUploadLabel}文件`}
-                      onChange={(event) =>
-                        setFiles(Array.from(event.target.files || []))
-                      }
+                      disabled={importQueue.busy || !project}
+                      onChange={(event) => { importQueue.add(event.target.files || [], { documentRole: uploadRole, storyScope: uploadScope, replaceDocumentId: replaceId }); event.target.value = ""; }}
                     />
                     <select
                       aria-label="文档版本处理方式"
                       value={replaceId}
+                      disabled={importQueue.busy}
                       onChange={(event) =>
                         selectReplacement(event.target.value)
                       }
@@ -2126,11 +2115,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </select>
                     <select
                       aria-label="上传文档类型"
-                      value={uploadRole}
+                      value={uploadRole || ""}
+                      disabled={importQueue.busy}
                       onChange={(event) =>
-                        setUploadRole(event.target.value as DocumentRole)
+                        setUploadRole((event.target.value || null) as DocumentRole | null)
                       }
                     >
+                      <option value="">新选文件沿用默认类型</option>
                       {documentRoles.map(([value, label]) => (
                         <option key={value} value={value}>
                           {label}
@@ -2141,46 +2132,33 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       aria-label="上传文档故事作用域"
                       maxLength={80}
                       value={uploadScope}
+                      disabled={importQueue.busy}
                       onChange={(event) => setUploadScope(event.target.value)}
-                      placeholder="故事作用域，如 global 或 route_a"
+                      placeholder="新选文件沿用默认作用域"
                     />
                     <button
                       disabled={
                         !project ||
-                        files.length === 0 ||
-                        action === "upload" ||
+                        importQueue.counts.pending === 0 ||
+                        importQueue.busy ||
                         projectLoading
                       }
-                      onClick={uploadDocuments}
+                      onClick={() => void uploadDocuments()}
                     >
-                      {action === "upload"
+                      {importQueue.busy
                         ? "上传中…"
-                        : `上传${files.length ? ` ${files.length} ` : " "}个文件`}
+                        : "导入待处理文稿"}
                     </button>
                   </div>
                   <p className="contextHint">
-                    支持 {supportedUploadLabel}。{docxImportBoundary} 新资料默认按“参考材料”导入；上传后请在下方确认资料身份，系统不会根据文件名冒充 AI 判断。
+                    支持 {supportedUploadLabel}。{docxImportBoundary} 上方选项只决定新选文件的默认设置，已有队列可逐文件调整。上传后请在下方核对资料身份，系统不会根据文件名冒充 AI 判断。
                   </p>
-                  {files.length > 0 && (
-                    <p
-                      className="uploadSelection"
-                      title={files.map((file) => file.name).join("\n")}
-                    >
-                      已选择：{files.map((file) => file.name).join("、")} ·
-                      将保存为“
-                      {
-                        documentRoles.find(
-                          ([value]) => value === uploadRole,
-                        )?.[1]
-                      }
-                      ” · 作用域 {uploadScope.trim() || "global"}
-                    </p>
-                  )}
+                  <ImportQueuePanel entries={importQueue.entries} busy={importQueue.busy} notice={importQueue.notice} replacements={docs.filter((row) => row.active).map((row) => ({ id: row.id, name: row.name, version: row.version }))} onEdit={importQueue.edit} onRemove={importQueue.remove} onClearCompleted={importQueue.clearCompleted} onRetry={(id) => void uploadDocuments(id)} onCheckDocuments={() => document.getElementById("document-library-title")?.scrollIntoView({ block: "start" })} />
                   {project && activeDocuments.length > 0 && (
                     <NarrativeContextWorkbench
                       projectId={project}
                       documents={docs}
-                      disabled={projectLoading || action === "upload"}
+                      disabled={projectLoading || importQueue.busy}
                       onSaved={applyNarrativeContext}
                       onOpenProvider={() => navigateWorkspace("provider")}
                     />
@@ -3380,6 +3358,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           onClose={() => setUserGuideSelection(null)}
         />
       )}
+      {metadataEditor && metadataEditor.projectId === project && <ProjectMetadataEditor key={`${identity.user.id}:${identity.workspace.id}:${metadataEditor.projectId}`} projectId={metadataEditor.projectId} trigger={metadataEditor.trigger} onClose={() => setMetadataEditor(null)} onSaved={metadataSaved} />}
       <footer>
         原创演示文本 · 本地项目/版本/运行历史 · Provider 异常时安全降级
       </footer>
