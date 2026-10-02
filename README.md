@@ -20,6 +20,14 @@ changes its narrative authority or publishes a draft. DOCX previews show the
 imported text, not the original Word layout. See the
 [document-library V1 contract](docs/document-library-v1.md).
 
+Report evidence also opens a paged, read-only view of its frozen original
+context. Formal issues, review clues and unverified model proposals stay
+distinct; opening their source does not validate a conclusion. Confirmed
+character traits may refer to an older source run. If only the verified frozen
+excerpt survives, the reader says that full context is unavailable instead of
+substituting the current draft. See the
+[report evidence reader V1 contract](docs/report-evidence-reader-v1.md).
+
 For character-OOC coverage, the recommended path is `baseline_build` -> human confirmation of character-profile candidates -> `draft_review`:
 
 1. Import documents and confirm each document's role, publication status and narrative scope. An explicit AI inference request may propose these fields with source evidence, but the server always stores it as `origin=model_inferred`, `resolution_state=inferred`, and unresolved authority. It never auto-confirms or promotes model output.

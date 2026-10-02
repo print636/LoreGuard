@@ -95,6 +95,13 @@ from .character_consistency_stage import (
 )
 from .document_diff import build_document_diff
 from .document_preview import build_document_preview
+from .report_evidence_preview import (
+    EvidencePreviewKind,
+    EvidencePreviewUnavailable,
+    NO_STORE_HEADERS as EVIDENCE_PREVIEW_NO_STORE_HEADERS,
+    NOT_FOUND_MESSAGE as EVIDENCE_PREVIEW_NOT_FOUND_MESSAGE,
+    build_report_evidence_preview,
+)
 from .docx_import import DocxImportError, extract_docx_text
 from .domain import CertaintyLevel, ConsistencyIssue, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
 from .evaluation import run_evaluation
@@ -6498,6 +6505,38 @@ def get_run_comparison(
         payload["page"]["total"] = total_items
         payload["page"]["has_more"] = offset + len(rows) < total_items
         return payload
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/evidence-preview")
+def get_report_evidence_preview(
+    run_id: str,
+    response: Response,
+    kind: EvidencePreviewKind,
+    item_id: Annotated[str, Query(min_length=1, max_length=200)],
+    evidence_index: Annotated[int, Query(ge=0, le=11)] = 0,
+    offset: Annotated[int | None, Query(ge=0)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 120,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    response.headers.update(EVIDENCE_PREVIEW_NO_STORE_HEADERS)
+    with SessionLocal() as db:
+        run = _run_in_workspace(db, run_id, context.workspace_id)
+        if run is None:
+            raise HTTPException(
+                404, EVIDENCE_PREVIEW_NOT_FOUND_MESSAGE,
+                headers=EVIDENCE_PREVIEW_NO_STORE_HEADERS,
+            )
+        try:
+            return build_report_evidence_preview(
+                db, run, workspace_id=context.workspace_id,
+                kind=kind, item_id=item_id, evidence_index=evidence_index,
+                offset=offset, limit=limit,
+                safe_review_clue_payload=_safe_review_clue_payload,
+            )
+        except EvidencePreviewUnavailable as exc:
+            raise HTTPException(
+                exc.status_code, exc.detail, headers=EVIDENCE_PREVIEW_NO_STORE_HEADERS,
+            ) from None
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/issues")

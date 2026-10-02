@@ -162,7 +162,8 @@ test("pending clues remain a separate reading section and do not become formal i
   await expect(clues).toContainText(clue.proposed_statement);
   await expect(clues).toContainText(clue.evidence);
   await expect(clues).toContainText("不计入正式问题数");
-  await expect(clues.getByRole("button")).toHaveCount(0);
+  await expect(clues.getByRole("button", { name: "查看分析时原文", exact: true })).toHaveCount(1);
+  await expect(clues.getByRole("button", { name: /^(已接受|误报|已解决|重新打开|导出.*)$/ })).toHaveCount(0);
   await expect(clues.getByRole("link")).toHaveCount(0);
   await expect(formalIssues.getByRole("heading", { name: /正式一致性问题 1/ })).toBeVisible();
   await expect(formalIssues.locator("article")).toHaveCount(1);
@@ -238,7 +239,8 @@ test("one contrary character action is a dual-evidence review clue, not a formal
   await expect(clues).toContainText(reviewClue.evidence[0].text);
   await expect(clues).toContainText(`当前新稿 · ${reviewClue.evidence[1].document_name}`);
   await expect(clues).toContainText(reviewClue.evidence[1].text);
-  await expect(clues.getByRole("button")).toHaveCount(0);
+  await expect(clues.getByRole("button", { name: "查看分析时原文", exact: true })).toHaveCount(2);
+  await expect(clues.getByRole("button", { name: /^(已接受|误报|已解决|重新打开|导出.*)$/ })).toHaveCount(0);
   await expect(clues.getByRole("link")).toHaveCount(0);
   await expect(page.locator(".railSummary")).toContainText("正式一致性问题");
   await expect(page.locator(".railSummary")).not.toContainText(reviewClue.title);

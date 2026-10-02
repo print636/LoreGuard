@@ -106,6 +106,8 @@ import {
   type NarrativeContext,
 } from "./features/workflow/guidedReview";
 import { documentNameKey, initialLibraryState } from "./features/documents/libraryModel";
+import EvidenceReader from "./features/evidence/EvidenceReader";
+import type { EvidenceKind, EvidenceSelection } from "./features/evidence/evidenceReaderModel";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
 const RevisionReview = lazy(() => import("./components/RevisionReview"));
@@ -130,6 +132,11 @@ type Issue = {
   suggestion: string;
   evidence: Evidence[];
   metadata?: unknown;
+};
+type EvidenceReaderSelection = {
+  selection: EvidenceSelection;
+  scope: string;
+  trigger: HTMLButtonElement;
 };
 type ProvisionalClueState = {
   runId: string | null;
@@ -483,6 +490,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [timeline, setTimeline] = useState<TimelineResponse | null>(null);
   const [visualTab, setVisualTab] = useState<"graph" | "timeline">("graph");
   const [focusedIssue, setFocusedIssue] = useState<string | null>(null);
+  const [evidenceReaderSelection, setEvidenceReaderSelection] = useState<EvidenceReaderSelection | null>(null);
   const [visualLoading, setVisualLoading] = useState<
     "graph" | "timeline" | null
   >(null);
@@ -519,6 +527,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const catalogSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const catalogCriteriaRef = useRef({ page: 1, query: "", sort: "recent" as "recent" | "name" });
   const currentProjectRef = useRef("");
+  const evidenceReaderScope = JSON.stringify([project, run, activeView, routedProjectId, routedRunId, routeSearch]);
   const diffAbortRef = useRef<AbortController | null>(null);
   const diffRequestRef = useRef(0);
   const visibleIssues = useMemo(
@@ -1574,6 +1583,21 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     }
     setActiveView(view);
   }
+
+  function openEvidenceReader(kind: EvidenceKind, itemId: string, evidenceIndex: number, expected: Evidence, trigger: HTMLButtonElement, expectedVersion?: number) {
+    if (!project || !run || projectLoading || routeProblem || runInfo?.id !== run || runInfo.project_id !== project || runInfo.status !== "completed") return;
+    if (kind === "review_clue" && (reviewClues.status !== "ready" || reviewClues.runId !== run)) return;
+    if (kind === "provisional_clue" && (provisionalClues.status !== "ready" || provisionalClues.runId !== run)) return;
+    setEvidenceReaderSelection({
+      scope: evidenceReaderScope, trigger,
+      selection: { projectId: project, runId: run, kind, itemId, evidenceIndex, expected: { ...expected },
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}) },
+    });
+  }
+
+  useEffect(() => {
+    setEvidenceReaderSelection((current) => current && (current.scope !== evidenceReaderScope || projectLoading || routeProblem) ? null : current);
+  }, [evidenceReaderScope, projectLoading, routeProblem]);
 
   useEffect(() => {
     void loadProjects().catch((error) => setMessage(String(error)));
@@ -2948,6 +2972,9 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                                 {evidence.document_name}:{evidence.line_start}
                               </b>
                               {evidence.text}
+                              <button className="evidenceReaderTrigger" type="button" onClick={(event) => openEvidenceReader("issue", issue.id, index, evidence, event.currentTarget)}>
+                                查看分析时原文
+                              </button>
                             </blockquote>
                           ))}
                         </div>
@@ -3072,6 +3099,9 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                                   <blockquote key={`${evidence.document_id}:${evidence.line_start}:${evidenceIndex}`}>
                                     <b>{evidenceIndex === 0 ? "既有设定" : evidenceIndex === 1 ? "当前新稿" : "补充证据"} · {evidence.document_name} · 第 {evidence.line_start}{evidence.line_end === evidence.line_start ? "" : `–${evidence.line_end}`} 行</b>
                                     <span>{evidence.text}</span>
+                                    <button className="evidenceReaderTrigger" type="button" onClick={(event) => openEvidenceReader("review_clue", clue.id, evidenceIndex, evidence, event.currentTarget)}>
+                                      查看分析时原文
+                                    </button>
                                   </blockquote>
                                 ))}
                               </div>
@@ -3115,6 +3145,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                               <blockquote>
                                 <b>冻结原文 · {clue.document_name} v{clue.document_version} · 第 {clue.line_start}{clue.line_end === clue.line_start ? "" : `–${clue.line_end}`} 行</b>
                                 <span>{clue.evidence}</span>
+                                <button className="evidenceReaderTrigger" type="button" onClick={(event) => openEvidenceReader("provisional_clue", clue.id, 0, {
+                                  document_id: clue.document_id, document_name: clue.document_name,
+                                  line_start: clue.line_start, line_end: clue.line_end, text: clue.evidence,
+                                }, event.currentTarget, clue.document_version)}>
+                                  查看分析时原文
+                                </button>
                               </blockquote>
                             </li>
                           ))}
@@ -3296,6 +3332,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         </aside>
         )}
       </main>
+      {evidenceReaderSelection && evidenceReaderSelection.scope === evidenceReaderScope && !projectLoading && !routeProblem && (
+        <EvidenceReader
+          key={`${evidenceReaderSelection.selection.runId}:${evidenceReaderSelection.selection.kind}:${evidenceReaderSelection.selection.itemId}:${evidenceReaderSelection.selection.evidenceIndex}`}
+          selection={evidenceReaderSelection.selection}
+          trigger={evidenceReaderSelection.trigger}
+          onClose={() => setEvidenceReaderSelection(null)}
+        />
+      )}
       <footer>
         原创演示文本 · 本地项目/版本/运行历史 · Provider 异常时安全降级
       </footer>
