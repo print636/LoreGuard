@@ -12,6 +12,8 @@ import AuthPage from "./AuthPage";
 import AccountSettings from "./AccountSettings";
 import ProjectCenter from "./ProjectCenter";
 import PublicHome from "./PublicHome";
+import GuestWorkspace from "./GuestWorkspace";
+import { guestWorkspaceViewFromPath } from "./guestWorkspaceViews";
 import { canApplySessionProbe, PUBLIC_SESSION_PROBE_TIMEOUT_MS } from "./publicEntry";
 import { apiErrorDetail, type SessionIdentity } from "./session";
 import { activateDraftSession, discardDraftSession, suspendDraftSession } from "../features/drafts/sessionDraftStorage";
@@ -39,6 +41,7 @@ export default function RootApp() {
   const [locationKey, setLocationKey] = useState(currentLocation);
   const [startup, setStartup] = useState<StartupState>({ status: "checking", identity: null });
   const route = productRouteFromPath(window.location.pathname);
+  const guestView = guestWorkspaceViewFromPath(window.location.pathname);
   const previousRouteKind = useRef(route.kind);
   const [draftLogoutWarning, setDraftLogoutWarning] = useState("");
   const identityRef = useRef<SessionIdentity | null>(null);
@@ -150,6 +153,7 @@ export default function RootApp() {
     }
     if (
       startup.status === "signed-out" &&
+      guestView === null &&
       route.kind !== "root" &&
       route.kind !== "login" &&
       route.kind !== "register"
@@ -159,13 +163,13 @@ export default function RootApp() {
         { replace: true, bypassBlockers: true },
       );
     }
-  }, [locationKey, route.kind, startup.status]);
+  }, [locationKey, route.kind, guestView, startup.status]);
 
   useEffect(() => {
     void locationKey;
-    document.body.classList.toggle("loreguard-workspace", route.kind === "workspace");
+    document.body.classList.toggle("loreguard-workspace", route.kind === "workspace" && startup.status === "ready");
     return () => document.body.classList.remove("loreguard-workspace");
-  }, [locationKey, route.kind]);
+  }, [locationKey, route.kind, startup.status]);
 
   useEffect(() => {
     const previous = previousRouteKind.current;
@@ -177,6 +181,10 @@ export default function RootApp() {
 
   if (route.kind === "root" && startup.status !== "ready") {
     return <PublicHome status={startup.status} onRetry={() => void checkSession()} draftLogoutWarning={draftLogoutWarning} />;
+  }
+
+  if (guestView !== null && startup.status !== "ready") {
+    return <GuestWorkspace view={guestView} status={startup.status} onRetry={() => void checkSession()} draftLogoutWarning={draftLogoutWarning} />;
   }
 
   if (startup.status === "checking") {

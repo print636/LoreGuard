@@ -260,7 +260,10 @@ class SpaStaticFiles(StaticFiles):
     """
 
     _LEGACY_WORKSPACE_ROUTES = frozenset(
-        {"check", "projects", "diff", "visual", "audit", "report", "provider"}
+        {
+            "check", "projects", "characters", "diff", "revision",
+            "visual", "audit", "report", "provider",
+        }
     )
 
     @classmethod

@@ -40,8 +40,9 @@ async function mockRequests(page: Page, state: MockState) {
     const method = request.method();
     if (!endpoint.startsWith("/api/")) {
       const staticDocument = request.resourceType() === "document"
-        && (endpoint === "/" || endpoint === "/login" || endpoint === "/register"
-          || endpoint === "/app" || endpoint.startsWith("/app/"));
+        && (["/", "/login", "/register", "/app", "/check", "/projects", "/characters",
+          "/diff", "/revision", "/visual", "/audit", "/report", "/provider"].includes(endpoint)
+          || endpoint.startsWith("/app/"));
       const staticAsset = method === "GET" && endpoint.startsWith("/assets/");
       if (url.origin === baseOrigin && method === "GET" && (staticDocument || staticAsset)) {
         await route.continue();
@@ -112,9 +113,9 @@ async function expectPublicHome(page: Page) {
   expect(new URL(page.url()).pathname).toBe("/");
 }
 
-async function expectReadingOnly(page: Page, state: MockState) {
+async function expectReadingOnly(page: Page, state: MockState, probeCount = 1) {
   await expectPublicHome(page);
-  expect(state.requests).toEqual(["GET /api/v1/auth/me"]);
+  expect(state.requests).toEqual(Array.from({ length: probeCount }, () => "GET /api/v1/auth/me"));
   expect(state.authWrites).toEqual([]);
   expect(state.businessWrites).toEqual([]);
   expect(state.unexpected).toEqual([]);
@@ -124,6 +125,22 @@ async function expectNoBusinessWrite(page: Page, state: MockState) {
   await page.waitForLoadState("networkidle");
   expect(state.businessWrites).toEqual([]);
   expect(state.unexpected).toEqual([]);
+}
+
+function guestWorkspace(page: Page) {
+  return page.getByRole("main", { name: "访客空工作区", exact: true });
+}
+
+async function expectGuestReadingOnly(page: Page, state: MockState, probeCount = 1) {
+  await expect(guestWorkspace(page)).toBeVisible();
+  await page.waitForLoadState("networkidle");
+  expect(state.requests).toEqual(Array.from({ length: probeCount }, () => "GET /api/v1/auth/me"));
+  expect(state.authWrites).toEqual([]);
+  expect(state.businessWrites).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  const draftKeys = await page.evaluate(() => Object.keys(sessionStorage)
+    .filter((key) => key.startsWith("loreguard:tab-draft:v1:")));
+  expect(draftKeys).toEqual([]);
 }
 
 async function expectWithinViewport(page: Page, control: Locator) {
@@ -169,9 +186,9 @@ test("慢探测不挡阅读，有限超时后登录且迟到探测不覆盖新�
   await expect(page.getByRole("dialog", { name: "使用指南", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(help).toBeFocused();
-  await page.getByRole("button", { name: "进入工作区", exact: true }).click();
+  await page.getByRole("button", { name: "新建故事项目", exact: true }).click();
   const dialog = reminder(page);
-  await expect(dialog).toContainText("正在确认登录状态，确认完成前不会打开工作区。");
+  await expect(dialog).toContainText("正在确认登录状态");
   await expect(dialog.getByRole("button", { name: "去登录", exact: true })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "创建账户", exact: true })).toBeDisabled();
   await page.clock.fastForward(12_000);
@@ -197,9 +214,9 @@ test("探测失败的手机首页仍可读，登录页可返回公开首页", as
   await page.waitForLoadState("networkidle");
   await page.screenshot({ path: path.join(screenshotFolder, "public-home-375.png"), fullPage: false });
   await expectWithinViewport(page, page.getByRole("button", { name: "进入工作区", exact: true }));
-  await page.getByRole("button", { name: "进入工作区", exact: true }).click();
+  await page.getByRole("button", { name: "模型与密钥", exact: true }).click();
   const dialog = reminder(page);
-  await expect(dialog).toContainText("暂时无法确认登录状态。你仍可阅读本页，或前往登录后继续。");
+  await expect(dialog).toContainText("暂时无法确认登录状态。");
   await expectWithinViewport(page, dialog.getByRole("button", { name: "继续浏览", exact: true }));
   await page.screenshot({ path: path.join(screenshotFolder, "login-reminder-375.png"), fullPage: false });
   await dialog.getByRole("button", { name: "去登录", exact: true }).click();
@@ -214,7 +231,7 @@ test("需账户按钮仅弹提醒，取消和 Escape 回焦点并保持原页面
   await openPage(page, state);
   await expectPublicHome(page);
   await page.waitForLoadState("networkidle");
-  const trigger = page.getByRole("button", { name: "进入工作区", exact: true });
+  const trigger = page.getByRole("button", { name: "模型与密钥", exact: true });
   await trigger.focus();
   await trigger.press("Enter");
   const dialog = reminder(page);
@@ -289,12 +306,17 @@ test("私密深链仍先登录，合法内部 query 和 hash 被保留", async (
   expect(url.pathname).toBe("/login");
   expect(url.searchParams.get("returnTo")).toBe(target);
   expect(state.requests).toEqual(["GET /api/v1/auth/me"]);
+  for (const settings of ["/app/settings/model", "/app/settings/account"]) {
+    await page.goto(settings);
+    await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("returnTo")).toBe(settings);
+  }
   await page.getByRole("button", { name: "返回公开首页", exact: true }).click();
-  await expectReadingOnly(page, state);
+  await expectReadingOnly(page, state, 3);
   state.probe = "failed";
   await page.goto(target);
   await expect(page.getByRole("heading", { name: "暂时无法连接服务", exact: true })).toBeVisible();
-  expect(state.requests).toEqual(["GET /api/v1/auth/me", "GET /api/v1/auth/me"]);
+  expect(state.requests).toEqual(Array.from({ length: 4 }, () => "GET /api/v1/auth/me"));
   await expectNoBusinessWrite(page, state);
 });
 
@@ -311,5 +333,83 @@ test("已登录和显式本地 anonymous 的根入口兼容旧行为自动进入
     await expectNoBusinessWrite(page, state);
   }
   expect(state.requests.filter((request) => request === "GET /api/v1/auth/me")).toHaveLength(2);
+  expect(state.authWrites).toEqual([]);
+});
+
+test("首页直接进入访客空工作区，通用栏目和 query/hash 不读取私密资源", async ({ page }) => {
+  const state = initialState();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await openPage(page, state);
+  await expectPublicHome(page);
+  await page.waitForLoadState("networkidle");
+  await page.getByRole("button", { name: "进入工作区", exact: true }).click();
+  await expect(page).toHaveURL(/\/app$/);
+  await expect(reminder(page)).toHaveCount(0);
+  const guest = guestWorkspace(page);
+  await expect(guest.getByRole("heading", { name: "项目", exact: true })).toBeVisible();
+  await expect(guest.getByRole("heading", { name: "还没有项目", exact: true })).toBeVisible();
+  await expectGuestReadingOnly(page, state);
+  await page.screenshot({ path: path.join(screenshotFolder, "guest-workspace-1440.png"), fullPage: false });
+  const navigation = page.getByRole("navigation", { name: "工作区", exact: true });
+  await navigation.getByRole("button", { name: "文稿校验", exact: true }).click();
+  await expect(page).toHaveURL(/\/check$/);
+  await expect(guest.getByRole("heading", { name: "文稿校验台", exact: true })).toBeVisible();
+  await navigation.getByRole("button", { name: "完整报告", exact: true }).click();
+  await expect(page).toHaveURL(/\/report$/);
+  await expectGuestReadingOnly(page, state);
+  await page.goto("/report?projectId=not-a-resource&runId=not-a-run#issue-not-a-resource");
+  await expectGuestReadingOnly(page, state, 2);
+  await expectNoBusinessWrite(page, state);
+});
+
+test("慢探测和失败的手机空工作区可浏览，实际项目及校验功能才提示登录", async ({ page }) => {
+  const state = initialState({ probe: "slow" });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.clock.install();
+  await openPage(page, state, "/app");
+  const guest = guestWorkspace(page);
+  await expect(guest).toBeVisible();
+  await expect.poll(() => state.requests.length).toBe(1);
+  const create = guest.getByRole("button", { name: "新建项目", exact: true });
+  await create.click();
+  await expect(reminder(page).getByRole("button", { name: "去登录", exact: true })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(create).toBeFocused();
+  await page.clock.fastForward(12_000);
+  await expect(guest).toContainText("暂时无法确认登录状态。");
+  state.releaseProbe();
+  await page.clock.resume();
+  await expectGuestReadingOnly(page, state);
+  await expectWithinViewport(page, create);
+  await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }));
+  await page.screenshot({ path: path.join(screenshotFolder, "guest-workspace-375.png"), fullPage: false });
+  await guest.getByRole("heading", { name: "还没有项目", exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(screenshotFolder, "guest-workspace-empty-375.png"), fullPage: false });
+  for (const name of ["新建项目", "导入已有故事", "新建空项目", "打开原创样例"]) {
+    const feature = guest.getByRole("button", { name, exact: true });
+    await feature.click();
+    await expect(reminder(page)).toBeVisible();
+    await expect(reminder(page).getByRole("button", { name: "去登录", exact: true })).toBeEnabled();
+    await reminder(page).getByRole("button", { name: "继续浏览", exact: true }).click();
+    await expect(feature).toBeFocused();
+    await expectGuestReadingOnly(page, state);
+  }
+  await page.getByRole("navigation", { name: "工作区", exact: true })
+    .getByRole("button", { name: "文稿校验", exact: true }).click();
+  await expect(page).toHaveURL(/\/check$/);
+  for (const name of ["输入文稿", "选择文稿文件", "开始校验"]) {
+    const feature = guest.getByRole("button", { name, exact: true });
+    await feature.click();
+    await expect(reminder(page)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(feature).toBeFocused();
+    await expectGuestReadingOnly(page, state);
+  }
+  await page.getByRole("button", { name: "账户安全", exact: true }).click();
+  await reminder(page).getByRole("button", { name: "去登录", exact: true }).click();
+  await expect(page).toHaveURL(/\/login\?returnTo=%2Fapp%2Fsettings%2Faccount$/);
+  await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible();
+  await expectNoBusinessWrite(page, state);
+  expect(state.requests).toEqual(["GET /api/v1/auth/me"]);
   expect(state.authWrites).toEqual([]);
 });

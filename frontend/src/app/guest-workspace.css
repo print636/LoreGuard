@@ -1,0 +1,57 @@
+.guestWorkspace.guestWorkspace { min-height: 100dvh; font-size: 16px; line-height: 1.7; }
+.guestWorkspace .productSidebar { align-self: start; min-height: 100dvh; }
+.guestWorkspace .productSidebar nav { margin-top: var(--space-5); gap: var(--space-1); }
+.guestWorkspace .productSidebar nav button { min-height: 44px; }
+.guestWorkspace .productSidebar nav button.active { background: var(--color-subtle); }
+.guestWorkspace .guestWorkspaceIdentity { margin-top: var(--space-5); }
+.guestWorkspace .projectCenterHeader { align-items: flex-start; }
+.guestWorkspace .projectCenterHeader h1 { font-size: 32px; }
+.guestWorkspace .projectCenterHeader h1:focus { outline: none; }
+.guestWorkspace .projectCenterHeader h1:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 5px; }
+.guestWorkspace .projectCenterHeader p { max-width: 45em; font-size: 16px; line-height: 1.7; }
+.guestWorkspace .projectHelpActions { flex-wrap: wrap; justify-content: flex-end; }
+.guestWorkspaceNotice { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-block: var(--space-5); padding: var(--space-3) var(--space-4); border-left: 2px solid var(--color-lavender); background: var(--color-field); }
+.guestWorkspaceNotice p { flex: 1 1 30em; margin: 0; color: var(--color-text-secondary); font-size: 14px; }
+.guestWorkspaceWarning { padding: var(--space-4); border: 1px solid var(--color-warning); border-radius: 8px; color: var(--color-text); background: var(--color-surface); }
+.guestWorkspace .projectEntryActions { margin-top: 0; }
+.guestWorkspace .projectListHeader span { color: var(--color-text-muted); font-size: 14px; }
+.guestWorkspace .guestWorkspaceEmpty { margin-top: var(--space-5); }
+.guestWorkspace .projectEmpty { padding: var(--space-7) var(--space-4); }
+.guestWorkspace .projectEmpty h2 { margin: var(--space-4) 0 var(--space-2); color: var(--color-text); font: 700 24px/1.4 "Noto Serif SC", "Source Han Serif SC", serif; }
+.guestWorkspace .projectEmpty p { font-size: 16px; line-height: 1.7; }
+.guestWorkspaceFeatureActions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-3); }
+.guestWorkspaceFeatureActions > span { display: contents; }
+.guestWorkspaceFeatureActions button { padding-inline: var(--space-5); }
+.guestWorkspaceNext { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-4); margin-top: var(--space-5); padding-top: var(--space-5); border-top: 1px solid var(--color-border); }
+.guestWorkspaceNext p { margin: 0; color: var(--color-text-secondary); }
+.guestWorkspaceNext > div { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+@media (max-width: 1023px) {
+  .guestWorkspace .projectCenterHeader { flex-direction: column; gap: var(--space-4); }
+  .guestWorkspace .projectHelpActions { justify-content: flex-start; }
+}
+
+@media (max-width: 767px) {
+  .guestWorkspace.guestWorkspace { display: block; padding-top: 0; }
+  .guestWorkspace .productSidebar { position: static; display: block; height: auto; min-height: 0; padding: var(--space-4); border-right: 0; }
+  .guestWorkspace .sidebarBrand { width: auto; }
+  .guestWorkspace .sidebarBrand small { display: block; }
+  .guestWorkspace .productSidebar nav { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
+  .guestWorkspace .productSidebar nav button { width: auto; grid-template-columns: 20px minmax(0, 1fr); gap: var(--space-2); padding: var(--space-2); font-size: 14px; }
+  .guestWorkspace .productSidebar nav button span:last-child { display: inline; }
+  .guestWorkspace .productSidebar nav svg { width: 18px; height: 18px; }
+  .guestWorkspace .guestWorkspaceIdentity { display: none; }
+  .guestWorkspace .projectCenterMain { padding: var(--space-5) var(--space-4) var(--space-7); }
+  .guestWorkspace .projectCenterHeader h1 { font-size: 28px; }
+  .guestWorkspace .projectHelpActions { width: 100%; gap: var(--space-2); }
+  .guestWorkspace .projectHelpActions button { flex: 1 1 auto; }
+  .guestWorkspace .projectListHeader { gap: var(--space-2); }
+  .guestWorkspaceFeatureActions { width: 100%; }
+  .guestWorkspaceFeatureActions button { flex: 1 1 auto; }
+  .guestWorkspaceNext > div { width: 100%; }
+  .guestWorkspaceNext button { flex: 1 1 auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guestWorkspace.guestWorkspace * { animation: none; transition: none; scroll-behavior: auto; }
+}

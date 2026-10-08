@@ -37,7 +37,9 @@ def test_spa_routes_serve_index_for_direct_navigation(tmp_path: Path) -> None:
         "/app/settings/model",
         "/check",
         "/projects",
+        "/characters",
         "/diff",
+        "/revision",
         "/visual",
         "/audit",
         "/report",
@@ -78,6 +80,8 @@ def test_unknown_api_and_missing_resources_are_not_swallowed(tmp_path: Path) -> 
             "/app/missing.js",
             "/favicon.ico",
             "/unknown",
+            "/characters/not-a-route",
+            "/revision/not-a-route",
         ):
             response = client.get(route)
             assert response.status_code == 404, route

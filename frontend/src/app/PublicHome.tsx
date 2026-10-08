@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import UserGuide from "../features/help/UserGuide";
+import { browserNavigate } from "../routing";
 import LoginReminder from "./LoginReminder";
-import { publicEntryActions, publicSessionMessage, type PublicEntryAction, type PublicSessionStatus } from "./publicEntry";
+import { publicEntryActions, publicSessionMessage, type PublicEntryAction, type PublicFeatureAction, type PublicSessionStatus } from "./publicEntry";
 import "./public-home.css";
 
 type Props = {
@@ -10,7 +11,7 @@ type Props = {
   draftLogoutWarning?: string;
 };
 
-type EntrySelection = { action: PublicEntryAction; trigger: HTMLButtonElement };
+type EntrySelection = { action: PublicFeatureAction; trigger: HTMLButtonElement };
 
 /** Public reading contains only original static copy and read-only local help. */
 export default function PublicHome({ status, onRetry, draftLogoutWarning }: Props) {
@@ -22,7 +23,10 @@ export default function PublicHome({ status, onRetry, draftLogoutWarning }: Prop
 
   function entryButton(action: PublicEntryAction, primary = false) {
     return <button type="button" className={primary ? "quietPrimary" : undefined}
-      onClick={(event) => setSelection({ action, trigger: event.currentTarget })}>{publicEntryActions[action].label}</button>;
+      onClick={(event) => {
+        if (action === "workspace") browserNavigate(publicEntryActions.workspace.returnTo);
+        else setSelection({ action, trigger: event.currentTarget });
+      }}>{publicEntryActions[action].label}</button>;
   }
 
   return (
@@ -113,12 +117,12 @@ export default function PublicHome({ status, onRetry, draftLogoutWarning }: Prop
         </section>
 
         <section className="publicHomeStart" aria-labelledby="public-home-start-title">
-          <div><h2 id="public-home-start-title">准备好自己的故事时</h2><p>登录后进入项目中心，再选择你的起步方式。</p></div>
+          <div><h2 id="public-home-start-title">准备好自己的故事时</h2><p>可以先浏览空工作区；创建或导入自己的故事时再登录。</p></div>
           <div className="publicHomeStartActions">{entryButton("create")}{entryButton("import")}</div>
         </section>
       </main>
 
-      <footer className="publicHomeFooter">阅读本页和使用指南无需账户。个人文稿、项目记录与模型密钥仅在登录后的工作区操作。</footer>
+      <footer className="publicHomeFooter">阅读本页、使用指南和浏览空工作区无需账户。使用个人文稿、项目记录与模型设置时再登录。</footer>
       {selection && <LoginReminder {...selection} status={status} onRetry={onRetry} onClose={() => setSelection(null)} />}
       {helpTrigger && <UserGuide initialTopic="start" trigger={helpTrigger} onClose={() => setHelpTrigger(null)} />}
     </div>

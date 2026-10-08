@@ -1,9 +1,9 @@
 import { useLayoutEffect, useRef, type KeyboardEvent } from "react";
 import { browserNavigate } from "../routing";
-import { publicEntryActions, publicEntryAuthHref, publicSessionMessage, type PublicEntryAction, type PublicSessionStatus } from "./publicEntry";
+import { publicEntryActions, publicEntryAuthHref, publicSessionMessage, type PublicFeatureAction, type PublicSessionStatus } from "./publicEntry";
 
 type Props = {
-  action: PublicEntryAction;
+  action: PublicFeatureAction;
   trigger: HTMLButtonElement;
   status: PublicSessionStatus;
   onRetry: () => void;
