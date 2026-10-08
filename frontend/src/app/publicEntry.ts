@@ -65,3 +65,8 @@ export function publicSessionMessage(status: PublicSessionStatus): string {
 export function canApplySessionProbe(generation: number, activeGeneration: number, aborted: boolean): boolean {
   return generation === activeGeneration && !aborted;
 }
+
+/** Active account interruption needs reauthentication; a guest visit or logout does not. */
+export function shouldRecoverExpiredSession(mode: "required" | "anonymous" | null | undefined, explicitLogout: boolean): boolean {
+  return mode === "required" && !explicitLogout;
+}

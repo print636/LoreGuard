@@ -14,7 +14,7 @@ import ProjectCenter from "./ProjectCenter";
 import PublicHome from "./PublicHome";
 import GuestWorkspace from "./GuestWorkspace";
 import { guestWorkspaceViewFromPath } from "./guestWorkspaceViews";
-import { canApplySessionProbe, PUBLIC_SESSION_PROBE_TIMEOUT_MS } from "./publicEntry";
+import { canApplySessionProbe, PUBLIC_SESSION_PROBE_TIMEOUT_MS, shouldRecoverExpiredSession } from "./publicEntry";
 import { apiErrorDetail, type SessionIdentity } from "./session";
 import { activateDraftSession, discardDraftSession, suspendDraftSession } from "../features/drafts/sessionDraftStorage";
 import "../features/drafts/draft-notice.css";
@@ -44,6 +44,7 @@ export default function RootApp() {
   const guestView = guestWorkspaceViewFromPath(window.location.pathname);
   const previousRouteKind = useRef(route.kind);
   const [draftLogoutWarning, setDraftLogoutWarning] = useState("");
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState("");
   const identityRef = useRef<SessionIdentity | null>(null);
   const sessionProbe = useRef<{ generation: number; controller: AbortController | null; timer: number | null }>({ generation: 0, controller: null, timer: null });
 
@@ -57,6 +58,7 @@ export default function RootApp() {
 
   const authenticated = useCallback((identity: SessionIdentity) => {
     invalidateSessionProbe();
+    setSessionExpiredNotice("");
     identityRef.current = identity;
     if (identity.mode === "required") activateDraftSession({ userId: identity.user.id, workspaceId: identity.workspace.id });
     else suspendDraftSession();
@@ -65,6 +67,7 @@ export default function RootApp() {
 
   const loggedOut = useCallback(() => {
     invalidateSessionProbe();
+    setSessionExpiredNotice("");
     const identity = identityRef.current;
     if (identity?.mode === "required") {
       const cleared = discardDraftSession({ userId: identity.user.id, workspaceId: identity.workspace.id });
@@ -116,14 +119,22 @@ export default function RootApp() {
       setLocationKey(currentLocation());
     };
     const handleExpired = (event: Event) => {
-      if ((event as CustomEvent<{ explicitLogout?: boolean }>).detail?.explicitLogout === true) {
+      const explicitLogout = (event as CustomEvent<{ explicitLogout?: boolean }>).detail?.explicitLogout === true;
+      if (explicitLogout) {
         loggedOut();
         return;
       }
+      const returnTo = shouldRecoverExpiredSession(identityRef.current?.mode, explicitLogout)
+        ? safeReturnTo(currentLocation())
+        : null;
       invalidateSessionProbe();
       suspendDraftSession();
       identityRef.current = null;
       setStartup({ status: "signed-out", identity: null });
+      if (returnTo !== null) {
+        setSessionExpiredNotice("登录状态已失效，请重新登录后继续。登录不会自动重试刚才的操作。");
+        browserNavigate(loginPath(returnTo), { replace: true, bypassBlockers: true });
+      }
     };
     window.addEventListener("popstate", handleLocation);
     window.addEventListener(SESSION_EXPIRED_EVENT, handleExpired);
@@ -201,7 +212,11 @@ export default function RootApp() {
     if (startup.status === "ready") {
       return <main className="startupPage productPage" aria-busy="true"><p>正在返回项目中心…</p></main>;
     }
-    return <>{draftLogoutWarning && <p className="logoutDraftWarning" role="alert">{draftLogoutWarning}</p>}<AuthPage mode={route.kind} onAuthenticated={authenticated} /></>;
+    return <>
+      {draftLogoutWarning && <p className="logoutDraftWarning" role="alert">{draftLogoutWarning}</p>}
+      {sessionExpiredNotice && <p className="logoutDraftWarning" role="status">{sessionExpiredNotice}</p>}
+      <AuthPage mode={route.kind} onAuthenticated={authenticated} />
+    </>;
   }
 
   if (startup.status === "failed") {

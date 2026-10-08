@@ -126,6 +126,19 @@ async function login(page: Page, who = "author-a") {
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.waitForLoadState("networkidle");
 }
+async function loginThroughGuestCheckGate(page: Page, who = "author-a") {
+  await expect(page).toHaveURL(/\/check$/);
+  const guest = page.getByRole("main", { name: "访客空工作区", exact: true });
+  await expect(guest).toBeVisible();
+  await expect(guest.getByRole("heading", { name: "还没有待审文稿", exact: true })).toBeVisible();
+  await guest.getByRole("button", { name: "开始校验", exact: true }).click();
+  const reminder = page.getByRole("dialog", { name: "登录后继续", exact: true });
+  await expect(reminder).toBeVisible();
+  await reminder.getByRole("button", { name: "去登录", exact: true }).click();
+  await expect(page).toHaveURL(/\/login\?returnTo=%2Fcheck$/);
+  await login(page, who);
+  await expect(page).toHaveURL(/\/check$/);
+}
 async function draftEntries(page: Page) {
   return page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("loreguard:tab-draft:v1:")).map((key) => ({ key, value: JSON.parse(sessionStorage.getItem(key)!) })));
 }
@@ -187,18 +200,26 @@ test("换账户不泄露也不删除原稿；原账户主动退出清理且不�
 
 test("主动退出返回401仍清稿；普通auth/me401刷新不清稿", async ({ page }) => {
   const state = fixtureState();
+  const privateText = "重新登录之前需要保留的正文。";
   await open(page, state, "/check");
-  await bodyEditor(page).fill("重新登录之前需要保留的正文。");
+  await bodyEditor(page).fill(privateText);
   state.authenticated = false;
   await page.reload();
-  await expect(page).toHaveURL(/\/login/);
+  await expect(page).toHaveURL(/\/check$/);
+  const guest = page.getByRole("main", { name: "访客空工作区", exact: true });
+  await expect(guest).toBeVisible();
+  await expect(guest.getByRole("heading", { name: "还没有待审文稿", exact: true })).toBeVisible();
   expect(await draftEntries(page)).toHaveLength(1);
-  await login(page);
-  await expect(bodyEditor(page)).toHaveValue("重新登录之前需要保留的正文。");
+  await expect(page.locator("body")).not.toContainText(privateText);
+  await loginThroughGuestCheckGate(page);
+  await expect(bodyEditor(page)).toHaveValue(privateText);
   state.logout401 = true;
   await page.getByRole("button", { name: "退出", exact: true }).click();
-  await expect(page).toHaveURL(/\/login/);
+  await expect(page).toHaveURL(/\/check$/);
+  await expect(guest).toBeVisible();
+  await expect(guest.getByRole("heading", { name: "还没有待审文稿", exact: true })).toBeVisible();
   expect(await draftEntries(page)).toEqual([]);
+  await expect(page.locator("body")).not.toContainText(privateText);
   await noUnexpected(state);
 });
 

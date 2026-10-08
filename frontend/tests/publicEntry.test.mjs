@@ -8,6 +8,7 @@ import {
   publicEntryActions,
   publicEntryAuthHref,
   publicSessionMessage,
+  shouldRecoverExpiredSession,
 } from "../src/app/publicEntry.ts";
 
 test("workspace entry is browsing while actual features preserve a destination without an automatic action", () => {
@@ -84,4 +85,14 @@ test("session probe timeout is bounded and stale or aborted replies cannot overw
   assert.equal(canApplySessionProbe(3, 4, false), false, "login, logout and expiration invalidate the old generation");
   assert.equal(canApplySessionProbe(3, 3, true), false, "timeout rejects a late reply even if transport ignores abort");
   assert.equal(canApplySessionProbe(3, 4, true), false);
+});
+
+test("only interruption of an active required account forces login recovery", () => {
+  assert.equal(shouldRecoverExpiredSession("required", false), true);
+  for (const mode of [null, undefined, "anonymous"]) {
+    assert.equal(shouldRecoverExpiredSession(mode, false), false, "initial visits and auth/me 401 remain guest browsing");
+  }
+  for (const mode of [null, undefined, "anonymous", "required"]) {
+    assert.equal(shouldRecoverExpiredSession(mode, true), false, "explicit logout uses existing draft cleanup and destination behavior");
+  }
 });
