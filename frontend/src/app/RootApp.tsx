@@ -11,6 +11,8 @@ import {
 import AuthPage from "./AuthPage";
 import AccountSettings from "./AccountSettings";
 import ProjectCenter from "./ProjectCenter";
+import PublicHome from "./PublicHome";
+import { canApplySessionProbe, PUBLIC_SESSION_PROBE_TIMEOUT_MS } from "./publicEntry";
 import { apiErrorDetail, type SessionIdentity } from "./session";
 import { activateDraftSession, discardDraftSession, suspendDraftSession } from "../features/drafts/sessionDraftStorage";
 import "../features/drafts/draft-notice.css";
@@ -40,15 +42,26 @@ export default function RootApp() {
   const previousRouteKind = useRef(route.kind);
   const [draftLogoutWarning, setDraftLogoutWarning] = useState("");
   const identityRef = useRef<SessionIdentity | null>(null);
+  const sessionProbe = useRef<{ generation: number; controller: AbortController | null; timer: number | null }>({ generation: 0, controller: null, timer: null });
 
-  function authenticated(identity: SessionIdentity) {
+  const invalidateSessionProbe = useCallback(() => {
+    sessionProbe.current.generation += 1;
+    sessionProbe.current.controller?.abort();
+    if (sessionProbe.current.timer !== null) window.clearTimeout(sessionProbe.current.timer);
+    sessionProbe.current.controller = null;
+    sessionProbe.current.timer = null;
+  }, []);
+
+  const authenticated = useCallback((identity: SessionIdentity) => {
+    invalidateSessionProbe();
     identityRef.current = identity;
     if (identity.mode === "required") activateDraftSession({ userId: identity.user.id, workspaceId: identity.workspace.id });
     else suspendDraftSession();
     setStartup({ status: "ready", identity });
-  }
+  }, [invalidateSessionProbe]);
 
-  function loggedOut() {
+  const loggedOut = useCallback(() => {
+    invalidateSessionProbe();
     const identity = identityRef.current;
     if (identity?.mode === "required") {
       const cleared = discardDraftSession({ userId: identity.user.id, workspaceId: identity.workspace.id });
@@ -56,14 +69,27 @@ export default function RootApp() {
     } else suspendDraftSession();
     identityRef.current = null;
     setStartup({ status: "signed-out", identity: null });
-  }
+  }, [invalidateSessionProbe]);
 
   const checkSession = useCallback(async () => {
+    invalidateSessionProbe();
+    const generation = sessionProbe.current.generation;
+    const controller = new AbortController();
+    sessionProbe.current.controller = controller;
+    const current = () => canApplySessionProbe(generation, sessionProbe.current.generation, controller.signal.aborted);
+    setStartup({ status: "checking", identity: null });
+    const timeout = window.setTimeout(() => {
+      if (!current()) return;
+      controller.abort();
+      setStartup({ status: "failed", identity: null, message: "确认登录状态超时，请重新确认或登录。" });
+    }, PUBLIC_SESSION_PROBE_TIMEOUT_MS);
+    sessionProbe.current.timer = timeout;
     try {
-      setStartup({ status: "checking", identity: null });
-      const identity = await apiJson<SessionIdentity>("/api/v1/auth/me");
+      const identity = await apiJson<SessionIdentity>("/api/v1/auth/me", { signal: controller.signal });
+      if (!current()) return;
       authenticated(identity);
     } catch (error) {
+      if (!current()) return;
       if (error instanceof ApiError && error.status === 401) {
         suspendDraftSession();
         identityRef.current = null;
@@ -71,8 +97,14 @@ export default function RootApp() {
         return;
       }
       setStartup({ status: "failed", identity: null, message: apiErrorDetail(error) });
+    } finally {
+      window.clearTimeout(timeout);
+      if (sessionProbe.current.generation === generation) {
+        sessionProbe.current.controller = null;
+        sessionProbe.current.timer = null;
+      }
     }
-  }, []);
+  }, [authenticated, invalidateSessionProbe]);
 
   useEffect(() => {
     initializeBrowserNavigation();
@@ -85,6 +117,7 @@ export default function RootApp() {
         loggedOut();
         return;
       }
+      invalidateSessionProbe();
       suspendDraftSession();
       identityRef.current = null;
       setStartup({ status: "signed-out", identity: null });
@@ -93,10 +126,11 @@ export default function RootApp() {
     window.addEventListener(SESSION_EXPIRED_EVENT, handleExpired);
     void checkSession();
     return () => {
+      invalidateSessionProbe();
       window.removeEventListener("popstate", handleLocation);
       window.removeEventListener(SESSION_EXPIRED_EVENT, handleExpired);
     };
-  }, [checkSession]);
+  }, [checkSession, invalidateSessionProbe, loggedOut]);
 
   useEffect(() => {
     if (startup.status === "ready") {
@@ -116,11 +150,12 @@ export default function RootApp() {
     }
     if (
       startup.status === "signed-out" &&
+      route.kind !== "root" &&
       route.kind !== "login" &&
       route.kind !== "register"
     ) {
       browserNavigate(
-        loginPath(route.kind === "root" ? undefined : currentLocation()),
+        loginPath(currentLocation()),
         { replace: true, bypassBlockers: true },
       );
     }
@@ -140,6 +175,10 @@ export default function RootApp() {
     }
   }, [locationKey, route.kind]);
 
+  if (route.kind === "root" && startup.status !== "ready") {
+    return <PublicHome status={startup.status} onRetry={() => void checkSession()} draftLogoutWarning={draftLogoutWarning} />;
+  }
+
   if (startup.status === "checking") {
     return (
       <main className="startupPage productPage" aria-busy="true" aria-label="正在确认登录状态">
@@ -148,6 +187,13 @@ export default function RootApp() {
         <p>正在打开故事工作区…</p>
       </main>
     );
+  }
+
+  if (route.kind === "login" || route.kind === "register") {
+    if (startup.status === "ready") {
+      return <main className="startupPage productPage" aria-busy="true"><p>正在返回项目中心…</p></main>;
+    }
+    return <>{draftLogoutWarning && <p className="logoutDraftWarning" role="alert">{draftLogoutWarning}</p>}<AuthPage mode={route.kind} onAuthenticated={authenticated} /></>;
   }
 
   if (startup.status === "failed") {
@@ -159,13 +205,6 @@ export default function RootApp() {
         <button className="quietPrimary" type="button" onClick={() => void checkSession()}>重新连接</button>
       </main>
     );
-  }
-
-  if (route.kind === "login" || route.kind === "register") {
-    if (startup.status === "ready") {
-      return <main className="startupPage productPage" aria-busy="true"><p>正在返回项目中心…</p></main>;
-    }
-    return <>{draftLogoutWarning && <p className="logoutDraftWarning" role="alert">{draftLogoutWarning}</p>}<AuthPage mode={route.kind} onAuthenticated={authenticated} /></>;
   }
 
   if (startup.status !== "ready") {

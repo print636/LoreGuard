@@ -157,6 +157,9 @@ export default function AuthPage({ mode, onAuthenticated }: AuthPageProps) {
 
       <section className="authPanel" aria-labelledby="auth-title">
         <div className="authPanelTop">
+          <button className="textButton authPublicHome" type="button" onClick={() => browserNavigate("/")}>
+            返回公开首页
+          </button>
           <button className="textButton" type="button" onClick={() => browserNavigate(switchHref)}>
             {isRegister ? "已有账户？登录" : "还没有账户？创建账户"}
           </button>
