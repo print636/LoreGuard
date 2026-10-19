@@ -424,12 +424,50 @@ if ($Action -eq 'CodexLogin' -or $Action -eq 'SiwcBind') {
 }
 
 if ($Action -eq 'Models') {
+    # The gateway catalog is a static/mixed routing view and registration is
+    # asynchronous at startup. Ask the official account-specific SIWC catalog,
+    # without returning tokens or reimplementing rotating-token refresh here.
     $taskAuthSummary = Get-AuthSummary
-    if ($taskAuthSummary.bound -lt 1 -or $taskAuthSummary.bound -ne $taskAuthSummary.total) { throw 'No complete SIWC-bound account. Model listing is not an entitlement check before authorization.' }
-    $taskResponse = Invoke-LocalRequest '/models' $true
-    if ($taskResponse.status -ne 200) { throw "Gateway model catalog returned HTTP $($taskResponse.status)." }
-    $taskModels = $taskResponse.content | ConvertFrom-Json
-    @($taskModels.data) | ForEach-Object { Write-Output $_.id }
+    if ($taskAuthSummary.total -ne 1 -or $taskAuthSummary.bound -ne 1) { throw 'Models requires one fully SIWC-bound account with a direct-plan grant.' }
+    $taskAuthFiles = @(Get-ChildItem -LiteralPath $taskAuthDir -Filter '*.json' -File)
+    if ($taskAuthFiles.Count -ne 1) { throw 'Models requires exactly one explicitly SIWC-bound account in this isolated auth directory.' }
+    Assert-NoReparsePath $taskAuthFiles[0].FullName
+    $taskAuthMetadata = Get-Content -LiteralPath $taskAuthFiles[0].FullName -Raw | ConvertFrom-Json
+    if (!$taskAuthMetadata.PSObject.Properties['use_siwc'] -or $taskAuthMetadata.use_siwc -ne $true -or
+        !$taskAuthMetadata.PSObject.Properties['siwc'] -or $null -eq $taskAuthMetadata.siwc -or
+        !$taskAuthMetadata.siwc.PSObject.Properties['access_token'] -or
+        [string]::IsNullOrWhiteSpace($taskAuthMetadata.siwc.access_token)) {
+        throw 'No SIWC access token. Complete browser SIWC binding; an ordinary Codex login is not sufficient.'
+    }
+    Add-Type -AssemblyName System.Net.Http
+    $taskHandler = New-Object System.Net.Http.HttpClientHandler
+    $taskHandler.AllowAutoRedirect = $false
+    $taskHandler.UseProxy = $false
+    $taskClient = New-Object System.Net.Http.HttpClient($taskHandler)
+    $taskClient.Timeout = [TimeSpan]::FromSeconds(20)
+    $taskClient.MaxResponseContentBufferSize = 1048576
+    $taskRequest = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, 'https://api.openai.com/v1/models')
+    $taskRequest.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $taskAuthMetadata.siwc.access_token)
+    Remove-Variable taskAuthMetadata -ErrorAction SilentlyContinue
+    $taskResponse = $null
+    try {
+        try { $taskResponse = $taskClient.SendAsync($taskRequest, [System.Net.Http.HttpCompletionOption]::ResponseContentRead).GetAwaiter().GetResult() }
+        catch { throw 'Official SIWC model catalog request failed or timed out; no credentials were printed.' }
+        if ([int]$taskResponse.StatusCode -eq 401) { throw 'SIWC access token was not accepted. Ensure the gateway is started and has completed its own token refresh, then retry Models; this script does not refresh OAuth.' }
+        if ([int]$taskResponse.StatusCode -ne 200) { throw "Official SIWC model catalog returned HTTP $([int]$taskResponse.StatusCode); response details withheld." }
+        try {
+            $taskCatalog = $taskResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+        } catch { throw 'Official model catalog body is invalid or exceeds the metadata size limit.' }
+        if (!$taskCatalog.PSObject.Properties['models']) { throw 'Official SIWC model catalog did not contain the expected models array.' }
+        $taskVisible = @($taskCatalog.models | Where-Object { $_.visibility -eq 'list' -and ![string]::IsNullOrWhiteSpace($_.slug) })
+        if ($taskVisible.Count -eq 0) { throw 'The selected ChatGPT account returned no visible SIWC models.' }
+        $taskVisible | ForEach-Object { Write-Output $_.slug }
+    } finally {
+        if ($null -ne $taskResponse) { $taskResponse.Dispose() }
+        $taskRequest.Dispose()
+        $taskClient.Dispose()
+        $taskHandler.Dispose()
+    }
     return
 }
 
