@@ -120,6 +120,11 @@ class Settings(BaseSettings):
     # Comma-separated exact HTTPS origins. The normalized OPENAI_BASE_URL
     # origin is also admitted for backwards-compatible local deployments.
     account_model_allowed_origins: str = Field(default="", max_length=16_384)
+    # Explicit development-only exception for a trusted loopback gateway.
+    # Ordinary account HTTPS/SSRF policy remains unchanged. Neither a saved
+    # account URL nor a worker snapshot may enable this capability itself.
+    local_model_gateway_enabled: bool = False
+    local_model_gateway_origins: str = Field(default="", max_length=2_048)
     # Internal, request-edge snapshot populated when an account credential is
     # resolved.  It prevents a run-local OPENAI_BASE_URL from implicitly
     # adding its own origin to the administrator's allowlist.  This value is
@@ -760,6 +765,14 @@ class Settings(BaseSettings):
     def validate_auth_security_boundary(self):
         """Fail closed when authentication is enabled without its trust root."""
 
+        if self.deployment_environment != "local" and (
+            self.local_model_gateway_enabled or self.local_model_gateway_origins
+        ):
+            raise ValueError("local model gateways are forbidden in production")
+        if bool(self.local_model_gateway_origins.strip()) != self.local_model_gateway_enabled:
+            raise ValueError(
+                "local model gateways require an explicit enabled flag and exact origins"
+            )
         if self.eval_isolation_instance_id and (
             self.deployment_environment != "local"
             or self.auth_mode != "anonymous"

@@ -29,7 +29,35 @@ export type AccountModelProviderProfile = {
   updatedAt: string | null;
   serviceDefaultAvailable: boolean;
   lastTest: ModelProviderTestView | null;
+  localGateway?: LocalGatewayPolicy;
 };
+
+export type LocalGatewayPolicy = { enabled: boolean; allowedOrigins: string[] };
+
+function canonicalLocalGatewayOrigin(value: unknown): value is string {
+  if (typeof value !== "string" || !/^http:\/\/(?:127\.0\.0\.1|host\.docker\.internal):[1-9]\d{0,4}$/.test(value)) return false;
+  try { return new URL(value).origin === value; } catch { return false; }
+}
+
+function parseLocalGatewayPolicy(value: unknown): LocalGatewayPolicy {
+  const policy = objectValue(value);
+  const allowedOrigins = Array.isArray(policy?.allowed_origins)
+    ? policy.allowed_origins.filter(canonicalLocalGatewayOrigin).slice(0, 16)
+    : [];
+  return policy?.enabled === true && allowedOrigins.length > 0
+    ? { enabled: true, allowedOrigins }
+    : { enabled: false, allowedOrigins: [] };
+}
+
+function allowedLocalGatewayUrl(value: string, policy?: LocalGatewayPolicy): boolean {
+  if (!policy?.enabled) return false;
+  const match = /^(http:\/\/(?:127\.0\.0\.1|host\.docker\.internal):[1-9]\d{0,4})(\/[^?#]*)?$/.exec(value);
+  if (!match || !canonicalLocalGatewayOrigin(match[1]) || !policy.allowedOrigins.includes(match[1])) return false;
+  const path = match[2] || "";
+  // Keep the local exception canonical; do not trust browser URL rewriting.
+  return !/[\\%\s\u0000-\u001f\u007f]/.test(path) && !path.includes("//") &&
+    !path.split("/").some((segment) => segment === "." || segment === "..");
+}
 
 export type ModelProviderForm = {
   baseUrl: string;
@@ -161,7 +189,7 @@ const testCategoryCopy: Record<
   },
   endpoint_rejected: {
     label: "模型地址未通过安全校验",
-    detail: "Base URL 的 HTTPS 来源不在部署允许列表中。",
+    detail: "Base URL 未通过部署的地址安全策略。",
     tone: "error",
     action: "请部署管理员核对 ACCOUNT_MODEL_ALLOWED_ORIGINS 后重新保存。",
   },
@@ -269,6 +297,7 @@ export function parseAccountModelProvider(payload: unknown): AccountModelProvide
     updatedAt: safeTimestamp(root.updated_at),
     serviceDefaultAvailable: safeBoolean(root.service_default_available),
     lastTest: lastTestPayload ? describeAccountProviderTest(lastTestPayload) : null,
+    localGateway: parseLocalGatewayPolicy(root.local_gateway),
   };
 }
 
@@ -290,6 +319,7 @@ export function emptyModelProviderForm(): ModelProviderForm {
 export function validateModelProviderForm(
   form: ModelProviderForm,
   configured: boolean,
+  localGateway?: LocalGatewayPolicy,
 ): ModelProviderErrors {
   const errors: ModelProviderErrors = {};
   const baseUrl = form.baseUrl.trim();
@@ -299,7 +329,11 @@ export function validateModelProviderForm(
   else {
     try {
       const parsed = new URL(baseUrl);
-      if (parsed.protocol !== "https:") errors.baseUrl = "Base URL 必须使用 HTTPS。";
+      if (parsed.protocol !== "https:" && !allowedLocalGatewayUrl(baseUrl, localGateway)) {
+        errors.baseUrl = localGateway?.enabled
+          ? "HTTP 仅限管理员明确启用的本机网关地址，请核对地址和端口；其他服务必须使用 HTTPS。"
+          : "Base URL 必须使用 HTTPS。";
+      }
       else if (parsed.username || parsed.password || parsed.search || parsed.hash) {
         errors.baseUrl = "Base URL 不能包含账户信息、查询参数或片段。";
       }

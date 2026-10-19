@@ -30,6 +30,33 @@ const configuredPayload = {
   last_test: null,
 };
 
+test("HTTP gateway exceptions require enabled server metadata and an exact canonical origin", () => {
+  const profile = parseAccountModelProvider({
+    ...configuredPayload,
+    local_gateway: { enabled: true, allowed_origins: ["http://127.0.0.1:8317"] },
+  });
+  const form = { ...formFromModelProvider(profile), baseUrl: "http://127.0.0.1:8317/v1" };
+  assert.equal(validateModelProviderForm(form, true, profile.localGateway).baseUrl, undefined);
+  assert.match(validateModelProviderForm(form, true).baseUrl, /HTTPS/);
+  for (const baseUrl of ["http://127.0.0.1:8318/v1", "http://localhost:8317/v1", "http://2130706433:8317/v1", "http://127.1:8317/v1", "http://host.docker.internal:8317/v1", "http://127.0.0.1:8317/a/../v1", "http://127.0.0.1:8317/%2e%2e/v1", "http://127.0.0.1:8317/v1?x=y", "http://x@127.0.0.1:8317/v1"]) {
+    assert.ok(validateModelProviderForm({ ...form, baseUrl }, true, profile.localGateway).baseUrl, baseUrl);
+  }
+  assert.equal(validateModelProviderForm({ ...form, baseUrl: "https://api.example.com/v1" }, true, profile.localGateway).baseUrl, undefined);
+});
+
+test("malformed or disabled local metadata never opens a generic HTTP exception", () => {
+  for (const local_gateway of [undefined, { enabled: false, allowed_origins: ["http://127.0.0.1:8317"] }, { enabled: true, allowed_origins: ["http://10.0.0.1:8317", "http://localhost:8317", "http://127.0.0.1:99999", "http://127.0.0.1:8317/"] }]) {
+    const profile = parseAccountModelProvider({ ...configuredPayload, local_gateway });
+    assert.equal(profile.localGateway.enabled, false);
+    assert.ok(validateModelProviderForm({ ...formFromModelProvider(profile), baseUrl: "http://127.0.0.1:8317/v1" }, true, profile.localGateway).baseUrl);
+  }
+});
+
+test("Docker host alias is permitted only when separately enabled by the server", () => {
+  const profile = parseAccountModelProvider({ ...configuredPayload, local_gateway: { enabled: true, allowed_origins: ["http://host.docker.internal:8317"] } });
+  assert.equal(validateModelProviderForm({ ...formFromModelProvider(profile), baseUrl: "http://host.docker.internal:8317/v1" }, true, profile.localGateway).baseUrl, undefined);
+});
+
 test("unconfigured account metadata stays explicit without inventing a service default", () => {
   const profile = parseAccountModelProvider({
     configured: false,

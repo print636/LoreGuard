@@ -17,6 +17,8 @@ from app.provider_credentials import (
     ProviderEndpointRejected,
     ProviderKeyring,
     allowed_provider_origins,
+    authorized_local_model_gateway_origins,
+    is_local_model_gateway_endpoint,
     load_or_create_local_keyring,
     load_provider_keyring,
     normalize_provider_base_url,
@@ -30,6 +32,87 @@ from app.provider_credentials import (
 
 CANARY_SECRET = "sk-provider-canary-must-never-leak"
 ALLOWED_ORIGINS = ("https://api.example.com", "https://relay.example:8443")
+
+
+def local_gateway_settings(**changes):
+    values = {
+        "_env_file": None,
+        "auth_mode": "required",
+        "auth_secret_key": "local-gateway-synthetic-auth-secret-32-chars",
+        "account_model_allowed_origins": "https://api.example.com",
+        "local_model_gateway_enabled": True,
+        "local_model_gateway_origins": "http://127.0.0.1:8317",
+    }
+    values.update(changes)
+    return Settings(**values)
+
+
+def test_local_gateway_is_disabled_by_default_and_cannot_use_ordinary_allowlist():
+    settings = Settings(_env_file=None, account_model_allowed_origins="http://127.0.0.1:8317")
+    assert authorized_local_model_gateway_origins(settings) == ()
+    with pytest.raises(ProviderEndpointRejected):
+        allowed_provider_origins(settings)
+    with pytest.raises(ProviderEndpointRejected):
+        normalize_provider_origin("http://127.0.0.1:8317")
+
+
+@pytest.mark.parametrize("hostname", ["127.0.0.1", "host.docker.internal"])
+def test_explicit_local_gateway_requires_exact_origin_and_request_policy(hostname):
+    origin = f"http://{hostname}:8317"
+    settings = local_gateway_settings(local_model_gateway_origins=origin)
+    allowed = allowed_provider_origins(settings)
+    assert allowed == (origin, "https://api.example.com")
+    assert authorized_local_model_gateway_origins(settings) == (origin,)
+    normalized = normalize_provider_base_url(origin + "/v1/", allowed_origins=allowed)
+    assert normalized == origin + "/v1"
+    assert len(provider_endpoint_sha256(normalized)) == 64
+    assert is_local_model_gateway_endpoint(normalized, settings)
+    assert validate_provider_request_url(normalized, allowed_origins=allowed, settings=settings) == normalized
+    with pytest.raises(ProviderEndpointRejected):
+        validate_provider_request_url(normalized, allowed_origins=allowed)
+    disabled = settings.model_copy(update={"local_model_gateway_enabled": False, "local_model_gateway_origins": ""})
+    with pytest.raises(ProviderEndpointRejected):
+        validate_provider_request_url(normalized, allowed_origins=allowed, settings=disabled)
+    with pytest.raises(ProviderEndpointRejected):
+        normalize_provider_base_url(f"http://{hostname}:8318/v1", allowed_origins=allowed)
+
+
+@pytest.mark.parametrize("origin", [
+    "http://localhost:8317", "http://127.0.0.2:8317", "http://0.0.0.0:8317",
+    "http://[::1]:8317", "http://2130706433:8317", "http://127.1:8317",
+    "http://host.docker.internal.evil.example:8317", "http://192.168.1.1:8317",
+    "http://127.0.0.1", "http://127.0.0.1:0", "http://127.0.0.1:65536",
+    "http://secret@127.0.0.1:8317", "http://127.0.0.1:8317/v1",
+    "http://127.0.0.1:8317?", "http://127.0.0.1:8317#",
+    "https://127.0.0.1:8317", "http://127.0.0.1:8317,",
+])
+def test_local_gateway_configuration_rejects_broader_or_ambiguous_origins(origin):
+    with pytest.raises(ProviderEndpointRejected):
+        allowed_provider_origins(local_gateway_settings(local_model_gateway_origins=origin))
+
+
+@pytest.mark.parametrize("path", ["/../admin", "/%252e%252e/admin", "//admin", "/v1?x=1", "/v1#x", "/v1\\admin"])
+def test_local_gateway_paths_retain_existing_traversal_and_ambiguity_guards(path):
+    settings = local_gateway_settings()
+    with pytest.raises(ProviderEndpointRejected):
+        normalize_provider_base_url("http://127.0.0.1:8317" + path, allowed_origins=allowed_provider_origins(settings))
+
+
+def test_production_rejects_local_gateway_configuration_and_stale_frozen_policy():
+    with pytest.raises(ValidationError, match="local model gateways are forbidden"):
+        local_gateway_settings(deployment_environment="production")
+    settings = local_gateway_settings()
+    stale = settings.model_copy(update={"deployment_environment": "production"})
+    with pytest.raises(ProviderEndpointRejected):
+        validate_provider_request_url("http://127.0.0.1:8317/v1", allowed_origins=("http://127.0.0.1:8317",), settings=stale)
+
+
+def test_anonymous_local_default_requires_explicit_gateway_enablement():
+    settings = local_gateway_settings(auth_mode="anonymous", openai_base_url="http://127.0.0.1:8317/v1")
+    assert "http://127.0.0.1:8317" in allowed_provider_origins(settings)
+    disabled = settings.model_copy(update={"local_model_gateway_enabled": False, "local_model_gateway_origins": ""})
+    with pytest.raises(ProviderEndpointRejected):
+        allowed_provider_origins(disabled)
 
 
 @pytest.mark.parametrize(

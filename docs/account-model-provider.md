@@ -7,6 +7,11 @@ V1 允许每个账户保存一份 OpenAI-compatible **聊天** Provider：HTTPS 
 角色一致性、问题证据复核与 Evidence Investigator。Embedding/RAG 凭据仍是独立的
 部署配置；V1 不支持多 Provider、团队共享密钥或按项目覆盖。
 
+本机个人开发另提供默认关闭的 [Pro 本地网关适配](local-pro-gateway.md)。只有管理员同时启用
+`LOCAL_MODEL_GATEWAY_ENABLED` 并配置 `LOCAL_MODEL_GATEWAY_ORIGINS` 后，才能使用明确授权的
+本机 HTTP origin；生产环境拒绝该开关，普通 `ACCOUNT_MODEL_ALLOWED_ORIGINS` 仍只接受 HTTPS。
+此能力不把 ChatGPT 套餐授权分享给网站用户，也不改变账户、CSRF、运行冻结或凭据撤销政策。
+
 接口为：
 
 - `GET /api/v1/account/model-provider`：返回安全配置状态；
@@ -78,3 +83,15 @@ V1 没有批量在线 rewrap 作业；不要在仍有历史密文/排队运行�
 增加新中转时，应先由部署管理员把它的**仅 origin**（例如
 `https://api.example.com`，不能带 `/v1`）加入 `ACCOUNT_MODEL_ALLOWED_ORIGINS`，再允许
 用户保存完整 Base URL。
+
+本机开发例外仅接受带显式端口的 `http://127.0.0.1:<port>`，或管理员另行明确配置的
+`http://host.docker.internal:<port>`；不接受任意 IP、localhost 别名或内网主机。保存、
+worker 解析与最终请求均核对当前本机策略和冻结 origin；撤销管理员例外后，旧运行也不能
+继续使用它。本机请求禁用环境代理且不跟随重定向。Docker 的网络可达性须另行配置，
+本轮仅实测原生 Windows 的 loopback 服务，不因接受该别名就宣称 Docker 接入已验证。
+
+账户配置读取、保存、删除响应统一提供 `local_gateway` 安全策略元数据，前端不会自己从
+输入地址猜测是否可以放宽 HTTPS。已授权本机连接测试为单次、有界 60 秒，保留原限频；
+普通 Provider 的测试限额不变。SIWC profile 使用非严格对象 JSON Schema 请求格式，
+业务 Pydantic 校验不变；不发送网关不支持的温度及输出 Token 上限，预算数字不能当作
+上游硬生成限制。工具响应仍须通过允许列表、参数与数量校验，多工具响应整轮拒绝。

@@ -49,6 +49,22 @@ def safe_thinking_configuration(settings: Any) -> dict[str, Any]:
     mode = getattr(settings, "provider_thinking_mode", None)
     if mode not in {"disabled", "enabled"}:
         mode = None
+    if mode is not None:
+        from .provider_credentials import (
+            ProviderEndpointRejected,
+            is_local_model_gateway_endpoint,
+        )
+
+        try:
+            local_gateway = is_local_model_gateway_endpoint(
+                getattr(settings, "openai_base_url", ""), settings
+            )
+        except ProviderEndpointRejected:
+            local_gateway = True
+        if local_gateway:
+            # The SIWC profile does not send the DeepSeek thinking extension;
+            # an invalid local policy must not make this diagnostic throw.
+            mode = None
     return {"configured": mode is not None, "mode": mode}
 
 
@@ -482,6 +498,7 @@ class OpenAICompatibleProvider:
             from .provider_credentials import (
                 ProviderEndpointRejected,
                 allowed_provider_origins,
+                is_local_model_gateway_endpoint,
                 provider_endpoint_sha256,
                 validate_provider_request_url,
             )
@@ -495,6 +512,7 @@ class OpenAICompatibleProvider:
             checked_base_url = validate_provider_request_url(
                 self.settings.openai_base_url,
                 allowed_origins=request_origins,
+                settings=self.settings,
             )
             frozen_endpoint_sha256 = (
                 self.settings.provider_runtime_endpoint_sha256
@@ -509,6 +527,9 @@ class OpenAICompatibleProvider:
                 raise ProviderEndpointRejected(
                     "provider endpoint fingerprint does not match"
                 )
+            local_gateway = is_local_model_gateway_endpoint(
+                checked_base_url, self.settings
+            )
         except ProviderEndpointRejected:
             telemetry = self._call_telemetry(
                 call_started, input_chars, "endpoint_rejected", attempts
@@ -545,6 +566,10 @@ class OpenAICompatibleProvider:
             api_key.encode("ascii"),
             json.dumps(api_key, ensure_ascii=True)[1:-1].encode("ascii"),
         }
+        if local_gateway:
+            # This profile is selected only after endpoint authorization and
+            # the frozen endpoint check, never by an untrusted hostname alone.
+            payload = self._local_gateway_payload(payload, tool_contract=tool_contract)
         endpoint = f"{checked_base_url.rstrip('/')}/chat/completions"
         deadline = (
             call_started + self.settings.provider_total_deadline_seconds
@@ -557,6 +582,10 @@ class OpenAICompatibleProvider:
             timeout=self._request_timeout(deadline),
             follow_redirects=False,
             transport=self.transport,
+            # A local fixed client key must not be forwarded through a proxy
+            # inherited from the environment. Ordinary HTTPS deployments keep
+            # their existing proxy behavior.
+            trust_env=not local_gateway,
         ) as client:
             for attempt_no in range(1, self.retry_policy.max_attempts + 1):
                 if deadline is not None and self.monotonic() >= deadline:
@@ -646,6 +675,21 @@ class OpenAICompatibleProvider:
                                         completion_tokens,
                                         failure,
                                     ) = response_parser(raw_body, attempt_no)
+                                    if (
+                                        failure is None
+                                        and local_gateway
+                                        and tool_contract
+                                        and isinstance(parsed_response, tuple)
+                                        and len(parsed_response) > 1
+                                    ):
+                                        # CLIProxyAPI's Codex translator can
+                                        # override parallel_tool_calls=false.
+                                        # Reject the entire turn before callers
+                                        # can execute any returned tool.
+                                        parsed_response = None
+                                        failure = _Failure(
+                                            "tool_calls_too_many", attempt_no
+                                        )
                                     if (
                                         failure is None
                                         and parsed_response is not None
@@ -776,6 +820,42 @@ class OpenAICompatibleProvider:
             telemetry=telemetry,
             request_id=failure.request_id,
         )
+
+    @staticmethod
+    def _local_gateway_payload(
+        payload: dict[str, Any], *, tool_contract: bool
+    ) -> dict[str, Any]:
+        """Explicit compatibility for the pinned CLIProxyAPI SIWC adapter.
+
+        Its Codex translator maps json_schema but not json_object, and drops
+        Chat Completions temperature/token limits. The broad non-strict object
+        schema requests JSON formatting only; caller Pydantic validators remain
+        the authority for every capability's business schema. Token accounting,
+        response-byte limits, deadlines and tool authorization remain local and
+        must not be mistaken for an upstream hard generation-token ceiling.
+        """
+        wire = dict(payload)
+        for unsupported in ("temperature", "max_tokens", "thinking"):
+            wire.pop(unsupported, None)
+        if tool_contract:
+            wire["parallel_tool_calls"] = False
+            wire["tools"] = [
+                {
+                    **tool,
+                    "function": {**tool["function"], "strict": False},
+                }
+                for tool in payload["tools"]
+            ]
+        else:
+            wire["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "loreguard_json_object",
+                    "strict": False,
+                    "schema": {"type": "object", "additionalProperties": True},
+                },
+            }
+        return wire
 
     def _assert_account_credential_authorized(
         self,

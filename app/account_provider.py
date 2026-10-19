@@ -31,6 +31,8 @@ from .provider_credentials import (
     ProviderCredentialError,
     ProviderEndpointRejected,
     allowed_provider_origins,
+    authorized_local_model_gateway_origins,
+    is_local_model_gateway_endpoint,
     load_provider_keyring,
     normalize_provider_base_url,
     provider_endpoint_sha256,
@@ -298,6 +300,7 @@ def account_provider_runtime(
             validate_provider_request_url(
                 row.base_url,
                 allowed_origins=allowed_provider_origins(settings),
+                settings=settings,
             )
         except (ProviderCredentialError, ProviderEndpointRejected):
             return ProviderRuntime(
@@ -422,6 +425,7 @@ def runtime_for_analysis_run(
             validate_provider_request_url(
                 row.base_url,
                 allowed_origins=allowed_provider_origins(settings),
+                settings=settings,
             )
         except (ProviderCredentialError, ProviderEndpointRejected):
             return ProviderRuntime(
@@ -492,8 +496,26 @@ def runtime_for_analysis_run(
         )
     # Legacy anonymous runs predate provider snapshots and retain local-server
     # compatibility. Required-auth runs never enter this fallback.
+    try:
+        normalized = normalize_provider_base_url(
+            settings.openai_base_url,
+            allowed_origins=allowed_provider_origins(settings),
+        )
+    except ProviderEndpointRejected:
+        return ProviderRuntime(
+            settings.model_copy(update={"openai_api_key": ""}),
+            {"source": "service_default_legacy", "configured": False},
+            config_id=None,
+            available=False,
+            unavailable_reason="endpoint_rejected",
+        )
     return ProviderRuntime(
-        settings,
+        _run_local_settings(
+            settings,
+            api_key=settings.openai_api_key,
+            base_url=normalized,
+            model_name=settings.openai_model,
+        ),
         {
             "schema_version": 1,
             "source": "service_default_legacy",
@@ -511,6 +533,11 @@ def _serialize(binding, row) -> dict[str, Any]:
         current_settings.auth_mode == "anonymous"
         and bool(current_settings.openai_api_key.strip())
     )
+    local_origins = authorized_local_model_gateway_origins(current_settings)
+    local_gateway = {
+        "enabled": bool(local_origins),
+        "allowed_origins": list(local_origins),
+    }
     if row is None:
         return {
             "configured": False,
@@ -521,6 +548,7 @@ def _serialize(binding, row) -> dict[str, Any]:
             "updated_at": binding.updated_at if binding is not None else None,
             "last_test": None,
             "service_default_available": service_default_available,
+            "local_gateway": local_gateway,
         }
     last_test_payload = _safe_last_test_payload(row.last_test_payload)
     return {
@@ -576,6 +604,7 @@ def _serialize(binding, row) -> dict[str, Any]:
             else None
         ),
         "service_default_available": service_default_available,
+        "local_gateway": local_gateway,
     }
 
 
@@ -688,7 +717,7 @@ async def put_account_provider(
         raise _safe_http(
             422,
             "provider_endpoint_not_allowed",
-            "模型服务地址不在部署允许的 HTTPS 地址范围内",
+            "模型服务地址不在部署允许的地址范围内",
         ) from None
     except ProviderCredentialError:
         raise _safe_http(
@@ -879,6 +908,7 @@ async def test_account_provider(
             normalized = validate_provider_request_url(
                 row.base_url,
                 allowed_origins=allowed_provider_origins(settings),
+                settings=settings,
             )
         except (ProviderCredentialError, ProviderEndpointRejected):
             raise _safe_http(
@@ -896,12 +926,23 @@ async def test_account_provider(
             revision=row.revision,
             endpoint_sha256=row.endpoint_sha256,
         )
+        local_gateway = is_local_model_gateway_endpoint(normalized, settings)
+        # Local OAuth refresh and SIWC inference can outlast the ordinary
+        # relay probe. This remains one attempt and a hard, explicit ceiling;
+        # it does not alter ordinary providers or the per-account rate limit.
+        timeout_ceiling = 60.0 if local_gateway else 10.0
+        deadline_ceiling = 60.0 if local_gateway else 15.0
         bounded = resolved.model_copy(
             update={
                 "enable_model_extraction": True,
-                "provider_timeout_seconds": min(settings.provider_timeout_seconds, 10.0),
+                "provider_timeout_seconds": (
+                    timeout_ceiling
+                    if local_gateway
+                    else min(settings.provider_timeout_seconds, timeout_ceiling)
+                ),
                 "provider_total_deadline_seconds": min(
-                    settings.provider_total_deadline_seconds or 15.0, 15.0
+                    settings.provider_total_deadline_seconds or deadline_ceiling,
+                    deadline_ceiling,
                 ),
                 "provider_max_attempts": 1,
                 "provider_max_completion_tokens": min(

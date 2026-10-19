@@ -126,8 +126,8 @@ export default function ModelSettings({ identity, onLoggedOut }: ModelSettingsPr
   });
 
   const errors = useMemo(
-    () => validateModelProviderForm(form, profile.configured),
-    [form, profile.configured],
+    () => validateModelProviderForm(form, profile.configured, profile.localGateway),
+    [form, profile.configured, profile.localGateway],
   );
   const dirty = useMemo(
     () => modelProviderFormDirty(form, profile),
@@ -395,8 +395,11 @@ export default function ModelSettings({ identity, onLoggedOut }: ModelSettingsPr
                 <div className="formField">
                   <label htmlFor="model-baseUrl">Base URL</label>
                   <input ref={(node) => { fieldRefs.current.baseUrl = node; }} id="model-baseUrl" name="model-base-url" type="url" inputMode="url" autoComplete="off" spellCheck={false} value={form.baseUrl} disabled={!profileLoaded || loading || saving || deleting} aria-invalid={Boolean(fieldError("baseUrl"))} aria-describedby={`model-baseUrl-help${fieldError("baseUrl") ? " model-baseUrl-error" : ""}`} onBlur={() => setTouched((current) => ({ ...current, baseUrl: true }))} onChange={(event) => updateField("baseUrl", event.target.value)} />
-                  <small className="fieldHelp" id="model-baseUrl-help">例如 https://api.example.com/v1；必须使用 HTTPS，不能包含账户信息或查询参数。</small>
+                  <small className="fieldHelp" id="model-baseUrl-help">{profile.localGateway?.enabled
+                    ? `普通服务必须使用 HTTPS；本机开发例外仅限 ${profile.localGateway.allowedOrigins.join("、")}，可在地址后加 /v1。不能包含账户信息或查询参数。`
+                    : "例如 https://api.example.com/v1；必须使用 HTTPS，不能包含账户信息或查询参数。"}</small>
                   {fieldError("baseUrl") && <small className="fieldError" id="model-baseUrl-error">{fieldError("baseUrl")}</small>}
+                  {profile.localGateway?.enabled && <p className="fieldHelp">本机网关的固定 API Key 与 ChatGPT 浏览器授权相互独立。连接测试最多等待 60 秒；通过不代表完整审查质量、额度或并发保证。仅供本人本机使用，不要通过公网分享此网关。</p>}
                 </div>
                 <div className="formField">
                   <label htmlFor="model-model">模型名称</label>

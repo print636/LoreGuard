@@ -122,6 +122,8 @@ def provider_test_settings(*, auth_mode: str = "required"):
         "account_model_keyring_json",
         "account_model_keyring_file",
         "account_model_allowed_origins",
+        "local_model_gateway_enabled",
+        "local_model_gateway_origins",
         "provider_transport_allowed_origins",
         "openai_api_key",
         "openai_base_url",
@@ -139,6 +141,8 @@ def provider_test_settings(*, auth_mode: str = "required"):
     )
     settings.account_model_keyring_file = ""
     settings.account_model_allowed_origins = ALLOWED_ORIGINS
+    settings.local_model_gateway_enabled = False
+    settings.local_model_gateway_origins = ""
     settings.provider_transport_allowed_origins = ""
     settings.openai_api_key = "server-global-key-must-not-leak"
     settings.openai_base_url = "https://api.openai.com/v1"
@@ -1007,6 +1011,158 @@ def test_revocation_during_retry_backoff_blocks_the_second_http_attempt():
             provider.complete("system", "user")
         assert raised.value.category == "credential_revoked"
         assert len(requests) == 1
+
+
+def test_local_gateway_account_save_probe_frozen_run_and_delete_are_policy_bound():
+    calls: list[httpx.Request] = []
+    captured_probe: dict[str, object] = {}
+
+    def respond(request):
+        calls.append(request)
+        assert str(request.url) == "http://127.0.0.1:8317/v1/chat/completions"
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"status":"ok"}'}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 2},
+        })
+
+    def mock_provider(provider_settings, **kwargs):
+        captured_probe["timeout"] = provider_settings.provider_timeout_seconds
+        captured_probe["deadline"] = provider_settings.provider_total_deadline_seconds
+        captured_probe["attempts"] = provider_settings.provider_max_attempts
+        return OpenAICompatibleProvider(
+            provider_settings, transport=httpx.MockTransport(respond), **kwargs
+        )
+
+    with provider_test_settings(), TestClient(app) as client:
+        settings.local_model_gateway_enabled = True
+        settings.local_model_gateway_origins = "http://127.0.0.1:8317"
+        user_id, csrf = register(client)
+        expected_policy = {
+            "enabled": True, "allowed_origins": ["http://127.0.0.1:8317"]
+        }
+        assert client.get("/api/v1/account/model-provider").json()["local_gateway"] == expected_policy
+        saved = save_provider(
+            client, csrf, expected_revision=0, api_key=CANARY_A,
+            model="synthetic-siwc-model", base_url="http://127.0.0.1:8317/v1/",
+        )
+        assert saved.status_code == 200, saved.text
+        assert CANARY_A not in saved.text
+        assert saved.json()["base_url"] == "http://127.0.0.1:8317/v1"
+        assert saved.json()["local_gateway"] == expected_policy
+        assert client.get("/api/v1/account/model-provider").json()["local_gateway"] == expected_policy
+        with patch("app.account_provider.OpenAICompatibleProvider", mock_provider):
+            tested = client.post(
+                "/api/v1/account/model-provider/test",
+                headers={"X-CSRF-Token": csrf}, json={"expected_revision": 1},
+            )
+        assert tested.status_code == 200, tested.text
+        assert tested.json()["json_contract_ok"] is True
+        assert captured_probe == {"timeout": 60.0, "deadline": 60.0, "attempts": 1}
+        assert len(calls) == 1
+        with SessionLocal() as db:
+            initial = account_provider_runtime(db, user_id=user_id)
+            run = AnalysisRunRow(
+                requested_by_user_id=user_id, provider_config_id=initial.config_id,
+                provider_identity=initial.identity,
+            )
+        assert save_provider(
+            client, csrf, expected_revision=1, api_key=CANARY_B,
+            model="later-model", base_url="http://127.0.0.1:8317/v1",
+        ).status_code == 200
+        with SessionLocal() as db:
+            frozen = runtime_for_analysis_run(db, run)
+        assert frozen.available
+        assert frozen.settings.openai_model == "synthetic-siwc-model"
+        assert frozen.settings.openai_api_key == CANARY_A
+        assert "http://127.0.0.1:8317" in frozen.settings.provider_transport_allowed_origins
+        OpenAICompatibleProvider(frozen.settings, transport=httpx.MockTransport(respond)).complete("s", "u")
+        assert len(calls) == 2
+        disabled = settings.model_copy(update={
+            "local_model_gateway_enabled": False, "local_model_gateway_origins": "",
+        })
+        with SessionLocal() as db:
+            unavailable = runtime_for_analysis_run(db, run, base_settings=disabled)
+        assert unavailable.available is False
+        assert unavailable.settings.openai_api_key == ""
+        removed = client.request(
+            "DELETE", "/api/v1/account/model-provider",
+            headers={"X-CSRF-Token": csrf}, json={"expected_revision": 2},
+        )
+        assert removed.status_code == 200
+        assert removed.json()["local_gateway"] == expected_policy
+        assert client.get("/api/v1/account/model-provider").json()["local_gateway"] == expected_policy
+        with pytest.raises(ProviderError) as revoked:
+            OpenAICompatibleProvider(frozen.settings, transport=httpx.MockTransport(respond)).complete("s", "u")
+        assert revoked.value.category == "credential_revoked"
+        assert len(calls) == 2
+
+
+def test_disabled_local_gateway_policy_is_consistent_on_get_put_and_delete():
+    expected_policy = {"enabled": False, "allowed_origins": []}
+    with provider_test_settings(), TestClient(app) as client:
+        _, csrf = register(client)
+        initial = client.get("/api/v1/account/model-provider")
+        assert initial.status_code == 200
+        assert initial.json()["local_gateway"] == expected_policy
+        saved = save_provider(
+            client, csrf, expected_revision=0, api_key=CANARY_A, model="ordinary-model",
+        )
+        assert saved.status_code == 200
+        assert saved.json()["local_gateway"] == expected_policy
+        assert client.get("/api/v1/account/model-provider").json()["local_gateway"] == expected_policy
+        removed = client.request(
+            "DELETE", "/api/v1/account/model-provider",
+            headers={"X-CSRF-Token": csrf}, json={"expected_revision": 1},
+        )
+        assert removed.status_code == 200
+        assert removed.json()["local_gateway"] == expected_policy
+        assert client.get("/api/v1/account/model-provider").json()["local_gateway"] == expected_policy
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://127.0.0.1:8318/v1", "http://localhost:8317/v1",
+    "http://192.168.1.1:8317/v1", "http://host.docker.internal:8317/v1",
+])
+def test_local_gateway_save_cannot_select_an_unapproved_local_address(base_url):
+    with provider_test_settings(), TestClient(app) as client:
+        settings.local_model_gateway_enabled = True
+        settings.local_model_gateway_origins = "http://127.0.0.1:8317"
+        _, csrf = register(client)
+        rejected = save_provider(client, csrf, expected_revision=0, api_key=CANARY_A, model="m", base_url=base_url)
+        assert rejected.status_code == 422
+        assert CANARY_A not in rejected.text
+        assert client.get("/api/v1/account/model-provider").json()["configured"] is False
+
+
+def test_local_gateway_frozen_allowlist_alone_does_not_authorize_transport():
+    calls = []
+    with provider_test_settings():
+        forged = settings.model_copy(update={
+            "openai_base_url": "http://127.0.0.1:8317/v1",
+            "provider_transport_allowed_origins": "http://127.0.0.1:8317",
+        })
+        provider = OpenAICompatibleProvider(forged, transport=httpx.MockTransport(lambda request: calls.append(request)))
+        with pytest.raises(ProviderError) as rejected:
+            provider.complete("s", "u")
+        assert rejected.value.category == "endpoint_rejected"
+        assert calls == []
+
+
+def test_legacy_anonymous_run_cannot_skip_local_gateway_policy_resolution():
+    with provider_test_settings(auth_mode="anonymous"):
+        settings.openai_base_url = "http://127.0.0.1:8317/v1"
+        run = AnalysisRunRow(provider_config_id=None, provider_identity=None)
+        with SessionLocal() as db:
+            denied = runtime_for_analysis_run(db, run)
+        assert denied.available is False
+        assert denied.unavailable_reason == "endpoint_rejected"
+        assert denied.settings.openai_api_key == ""
+        settings.local_model_gateway_enabled = True
+        settings.local_model_gateway_origins = "http://127.0.0.1:8317"
+        with SessionLocal() as db:
+            allowed = runtime_for_analysis_run(db, run)
+        assert allowed.available
+        assert "http://127.0.0.1:8317" in allowed.settings.provider_transport_allowed_origins
 
 
 def test_docker_build_context_excludes_local_account_master_keys():

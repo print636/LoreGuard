@@ -453,6 +453,7 @@ def allowed_provider_origins(settings: Settings) -> tuple[str, ...]:
     selectable.
     """
 
+    local_origins = authorized_local_model_gateway_origins(settings)
     configured = settings.account_model_allowed_origins.strip()
     entries: list[str] = []
     if configured:
@@ -461,11 +462,50 @@ def allowed_provider_origins(settings: Settings) -> tuple[str, ...]:
             raise ProviderEndpointRejected("provider origin allowlist is invalid")
     origins: set[str] = set()
     if settings.auth_mode == "anonymous":
-        legacy_base = _parse_https_url(settings.openai_base_url, origin_only=False)
-        origins.add(_origin_from_parts(legacy_base))
+        legacy_base = _parse_provider_url(settings.openai_base_url, origin_only=False)
+        legacy_origin = _origin_from_parts(legacy_base)
+        if legacy_base.scheme == "http" and legacy_origin not in local_origins:
+            raise ProviderEndpointRejected("local model gateway is not authorized")
+        origins.add(legacy_origin)
     if entries:
-        origins.update(_normalize_allowed_origins(entries))
+        # The ordinary account allowlist can never enable a local exception.
+        origins.update(normalize_provider_origin(item) for item in entries)
+    origins.update(local_origins)
     return tuple(sorted(origins))
+
+
+def authorized_local_model_gateway_origins(settings: Settings) -> tuple[str, ...]:
+    """Return only administrator-enabled, development-only exact origins."""
+
+    enabled = getattr(settings, "local_model_gateway_enabled", False)
+    configured = getattr(settings, "local_model_gateway_origins", "")
+    if not isinstance(configured, str) or not isinstance(enabled, bool):
+        raise ProviderEndpointRejected("local model gateway policy is invalid")
+    if not enabled and not configured:
+        return ()
+    if (
+        not enabled
+        or getattr(settings, "deployment_environment", "local") != "local"
+        or not configured.strip()
+    ):
+        raise ProviderEndpointRejected("local model gateway is not authorized")
+    entries = [item.strip() for item in configured.split(",")]
+    if any(not item for item in entries):
+        raise ProviderEndpointRejected("local model gateway policy is invalid")
+    return tuple(sorted({
+        _origin_from_parts(_parse_local_gateway_url(item, origin_only=True))
+        for item in entries
+    }))
+
+
+def is_local_model_gateway_endpoint(value: str, settings: Settings) -> bool:
+    """Derive the local compatibility profile only from an authorized URL."""
+
+    try:
+        parts = _parse_local_gateway_url(value, origin_only=False)
+    except ProviderEndpointRejected:
+        return False
+    return _origin_from_parts(parts) in authorized_local_model_gateway_origins(settings)
 
 
 def validate_provider_security_configuration(settings: Settings) -> None:
@@ -485,30 +525,39 @@ def normalize_provider_origin(value: str) -> str:
 def normalize_provider_base_url(
     value: str, *, allowed_origins: str | Iterable[str]
 ) -> str:
-    """Normalize a provider base URL and enforce its exact HTTPS origin."""
+    """Normalize a provider URL and enforce an already-authorized exact origin.
 
-    parts = _parse_https_url(value, origin_only=False)
+    Parsing/fingerprinting does not grant local transport permission. Callers
+    derive this allowlist from deployment policy; transport rechecks settings.
+    """
+
+    parts = _parse_provider_url(value, origin_only=False)
     normalized_origin = _origin_from_parts(parts)
     if normalized_origin not in _normalize_allowed_origins(allowed_origins):
         raise ProviderEndpointRejected("provider endpoint origin is not allowed")
     path = parts.path.rstrip("/")
-    return urlunsplit(("https", parts.netloc, path, "", ""))
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 def validate_provider_request_url(
-    value: str, *, allowed_origins: str | Iterable[str]
+    value: str, *, allowed_origins: str | Iterable[str], settings: Settings | None = None
 ) -> str:
     """Re-apply the save-time endpoint policy immediately before a request."""
 
-    return normalize_provider_base_url(value, allowed_origins=allowed_origins)
+    normalized = normalize_provider_base_url(value, allowed_origins=allowed_origins)
+    if normalized.startswith("http:") and (
+        settings is None or not is_local_model_gateway_endpoint(normalized, settings)
+    ):
+        raise ProviderEndpointRejected("local model gateway is not authorized")
+    return normalized
 
 
 def provider_endpoint_sha256(normalized_base_url: str) -> str:
     """Fingerprint a safe canonical endpoint without persisting the URL."""
 
-    parts = _parse_https_url(normalized_base_url, origin_only=False)
+    parts = _parse_provider_url(normalized_base_url, origin_only=False)
     normalized = urlunsplit(
-        ("https", parts.netloc, parts.path.rstrip("/"), "", "")
+        (parts.scheme, parts.netloc, parts.path.rstrip("/"), "", "")
     )
     if normalized != normalized_base_url:
         raise ProviderEndpointRejected("provider endpoint is not normalized")
@@ -548,7 +597,54 @@ def _normalize_allowed_origins(values: str | Iterable[str]) -> frozenset[str]:
             raise ProviderEndpointRejected("provider origin allowlist is invalid") from exc
     if not raw_values or any(not isinstance(item, str) or not item for item in raw_values):
         raise ProviderEndpointRejected("provider origin allowlist is empty or invalid")
-    return frozenset(normalize_provider_origin(item) for item in raw_values)
+    return frozenset(
+        _origin_from_parts(_parse_provider_url(item, origin_only=True))
+        for item in raw_values
+    )
+
+
+def _parse_provider_url(value: object, *, origin_only: bool):
+    # This recognizes a very small local grammar, not arbitrary HTTP URLs.
+    if isinstance(value, str) and value.lower().startswith("http:"):
+        return _parse_local_gateway_url(value, origin_only=origin_only)
+    return _parse_https_url(value, origin_only=origin_only)
+
+
+def _parse_local_gateway_url(value: object, *, origin_only: bool):
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > _MAX_ENDPOINT_LENGTH
+        or _has_forbidden_codepoint(value)
+        or any(marker in value for marker in ("\\", "?", "#"))
+    ):
+        raise ProviderEndpointRejected("local model gateway endpoint is invalid")
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except (UnicodeError, ValueError):
+        raise ProviderEndpointRejected("local model gateway endpoint is invalid") from None
+    if (
+        parsed.scheme.lower() != "http"
+        or hostname not in {"127.0.0.1", "host.docker.internal"}
+        or port is None
+        or not 1 <= port <= 65535
+        or parsed.username is not None
+        or parsed.password is not None
+        or "%" in parsed.netloc
+        or parsed.netloc.endswith(":")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ProviderEndpointRejected("local model gateway endpoint is invalid")
+    if origin_only and parsed.path not in {"", "/"}:
+        raise ProviderEndpointRejected("local model gateway allowlist requires origins")
+    _validate_safe_path(parsed.path)
+    return parsed._replace(
+        scheme="http", netloc=f"{hostname}:{port}", query="", fragment=""
+    )
 
 
 def _parse_https_url(value: object, *, origin_only: bool):
@@ -667,7 +763,7 @@ def _reject_unsafe_decoded_path(path: str) -> None:
 
 
 def _origin_from_parts(parts) -> str:
-    return urlunsplit(("https", parts.netloc, "", "", ""))
+    return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
 
 def _validate_key_id(value: object) -> None:

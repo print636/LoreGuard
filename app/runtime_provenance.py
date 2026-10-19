@@ -38,6 +38,10 @@ from .character_explanation_review import (
 from .embeddings import EmbeddingNotConfiguredError, OpenAICompatibleEmbeddingProvider
 from .evidence_chunks import EvidenceChunker
 from .provider import safe_thinking_configuration
+from .provider_credentials import (
+    ProviderEndpointRejected,
+    is_local_model_gateway_endpoint,
+)
 
 
 RUNTIME_PROVENANCE_SCHEMA = "loreguard-runtime-provenance-v3"
@@ -65,6 +69,11 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
     """
 
     endpoint = _safe_endpoint_identity(settings.openai_base_url)
+    try:
+        local_gateway = is_local_model_gateway_endpoint(settings.openai_base_url, settings)
+    except ProviderEndpointRejected:
+        # Runtime identity cannot authorize an invalid/stale deployment policy.
+        local_gateway = False
     thinking = safe_thinking_configuration(settings)
     profile_fingerprint = _embedding_profile_fingerprint(settings)
     chunker_fingerprint = _fingerprint(EvidenceChunker().version)
@@ -238,6 +247,26 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
     )
     model_alias = _safe_label(settings.openai_model, maximum=255)
     revision = settings.loreguard_build_revision.strip() or None
+    chat_provider = {
+        "model_alias": model_alias,
+        "endpoint_configuration_sha256": endpoint,
+        "temperature": 0,
+        "thinking_configured": thinking["configured"],
+        "thinking_mode": thinking["mode"],
+    }
+    if local_gateway:
+        # Keep the historical numeric ceilings below for local admission and
+        # budget accounting, but do not describe them as upstream generation
+        # caps: the pinned SIWC translator does not forward max_tokens or
+        # temperature. Business Pydantic validation is still authoritative.
+        chat_provider.update({
+            "request_profile": "cli_proxy_siwc",
+            "upstream_generation_token_limit_supported": False,
+            "temperature": None,
+            "response_format": "json_schema",
+            "response_schema_strict": False,
+            "completion_limit_semantics": "local_admission_budget_not_upstream_cap",
+        })
 
     return {
         "schema_version": RUNTIME_PROVENANCE_SCHEMA,
@@ -245,13 +274,7 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "git_revision": revision,
             "service_artifact_sha256": service_artifact_sha256(),
         },
-        "chat_provider": {
-            "model_alias": model_alias,
-            "endpoint_configuration_sha256": endpoint,
-            "temperature": 0,
-            "thinking_configured": thinking["configured"],
-            "thinking_mode": thinking["mode"],
-        },
+        "chat_provider": chat_provider,
         "capabilities": {
             "model_extraction": settings.enable_model_extraction,
             "character_consistency": settings.enable_character_consistency,
