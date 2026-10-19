@@ -39,6 +39,8 @@
 
 ### 本轮 CI 证据
 
+用户随后确认：要切换的是开发者此前持续使用的测试模型，而非网站用户账户。已将本机 Git 忽略的 `.env` 从 `deepseek-v4-pro`／原服务改为 `gpt-6.1-sol`／个人 SIWC 网关，凭据采用独立本机客户端 Key，并显式启用精确 loopback origin。原配置备份在网关私有 ACL 目录，未上传任何密钥；没有更改其他功能开关、网站账户或已冻结运行。随后通过原 `python -m scripts.check_provider` 从实际默认配置完成一次真实 JSON 合同检查。后续开发测试默认沿用 GPT；历史 DeepSeek 成绩不改名、不转算为 GPT 成绩。此次只更改私有运行配置与本说明，不重跑已验收的全量 CI。
+
 首版代码 `e954d1145f375459b13cca82e4b487463eed47c5` 的 [CI 39218427516](https://github.com/print636/LoreGuard/actions/runs/39218427516) 首轮五项通过：后端 3925 通过、11 跳过、692 子测试通过；前端 259/259、浏览器 113/113；PostgreSQL 升级 4 项通过；备份 31 表、6 约束与工作区隔离通过；Compose 冒烟完成。该成绩不代替后续提交。
 
 最后仅改进 Models 目录查询脚本及文档的代码 `b6495aa6513dc01c95c6e5e4886c9fcb506718d8`，对应 [CI 39219493979](https://github.com/print636/LoreGuard/actions/runs/39219493979)。首轮后端 3924 通过、1 失败，失败为既有 `test_heartbeat_prevents_takeover_during_call_longer_than_lease`（180 毫秒租约／30 毫秒线程心跳）；其余为 11 跳过与 692 子测试通过，后续前端未执行，Compose／浏览器因依赖跳过，不记为全绿。两提交间没有修改 Python／前端代码。本地仅该定点检查 1 通过、26 未选；这不足以消除第一次失败或证明其根因。原代码及断言不变，只重试受影响主 test 与自动依赖流程一次，保留 PostgreSQL／备份首轮成功，不反复刷新结果。
