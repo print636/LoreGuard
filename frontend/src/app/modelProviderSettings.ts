@@ -4,7 +4,7 @@ type JsonObject = Record<string, unknown>;
 
 export const SAVED_API_KEY_MASK = "••••••••••••";
 export const MODEL_TEST_DISCLAIMER =
-  "最小连接测试只验证网络、授权和基础 JSON 响应，不代表长文本、额度、并发或完整分析一定可用。";
+  "这次检查只确认能否连接、密钥是否有效、回复格式能否读取，不代表长文本、额度、并发或完整分析一定可用。";
 
 export type ModelProviderTestTone = "neutral" | "ready" | "warning" | "error";
 
@@ -74,8 +74,8 @@ const testCategoryCopy: Record<
   Omit<ModelProviderTestView, "category" | "testedAt" | "profileRevision" | "jsonContractOk" | "latencyMs" | "tokenTotal">
 > = {
   success: {
-    label: "最小连接测试通过",
-    detail: "模型服务可达，当前凭据已授权，并通过基础 JSON 响应检查。",
+    label: "模型连接检查通过",
+    detail: "可以连接模型，密钥有效，回复格式也能正常读取。",
     tone: "ready",
     action: "可以先用短篇样例确认实际抽取质量。",
   },
@@ -122,8 +122,8 @@ const testCategoryCopy: Record<
     action: "检查 Base URL、DNS、代理和网络连通性后重试。",
   },
   invalid_response: {
-    label: "基础 JSON 响应不兼容",
-    detail: "网络和授权可能正常，但模型没有按最小 JSON 合同返回。",
+    label: "回复格式不兼容",
+    detail: "网络和密钥可能正常，但模型没有按要求返回可读取的回复。",
     tone: "warning",
     action: "确认所选模型支持 JSON 输出，或更换兼容模型。",
   },
@@ -152,8 +152,8 @@ const testCategoryCopy: Record<
     action: "核对 Base URL 是否为 OpenAI-compatible 接口根路径，并检查模型名。",
   },
   body_json: {
-    label: "模型响应不是有效 JSON",
-    detail: "服务可达，但响应体不符合 OpenAI-compatible JSON 格式。",
+    label: "模型回复无法读取",
+    detail: "模型服务可以连接，但回复格式不符合接口要求。",
     tone: "warning",
     action: "检查中转网关兼容性，或更换模型后重试。",
   },
@@ -170,7 +170,7 @@ const testCategoryCopy: Record<
     action: "重试一次；若持续发生，请更换模型或检查网关策略。",
   },
   usage_shape: {
-    label: "Token 用量字段不兼容",
+    label: "模型用量记录无法读取",
     detail: "响应正文已到达，但用量字段不是受支持的安全格式。",
     tone: "warning",
     action: "检查中转网关的 OpenAI-compatible usage 字段。",
@@ -182,8 +182,8 @@ const testCategoryCopy: Record<
     action: "检查模型是否支持简短 JSON 输出，或更换兼容模型。",
   },
   content_json: {
-    label: "模型正文不是有效 JSON",
-    detail: "标准响应结构存在，但模型正文没有满足最小 JSON 合同。",
+    label: "模型回复内容格式不兼容",
+    detail: "接口已返回内容，但内容没有符合本次检查要求的格式。",
     tone: "warning",
     action: "确认模型支持 JSON 输出，或更换兼容模型。",
   },
@@ -191,7 +191,7 @@ const testCategoryCopy: Record<
     label: "模型地址未通过安全校验",
     detail: "Base URL 未通过部署的地址安全策略。",
     tone: "error",
-    action: "请部署管理员核对 ACCOUNT_MODEL_ALLOWED_ORIGINS 后重新保存。",
+    action: "请联系部署管理员，确认服务地址被允许使用后重新保存。",
   },
   credential_invalid: {
     label: "API Key 格式无效",
@@ -447,7 +447,7 @@ export function describeAccountProviderConnection(
         currentTest?.tokenTotal === null || currentTest?.tokenTotal === undefined
           ? "未提供"
           : String(currentTest.tokenTotal),
-      suggestions: currentTest ? [currentTest.action] : ["可以在“模型与密钥”中执行最小连接测试。"],
+      suggestions: currentTest ? [currentTest.action] : ["可以在“模型与密钥”中检查模型能否正常回复。"],
     };
   }
   if (profile.serviceDefaultAvailable) {

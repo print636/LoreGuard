@@ -946,7 +946,7 @@ test("axis draft validates on meaningful normalized content", () => {
   const empty = validateAxisDraft(" \n ", "\t", "  ");
   assert.match(empty.errors.display_name, /请输入/);
   assert.match(empty.errors.definition, /请说明/);
-  assert.match(empty.errors.positive_proposition, /正向/);
+  assert.match(empty.errors.positive_proposition, /用来比较/);
   const valid = validateAxisDraft("  路线   协作  ", " 决策\n是否征询同伴 ", " 决策前\n征询当值同伴 ");
   assert.deepEqual(valid.value, {
     display_name: "路线 协作",

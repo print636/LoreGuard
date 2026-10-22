@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { ApiError } from "../../api/client";
+import TechnicalDetails from "../../components/TechnicalDetails";
 import type { WorkspaceView } from "../../routing";
 import {
   createCharacterTraitAxis,
@@ -78,30 +79,30 @@ function requestError(error: unknown): string {
     const code = detail && typeof detail === "object" && "code" in detail
       ? detail.code
       : null;
-    if (code === "character_trait_axis_version_conflict") return "作者轴版本已变化，请刷新轴列表后重新选择。";
-    if (code === "character_trait_axis_not_found") return "所选作者轴不存在或不属于当前项目，请刷新轴列表。";
-    if (code === "character_trait_axis_dimension_mismatch") return "所选作者轴不适用于这条角色特征，请重新选择。";
-    if (code === "character_trait_axis_object_mismatch") return "候选对象与所选作者轴不一致；请刷新后核对对象。";
-    if (code === "character_trait_axis_scope_conflict") return "作者轴适用情境已变化；请刷新轴列表，再判断当前证据是否适用。";
-    if (code === "character_trait_axis_scope_confirmation_required") return "请先核对原文与轴的适用情境，并明确勾选适用性。";
+    if (code === "character_trait_axis_version_conflict") return "比较标准版本已变化，请刷新比较标准后重新选择。";
+    if (code === "character_trait_axis_not_found") return "所选比较标准不存在或不属于当前项目，请刷新比较标准。";
+    if (code === "character_trait_axis_dimension_mismatch") return "所选比较标准不适用于这条角色特征，请重新选择。";
+    if (code === "character_trait_axis_object_mismatch") return "候选对象与所选比较标准不一致；请刷新后核对对象。";
+    if (code === "character_trait_axis_scope_conflict") return "比较标准适用情境已变化；请刷新比较标准，再判断当前证据是否适用。";
+    if (code === "character_trait_axis_scope_confirmation_required") return "请先核对原文与标准的适用情境，并明确勾选适用性。";
     if (code === "character_trait_axis_source_unverified") return "这条候选缺少可核对的模型来源或精确原文证据，暂不能绑定情境轴；请重新分析后审核。";
-    if (code === "character_trait_axis_integrity_invalid") return "作者轴定义未通过完整性核对；请刷新列表核对，若问题持续请检查项目数据。";
+    if (code === "character_trait_axis_integrity_invalid") return "比较标准定义未通过完整性核对；请刷新列表核对，若问题持续请检查项目数据。";
     if (code === "character_trait_axis_legacy_overlap") return "相同对象已有正式特征；请在角色档案核对并撤销旧项，再重新确认。";
-    if (code === "character_trait_axis_proposition_required") return "所选旧作者轴还没有正向命题，请先由作者补写并核对。";
-    if (code === "character_trait_axis_proposition_conflict") return "作者轴正向命题已变化；原选择保留，请刷新轴列表并重新核对。";
+    if (code === "character_trait_axis_proposition_required") return "所选旧比较标准还没有比较句，请先由作者补写并核对。";
+    if (code === "character_trait_axis_proposition_conflict") return "比较标准比较句已变化；原选择保留，请刷新比较标准并重新核对。";
     if (code === "character_trait_axis_alignment_required") return "当前候选还没有可核对的同向/反向映射；不确定时请保留待审。";
     if (code === "character_trait_axis_alignment_unverified") return "同轴旧特征的方向尚未补认；请先在角色档案逐条核对。";
     if (code === "character_trait_candidate_stale") return "来源文档或叙事上下文已变化；请重新分析后审核。";
     if (code === "character_trait_support_binding_invalid") return "精确证据定位无法与冻结原文核对；请重新分析后审核。";
-    if (code === "character_trait_confirmation_conflict") return "同一作用域已有冲突的已确认特征；请核对角色档案与轴定义。";
+    if (code === "character_trait_confirmation_conflict") return "同一作用域已有冲突的已确认特征；请核对角色档案与标准说明。";
     if (code === "character_trait_supersession_conflict") return "待替代的角色特征已变化；请刷新后重新核对。";
     if (code === "character_trait_revision_conflict") return "这条特征已在其他页面更新；档案正在刷新，请重新核对后再操作。";
-    if (error.status === 409) return "档案或作者轴已在其他页面更新；请刷新后重新核对。";
+    if (error.status === 409) return "档案或比较标准已在其他页面更新；请刷新后重新核对。";
     if (error.status === 429) return "请求过于频繁，请稍后重试。";
     if (error.status === 404) return "这项角色资料不存在，或不属于当前项目。";
     if (error.status === 401) return "登录状态已失效，请重新登录后继续。";
     if (error.status === 403) return "安全校验未通过，请刷新页面后重试。";
-    if (error.status === 422) return "提交内容未通过校验，请检查轴名称、定义与候选状态。";
+    if (error.status === 422) return "提交内容未通过校验，请检查标准名称、定义与候选状态。";
     return "请求没有完成，请稍后重试。";
   }
   if (error instanceof TypeError) {
@@ -585,7 +586,7 @@ export default function CharacterWorkspace({
         merged = appendAxisPage(axisItems, page);
       } catch {
         setAxisLoaded(false);
-        setAxisError("轴列表在分页读取期间发生变化；请重新读取，避免遗漏已有轴。");
+        setAxisError("比较标准列表在分页读取期间发生变化；请重新读取，避免遗漏已有轴。");
         return;
       }
       setAxisItems(merged);
@@ -648,7 +649,7 @@ export default function CharacterWorkspace({
 
   async function defineAxisProposition(axis: CharacterTraitAxis, positiveProposition: string): Promise<CharacterTraitAxis> {
     if (!route.characterId || !route.candidateId || candidate?.id !== route.candidateId || axis.positive_proposition) {
-      throw new Error("请重新核对作者轴与当前候选。");
+      throw new Error("请重新核对比较标准与当前候选。");
     }
     const startedScope = reviewScopeRef.current;
     const updated = await setAxisPositiveProposition(projectId, axis.id, {
@@ -656,7 +657,7 @@ export default function CharacterWorkspace({
       expected_axis_version: axis.version,
     });
     if (updated.id !== axis.id || !updated.positive_proposition_sha256) {
-      throw new TypeError("作者轴命题保存结果不一致");
+      throw new TypeError("比较标准命题保存结果不一致");
     }
     if (isCurrentReviewScope(reviewScopeRef.current, startedScope)) {
       setAxisItems((current) => current.map((item) => item.id === updated.id ? updated : item));
@@ -688,12 +689,12 @@ export default function CharacterWorkspace({
       decisionBusy || decisionPendingRef.current
     ) return false;
     if (decision === "confirm" && candidate.dimension === "core_personality" && !selectedAxis) {
-      setActionError("请先为核心性格候选选择或创建作者轴。");
+      setActionError("请先为核心性格候选选择或创建比较标准。");
       return false;
     }
     if (decision === "confirm" && candidate.dimension === "core_personality" &&
       (!selectedAxis?.positive_proposition_sha256 || !alignment)) {
-      setActionError("请先核对作者轴正向命题，再明确选择同向或反向；不确定时保留待审。");
+      setActionError("请先核对比较标准比较句，再明确选择同向或反向；不确定时保留待审。");
       return false;
     }
     if (decision === "confirm" && selectedAxis && isScopedAxisDimension(candidate.dimension) && (
@@ -749,7 +750,7 @@ export default function CharacterWorkspace({
         decision === "confirm"
           ? selectedAxis && isScopedAxisDimension(candidate.dimension)
             ? `归纳与适用情境已由作者确认，写入角色档案基线。${scopedAxisReviewBoundary}既有报告不变。`
-            : "归纳已确认并写入角色档案；作者轴只影响之后创建的分析，既有报告不会改写。"
+            : "归纳已确认并写入角色档案；比较标准只影响之后创建的分析，既有报告不会改写。"
           : "归纳已驳回，决定已保留在审核记录中。",
       );
       setListReload((value) => value + 1);
@@ -865,12 +866,11 @@ export default function CharacterWorkspace({
     <section className="characterWorkspace workspaceView" aria-labelledby="character-workspace-title">
       <header className="characterWorkspaceHead">
         <div>
-          <p className="eyebrow">CHARACTER EVIDENCE ARCHIVE</p>
           <h1 id="character-workspace-title" ref={pageTitleRef} tabIndex={-1}>角色档案</h1>
           <p>AI 归纳候选只有经过确认，才会写入正式角色档案。</p>
         </div>
         {characterPage?.source_run_id && (
-          <span className="characterRunRef">来源运行 {characterPage.source_run_id.slice(0, 8)}</span>
+          <TechnicalDetails><p>角色资料来源审查编号：<code>{characterPage.source_run_id}</code></p></TechnicalDetails>
         )}
       </header>
 
@@ -1024,7 +1024,7 @@ export default function CharacterWorkspace({
                         onWithdrawnPage={setWithdrawnPageNumber}
                         onRetryWithdrawn={() => setWithdrawnReload((value) => value + 1)}
                         onAligned={() => {
-                          setAnnouncement("作者轴方向已补认，仅影响之后新建的分析；历史报告保持不变。");
+                          setAnnouncement("比较标准方向已补认，仅影响之后新建的分析；历史报告保持不变。");
                           setDetailReload((value) => value + 1);
                           setListReload((value) => value + 1);
                         }}

@@ -322,7 +322,17 @@ test("61条历史服务端分页与状态URL/back生效，页外选中run保持�
   await expect(panel(page).locator("tbody tr")).toHaveCount(20);
   await expect(panel(page)).toContainText("共 61 次，第 1 / 4 页");
   await expect(panel(page)).toContainText("不在本页中，仍保持选中");
-  await expect(page.locator(".status code").nth(1)).toHaveText(runId(60));
+  const firstRecord = panel(page).locator("tbody tr").first();
+  await expect(firstRecord).toContainText("记录 1");
+  expect(await firstRecord.innerText()).not.toContain(runId(0));
+  expect(await firstRecord.getByRole("button").getAttribute("aria-label")).not.toContain(runId(0));
+  const supportCode = firstRecord.locator(".technicalDetails code").first();
+  await expect(supportCode).toHaveText(runId(0));
+  await expect(supportCode).not.toBeVisible();
+  await firstRecord.locator(".technicalDetails > summary").click();
+  await expect(supportCode).toBeVisible();
+  await firstRecord.locator(".technicalDetails > summary").click();
+  await expect(page.locator(".status")).toHaveAttribute("data-run-id", runId(60));
   await panel(page).getByRole("button", { name: "下一页", exact: true }).click();
   await expect(page).toHaveURL(/history_page=2/);
   await expect(panel(page)).toContainText("第 2 / 4 页");
@@ -331,7 +341,7 @@ test("61条历史服务端分页与状态URL/back生效，页外选中run保持�
   await panel(page).getByRole("combobox", { name: "运行状态" }).selectOption("completed");
   await expect(page).toHaveURL(/history_status=completed/);
   await expect(panel(page).locator("tbody tr")).toHaveCount(13);
-  await expect(page.locator(".status code").nth(1)).toHaveText(runId(60));
+  await expect(page.locator(".status")).toHaveAttribute("data-run-id", runId(60));
   await expect(panel(page)).toContainText("已记录用量，不证明模型实际参与");
   await panel(page).getByRole("combobox", { name: "运行状态" }).focus();
   expect(await panel(page).getByRole("combobox", { name: "运行状态" }).evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
@@ -387,7 +397,7 @@ test("迟到状态筛选响应不能覆盖新结果，历史错误可重试与�
   state.forceEmptyStatus = "cancelled";
   await panel(page).getByRole("combobox", { name: "运行状态" }).selectOption("cancelled");
   await expect(panel(page)).toContainText("没有已取消的运行");
-  await expect(page.locator(".status code").nth(1)).toHaveText(runId(0));
+  await expect(page.locator(".status")).toHaveAttribute("data-run-id", runId(0));
   await noUnexpected(state);
 });
 

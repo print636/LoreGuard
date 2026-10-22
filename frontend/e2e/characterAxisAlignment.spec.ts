@@ -104,7 +104,7 @@ async function mockApi(page: Page, state: MockState) {
     };
     else if (path === "/api/v1/project-catalog" && method === "GET") {
       const item = {
-        id: projectId, name: "作者轴演示", description: "", active_document_count: 1,
+        id: projectId, name: "比较标准演示", description: "", active_document_count: 1,
         created_at: "2026-09-01T00:00:00Z", latest_run: null,
       };
       const page = Number(url.searchParams.get("page") || 1);
@@ -259,26 +259,26 @@ test("legacy axis 409 offers in-page recovery without discarding the author's ch
   };
   await mockApi(page, state);
   await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
-  const axisSelect = page.getByLabel("项目内已有轴");
+  const axisSelect = page.getByLabel("项目内已有比较标准");
   await expect(axisSelect).toBeVisible();
   await axisSelect.selectOption(axisId);
-  const input = page.getByLabel("为旧作者轴补写正向命题");
+  const input = page.getByLabel("为旧标准补写比较句");
   await input.fill(proposition);
-  await page.getByRole("button", { name: "保存正向命题" }).click();
-  await expect(page.getByRole("button", { name: "刷新轴列表核对" })).toBeVisible();
+  await page.getByRole("button", { name: "保存比较句" }).click();
+  await expect(page.getByRole("button", { name: "刷新比较标准核对" })).toBeVisible();
   await expect(input).toHaveValue(proposition);
   await expect(axisSelect).toHaveValue(axisId);
   expect(state.decisionPostCount).toBe(0);
 
-  await page.getByRole("button", { name: "刷新轴列表核对" }).click();
-  await expect(page.getByRole("button", { name: "我已核对刷新后的轴定义与命题" })).toBeVisible();
+  await page.getByRole("button", { name: "刷新比较标准核对" }).click();
+  await expect(page.getByRole("button", { name: "我已核对刷新后的标准说明与命题" })).toBeVisible();
   await expect(input).toHaveValue(proposition);
   await expect(axisSelect).toHaveValue(axisId);
-  await page.getByRole("button", { name: "我已核对刷新后的轴定义与命题" }).click();
-  await page.getByRole("button", { name: "保存正向命题" }).click();
-  await expect(page.getByText(`作者比较句（轴正向）：${proposition}`, { exact: true })).toBeVisible();
-  await page.getByLabel(/反向：模型标签的正向状态与作者比较句相反/).check();
-  await expect(page.getByText(/映射预览（未经事实复核）：若采用你的方向选择，这条候选表示“作者比较句不成立”/)).toBeVisible();
+  await page.getByRole("button", { name: "我已核对刷新后的标准说明与命题" }).click();
+  await page.getByRole("button", { name: "保存比较句" }).click();
+  await expect(page.getByText(`用来比较的说法：${proposition}`, { exact: true })).toBeVisible();
+  await page.getByLabel(/反向：模型标签成立时，比较句不成立/).check();
+  await expect(page.getByText(/映射预览（未经事实复核）：若采用你的方向选择，这条候选表示“比较句不成立”/)).toBeVisible();
   await page.getByRole("button", { name: "确认归纳" }).click();
   await expect(page.getByText(/归纳已确认并写入角色档案/)).toBeVisible();
   expect(state.propositionPostCount).toBe(2);
@@ -295,16 +295,16 @@ test("scoped boundary review requires author applicability and clears it after a
   await mockApi(page, state);
   await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
   const detail = page.getByRole("region", { name: "归纳证据详情" });
-  const axisSelect = detail.getByLabel("项目内已有轴");
+  const axisSelect = detail.getByLabel("项目内已有比较标准");
   await expect(axisSelect).toBeVisible();
   await expect(axisSelect.locator("option")).toHaveCount(2);
   await axisSelect.selectOption(axisId);
   await expect(detail.locator(".candidateAxisDefinition").getByText(/适用情境：需要同伴签字时/)).toBeVisible();
-  await detail.getByRole("radio", { name: /反向：模型标签的正向状态与作者比较句相反/ }).check();
+  await detail.getByRole("radio", { name: /反向：模型标签成立时，比较句不成立/ }).check();
   await detail.getByRole("button", { name: "确认归纳" }).click();
   const scopeAck = detail.getByRole("checkbox", { name: /我已根据上方原文判断/ });
   await page.setViewportSize({ width: 375, height: 900 });
-  const panelBox = await detail.getByRole("region", { name: "作者批准比较轴" }).boundingBox();
+  const panelBox = await detail.getByRole("region", { name: "作者确认的比较标准" }).boundingBox();
   expect(panelBox).not.toBeNull();
   expect(panelBox!.x).toBeGreaterThanOrEqual(0);
   expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(376);
@@ -314,12 +314,12 @@ test("scoped boundary review requires author applicability and clears it after a
   expect(state.decisionPostCount).toBe(0);
   await scopeAck.check();
   await detail.getByRole("button", { name: "确认归纳" }).click();
-  await expect(page.getByText(/作者轴适用情境已变化/)).toBeVisible();
+  await expect(page.getByText(/比较标准适用情境已变化/)).toBeVisible();
   await expect(axisSelect).toHaveValue("");
   await expect(scopeAck).toHaveCount(0);
   await axisSelect.selectOption(axisId);
   await expect(scopeAck).not.toBeChecked();
-  await detail.getByRole("radio", { name: /反向：模型标签的正向状态与作者比较句相反/ }).check();
+  await detail.getByRole("radio", { name: /反向：模型标签成立时，比较句不成立/ }).check();
   await scopeAck.check();
   await detail.getByRole("button", { name: "确认归纳" }).click();
   await expect(page.getByText(/归纳与适用情境已由作者确认/)).toBeVisible();
@@ -334,7 +334,7 @@ test("scoped candidate can still be confirmed as an ordinary unbound profile ite
   };
   await mockApi(page, state);
   await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
-  await expect(page.getByText(/若不绑定比较轴，仍可确认普通角色特征/)).toBeVisible();
+  await expect(page.getByText(/若不绑定比较标准，仍可确认普通角色特征/)).toBeVisible();
   await page.getByRole("button", { name: "确认归纳" }).click();
   await expect(page.getByText(/归纳已确认并写入角色档案/)).toBeVisible();
   expect(state.decisionPostCount).toBe(1);
@@ -343,7 +343,7 @@ test("scoped candidate can still be confirmed as an ordinary unbound profile ite
 
 for (const [code, expectedMessage] of [
   ["character_trait_axis_source_unverified", /缺少可核对的模型来源或精确原文证据/],
-  ["character_trait_axis_integrity_invalid", /作者轴定义未通过完整性核对/],
+  ["character_trait_axis_integrity_invalid", /比较标准定义未通过完整性核对/],
 ] as const) {
   test(`scoped binding explains ${code} and retains the pending candidate`, async ({ page }) => {
     const longScope = "需要同伴签字且持续存在授权边界".repeat(12);
@@ -355,14 +355,14 @@ for (const [code, expectedMessage] of [
     await mockApi(page, state);
     await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
     const detail = page.getByRole("region", { name: "归纳证据详情" });
-    const axisSelect = detail.getByLabel("项目内已有轴");
+    const axisSelect = detail.getByLabel("项目内已有比较标准");
     await expect(axisSelect.locator(`option[value="${axisId}"]`)).toContainText("适用：");
     await axisSelect.selectOption(axisId);
     const acknowledgment = detail.locator(".candidateAxisScopeAcknowledgment");
     await page.setViewportSize({ width: 375, height: 900 });
     await expect(acknowledgment).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(376);
-    await detail.getByRole("radio", { name: /反向：模型标签的正向状态与作者比较句相反/ }).check();
+    await detail.getByRole("radio", { name: /反向：模型标签成立时，比较句不成立/ }).check();
     await detail.getByRole("checkbox", { name: /我已根据上方原文判断/ }).check();
     await detail.getByRole("button", { name: "确认归纳" }).click();
     await expect(page.getByText(expectedMessage)).toBeVisible();
@@ -380,15 +380,15 @@ test("author can create an object-scoped boundary axis and then confirm its situ
   };
   await mockApi(page, state);
   await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
-  await page.getByRole("button", { name: "创建新轴" }).click();
-  await page.getByLabel("轴名称").fill("代签边界");
-  await page.getByLabel("轴定义").fill("是否未经同伴授权代其签名");
-  await page.getByLabel("轴的正向命题").fill(proposition);
-  await page.getByLabel("轴的适用情境").fill("需要同伴签字时");
-  await page.getByRole("button", { name: "先创建作者轴" }).click();
+  await page.getByRole("button", { name: "创建新标准" }).click();
+  await page.getByLabel("标准名称").fill("代签边界");
+  await page.getByLabel("标准说明").fill("是否未经同伴授权代其签名");
+  await page.getByLabel("用来比较的说法").fill(proposition);
+  await page.getByLabel("标准的适用情境").fill("需要同伴签字时");
+  await page.getByRole("button", { name: "先创建比较标准" }).click();
   await expect(page.getByText(/已创建并选中/)).toBeVisible();
   expect(state.axisPostCount).toBe(1);
-  await page.getByRole("radio", { name: /反向：模型标签的正向状态与作者比较句相反/ }).check();
+  await page.getByRole("radio", { name: /反向：模型标签成立时，比较句不成立/ }).check();
   const scopeAck = page.getByRole("checkbox", { name: /我已根据上方原文判断/ });
   await expect(scopeAck).not.toBeChecked();
   await scopeAck.check();
@@ -412,21 +412,21 @@ test("candidate review leads with exact source and conditions without treating p
   const conditions = detail.getByRole("region", { name: "适用条件与例外" });
   await expect(conditions.getByText("需要签字时")).toBeVisible();
   await expect(conditions.getByText("未披露的紧急代签情境需要另行核对")).toBeVisible();
-  await expect(detail.getByText(/positive（相对模型标签的正向）/).first()).toBeVisible();
-  await expect(detail.getByText(/不能按“不会”等字眼自动反转/)).toBeVisible();
+  await expect(detail.getByText(/模型记录为标签成立（待核对）/).first()).toBeVisible();
+  await expect(detail.getByText(/不能只看到“不会”等否定词就反转结论/)).toBeVisible();
   if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
     await preview.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("candidate-review-desktop.png") });
   }
-  const axisSelect = detail.getByLabel("项目内已有轴");
+  const axisSelect = detail.getByLabel("项目内已有比较标准");
   await axisSelect.focus();
   await axisSelect.press("ArrowDown");
   await expect(axisSelect).toHaveValue(axisId);
-  const opposite = detail.getByRole("radio", { name: /反向：模型标签的正向状态与作者比较句相反/ });
+  const opposite = detail.getByRole("radio", { name: /反向：模型标签成立时，比较句不成立/ });
   await opposite.focus();
   await opposite.press("Space");
   await expect(opposite).toBeChecked();
-  await expect(detail.getByText(/作者比较句不成立/)).toBeVisible();
+  await expect(detail.getByRole("status").filter({ hasText: /映射预览.*比较句不成立/ })).toBeVisible();
   expect(state.decisionPostCount).toBe(0);
   await page.setViewportSize({ width: 375, height: 1200 });
   await expect(detail).toBeVisible();
@@ -449,14 +449,14 @@ test("an already mapped profile keeps its proposition and frozen evidence inspec
   };
   await mockApi(page, state);
   await page.goto(`/app/projects/${projectId}/characters?section=profile&page=1&character=${encodeURIComponent(characterId)}`);
-  const open = page.getByRole("button", { name: "查看作者轴方向与证据" });
+  const open = page.getByRole("button", { name: "查看比较标准方向与证据" });
   await expect(open).toBeVisible();
   await open.click();
-  const panel = page.getByRole("region", { name: "补认作者轴方向" });
-  await expect(panel.getByText(`作者比较句（轴正向）：${proposition}`)).toBeVisible();
+  const panel = page.getByRole("region", { name: "补认比较标准方向" });
+  await expect(panel.getByText(`用来比较的说法：${proposition}`)).toBeVisible();
   await expect(panel.getByRole("blockquote")).toHaveText(sourceLine);
   await expect(panel.getByText(/作者已标注比较方向：反向/)).toBeVisible();
-  await expect(panel.getByText(/按已确认映射，作者比较句不成立/)).toBeVisible();
+  await expect(panel.getByText(/按已确认映射，比较句不成立/)).toBeVisible();
   if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
     await panel.screenshot({
       path: testInfo.outputPath("axis-alignment-desktop.png"),
@@ -482,7 +482,7 @@ test("an already mapped profile keeps its proposition and frozen evidence inspec
   await expect(open).toBeVisible();
   await expect(open).toBeFocused();
   await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
-  await expect(page.getByRole("region", { name: "归纳证据详情" }).getByText(/按已确认映射，作者比较句不成立/)).toBeVisible();
+  await expect(page.getByRole("region", { name: "归纳证据详情" }).getByText(/按已确认映射，比较句不成立/)).toBeVisible();
   expect(state.propositionPostCount).toBe(0);
   expect(state.decisionPostCount).toBe(0);
   expect(state.unexpected).toEqual([]);
@@ -495,13 +495,13 @@ test("a confirmed direction with a changed axis proposition does not guess its m
   };
   await mockApi(page, state);
   await page.goto(`/app/projects/${projectId}/characters?section=profile&page=1&character=${encodeURIComponent(characterId)}`);
-  await page.getByRole("button", { name: "查看作者轴方向与证据" }).click();
-  const panel = page.getByRole("region", { name: "补认作者轴方向" });
+  await page.getByRole("button", { name: "查看比较标准方向与证据" }).click();
+  const panel = page.getByRole("region", { name: "补认比较标准方向" });
   await expect(panel.getByText(/不展示成立\/不成立的换算/)).toBeVisible();
-  await expect(panel.getByText(/按已确认映射，作者比较句/)).toHaveCount(0);
+  await expect(panel.getByText(/按已确认映射，比较句/)).toHaveCount(0);
   await page.goto(`/app/projects/${projectId}/characters?section=candidates&page=1&character=${encodeURIComponent(characterId)}&candidate=${candidateId}`);
   const detail = page.getByRole("region", { name: "归纳证据详情" });
-  await expect(detail.getByText(/当前轴命题或冻结证据不可核对，暂不换算成立\/不成立/)).toBeVisible();
-  await expect(detail.getByText(/按已确认映射，作者比较句/)).toHaveCount(0);
+  await expect(detail.getByText(/当前比较句或冻结证据不可核对，暂不换算成立\/不成立/)).toBeVisible();
+  await expect(detail.getByText(/按已确认映射，比较句/)).toHaveCount(0);
   expect(state.unexpected).toEqual([]);
 });

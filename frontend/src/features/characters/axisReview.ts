@@ -57,7 +57,7 @@ export function validateApplicabilityScope(value: string): { value: string; erro
   const length = Array.from(scope).length;
   return {
     value: scope,
-    error: !scope ? "请描述这条比较轴适用的具体情境。"
+    error: !scope ? "请描述这条比较标准适用的具体情境。"
       : length > 200 ? "适用情境不能超过 200 字。"
         : "",
   };
@@ -78,19 +78,19 @@ export function validateAxisDraft(
     value: { display_name: name, definition: meaning, positive_proposition: proposition },
     errors: {
       display_name: !name
-        ? "请输入轴名称。"
+        ? "请输入标准名称。"
         : nameLength > 80
-          ? "轴名称不能超过 80 字。"
+          ? "标准名称不能超过 80 字。"
           : "",
       definition: !meaning
         ? "请说明比较的具体行为或性格维度。"
         : meaningLength > 200
-          ? "轴定义不能超过 200 字。"
+          ? "标准说明不能超过 200 字。"
           : "",
       positive_proposition: !proposition
-        ? "请写出用于判定正向的明确命题。"
+        ? "请写出一句用来比较的明确说法。"
         : propositionLength > 200
-          ? "正向命题不能超过 200 字。"
+          ? "比较句不能超过 200 字。"
           : "",
     },
   };
@@ -105,9 +105,9 @@ export function validateAxisPositiveProposition(value: string): {
   return {
     value: proposition,
     error: !proposition
-      ? "请写出用于判定正向的明确命题。"
+      ? "请写出一句用来比较的明确说法。"
       : length > 200
-        ? "正向命题不能超过 200 字。"
+        ? "比较句不能超过 200 字。"
         : "",
   };
 }
@@ -169,7 +169,7 @@ export function appendAxisPage(
 ): CharacterTraitAxis[] {
   const seen = new Set(current.map((axis) => axis.id));
   if (page.items.some((axis) => seen.has(axis.id))) {
-    throw new Error("作者轴分页出现重复项，请重新读取列表");
+    throw new Error("比较标准分页出现重复项，请重新读取列表");
   }
   return [...current, ...page.items];
 }

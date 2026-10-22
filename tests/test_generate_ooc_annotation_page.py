@@ -317,6 +317,57 @@ def test_generated_javascript_builds_exact_current_reviewer_bundle_fields(tmp_pa
     workflow._validate_annotation_setup_binding(public, setup, valid_bundle)
 
 
+def test_reading_first_layout_keeps_payload_and_protocol_unchanged(tmp_path):
+    public, _, root, setup, _, freeze, _ = _fixture(tmp_path)
+    data = page.build_page_data(
+        public,
+        root,
+        setup,
+        freeze,
+        reviewer_id="reviewer-a",
+        manual_version="ooc-manual-v1",
+    )
+    html = page.render_annotation_page(data)
+    javascript = _inline_javascript(html)
+
+    # Reordering the interface must never rewrite frozen public material or
+    # identities, including fields no longer exposed in the reading surface.
+    assert _embedded_data(html) == data
+    assert '<meta name="color-scheme" content="light">' in html
+    assert "完成任务并下载结果" in html
+    assert "下载后把文件发回负责人" in html
+    assert "校验并下载锁定 JSON" not in html
+    assert "文件信息（通常不用看）" in html
+    assert "题目信息（通常不用看）" in javascript
+    assert "文档信息（通常不用看）" in javascript
+    assert "grid-template-columns: 170px minmax(0, 1fr)" in html
+    assert 'const draftKey = [' in javascript
+    assert '"loreguard-ooc-draft-v1", DATA.public_input_sha256, DATA.reviewer_id' in javascript
+    assert 'draft_version: 1' in javascript
+    assert 'conflictLevel: "", materialCoverage: "complete"' in javascript
+    assert 'reasonCodes: "", confidence: "", reviewNote: ""' in javascript
+    assert 'humanConfirmed: false' in javascript
+    assert 'peerBlindConfirmed: false' in javascript
+    assert 'systemBlindConfirmed: false' in javascript
+    assert 'independenceConfirmed: false' in javascript
+    assert "本题原设定（原文）" in javascript
+    assert 'addContext("原先的要求", caseRow.author_axis.positive_proposition' not in javascript
+    assert "不一定是人物原设定" in javascript
+    assert 'check.id = "check-current-case"' in javascript
+    assert 'next.id = "next-case"' in javascript
+    assert 'previous.id = "previous-case"' in javascript
+    # The human-language labels remain an exact presentation mapping to the
+    # existing L0-L3 outcomes/surfaces, not a replacement decision algorithm.
+    for raw, label in (
+        ('L0: { outcome: "no_issue", surface: "none"', "未发现冲突／变化有明确解释"),
+        ('L1: { outcome: "indeterminate", surface: "review_clue"', "信息不够，暂时判断不了"),
+        ('L2: { outcome: "indeterminate", surface: "review_clue"', "有疑点，还不能定为冲突"),
+        ('L3: { outcome: "conflict", surface: "formal_issue"', "证据充分，存在冲突"),
+    ):
+        assert raw in javascript
+        assert label in javascript
+
+
 def test_generator_writes_once_and_cli_reports_created(tmp_path, capsys):
     _, public_file, root, _, setup_file, _, freeze_file = _fixture(tmp_path)
     output = tmp_path / "reviewer-a.html"
@@ -496,6 +547,7 @@ const { pathToFileURL } = require("url");
   }
   const declarations = page.locator('#declarations input[type="checkbox"]');
   if (await declarations.count() !== 4) throw new Error("expected four declarations");
+  await page.locator('#declarations > summary').click();
   for (let index = 0; index < 4; index += 1) await declarations.nth(index).check();
   const downloadPromise = page.waitForEvent("download");
   await page.locator("#download-locked").click();

@@ -270,7 +270,7 @@ test("作者查看旧报告冻结V1，关闭后保留筛选、选中问题、反
   await expect(note).toHaveValue("我还需核对守门人前一段的对白，暂未提交。");
   await expect(page.locator(".reportFilters").getByRole("combobox", { name: "问题类别" })).toHaveValue("fact_conflict");
   await expect(page.locator(".reportFilters").getByRole("combobox", { name: "反馈状态" })).toHaveValue("unreviewed");
-  await expect(article.getByRole("button", { name: "当前选中问题" })).toHaveAttribute("aria-pressed", "true");
+  await expect(article.getByRole("button", { name: "已定位此问题" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".issues article")).toHaveCount(1);
   await expect(page).toHaveURL(new RegExp(`category=fact_conflict&status=unreviewed&issue=${primaryId}$`));
   assertReadingOnly(state);
@@ -286,7 +286,11 @@ test("剧情策划核对旧特征来源与两类待复核证据，阅读不会�
   await expect(dialog.locator(".evidenceReaderMetadata")).toContainText("既有角色设定的冻结来源");
   const headerSummary = dialog.locator(".evidenceReaderHeading .evidenceReaderHeaderSummary");
   await expect(headerSummary).toHaveText("冻结 v1 · 既有设定 · 正式问题");
-  await expect(dialog.locator(`code[title="${baselineRunId}"]`)).toHaveCount(1);
+  const sourceRunCode = dialog.locator(".technicalDetails code").filter({ hasText: new RegExp(`^${baselineRunId}$`) });
+  await expect(sourceRunCode).toHaveCount(1);
+  await expect(sourceRunCode).not.toBeVisible();
+  await dialog.locator(".technicalDetails > summary").click();
+  await expect(sourceRunCode).toBeVisible();
   await expect(dialog.locator(".evidenceReaderLines .referenced")).toContainText(traitEvidence.text);
   expect(run().input_documents[1].document_id).toBe(traitEvidence.document_id);
   expect(run().input_documents[1].document_version).toBe(2);
@@ -368,7 +372,7 @@ test("切换运行与项目会清除旧阅读面板，迟到原文不能覆盖�
   await openReport(page, state, nextRunId);
   await page.locator(".sideNav").getByRole("button", { name: "运行审计", exact: true }).click();
   const history = page.getByRole("region", { name: "运行历史", exact: true });
-  await history.getByRole("row").filter({ has: page.locator(`code[title="${runId}"]`) })
+  await history.locator(`tr[data-run-id="${runId}"]`)
     .getByRole("button", { name: /^查看报告/ }).click();
   await expect(page).toHaveURL(new RegExp(`/runs/${runId}/report`));
   await primaryTrigger(page).click();

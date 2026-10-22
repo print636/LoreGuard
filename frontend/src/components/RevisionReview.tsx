@@ -27,7 +27,8 @@ import {
   type RevisionRouteState,
   validateRevisionUploadSelection,
 } from "../revisionWorkflow";
-import { runSnapshotDocuments, shortIdentifier, type RunInputSnapshot } from "../runSnapshot";
+import { runSnapshotDocuments, type RunInputSnapshot } from "../runSnapshot";
+import TechnicalDetails from "./TechnicalDetails";
 import { supportedUploadAccept, supportedUploadLabel } from "../uploadFormats";
 import { importFailure, ImportResultUnknown, verifiedImportReceipt } from "../features/imports/importQueueModel";
 import { frozenRevisionUpload, revisionUploadBelongsTo, revisionUploadMatchesInput, revisionUploadMaySend, type RevisionUploadOperation } from "../revisionUploadRecovery";
@@ -709,12 +710,11 @@ export default function RevisionReview({
 
   return (
     <section className="revisionReview workspaceView" aria-labelledby="revision-title">
-      <header className="revisionHeader">
+      <header className="revisionHeader" data-baseline-run-id={baselineRun?.id || ""}>
         <div>
           <h1 id="revision-title">修订与复检</h1>
           <p>
-            以运行 <code title={baselineRun?.id}>{shortIdentifier(baselineRun?.id || "")}</code>
-            为固定基线，上传修订稿后只比较这两次报告。
+            以你刚打开的报告为固定比较起点，上传修订稿后只比较这两次审查。
           </p>
         </div>
         {baselineRun ? (
@@ -743,11 +743,12 @@ export default function RevisionReview({
       </nav>
 
       <div className="revisionContext" aria-label="复检上下文">
-        <span><small>项目</small><b>{projectName || projectId}</b></span>
-        <span><small>基线运行</small><code title={baselineRun?.id}>{shortIdentifier(baselineRun?.id || "")}</code></span>
+        <span><small>项目</small><b>{projectName || "当前项目"}</b></span>
+        <span><small>比较起点</small><b>{baselineRun ? "已固定原报告" : "原报告未加载"}</b></span>
         <span><small>冻结输入</small><b>{baselineDocuments.length} 份</b></span>
         <span><small>基线问题</small><b>{baselineIssues.length} 项</b></span>
       </div>
+      <TechnicalDetails><p>原报告审查编号：<code>{baselineRun?.id || "未加载"}</code></p>{route.recheckRunId && <p>复检审查编号：<code>{route.recheckRunId}</code></p>}</TechnicalDetails>
 
       {(notice || problem) && (
         <div className={`revisionNotice ${problem ? "error" : ""}`} role={problem ? "alert" : "status"} aria-live="polite">
@@ -955,7 +956,7 @@ export default function RevisionReview({
           </fieldset>
           {route.recheckRunId ? (
             <div className="recheckProgress" aria-live="polite">
-              <span><i aria-hidden="true" />复检运行 {shortIdentifier(route.recheckRunId)}</span>
+              <span><i aria-hidden="true" />修订稿复检</span>
               <b>{safeComparison?.status === "ready" ? "比较完成" : safeComparison?.status === "failed" ? "运行失败" : safeComparison?.status === "cancelled" ? "运行已取消" : recheckMessage}</b>
               {safeComparison?.status === "pending" && (
                 <div

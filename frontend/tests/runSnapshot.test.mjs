@@ -14,16 +14,16 @@ test('available snapshots expose frozen version, context, and abbreviated hash',
   assert.equal(hasRunSnapshot(run),true);
   assert.equal(runInputState(run),'1 个冻结输入');
   assert.deepEqual(snapshotDocumentLabels(frozen),{
-    identity:'chapter.md · v1',context:'role 故事正文 (chapter) · scope route_a',hash:'1234567890ab…',
+    identity:'chapter.md · v1',context:'故事正文 · 故事范围见排错信息',hash:'1234567890ab…',
   });
-  assert.deepEqual(retryState(run),{allowed:true,label:'按本次输入重试（可能消耗 Token）'});
+  assert.deepEqual(retryState(run),{allowed:true,label:'按原文稿重新审查（可能产生费用）'});
 });
 
 test('legacy runs never borrow current documents and cannot claim same-input retry', () => {
   const legacy={id:'legacy',input_snapshot_available:false};
   assert.deepEqual(runSnapshotDocuments(legacy),[]);
   assert.equal(runInputState(legacy),'输入未知');
-  assert.deepEqual(retryState(legacy),{allowed:false,label:'不可同输入重试'});
+  assert.deepEqual(retryState(legacy),{allowed:false,label:'缺少原文稿，暂不能重新审查'});
 });
 
 test('inconsistent available flag with no documents stays conservative', () => {

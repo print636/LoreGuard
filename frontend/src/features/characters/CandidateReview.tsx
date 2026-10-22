@@ -3,6 +3,7 @@ import { ApiError, SESSION_EXPIRED_EVENT } from "../../api/client";
 import { registerBrowserNavigationBlocker } from "../../routing";
 import EvidenceList from "./EvidenceList";
 import TargetEvidencePreview from "./TargetEvidencePreview";
+import TechnicalDetails from "../../components/TechnicalDetails";
 import { canCreateNewAxis, confirmedAxisPolarity, isScopedAxisDimension, previewAxisPolarity, scopedCandidateCanBind, selectableAxesForCandidate, selectedProjectAxis, selectedReviewAxis, validateApplicabilityScope, validateAxisDraft, validateAxisPositiveProposition, validScopedComparisonKey } from "./axisReview";
 import { advanceReviewScope, isCurrentReviewRequest } from "./reviewScope";
 import { candidateBusyLeaveConfirmation, candidateInputAfterSubmission, candidateLeaveConfirmation, hasPendingCandidateInput } from "./candidateDraftProtection";
@@ -75,10 +76,10 @@ type CandidateReviewProps = {
 };
 
 const polarityNames: Record<NonNullable<ProfileCandidate["polarity"]>, string> = {
-  positive: "positive（相对模型标签的正向）",
-  negative: "negative（相对模型标签的反向）",
-  neutral: "neutral（无方向）",
-  unclear: "unclear（未判定）",
+  positive: "模型记录为标签成立（待核对）",
+  negative: "模型记录为标签不成立（待核对）",
+  neutral: "没有明确倾向",
+  unclear: "尚不能判断",
 };
 
 function axisCreateError(error: unknown): string {
@@ -91,25 +92,25 @@ function axisCreateError(error: unknown): string {
       ? detail.code
       : null;
     if (code === "character_trait_axis_duplicate") {
-      return "相同定义的作者轴已经存在。请刷新并手动选择它，不要重复创建。";
+      return "相同定义的比较标准已经存在。请刷新并手动选择它，不要重复创建。";
     }
     if (error.status === 401) return "登录状态已失效，请重新登录。";
     if (error.status === 403) return "安全校验未通过，请刷新页面后重试。";
     if (error.status === 404) return "项目不存在或无权访问，请返回项目列表核对。";
-    if (error.status === 422) return "轴名称或定义未通过校验，请检查后重试。";
-    return "创建结果暂无法确认。先刷新轴列表核对，避免重复创建。";
+    if (error.status === 422) return "标准名称或定义未通过校验，请检查后重试。";
+    return "创建结果暂无法确认。先刷新比较标准核对，避免重复创建。";
   }
-  return "连接中断，作者轴可能已创建。请先刷新轴列表核对，不要立即重复提交。";
+  return "连接中断，比较标准可能已创建。请先刷新比较标准核对，不要立即重复提交。";
 }
 
 function axisPropositionError(error: unknown): string {
   if (error instanceof ApiError) {
-    if (error.status === 409) return "作者轴可能已由另一位作者定义。原输入已保留，请刷新轴列表核对后再继续。";
-    if (error.status === 422) return "正向命题未通过校验，请检查措辞后重试。";
+    if (error.status === 409) return "比较标准可能已由另一位作者定义。原输入已保留，请刷新比较标准核对后再继续。";
+    if (error.status === 422) return "比较句未通过校验，请检查措辞后重试。";
     if (error.status === 403) return "安全校验未通过，请刷新页面后重试。";
-    if (error.status === 404) return "作者轴已不可访问，请刷新轴列表。";
+    if (error.status === 404) return "比较标准已不可访问，请刷新比较标准。";
   }
-  return "命题保存结果暂无法确认。原输入已保留，请刷新轴列表核对，避免重复提交。";
+  return "命题保存结果暂无法确认。原输入已保留，请刷新比较标准核对，避免重复提交。";
 }
 
 export default function CandidateReview({
@@ -270,7 +271,7 @@ export default function CandidateReview({
     // re-selection before any newer axis version or proposition is trusted.
     if (axisChoice) {
       setAxisNeedsRecheck(true);
-      setAxisChoiceError("轴列表已刷新。原选择已保留，请重新核对轴定义、命题与适用情境后再确认。");
+      setAxisChoiceError("比较标准列表已刷新。原选择已保留，请重新核对标准说明、命题与适用情境后再确认。");
     }
     setUpdatedAxis(null);
     setCreatedAxis(null);
@@ -315,7 +316,7 @@ export default function CandidateReview({
     const mustBind = selected?.dimension === "core_personality";
     if (selected && (mustBind || (scopedCandidate && (axisChoice || axisMode === "new")))) {
       if (!selectedAxis) {
-        setAxisChoiceError("请先选择适用于此候选的作者轴，或创建新轴后再确认。");
+        setAxisChoiceError("请先选择适用于此候选的比较标准，或创建新标准后再确认。");
         requestAnimationFrame(() => {
           if (axisMode === "existing") axisSelectRef.current?.focus();
           else axisNameRef.current?.focus();
@@ -323,16 +324,16 @@ export default function CandidateReview({
         return;
       }
       if (axisNeedsRecheck) {
-        setAxisChoiceError("请核对刷新后的轴定义和正向命题，并重新选择一次。");
+        setAxisChoiceError("请核对刷新后的标准说明和比较句，并重新选择一次。");
         requestAnimationFrame(() => axisSelectRef.current?.focus());
         return;
       }
       if (!selectedAxis.positive_proposition_sha256) {
-        setAxisChoiceError("这条旧作者轴还没有正向命题，请先在下方补写，不能猜测方向。");
+        setAxisChoiceError("这条旧比较标准还没有比较句，请先在下方补写，不能猜测方向。");
         return;
       }
       if (selected.polarity !== "positive" && selected.polarity !== "negative") {
-        setAlignmentError("模型原始方向不明确，不能建立有方向的作者轴绑定。请先驳回或等待重新归纳。");
+        setAlignmentError("模型对标签的判断不明确，不能建立有方向的比较标准绑定。请先驳回或等待重新归纳。");
         return;
       }
       if (alignmentChoice === "uncertain") {
@@ -342,7 +343,7 @@ export default function CandidateReview({
       }
       if (scopedCandidate) {
         if (!scopedEligible || !selectedAxis.applicability_scope || !selectedAxis.applicability_scope_sha256) {
-          setAxisChoiceError("这条候选或作者轴缺少可核对的对象、原文证据或适用情境；请保留待审。");
+          setAxisChoiceError("这条候选或比较标准缺少可核对的对象、原文证据或适用情境；请保留待审。");
           requestAnimationFrame(() => axisSelectRef.current?.focus());
           return;
         }
@@ -494,7 +495,7 @@ export default function CandidateReview({
       {pendingInput && (
         <div className="characterCoverage" role="status" aria-label="候选审核未提交输入">
           <b>还有未提交的审核输入</b>
-          <p>备注、未创建的作者轴内容及未提交的绑定选择仅在本页内存，尚未保存；切换或离开前会询问。刷新或关闭只提供浏览器离开警示，不会跨刷新恢复。已创建的作者轴保存在项目中，离开不会撤销。</p>
+          <p>备注、未创建的比较标准内容及未提交的绑定选择仅在本页内存，尚未保存；切换或离开前会询问。刷新或关闭只提供浏览器离开警示，不会跨刷新恢复。已创建的比较标准保存在项目中，离开不会撤销。</p>
         </div>
       )}
 
@@ -636,8 +637,8 @@ export default function CandidateReview({
 
               <section className="candidateTraitMetadata" aria-label="原始特征与权威范围">
                 <dl>
-                  <div><dt>模型原始标签</dt><dd>{selected.model_trait_key || "未提供"}</dd></div>
-                  <div><dt>模型内部方向码</dt><dd>{selected.polarity ? polarityNames[selected.polarity] : "未提供"}</dd></div>
+                  <div><dt>模型用于归类的说法</dt><dd>{selected.model_trait_key || "未提供"}</dd></div>
+                  <div><dt>模型对标签的判断</dt><dd>{selected.polarity ? polarityNames[selected.polarity] : "未提供"}</dd></div>
                   <div><dt>对象限定</dt><dd>{selected.key_object || selected.comparison_key || "无对象限定"}</dd></div>
                   <div><dt>来源资料级别</dt><dd>{selected.authority_tier === "core_canon" ? "核心设定来源" : selected.authority_tier === "formal_record" ? "正式资料来源" : "未提供"}</dd></div>
                   <div>
@@ -648,13 +649,13 @@ export default function CandidateReview({
                   </div>
                   {selected.dimension === "core_personality" && (
                     <div>
-                      <dt>作者批准轴</dt>
+                      <dt>作者确认的比较标准</dt>
                       <dd>{selected.approved_axis_id
                         ? confirmedAxis?.version === selected.approved_axis_version
                           ? `${confirmedAxis.display_name} · v${selected.approved_axis_version}`
-                          : `已绑定 · v${selected.approved_axis_version}（当前轴版本未核对）`
+                          : `已绑定 · v${selected.approved_axis_version}（当前标准版本未核对）`
                         : selected.status === "confirmed"
-                          ? "未绑定作者轴"
+                          ? "未绑定比较标准"
                           : "尚未绑定"}</dd>
                     </div>
                   )}
@@ -663,14 +664,15 @@ export default function CandidateReview({
                       <dt>作者方向映射</dt>
                       <dd>{selected.axis_alignment
                         ? confirmedMappedPolarity
-                          ? `${selected.axis_alignment === "same" ? "同向" : "反向"}；按已确认映射，作者比较句${confirmedMappedPolarity === "positive" ? "成立" : "不成立"}（非新稿事实复核）`
-                          : "已记录方向；当前轴命题或冻结证据不可核对，暂不换算成立/不成立"
+                          ? `${selected.axis_alignment === "same" ? "同向" : "反向"}；按已确认映射，比较句${confirmedMappedPolarity === "positive" ? "成立" : "不成立"}（非新稿事实复核）`
+                          : "已记录方向；当前比较句或冻结证据不可核对，暂不换算成立/不成立"
                         : "待作者补认，暂不作同轴方向判定"}</dd>
                     </div>
                   )}
                 </dl>
                 <p>模型解释：{selected.rationale}</p>
-                <p>positive / negative 仅相对模型原始标签，不表示行为好坏，也不能按“不会”等字眼自动反转。正式比较轴须由作者核对证据后定义。</p>
+                <p>上方是模型对原文的理解，不是人物好坏评价。请先核对原文，再决定是否作为正式设定；不能只看到“不会”等否定词就反转结论。</p>
+                <TechnicalDetails><p>模型原始标签：<code>{selected.model_trait_key || "未提供"}</code></p><p>方向记录代码：<code>{selected.polarity || "未提供"}</code></p></TechnicalDetails>
               </section>
 
               <section className="candidateSourceNeighbors" aria-labelledby={`candidate-source-neighbors-${selected.id}`}>
@@ -746,15 +748,16 @@ export default function CandidateReview({
                 <p>{review?.label}</p>
                 {scopedCandidate && !scopedEligible && selected.status === "pending" && (
                   <p className="candidateAxisHint" role="status">
-                    此候选暂不能绑定对象与情境比较轴：需明确设定来源、单条已核对的原文证据、有效对象键及明确方向。仍可按现有流程审核普通角色特征。
+                    此候选暂不能绑定对象与情境比较标准：需明确设定来源、单条已核对的原文证据、有效对象键及明确方向。仍可按现有流程审核普通角色特征。
                   </p>
                 )}
                 {(selected.dimension === "core_personality" || (scopedCandidate && scopedEligible)) && selected.status === "pending" && (
                   <section className="candidateAxisBinding" aria-labelledby={`candidate-axis-heading-${selected.id}`}>
-                    <h4 id={`candidate-axis-heading-${selected.id}`}>作者批准比较轴</h4>
+                    <h4 id={`candidate-axis-heading-${selected.id}`}>作者确认的比较标准</h4>
+                    <p>比较标准就是以后核对同类行为时使用的一把尺子。先写清“比较什么”，再核对模型的说法与这把尺子的关系。比较句不等于角色设定，人物实际如何仍以原文为准。</p>
                     <p>{scopedCandidate
                       ? `先核对原文，再决定这条候选是否属于所选对象与情境。确认仅建立作者认可的角色基线；${scopedAxisReviewBoundary}`
-                      : "轴只定义“比较什么”，不代表当前候选一定正确。创建与确认分两步；绑定只影响之后创建的分析，既有报告不会改写。"}</p>
+                      : "比较标准只定义“比较什么”，不代表当前候选一定正确。创建与确认分两步；绑定只影响之后创建的分析，既有报告不会改写。"}</p>
                     {scopedCandidate && (
                       <div className="candidateAxisScopeReview">
                         <b>当前候选</b>
@@ -763,46 +766,46 @@ export default function CandidateReview({
                         <p><strong>原文证据：</strong>{selected.supporting_evidence[0]?.text || "原文缺失"}</p>
                       </div>
                     )}
-                    <div className="candidateAxisMode" role="group" aria-label="作者轴来源">
+                    <div className="candidateAxisMode" role="group" aria-label="比较标准来源">
                       <button
                         type="button"
                         className={axisMode === "existing" ? "active" : ""}
                         aria-pressed={axisMode === "existing"}
                         onClick={() => { setAxisMode("existing"); setAxisChoiceError(""); setAlignmentChoice("uncertain"); setScopeConfirmed(false); setScopeError(""); }}
-                      >选择已有轴</button>
+                      >选择已有标准</button>
                       <button
                         type="button"
                         className={axisMode === "new" ? "active" : ""}
                         aria-pressed={axisMode === "new"}
                         disabled={!review?.allowed || !canCreateAxis || Boolean(decisionBusy) || axisCreateBusy}
                         onClick={() => { setAxisMode("new"); setAxisChoice(""); setUpdatedAxis(null); setAxisNeedsRecheck(false); setAxisChoiceError(""); setAlignmentChoice("uncertain"); setScopeConfirmed(false); setScopeError(""); setCreatedMessage(""); }}
-                      >创建新轴</button>
+                      >创建新标准</button>
                     </div>
-                    {axisLoading && <p className="candidateAxisHint" role="status">正在读取当前项目的作者轴…</p>}
+                    {axisLoading && <p className="candidateAxisHint" role="status">正在读取当前项目的比较标准…</p>}
                     {axisError && (
                       <div className="candidateAxisError" role="alert">
-                        <p>{axisError} 作者轴列表未核对完成，暂不能新建或确认。</p>
-                        <button type="button" onClick={onRetryAxes}>刷新轴列表</button>
+                        <p>{axisError} 比较标准列表未核对完成，暂不能新建或确认。</p>
+                        <button type="button" onClick={onRetryAxes}>刷新比较标准</button>
                       </div>
                     )}
                     {axisListDirty && !axisError && (
                       <div className="candidateAxisPagination">
-                        <p>刚创建的轴已选中。请重新核对候选原文、轴定义和适用情境。若要再建新轴，请先刷新列表。</p>
-                        <button type="button" onClick={onRetryAxes}>重新读取作者轴</button>
+                        <p>刚创建的轴已选中。请重新核对候选原文、标准说明和适用情境。若要再建新轴，请先刷新列表。</p>
+                        <button type="button" onClick={onRetryAxes}>重新读取比较标准</button>
                       </div>
                     )}
                     {!axisListDirty && !axisError && !axisLoading && axisFetchedCount < axisTotal && (
                       <div className="candidateAxisPagination">
-                        <p>已读取 {axisFetchedCount} / {axisTotal} 条作者轴。尚有未加载条目；请先看完再决定是否创建，避免重复定义。</p>
+                        <p>已读取 {axisFetchedCount} / {axisTotal} 条比较标准。尚有未加载条目；请先看完再决定是否创建，避免重复定义。</p>
                         <button type="button" disabled={axisMoreBusy} onClick={onLoadMoreAxes}>
-                          {axisMoreBusy ? "正在加载…" : "继续加载作者轴"}
+                          {axisMoreBusy ? "正在加载…" : "继续加载比较标准"}
                         </button>
                         {axisMoreError && <p role="alert">{axisMoreError}</p>}
                       </div>
                     )}
                     {axisMode === "existing" && !axisError && (
                       <div className="candidateAxisSelect">
-                        <label htmlFor={`candidate-axis-${selected.id}`}>项目内已有轴</label>
+                        <label htmlFor={`candidate-axis-${selected.id}`}>项目内已有比较标准</label>
                         <select
                           ref={axisSelectRef}
                           id={`candidate-axis-${selected.id}`}
@@ -812,7 +815,7 @@ export default function CandidateReview({
                           aria-describedby={`candidate-axis-help-${selected.id}${axisChoiceError ? ` candidate-axis-error-${selected.id}` : ""}`}
                           onChange={(event) => { setAxisChoice(event.target.value); setUpdatedAxis(null); setAxisNeedsRecheck(false); setLegacyAxisProposition(""); setLegacyAxisPropositionError(""); setAlignmentChoice("uncertain"); setAlignmentError(""); setScopeConfirmed(false); setScopeError(""); setAxisChoiceError(""); setCreatedMessage(""); }}
                         >
-                          <option value="">请选择比较轴</option>
+                          <option value="">请选择比较标准</option>
                           {candidateAxes.map((axis) => (
                             <option key={axis.id} value={axis.id}>{axis.display_name} · v{axis.version}{axis.applicability_scope ? ` · 适用：${Array.from(axis.applicability_scope).slice(0, 18).join("")}${Array.from(axis.applicability_scope).length > 18 ? "…" : ""}` : ""}</option>
                           ))}
@@ -821,7 +824,7 @@ export default function CandidateReview({
                           )}
                         </select>
                         <p id={`candidate-axis-help-${selected.id}`} className="candidateAxisHint">
-                          {candidateAxes.length ? "请核对轴定义、对象、情境与原文；相近措辞不等于同一轴。" : scopedCandidate ? "尚无同维度、同对象的轴。可创建新轴，也可仅确认普通角色特征。" : "此项目还没有核心性格轴。读取完成后可创建新轴。"}
+                          {candidateAxes.length ? "请核对标准说明、对象、情境与原文；相近措辞不等于同一比较标准。" : scopedCandidate ? "尚无同维度、同对象的轴。可创建新标准，也可仅确认普通角色特征。" : "此项目还没有核心性格比较标准。读取完成后可创建新标准。"}
                         </p>
                         {selectedAxis && (
                           <div className="candidateAxisDefinition">
@@ -830,8 +833,8 @@ export default function CandidateReview({
                               <p><strong>比较对象：</strong>{selectedAxis.comparison_key?.split(":").slice(1).join(":")}</p>
                               <p><strong>适用情境：</strong>{selectedAxis.applicability_scope}</p>
                             </>}
-                            <p><strong>作者比较句（轴正向）：</strong>{selectedAxis.positive_proposition || "尚未由作者定义"}</p>
-                            <p>“正向”只是作者定义的比较坐标，不是好坏评价，也不代表这句话已在剧情中发生。</p>
+                            <p><strong>用来比较的说法：</strong>{selectedAxis.positive_proposition || "尚未由作者定义"}</p>
+                            <p>这句话只是用于比较，不代表人物实际如此，也不表示行为好坏；原文可能支持它，也可能否定它。</p>
                           </div>
                         )}
                         {selectedAxis && axisNeedsRecheck && (
@@ -839,11 +842,11 @@ export default function CandidateReview({
                             type="button"
                             className="candidateAxisRecheck"
                             onClick={() => { setAxisNeedsRecheck(false); setAxisChoiceError(""); setAlignmentChoice("uncertain"); setScopeConfirmed(false); setScopeError(""); }}
-                          >我已核对刷新后的轴定义{scopedCandidate ? "、对象、情境" : "与命题"}</button>
+                          >我已核对刷新后的标准说明{scopedCandidate ? "、对象、情境" : "与命题"}</button>
                         )}
                         {selectedAxis && !scopedCandidate && !selectedAxis.positive_proposition && (
                           <form className="candidateAxisCreate" onSubmit={(event) => void submitLegacyAxisProposition(event)} noValidate>
-                            <label htmlFor={`candidate-axis-legacy-proposition-${selected.id}`}>为旧作者轴补写正向命题</label>
+                            <label htmlFor={`candidate-axis-legacy-proposition-${selected.id}`}>为旧标准补写比较句</label>
                             <textarea
                               id={`candidate-axis-legacy-proposition-${selected.id}`}
                               value={legacyAxisProposition}
@@ -853,14 +856,14 @@ export default function CandidateReview({
                               aria-describedby={legacyAxisPropositionError ? `candidate-axis-legacy-proposition-error-${selected.id}` : undefined}
                               onChange={(event) => { setLegacyAxisProposition(event.target.value); setLegacyAxisPropositionError(""); }}
                             />
-                            <p className="candidateAxisHint">这是一次性的作者定义，不能根据轴名称自动推断。补写后仍须单独选择候选方向。</p>
+                            <p className="candidateAxisHint">这是一次性的作者定义，不能根据标准名称自动推断。补写后仍须单独选择候选方向。</p>
                             {legacyAxisPropositionError && (
                               <div className="candidateAxisError" role="alert">
                                 <p id={`candidate-axis-legacy-proposition-error-${selected.id}`}>{legacyAxisPropositionError}</p>
-                                <button type="button" onClick={onRetryAxes}>刷新轴列表核对</button>
+                                <button type="button" onClick={onRetryAxes}>刷新比较标准核对</button>
                               </div>
                             )}
-                            <button type="submit" disabled={legacyAxisPropositionBusy || Boolean(decisionBusy)}>{legacyAxisPropositionBusy ? "正在保存…" : "保存正向命题"}</button>
+                            <button type="submit" disabled={legacyAxisPropositionBusy || Boolean(decisionBusy)}>{legacyAxisPropositionBusy ? "正在保存…" : "保存比较句"}</button>
                           </form>
                         )}
                         {axisChoiceError && <p id={`candidate-axis-error-${selected.id}`} className="candidateFieldError" role="alert">{axisChoiceError}</p>}
@@ -880,7 +883,7 @@ export default function CandidateReview({
                             </ul>
                           </div>
                         )}
-                        <label htmlFor={`candidate-axis-name-${selected.id}`}>轴名称</label>
+                        <label htmlFor={`candidate-axis-name-${selected.id}`}>标准名称</label>
                         <input
                           ref={axisNameRef}
                           id={`candidate-axis-name-${selected.id}`}
@@ -892,9 +895,9 @@ export default function CandidateReview({
                           onChange={(event) => setAxisName(event.target.value)}
                           onBlur={() => setNameTouched(true)}
                         />
-                        <p id={`candidate-axis-name-help-${selected.id}`} className="candidateAxisHint">{scopedCandidate ? "给当前对象与情境的比较轴取一个便于识别的名称。" : "例如“涉及同伴安全的路线决策”。不要把正反方向写进名称。"}</p>
+                        <p id={`candidate-axis-name-help-${selected.id}`} className="candidateAxisHint">{scopedCandidate ? "给当前对象与情境的比较标准取一个便于识别的名称。" : "例如“涉及同伴安全的路线决策”。不要把正反方向写进名称。"}</p>
                         {(nameTouched || createAttempted) && axisDraft.errors.display_name && <p id={`candidate-axis-name-error-${selected.id}`} className="candidateFieldError" role="alert">{axisDraft.errors.display_name}</p>}
-                        <label htmlFor={`candidate-axis-definition-${selected.id}`}>轴定义</label>
+                        <label htmlFor={`candidate-axis-definition-${selected.id}`}>标准说明</label>
                         <textarea
                           ref={axisDefinitionRef}
                           id={`candidate-axis-definition-${selected.id}`}
@@ -906,9 +909,9 @@ export default function CandidateReview({
                           onChange={(event) => setAxisDefinition(event.target.value)}
                           onBlur={() => setDefinitionTouched(true)}
                         />
-                        <p id={`candidate-axis-definition-help-${selected.id}`} className="candidateAxisHint">说明比较的{scopedCandidate ? "价值取向或行为边界" : "具体行为边界"}；另用正向命题明确判定方向。</p>
+                        <p id={`candidate-axis-definition-help-${selected.id}`} className="candidateAxisHint">说明比较的{scopedCandidate ? "价值取向或行为边界" : "具体行为边界"}；另用比较句明确判定方向。</p>
                         {(definitionTouched || createAttempted) && axisDraft.errors.definition && <p id={`candidate-axis-definition-error-${selected.id}`} className="candidateFieldError" role="alert">{axisDraft.errors.definition}</p>}
-                        <label htmlFor={`candidate-axis-proposition-${selected.id}`}>轴的正向命题</label>
+                        <label htmlFor={`candidate-axis-proposition-${selected.id}`}>用来比较的说法</label>
                         <textarea
                           ref={axisPropositionRef}
                           id={`candidate-axis-proposition-${selected.id}`}
@@ -920,12 +923,12 @@ export default function CandidateReview({
                           onChange={(event) => setAxisPositiveProposition(event.target.value)}
                           onBlur={() => setPropositionTouched(true)}
                         />
-                        <p id={`candidate-axis-proposition-help-${selected.id}`} className="candidateAxisHint">{scopedCandidate ? "写出在当前对象与情境下用于比较的具体正向命题。" : "例如“角色未经授权冒用同伴签名”。"}这只定义何为正向，不表示角色已这样做。</p>
+                        <p id={`candidate-axis-proposition-help-${selected.id}`} className="candidateAxisHint">{scopedCandidate ? "写出在当前对象与情境下可以判断是否成立的一句话。" : "例如“角色未经授权冒用同伴签名”。"}这只是比较句，不表示角色已这样做；保存后不能直接改写。</p>
                         {(propositionTouched || createAttempted) && axisDraft.errors.positive_proposition && <p id={`candidate-axis-proposition-error-${selected.id}`} className="candidateFieldError" role="alert">{axisDraft.errors.positive_proposition}</p>}
                         {scopedCandidate && (
                           <>
-                            <p className="candidateAxisHint">比较对象取自已核对的候选对象键：{validScopedComparisonKey(selected)?.split(":").slice(1).join(":")}。新轴只对这个对象生效。</p>
-                            <label htmlFor={`candidate-axis-scope-${selected.id}`}>轴的适用情境</label>
+                            <p className="candidateAxisHint">比较对象取自已核对的候选对象键：{validScopedComparisonKey(selected)?.split(":").slice(1).join(":")}。新标准只对这个对象生效。</p>
+                            <label htmlFor={`candidate-axis-scope-${selected.id}`}>标准的适用情境</label>
                             <textarea
                               ref={applicabilityScopeRef}
                               id={`candidate-axis-scope-${selected.id}`}
@@ -942,9 +945,9 @@ export default function CandidateReview({
                           </>
                         )}
                         <button type="submit" disabled={!review?.allowed || axisCreateBusy || Boolean(decisionBusy) || !canCreateAxis}>
-                          {axisCreateBusy ? "正在创建作者轴…" : "先创建作者轴"}
+                          {axisCreateBusy ? "正在创建比较标准…" : "先创建比较标准"}
                         </button>
-                        {createError && <div className="candidateAxisError" role="alert"><p>{createError}</p><button type="button" onClick={onRetryAxes}>刷新轴列表</button></div>}
+                        {createError && <div className="candidateAxisError" role="alert"><p>{createError}</p><button type="button" onClick={onRetryAxes}>刷新比较标准</button></div>}
                       </form>
                     )}
                     {createdMessage && <p className="candidateAxisCreated" role="status">{createdMessage}</p>}
@@ -955,13 +958,14 @@ export default function CandidateReview({
                         className="candidateAxisAlignment"
                         aria-describedby={alignmentError ? `candidate-axis-alignment-error-${selected.id}` : undefined}
                       >
-                        <legend>核对模型标签与作者比较句的方向</legend>
-                        <p>模型内部标签：{selected.model_trait_key || "未提供"}；模型方向码：{selected.polarity ? polarityNames[selected.polarity] : "未提供"}。作者比较句：{selectedAxis.positive_proposition}。请按原文判断两种比较坐标是否同向，不要根据否定词自动选择。</p>
-                        <label><input type="radio" name={`candidate-alignment-${selected.id}`} checked={alignmentChoice === "same"} onChange={() => { setAlignmentChoice("same"); setAlignmentError(""); }} />同向：模型标签的正向状态与作者比较句同向</label>
-                        <label><input type="radio" name={`candidate-alignment-${selected.id}`} checked={alignmentChoice === "opposite"} onChange={() => { setAlignmentChoice("opposite"); setAlignmentError(""); }} />反向：模型标签的正向状态与作者比较句相反</label>
+                        <legend>这两种说法是什么关系？</legend>
+                        <p>模型用于归类的说法：{selected.model_trait_key || "未提供"}。模型对标签的判断：{selected.polarity ? polarityNames[selected.polarity] : "未提供"}。用来比较的说法：{selectedAxis.positive_proposition}。</p>
+                        <p>这里问的是两种说法本身的关系，不是直接问人物做没做。请对照原文选择：如果模型标签成立，比较句也会成立，选“同向”；如果会不成立，选“反向”。不要只按否定词猜测。</p>
+                        <label><input type="radio" name={`candidate-alignment-${selected.id}`} checked={alignmentChoice === "same"} onChange={() => { setAlignmentChoice("same"); setAlignmentError(""); }} />同向：模型标签成立时，比较句也成立</label>
+                        <label><input type="radio" name={`candidate-alignment-${selected.id}`} checked={alignmentChoice === "opposite"} onChange={() => { setAlignmentChoice("opposite"); setAlignmentError(""); }} />反向：模型标签成立时，比较句不成立</label>
                         <label><input type="radio" name={`candidate-alignment-${selected.id}`} checked={alignmentChoice === "uncertain"} onChange={() => { setAlignmentChoice("uncertain"); setAlignmentError(""); }} />暂不确定，保留待审</label>
                         {previewAxisPolarity(selected.polarity, alignmentChoice) && (
-                          <p role="status">映射预览（未经事实复核）：若采用你的方向选择，这条候选表示“作者比较句{previewAxisPolarity(selected.polarity, alignmentChoice) === "positive" ? "成立" : "不成立"}”。这里只做方向换算，不代表模型或系统验证了原文判断。</p>
+                          <p role="status">映射预览（未经事实复核）：若采用你的方向选择，这条候选表示“比较句{previewAxisPolarity(selected.polarity, alignmentChoice) === "positive" ? "成立" : "不成立"}”。这里只做方向换算，不代表模型或系统验证了原文判断。</p>
                         )}
                         {alignmentError && <p id={`candidate-axis-alignment-error-${selected.id}`} className="candidateFieldError" role="alert">{alignmentError}</p>}
                       </fieldset>
@@ -985,7 +989,7 @@ export default function CandidateReview({
                         {scopeError && <p id={`candidate-axis-scope-confirm-error-${selected.id}`} className="candidateFieldError" role="alert">{scopeError}</p>}
                       </div>
                     )}
-                    {scopedCandidate && <p className="candidateAxisHint">若不绑定比较轴，仍可确认普通角色特征；后续需要作者另行建立轴基线。</p>}
+                    {scopedCandidate && <p className="candidateAxisHint">若不绑定比较标准，仍可确认普通角色特征；后续需要作者另行建立轴基线。</p>}
                   </section>
                 )}
                 <label htmlFor={`candidate-comment-${selected.id}`}>

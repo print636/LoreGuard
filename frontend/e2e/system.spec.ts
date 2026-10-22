@@ -228,7 +228,7 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
     await expect(issueCards.first()).toContainText("林澈的发色是黑色。");
     const issueTexts = await issueCards.allTextContents();
     expect(new Set(issueTexts).size).toBe(issueTexts.length);
-    await issueCards.first().getByRole("button", { name: "选中并写入链接" }).click();
+    await issueCards.first().getByRole("button", { name: "定位此问题" }).click();
     await expect(page).toHaveURL(/&issue=[A-Za-z0-9_-]+$/);
     const selectedIssueUrl = page.url();
     await page.reload();
@@ -236,10 +236,10 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
     await expect(issueCards.first()).toHaveClass(/focusedIssue/);
     const [download] = await Promise.all([
       page.waitForEvent("download"),
-      page.getByRole("button", { name: "导出 Markdown 报告" }).click(),
+      page.getByRole("button", { name: "下载审查报告" }).click(),
     ]);
     expect(download.suggestedFilename()).toBe(
-      `LoreGuard-report-${replayedRunId}.md`,
+      "LoreGuard-审查报告.md",
     );
     const markdown = await readFile(await download.path(), "utf8");
     expect(markdown).toContain(projectName);

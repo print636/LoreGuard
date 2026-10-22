@@ -98,7 +98,7 @@ export default function CharacterProfile({
                         <span>{item.evidence_count} 条证据</span>
                         {item.key_object && <span>对象：{item.key_object}</span>}
                         {item.dimension === "core_personality" && (
-                          <span>{item.approved_axis_id ? "已绑定作者轴" : "未绑定作者轴"}</span>
+                          <span>{item.approved_axis_id ? "已绑定比较标准" : "未绑定比较标准"}</span>
                         )}
                         {(item.dimension === "value" || item.dimension === "behavior_boundary") && item.approved_axis_id && (
                           <span>对象与情境轴已由作者确认。{scopedAxisReviewBoundary}</span>
@@ -124,7 +124,7 @@ export default function CharacterProfile({
                             disabled={withdrawBusyId !== null || item.revision === null}
                             aria-expanded={alignId === item.id}
                             onClick={() => { setConfirmId(null); if (alignId === item.id) closeAlignment(item.id); else setAlignId(item.id); }}
-                          >{item.axis_alignment ? "查看作者轴方向与证据" : "核对并补认作者轴方向"}</button>
+                          >{item.axis_alignment ? "查看比较标准方向与证据" : "核对并补认比较标准方向"}</button>
                           {alignId === item.id && (
                             <AxisAlignmentPanel
                               projectId={projectId}

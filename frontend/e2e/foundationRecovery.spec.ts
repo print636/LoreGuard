@@ -215,7 +215,7 @@ async function open(page: Page, state: Fixture, location = revisePath) {
     // The upload shell appears before its exact frozen baseline has finished
     // restoring. Choosing a file during that identity transition is not ready.
     if (!state.baselineHistoryPending) {
-      await expect(page.locator(`.revisionHeader code[title="${runId}"]`)).toBeVisible();
+      await expect(page.locator(".revisionHeader")).toHaveAttribute("data-baseline-run-id", runId);
       await expect(page.locator(".revisionContext")).toContainText("2 份");
     }
   }
@@ -290,7 +290,7 @@ test("03 文稿确已保存而资料刷新失败时，只重新读取，不重�
   expect(state.uploads).toHaveLength(0);
   state.baselineHistoryPending = false;
   state.releaseBaselineHistory?.();
-  await expect(page.locator(`.revisionHeader code[title="${runId}"]`)).toBeVisible();
+  await expect(page.locator(".revisionHeader")).toHaveAttribute("data-baseline-run-id", runId);
   await expect(page.locator(".revisionContext")).toContainText("2 份");
   await expect(revisionFile(page)).toBeEnabled();
   await expect(page.getByRole("status", { name: "复检基线尚未核验", exact: true })).toHaveCount(0);
@@ -400,16 +400,16 @@ test("07 候选翻页和离开取消保备注，明确审核失败保稿，成�
   expectNoUnexpected(state);
 });
 
-test("08 未创建的作者轴输入切换前有确认，取消保留，明确放弃不向服务器建轴", async ({ page }) => {
+test("08 未创建的比较标准输入切换前有确认，取消保留，明确放弃不向服务器建轴", async ({ page }) => {
   const state = fixture(); await open(page, state, candidatePath);
-  await page.getByRole("button", { name: "创建新轴", exact: true }).click();
-  await page.getByRole("textbox", { name: "轴名称", exact: true }).fill("共同事务决策边界");
-  await page.getByRole("textbox", { name: "轴定义", exact: true }).fill("是否未经同伴同意决定共同事务。");
-  await page.getByRole("textbox", { name: "轴的正向命题", exact: true }).fill("角色未经同伴同意决定共同事务。");
+  await page.getByRole("button", { name: "创建新标准", exact: true }).click();
+  await page.getByRole("textbox", { name: "标准名称", exact: true }).fill("共同事务决策边界");
+  await page.getByRole("textbox", { name: "标准说明", exact: true }).fill("是否未经同伴同意决定共同事务。");
+  await page.getByRole("textbox", { name: "用来比较的说法", exact: true }).fill("角色未经同伴同意决定共同事务。");
   await confirmation(page, () => candidateLink(page).click(), false);
-  await expect(page.getByRole("textbox", { name: "轴名称", exact: true })).toHaveValue("共同事务决策边界");
-  await expect(page.getByRole("textbox", { name: "轴定义", exact: true })).toHaveValue("是否未经同伴同意决定共同事务。");
-  await expect(page.getByRole("textbox", { name: "轴的正向命题", exact: true })).toHaveValue("角色未经同伴同意决定共同事务。");
+  await expect(page.getByRole("textbox", { name: "标准名称", exact: true })).toHaveValue("共同事务决策边界");
+  await expect(page.getByRole("textbox", { name: "标准说明", exact: true })).toHaveValue("是否未经同伴同意决定共同事务。");
+  await expect(page.getByRole("textbox", { name: "用来比较的说法", exact: true })).toHaveValue("角色未经同伴同意决定共同事务。");
   await confirmation(page, () => candidateLink(page).click(), true);
   await expect(page).toHaveURL(new RegExp(`candidate=${secondCandidate}`));
   expect(state.requests.filter((item) => item === `POST ${root}/character-trait-axes`)).toEqual([]);

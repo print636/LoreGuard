@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiJson } from "../../api/client";
+import TechnicalDetails from "../../components/TechnicalDetails";
 import {
   EVIDENCE_PAGE_SIZE, evidenceKindLabel, evidencePreviewPath, isCurrentEvidenceRequest,
   normalizeEvidencePreview, referenceRange, sameEvidenceSource,
@@ -116,15 +117,14 @@ export default function EvidenceReader({ selection, trigger, onClose }: Props) {
           {selection.kind !== "issue" && <span>原文定位可核对，阅读不会改变线索或提案的审查结论。</span>}
         </p>
         <dl className="evidenceReaderMetadata">
-          <div><dt>报告运行</dt><dd><code title={selection.runId}>{selection.runId.slice(0, 8)}</code></dd></div>
           <div><dt>报告引用范围</dt><dd>{referenceRange(selection.expected)}</dd></div>
           {preview && <>
             <div><dt>分析时版本</dt><dd>冻结版本 v{preview.source.document_version}</dd></div>
             <div><dt>原文来源</dt><dd>{preview.source.provenance === "run_input" ? "本次分析的冻结输入" : "既有角色设定的冻结来源"}</dd></div>
-            {preview.source.source_run_id && <div><dt>来源运行</dt><dd><code title={preview.source.source_run_id}>{preview.source.source_run_id.slice(0, 8)}</code></dd></div>}
             {preview.source.char_count !== null && <div><dt>正文规模</dt><dd>{preview.source.char_count.toLocaleString("zh-CN")} 字符，{preview.source.line_count?.toLocaleString("zh-CN")} 行</dd></div>}
           </>}
         </dl>
+        <TechnicalDetails><p>报告审查编号：<code>{selection.runId}</code></p>{preview?.source.source_run_id && <p>证据来源审查编号：<code>{preview.source.source_run_id}</code></p>}</TechnicalDetails>
         <details className="evidenceReaderExcerpt" open={preview?.source.availability === "excerpt_only" || current?.status === "error"}>
           <summary>报告中保留的引用 · {referenceRange(selection.expected)}</summary>
           <blockquote>{selection.expected.text}</blockquote>

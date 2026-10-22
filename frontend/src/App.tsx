@@ -35,11 +35,9 @@ import {
   type DocumentRole,
 } from "./documentContext";
 import {
-  retryLineage,
   retryState,
   runInputState,
   runSnapshotDocuments,
-  shortIdentifier,
   snapshotDocumentLabels,
   type RunInputSnapshot,
 } from "./runSnapshot";
@@ -123,6 +121,8 @@ import {
 } from "./features/drafts/sessionDraftStorage";
 import RunHistoryPanel from "./features/run-history/RunHistoryPanel";
 import type { RunCatalogItem } from "./features/run-history/runHistoryModel";
+import TechnicalDetails from "./components/TechnicalDetails";
+import { issueSeverityLabel, reviewStatusLabel, reviewTimeLabel } from "./productLanguage";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
 const RevisionReview = lazy(() => import("./components/RevisionReview"));
@@ -1101,8 +1101,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       setAction("");
       setMessage(
         data.error
-          ? `${data.status}：${data.error}`
-          : `任务状态：${data.status}`,
+          ? `${reviewStatusLabel(data.status)}：${data.error}`
+          : reviewStatusLabel(data.status),
       );
       try {
         const status = await apiJson<RunInfo>(
@@ -1184,7 +1184,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setRunInfo(info);
     setAcceptedModelExecution(null);
     setProgress(info.status === "completed" ? 100 : 0);
-    setMessage(info.error || `历史任务：${info.status}`);
+    setMessage(info.error || `历史审查：${reviewStatusLabel(info.status)}`);
     setIssues([]);
     clearPendingClues();
     setClarifications([]);
@@ -1252,7 +1252,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     setRunInfo(null);
     setAcceptedModelExecution(null);
     setProgress(0);
-    setMessage("任务已提交（若服务器启用模型，可能消耗 Token）");
+    setMessage("审查已开始；使用模型时可能产生费用。");
     try {
       const created = await apiJsonIdempotent<AcceptedRunInfo>(
         `/api/v1/projects/${id}/analysis-runs`,
@@ -1467,7 +1467,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       loadedRouteRef.current = `${projectId}:${created.id}`;
       browserNavigate(workspacePath("audit", projectId, created.id));
       setMessage(
-        `重试已提交，继承运行 ${shortIdentifier(created.retried_from || run)} 的冻结输入；${describeRunModelExecution(created.model_execution, created.status).label}`,
+        `已按上次使用的文稿重新发起审查；${describeRunModelExecution(created.model_execution, created.status).label}`,
       );
       subscribe(created.id, projectId, epoch);
       try {
@@ -1553,7 +1553,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           ? "运行不存在或无权访问"
           : response.status === 409
             ? "运行尚未完成，请稍后重试"
-            : `服务器返回 HTTP ${response.status}`;
+            : "服务器暂时无法提供报告，请稍后重试";
         throw new Error(explanation);
       }
       const blob = await response.blob();
@@ -1561,14 +1561,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `LoreGuard-report-${run}.md`;
+      link.download = "LoreGuard-审查报告.md";
       document.body.append(link);
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
       setExportStatus("报告已下载：包含本次正式问题、待澄清项及最新反馈；不包含待复核线索。");
     } catch (error) {
-      setExportStatus(`导出失败：${error instanceof Error ? error.message : "请稍后重试"}`);
+      setExportStatus(`报告下载失败：${error instanceof Error ? error.message : "请稍后重试"}`);
     } finally {
       setExportPending(false);
     }
@@ -1819,7 +1819,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             <b>{selectedProject?.name || "尚未选择项目"}</b>
             <span>
               {selectedProject
-                ? `${selectedProject.active_document_count} 份文档 · ${selectedProject.latest_run?.status || "未运行"}`
+                ? `${selectedProject.active_document_count} 份文档 · ${reviewStatusLabel(selectedProject.latest_run?.status)}`
                 : "点击选择或新建"}
             </span>
           </button>
@@ -1950,7 +1950,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             <details className="sampleShelf">
               <summary>样例与帮助</summary>
               <button type="button" onClick={(event) => openUserGuide("start", event.currentTarget)}>阅读使用指南</button>
-              <p>原创演示文本；运行模型时可能消耗 Token。</p>
+              <p>原创演示文本；使用模型时可能产生费用。</p>
               <button disabled={busy} onClick={() => demo("simple")}>
                 {action === "simple" ? "分析中…" : "运行简单样例"}
               </button>
@@ -2071,7 +2071,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       {projectOptions.map((row) => (
                         <option key={row.id} value={row.id}>
                           {row.id === project && !projects.some((item) => item.id === row.id) ? "当前项目 · " : ""}{row.name} · {row.active_document_count} 文档 ·{" "}
-                          {row.latest_run?.status || "未运行"}
+                          {reviewStatusLabel(row.latest_run?.status)}
                         </option>
                       ))}
                     </select>
@@ -2241,7 +2241,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       <p className="eyebrow">VERSION DIFF</p>
                       <h3>版本内容差异</h3>
                     </div>
-                    <small>本地行级比较，不调用模型、不消耗 Token</small>
+                    <small>只比较文稿改动，不调用模型、不产生模型费用</small>
                     <button type="button" onClick={() => navigateWorkspace("projects")}>返回资料库</button>
                   </div>
                   <div className="diffControls">
@@ -2405,7 +2405,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </div>
                   )}
                   <DraftNotice status={quickDraft.status} restored={quickDraft.restored} kind="正文" hasDraft={quickDraft.hasDraft} onDiscard={quickDraft.discard} enabled={identity.mode === "required"} />
-                  <p className="contextHint">高级模式会把设定标为“权威世界观”、章节标为“故事正文”；只有正文时无需提前准备世界观。启用模型时可能消耗 Token。</p>
+                  <p className="contextHint">高级模式会把设定标为“权威世界观”、章节标为“故事正文”；只有正文时无需提前准备世界观。使用模型时可能产生费用。</p>
                 </div>
               )}
             </section>
@@ -2413,14 +2413,14 @@ export default function App({ identity, onLoggedOut }: AppProps) {
 
           {!routeProblem && activeView === "audit" && (
             <>
-              <section className="status" aria-live="polite">
+              <section className="status" aria-live="polite" data-run-id={run} data-project-id={project}>
                 <div>
-                  <small>PROJECT</small>
-                  <code>{project || "not-selected"}</code>
+                  <small>当前项目</small>
+                  <b>{selectedProject?.name || "尚未选择项目"}</b>
                 </div>
                 <div>
-                  <small>RUN</small>
-                  <code>{run || "not-started"}</code>
+                  <small>当前审查</small>
+                  <span>{runInfo ? reviewStatusLabel(runInfo.status) : "尚未开始"}</span>
                 </div>
                 <div className="meter">
                   <i style={{ width: `${progress}%` }} />
@@ -2446,6 +2446,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     )}
                 </div>
               </section>
+              {(project || run) && <TechnicalDetails><p>项目编号：<code>{project || "未选择"}</code></p><p>审查编号：<code>{run || "未开始"}</code></p></TechnicalDetails>}
               {runInfo && (
                 <section
                   className={`runSnapshot ${runSnapshotDocuments(runInfo).length ? "available" : "unknown"}`}
@@ -2453,16 +2454,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                 >
                   <div className="sectionHead">
                     <div>
-                      <p className="eyebrow">RUN INPUT SNAPSHOT</p>
-                      <h2>本次运行使用的输入快照</h2>
+                      <h2>本次审查使用的文稿</h2>
+                      <p>保留审查开始时的版本，后续修改不会替换这里的依据。</p>
                     </div>
                     <div className="snapshotState">
                       <b>{runInputState(runInfo)}</b>
-                      {retryLineage(runInfo) && (
-                        <small title={runInfo.retried_from || ""}>
-                          {retryLineage(runInfo)}
-                        </small>
-                      )}
+                      {runInfo.retried_from && <small>沿用上次审查的文稿版本</small>}
                       <RunModelExecutionNote
                         view={selectedRunModelExecution}
                         compact
@@ -2479,9 +2476,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                           >
                             <b>{labels.identity}</b>
                             <span>{labels.context}</span>
-                            <code title={input.content_sha256}>
-                              sha256 {labels.hash}
-                            </code>
+                            <TechnicalDetails><p>内容校验值：<code>{input.content_sha256}</code></p><p>资料用途代码：<code>{input.document_role}</code></p><p>故事范围代码：<code>{input.story_scope}</code></p></TechnicalDetails>
                             {input.char_count !== undefined && (
                               <small>{input.char_count} 字符</small>
                             )}
@@ -2527,7 +2522,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   <b>{clarifications.length}</b>
                 </div>
                 <div>
-                  <small>模型 Token</small>
+                  <small>模型用量</small>
                   <b>{selectedRunUsage.tokens}</b>
                   <small>
                     {selectedRunUsage.detail && (
@@ -2881,7 +2876,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                 />}
                 <div className="sectionHead">
                   <div>
-                    <p className="eyebrow">EVIDENCE REPORT</p>
+                    <p className="eyebrow">对照原文逐条核对</p>
                     <h2>
                       正式一致性问题 <em>{visibleIssues.length}</em>
                     </h2>
@@ -2894,7 +2889,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                         disabled={exportPending}
                         onClick={exportMarkdownReport}
                       >
-                        {exportPending ? "正在导出…" : "导出 Markdown 报告"}
+                        {exportPending ? "正在准备下载…" : "下载审查报告"}
                       </button>
                     )}
                     {runInfo?.status === "completed" && runSnapshotDocuments(runInfo).length > 0 && (
@@ -2991,8 +2986,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       </div>
                       <div>
                         <p className="tag">
-                          {categoryNames[issue.category] || issue.category} ·{" "}
-                          {issue.severity} ·{" "}
+                          {categoryNames[issue.category] || "其他类型（待核对）"} ·{" "}
+                          {issueSeverityLabel(issue.severity)} ·{" "}
                           {(issue.confidence * 100).toFixed(0)}%
                         </p>
                         <h3>{issue.title}</h3>
@@ -3002,7 +2997,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                           aria-pressed={focusedIssue === issue.id}
                           onClick={() => updateReportRoute({ issueId: issue.id })}
                         >
-                          {focusedIssue === issue.id ? "当前选中问题" : "选中并写入链接"}
+                          {focusedIssue === issue.id ? "已定位此问题" : "定位此问题"}
                         </button>
                         <a
                           className="issueRevisionLink"
@@ -3047,7 +3042,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                         </div>
                         <input
                           className="note"
-                          aria-label={`问题备注 ${shortIdentifier(issue.id)}`}
+                          aria-label={`问题备注：${issue.title}`}
                           value={notes[issue.id] || ""}
                           disabled={feedbackPending[issue.id] || notesReadyRun !== run}
                           onClick={(event) => event.stopPropagation()}
@@ -3091,7 +3086,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               >
                 <div className="sectionHead">
                   <div>
-                    <p className="eyebrow">REVIEW LEADS</p>
+                    <p className="eyebrow">尚不能定为冲突</p>
                     <h2 id="provisional-clues-title">
                       待复核线索 <em>{pendingClueCountLabel}</em>
                     </h2>
@@ -3233,7 +3228,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         <aside className="resultRail" aria-label="运行与冲突报告">
           <div className="resultRailHead">
             <div>
-              <p className="eyebrow">LIVE REVIEW</p>
+              <p className="eyebrow">本次审查</p>
               <h2>冲突审查报告</h2>
             </div>
             <strong>{issues.length}</strong>
@@ -3258,7 +3253,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                 {busy
                   ? "正在校验"
                   : runInfo
-                    ? `运行 ${runInfo.status}`
+                    ? reviewStatusLabel(runInfo.status)
                     : "尚未开始"}
               </span>
               <b>{progress}%</b>
@@ -3267,14 +3262,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               <i style={{ width: `${progress}%` }} />
             </div>
             <p>{message}</p>
-            <div className="railIds">
-              <span>
-                PROJECT <code>{shortIdentifier(project) || "—"}</code>
-              </span>
-              <span>
-                RUN <code>{shortIdentifier(run) || "—"}</code>
-              </span>
-            </div>
+            <div className="railIds"><span>项目：{selectedProject?.name || "尚未选择"}</span><span>审查时间：{runInfo ? reviewTimeLabel(runInfo.created_at) : "尚未开始"}</span></div>
+            {(project || run) && <TechnicalDetails><p>项目编号：<code>{project || "未选择"}</code></p><p>审查编号：<code>{run || "未开始"}</code></p></TechnicalDetails>}
             <div className="runActions">
               {busy && run && <button onClick={cancel}>取消任务</button>}
               {runInfo && ["failed", "cancelled"].includes(runInfo.status) && (
@@ -3311,7 +3300,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               <b>{docs.filter((row) => row.active).length}</b>
             </div>
             <div className="railToken">
-              <small>模型 Token</small>
+              <small>模型用量</small>
               <b>{selectedRunUsage.tokens}</b>
               <span>{selectedRunUsage.cost}</span>
               {(runInfo !== null || acceptedModelExecution !== null) && (
@@ -3346,8 +3335,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     }}
                   >
                     <span>
-                      {categoryNames[issue.category] || issue.category} ·{" "}
-                      {issue.severity} · {(issue.confidence * 100).toFixed(0)}%
+                      {categoryNames[issue.category] || "其他类型（待核对）"} ·{" "}
+                      {issueSeverityLabel(issue.severity)} · {(issue.confidence * 100).toFixed(0)}%
                     </span>
                     <b>{issue.title}</b>
                     <p>{issue.explanation}</p>

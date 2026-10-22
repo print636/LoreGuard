@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import path from "node:path";
 
 const projectId = "provisional-project";
 const runId = "provisional-run";
@@ -188,10 +189,24 @@ test("pending clues remain a separate reading section and do not become formal i
   await expect(page.locator(".railSummary")).not.toContainText("待复核线索");
   await formalIssues.getByRole("button", { name: "已接受" }).click();
   await expect(formalIssues).toContainText("当前反馈：已接受");
-  await formalIssues.getByRole("button", { name: "导出 Markdown 报告" }).click();
+  const visibleText = await page.locator("body").innerText();
+  expect(visibleText).not.toContain(projectId);
+  expect(visibleText).not.toContain(runId);
+  expect(visibleText).not.toMatch(/\b[0-9a-f]{64}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i);
+  const downloadPromise = page.waitForEvent("download");
+  await formalIssues.getByRole("button", { name: "下载审查报告" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("LoreGuard-审查报告.md");
   await expect.poll(() => state.exportReads).toBe(1);
   await expect(formalIssues.getByRole("status")).toContainText("不包含待复核线索");
   expect(state.feedbackPosts).toBe(1);
+
+  const languageScreenshotDir = process.env.LOREGUARD_PRODUCT_LANGUAGE_SCREENSHOT_DIR;
+  if (languageScreenshotDir) {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await formalIssues.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(languageScreenshotDir, "review-report-1440.png") });
+  }
 
   if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -204,6 +219,10 @@ test("pending clues remain a separate reading section and do not become formal i
   await expect(clues).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(await page.locator(".mainCanvas").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  if (languageScreenshotDir) {
+    await formalIssues.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(languageScreenshotDir, "review-report-375.png") });
+  }
   if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
     await clues.screenshot({ path: testInfo.outputPath("provisional-clues-375.png") });
     await page.screenshot({ path: "../artifacts/playwright/provisional-report-375.png", fullPage: true });
@@ -398,7 +417,7 @@ test("a late clue response from a previous run cannot replace the selected run",
   await expect(clues).toContainText("正在读取待复核线索");
   await page.locator(".sideNav").getByRole("button", { name: "运行审计" }).click();
   const history = page.getByRole("region", { name: "运行历史", exact: true });
-  await history.getByRole("row").filter({ has: page.locator(`code[title="${secondRunId}"]`) })
+  await history.locator(`tr[data-run-id="${secondRunId}"]`)
     .getByRole("button", { name: /^查看报告/ }).click();
   await expect(page).toHaveURL(new RegExp(`/runs/${secondRunId}/report`));
   await expect(clues).toContainText(secondClue.proposed_statement);

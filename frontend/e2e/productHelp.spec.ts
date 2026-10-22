@@ -301,7 +301,7 @@ test("剧情策划从报告定位阅读与覆盖帮助，保留筛选选中问�
   await expect(note).toHaveValue(feedbackDraft);
   await expect(page.locator(".reportFilters").getByRole("combobox", { name: "问题类别" })).toHaveValue("fact_conflict");
   await expect(page.locator(".reportFilters").getByRole("combobox", { name: "反馈状态" })).toHaveValue("unreviewed");
-  await expect(article.getByRole("button", { name: "当前选中问题" })).toHaveAttribute("aria-pressed", "true");
+  await expect(article.getByRole("button", { name: "已定位此问题" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".issues article")).toHaveCount(1);
   await expect(page.getByRole("region", { name: /待复核线索/ })).toContainText("模型提案（未验证）");
   await assertReadingOnly(page, state, before);

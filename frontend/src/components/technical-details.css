@@ -1,0 +1,25 @@
+.technicalDetails {
+  margin-block: 12px;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
+  min-width: 0;
+}
+.technicalDetails > summary {
+  cursor: pointer;
+  padding-block: 10px;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+.technicalDetails > summary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.technicalDetails > div {
+  padding: 12px;
+  border-inline-start: 2px solid var(--color-border-strong);
+  background: var(--color-field);
+}
+.technicalDetails p { margin-block: 4px 12px; }
+.technicalDetails code { overflow-wrap: anywhere; white-space: normal; }

@@ -52,7 +52,7 @@ test("enabled local gateway saves through account form and tests without exposin
   await expect(page.getByText("模型配置已保存。API Key 已从页面输入状态中清除。", { exact: true })).toBeVisible();
   await expect(page.locator("body")).not.toContainText("synthetic-local-client-key");
   await page.getByRole("button", { name: "测试已保存的模型连接", exact: true }).click();
-  await expect(page.getByText("最小连接测试通过", { exact: true })).toBeVisible();
+  await expect(page.getByText("模型连接检查通过", { exact: true })).toBeVisible();
   expect(state.writes).toEqual(["save", "test"]);
   expect(state.unexpected).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

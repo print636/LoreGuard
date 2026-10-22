@@ -53,8 +53,8 @@ export function runInputState(run: SnapshotRun): string {
 
 export function retryState(run: SnapshotRun): {allowed:boolean; label:string} {
   return hasRunSnapshot(run)
-    ? {allowed:true,label:'按本次输入重试（可能消耗 Token）'}
-    : {allowed:false,label:'不可同输入重试'};
+    ? {allowed:true,label:'按原文稿重新审查（可能产生费用）'}
+    : {allowed:false,label:'缺少原文稿，暂不能重新审查'};
 }
 
 export function snapshotDocumentLabels(document: RunInputSnapshot): {
@@ -62,7 +62,7 @@ export function snapshotDocumentLabels(document: RunInputSnapshot): {
 } {
   return {
     identity:`${document.document_name} · v${document.document_version}`,
-    context:`role ${roleNames[document.document_role]||document.document_role} (${document.document_role}) · scope ${document.story_scope}`,
+    context:`${roleNames[document.document_role] || '其他文稿'} · ${document.story_scope === 'main' ? '主线' : '故事范围见排错信息'}`,
     hash:shortIdentifier(document.content_sha256),
   };
 }

@@ -11,6 +11,7 @@ import {
 import { ApiError, apiJson } from "../api/client";
 import { browserNavigate, registerBrowserNavigationBlocker } from "../routing";
 import type { SessionIdentity } from "./session";
+import TechnicalDetails from "../components/TechnicalDetails";
 import {
   MODEL_TEST_DISCLAIMER,
   SAVED_API_KEY_MASK,
@@ -260,7 +261,7 @@ export default function ModelSettings({ identity, onLoggedOut }: ModelSettingsPr
       });
       const result = describeAccountProviderTest(payload);
       setTestResult(result);
-      setSuccessMessage("最小连接测试已完成。请结合下方边界说明判断结果。");
+      setSuccessMessage("模型连接检查已完成。结果仅说明能否正常回复，不代表剧情判断质量。");
     } catch (error) {
       setOperationError(safeOperationMessage(error, "test"));
     } finally {
@@ -349,7 +350,7 @@ export default function ModelSettings({ identity, onLoggedOut }: ModelSettingsPr
 
       <main id="model-settings-main" className="accountSettingsMain modelSettingsMain" tabIndex={-1} ref={mainRef}>
         <header className="accountSettingsHeader">
-          <div><h1>模型与密钥</h1><p>保存你自己的 OpenAI-compatible 模型配置，用于你发起的故事审查。</p></div>
+          <div><h1>模型与密钥</h1><p>填入模型服务商提供的地址、模型名称和密钥，用于你发起的故事审查。接口需要兼容 OpenAI 格式。</p></div>
           <span className={`modelCredentialState ${statusTone}`}><KeyIcon />{statusLabel}</span>
         </header>
 
@@ -363,20 +364,20 @@ export default function ModelSettings({ identity, onLoggedOut }: ModelSettingsPr
 
         <div className="securityLedger modelSettingsLedger" aria-busy={loading}>
           <section className="securitySection modelOverviewSection" aria-labelledby="model-overview-title">
-            <header><span className="sectionGlyph"><KeyIcon /></span><div><h2 id="model-overview-title">当前配置</h2><p>这里只显示非敏感元数据，不会返回已保存的密钥。</p></div></header>
+            <header><span className="sectionGlyph"><KeyIcon /></span><div><h2 id="model-overview-title">当前配置</h2><p>你可以查看服务地址和模型名称，但不能再次读取已保存的密钥。</p></div></header>
             <div className="securitySectionBody">
               {loading ? (
                 <div className="modelSettingsSkeleton" aria-label="正在加载模型配置"><i /><i /><i /></div>
               ) : (
                 <>
                   <dl className="modelConfigSummary">
-                    <div><dt>本次新运行来源</dt><dd>{modelProviderSourceLabel(profile)}</dd></div>
+                    <div><dt>下次审查使用</dt><dd>{modelProviderSourceLabel(profile)}</dd></div>
                     <div><dt>API Key</dt><dd>{profile.configured ? <code aria-label="API Key 已保存">{SAVED_API_KEY_MASK}</code> : "未设置"}</dd></div>
                     <div><dt>Base URL</dt><dd>{profile.baseUrl || "未设置"}</dd></div>
                     <div><dt>模型</dt><dd>{profile.model || "未设置"}</dd></div>
-                    <div><dt>配置版本</dt><dd>{profile.revision ? `revision ${profile.revision}` : "尚未创建"}</dd></div>
                     <div><dt>更新时间</dt><dd>{formatTimestamp(profile.updatedAt)}</dd></div>
                   </dl>
+                  <TechnicalDetails><p>配置版本：<code>{profile.revision || "尚未创建"}</code></p></TechnicalDetails>
                   <p className="secretBoundary"><strong>LoreGuard 不会再次显示已保存 API Key。</strong><span>固定掩码只表示账户中存在密钥，不包含真实前缀或后缀。</span></p>
                 </>
               )}
@@ -434,17 +435,17 @@ export default function ModelSettings({ identity, onLoggedOut }: ModelSettingsPr
           </section>
 
           <section className="securitySection" aria-labelledby="model-test-title">
-            <header><span className="sectionGlyph"><ShieldIcon /></span><div><h2 id="model-test-title">最小连接测试</h2><p>使用已保存配置发起一次受限 JSON 请求，可能消耗少量 Token。</p></div></header>
+            <header><span className="sectionGlyph"><ShieldIcon /></span><div><h2 id="model-test-title">检查模型能否正常回复</h2><p>使用已保存的配置发送一条简短测试，可能产生少量费用。不会发送你的故事。</p></div></header>
             <div className="securitySectionBody modelTestBody">
               <div className="modelTestToolbar"><button type="button" disabled={!testAllowed} onClick={() => void testConnection()}>{testing ? "正在测试…" : "测试已保存的模型连接"}</button><span>{!profile.configured ? "请先保存账户模型配置。" : dirty ? "请先保存或撤销当前更改。" : "测试不会读取未保存输入。"}</span></div>
               <p className="modelTestBoundary"><strong>测试边界</strong>{MODEL_TEST_DISCLAIMER}</p>
               {activeTest ? (
                 <div className={`modelTestResult ${testStale ? "warning" : activeTest.tone}`} role="status">
                   <div><strong>{testStale ? "测试结果已过期" : activeTest.label}</strong><span>{testStale ? "配置版本已改变，请重新测试。" : activeTest.detail}</span></div>
-                  <dl><div><dt>测试时间</dt><dd>{formatTimestamp(activeTest.testedAt)}</dd></div><div><dt>JSON 合同</dt><dd>{activeTest.jsonContractOk === true ? "通过" : activeTest.jsonContractOk === false ? "未通过" : "未提供"}</dd></div><div><dt>延迟</dt><dd>{activeTest.latencyMs === null ? "未提供" : `${activeTest.latencyMs} ms`}</dd></div><div><dt>Token</dt><dd>{activeTest.tokenTotal === null ? "未提供" : activeTest.tokenTotal}</dd></div></dl>
+                  <dl><div><dt>检查时间</dt><dd>{formatTimestamp(activeTest.testedAt)}</dd></div><div><dt>回复格式检查</dt><dd>{activeTest.jsonContractOk === true ? "通过" : activeTest.jsonContractOk === false ? "未通过" : "未提供"}</dd></div><div><dt>响应时间</dt><dd>{activeTest.latencyMs === null ? "未提供" : `${(activeTest.latencyMs / 1000).toLocaleString("zh-CN", { maximumFractionDigits: 2 })} 秒`}</dd></div><div><dt>模型用量</dt><dd>{activeTest.tokenTotal === null ? "未提供" : `${activeTest.tokenTotal} Token`}</dd></div></dl>
                   <p><strong>下一步：</strong>{activeTest.action}</p>
                 </div>
-              ) : <div className="modelTestEmpty"><strong>尚未执行最小连接测试</strong><p>保存配置后手动测试；页面不会把“已保存”解释为“已经可用”。</p></div>}
+              ) : <div className="modelTestEmpty"><strong>尚未检查模型连接</strong><p>保存配置后点击上方按钮检查；保存成功不代表模型已经可用。</p></div>}
             </div>
           </section>
 

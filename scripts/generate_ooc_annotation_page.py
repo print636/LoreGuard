@@ -326,33 +326,33 @@ _HTML_TEMPLATE = r'''<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>LoreGuard OOC 独立标注台</title>
+  <title>LoreGuard 剧情阅读与判断</title>
   <style>
     :root {
-      --page-deep: #090716;
-      --page: #0d0a1e;
-      --surface: #1d1739;
-      --surface-raised: #291f4b;
-      --field: #100d24;
-      --text: #f4f0ff;
-      --text-secondary: #cfc6e3;
-      --text-muted: #aea5c2;
-      --border: rgba(179, 154, 255, .22);
-      --border-strong: rgba(183, 161, 255, .45);
-      --lavender: #b7a2ff;
-      --cyan: #8be9f0;
-      --pink: #ff91bd;
-      --warning: #ffbd82;
-      --success: #8de5b8;
-      --danger: #ff7fad;
-      --role-b: #b7a2ff;
-      --role-c: #ff91bd;
-      --role-g: #8de5b8;
-      --role-x: #ffbd82;
-      --role-p: #8be9f0;
-      --shadow: 0 18px 48px rgba(0, 0, 0, .24);
+      --page-deep: #f1f2f7;
+      --page: #f1f2f7;
+      --surface: #ffffff;
+      --surface-raised: #eeebfa;
+      --field: #ffffff;
+      --text: #262337;
+      --text-secondary: #504b63;
+      --text-muted: #665e77;
+      --border: #dad6e5;
+      --border-strong: #8f859f;
+      --lavender: #6244a3;
+      --cyan: #215d98;
+      --pink: #8b3c68;
+      --warning: #795019;
+      --success: #246044;
+      --danger: #a32a43;
+      --role-b: #6244a3;
+      --role-c: #287392;
+      --role-g: #28734f;
+      --role-x: #986525;
+      --role-p: #6d6391;
+      --shadow: 0 8px 24px rgba(44, 31, 67, .1);
       --radius-control: 8px;
       --radius-panel: 14px;
       --header-height: 82px;
@@ -363,7 +363,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
 
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; scroll-padding-top: calc(var(--header-height) + 20px); }
-    body { margin: 0; min-width: 320px; min-height: 100dvh; background: var(--page); }
+    body { margin: 0; min-width: 320px; min-height: 100dvh; background: var(--page); font-size: 17px; line-height: 1.8; }
     button, input, select, textarea { font: inherit; }
     button, select, input[type="checkbox"], input[type="radio"], label[for] { cursor: pointer; }
     button, select, input[type="text"], textarea {
@@ -373,7 +373,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       border: 1px solid var(--border-strong);
       border-radius: var(--radius-control);
     }
-    button { padding: 10px 14px; font-weight: 650; }
+    button { padding: 10px 14px; font-weight: 650; line-height: 1.5; touch-action: manipulation; }
     button:hover:not(:disabled) { border-color: var(--lavender); background: var(--surface-raised); }
     button:active:not(:disabled) { opacity: .82; }
     button:disabled, select:disabled, input:disabled, textarea:disabled {
@@ -390,7 +390,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       left: 8px;
       transform: translateY(-160%);
       padding: 10px 14px;
-      color: var(--page-deep);
+      color: #fff;
       background: var(--cyan);
       border-radius: 8px;
     }
@@ -406,16 +406,15 @@ _HTML_TEMPLATE = r'''<!doctype html>
       justify-content: space-between;
       gap: 20px;
       padding: 14px clamp(16px, 3vw, 40px);
-      background: rgba(13, 10, 30, .96);
+      background: rgba(255, 255, 255, .98);
       border-bottom: 1px solid var(--border);
-      backdrop-filter: blur(14px);
     }
     .brand-block { min-width: 0; }
     .brand-block h1 { margin: 0; font-size: clamp(20px, 2.2vw, 28px); line-height: 1.2; }
-    .brand-block p { margin: 5px 0 0; color: var(--text-secondary); font-size: 13px; }
+    .brand-block p { margin: 5px 0 0; color: var(--text-secondary); font-size: 15px; }
     .toolbar { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-    .toolbar .primary { color: #100b24; background: var(--lavender); border-color: var(--lavender); }
-    .toolbar .lock-action { color: #1a0c17; background: var(--pink); border-color: var(--pink); }
+    .toolbar .primary, .toolbar .lock-action { color: #fff; background: var(--lavender); border-color: var(--lavender); }
+    .toolbar .primary:hover, .toolbar .lock-action:hover { background: #4e3485; }
     .toolbar .quiet-danger { color: var(--danger); }
     .file-control { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; pointer-events: none; }
 
@@ -427,20 +426,33 @@ _HTML_TEMPLATE = r'''<!doctype html>
       gap: 16px;
       padding: 10px clamp(16px, 3vw, 40px);
       color: var(--text-secondary);
-      background: #15102c;
+      background: #eeebf6;
       border-bottom: 1px solid var(--border);
       font-size: 14px;
     }
     .privacy-strip strong { color: var(--success); }
-    .privacy-strip .identity { overflow-wrap: anywhere; text-align: right; }
+    .privacy-strip .identity { overflow-wrap: anywhere; }
+    .file-tools { position: relative; }
+    summary { min-height: 44px; padding: 8px 0; cursor: pointer; font-weight: 650; }
+    .file-tools > summary { padding: 10px 12px; }
+    .file-tools > div { position: absolute; z-index: 50; right: 0; width: 280px; max-width: calc(100vw - 32px); padding: 16px; background: var(--surface); border: 1px solid var(--border-strong); box-shadow: var(--shadow); border-radius: 8px; }
+    .file-tools button { display: block; width: 100%; margin-bottom: 10px; }
+    .file-tools p { margin: 0; font-size: 14px; color: var(--text-secondary); }
+    .technical-details { margin-top: 12px; color: var(--text-muted); font-size: 14px; }
+    .technical-details > summary { font-weight: 500; }
+    .technical-details p { margin: 6px 0; overflow-wrap: anywhere; }
+    .quick-start { max-width: 1160px; margin: 24px auto 0; padding: 0 24px; }
+    .quick-start p { margin: 8px 0; }
+    .reading-steps { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 0; padding-left: 24px; color: var(--text-secondary); }
+    .reading-steps a { font-weight: 650; text-decoration-thickness: 1px; text-underline-offset: 4px; }
     .freeze-binding { flex: 1 0 100%; color: var(--text-muted); font: 12px/1.5 "Cascadia Code", Consolas, monospace; overflow-wrap: anywhere; }
 
     .error-summary {
-      max-width: 1540px;
+      max-width: 1112px;
       margin: 18px auto 0;
       padding: 16px 20px;
-      background: rgba(255, 127, 173, .12);
-      border: 1px solid rgba(255, 127, 173, .72);
+      background: #fff0f2;
+      border: 1px solid var(--danger);
       border-radius: 12px;
     }
     .error-summary[hidden] { display: none; }
@@ -449,28 +461,28 @@ _HTML_TEMPLATE = r'''<!doctype html>
     .error-summary button { min-height: 32px; padding: 2px 4px; color: var(--text); background: none; border: 0; text-align: left; text-decoration: underline; }
 
     .workspace {
-      width: min(100%, 1600px);
+      width: min(100%, 1160px);
       margin: 0 auto;
-      padding: 20px clamp(16px, 2.6vw, 36px) 72px;
+      padding: 24px 24px 72px;
       display: grid;
-      grid-template-columns: 214px minmax(480px, 1fr) minmax(360px, 420px);
+      grid-template-columns: 170px minmax(0, 1fr);
       align-items: start;
-      gap: 18px;
+      gap: 24px;
     }
     .case-rail, .annotation-pane {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius-panel);
     }
-    .case-rail { position: sticky; top: calc(var(--header-height) + 18px); overflow: hidden; }
+    .case-rail { position: sticky; top: calc(var(--header-height) + 18px); overflow: hidden; grid-row: 1 / span 2; }
     .rail-heading { padding: 16px; border-bottom: 1px solid var(--border); }
     .rail-heading h2 { margin: 0; font-size: 16px; }
     .rail-heading p { margin: 6px 0 0; color: var(--text-muted); font-size: 13px; }
-    .case-list { max-height: calc(100dvh - 190px); overflow: auto; padding: 8px; }
+    .case-list { max-height: calc(100dvh - 250px); overflow: auto; padding: 8px; }
     .case-button {
       width: 100%;
       display: grid;
-      grid-template-columns: 32px minmax(0, 1fr) auto;
+      grid-template-columns: 24px minmax(0, 1fr);
       align-items: center;
       gap: 8px;
       min-height: 52px;
@@ -485,26 +497,28 @@ _HTML_TEMPLATE = r'''<!doctype html>
     .case-number { font-variant-numeric: tabular-nums; color: var(--lavender); }
     .case-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .case-state { font-size: 12px; color: var(--text-muted); }
+    .case-button .case-state { grid-column: 2; }
     .case-mobile { display: none; padding: 12px 16px; }
     .case-mobile label { display: block; margin-bottom: 6px; font-weight: 650; }
     .case-mobile select { width: 100%; padding: 8px 10px; }
 
-    .evidence-pane { min-width: 0; }
+    .evidence-pane { min-width: 0; grid-column: 2; }
     .case-intro {
       margin-bottom: 14px;
-      padding: 20px;
+      padding: 24px 28px;
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius-panel);
     }
     .case-intro h2 { margin: 0 0 8px; font-size: 24px; }
     .case-intro p { margin: 5px 0; color: var(--text-secondary); overflow-wrap: anywhere; }
-    .case-intro .shortcut-note { color: var(--cyan); font-size: 13px; }
+    .case-intro .shortcut-note { color: var(--text-secondary); font-size: 14px; }
+    .case-question { color: var(--text) !important; font-size: 21px; font-weight: 700; line-height: 1.7; }
     .target-context { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
     .target-context h3 { margin: 0 0 10px; font-size: 17px; }
     .context-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 16px; }
-    .context-item { min-width: 0; padding: 9px 10px; background: var(--field); border-left: 3px solid var(--lavender); }
-    .context-item dt { margin: 0 0 4px; color: var(--text-muted); font-size: 12px; }
+    .context-item { min-width: 0; padding: 9px 12px; background: #f5f3fa; border-left: 3px solid var(--lavender); }
+    .context-item dt { margin: 0 0 4px; color: var(--text-muted); font-size: 14px; }
     .context-item dd { margin: 0; color: var(--text); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
     .context-item.wide { grid-column: 1 / -1; }
     .document-block {
@@ -514,55 +528,56 @@ _HTML_TEMPLATE = r'''<!doctype html>
       border: 1px solid var(--border);
       border-radius: var(--radius-panel);
     }
-    .document-header { padding: 14px 18px; background: #17122f; border-bottom: 1px solid var(--border); }
-    .document-header h3 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
-    .document-header p { margin: 5px 0 0; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
-    .document-block[data-target="true"] { border-color: rgba(255,145,189,.58); }
+    .document-header { padding: 18px 24px; background: #f2eff9; border-bottom: 1px solid var(--border); }
+    .document-header h3 { margin: 0; font-size: 20px; overflow-wrap: anywhere; }
+    .document-header p { margin: 5px 0 0; color: var(--text-secondary); font-size: 15px; overflow-wrap: anywhere; }
+    .document-block[data-target="true"] { border-color: #9bbeca; }
+    .document-block[data-target="true"] .document-header { background: #edf6f8; }
     .document-block[data-selector-source="true"] .document-header { box-shadow: inset 4px 0 var(--lavender); }
     .document-lines { padding: 8px 0; }
     .evidence-row {
       display: grid;
-      grid-template-columns: 48px minmax(0, 1fr) 118px;
+      grid-template-columns: 30px minmax(0, 1fr) 174px;
       align-items: start;
       gap: 12px;
-      padding: 8px 14px 8px 10px;
+      padding: 12px 20px 12px 12px;
       border-left: 4px solid transparent;
-      border-bottom: 1px solid rgba(179, 154, 255, .09);
+      border-bottom: 1px solid #ece9f1;
     }
-    .evidence-row:hover { background: rgba(183, 162, 255, .05); }
+    .evidence-row:hover { background: #faf9fd; }
     .evidence-row[data-role="B"] { border-left-color: var(--role-b); }
     .evidence-row[data-role="C"] { border-left-color: var(--role-c); }
     .evidence-row[data-role="G"] { border-left-color: var(--role-g); }
     .evidence-row[data-role="X"] { border-left-color: var(--role-x); }
     .evidence-row[data-role="P"] { border-left-color: var(--role-p); }
-    .evidence-row[data-selector="true"] { background: rgba(183,162,255,.08); }
+    .evidence-row[data-selector="true"] { background: #f5f2fb; }
     .line-number { padding-top: 10px; color: var(--text-muted); text-align: right; font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
     .line-copy {
       min-width: 0;
       margin: 0;
       padding: 7px 0;
-      color: #fbf8ff;
-      font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, serif;
-      font-size: 17px;
-      line-height: 1.78;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 18px;
+      line-height: 1.85;
       overflow-wrap: anywhere;
       white-space: pre-wrap;
     }
-    .role-select { width: 100%; padding: 8px; }
+    .role-select { width: 100%; padding: 8px 4px; font-size: 15px; }
     .blank-line { min-height: 18px; border-bottom: 1px solid rgba(179, 154, 255, .05); }
 
-    .annotation-pane { padding: 18px; min-width: 0; }
-    .annotation-pane h2 { margin: 0 0 6px; font-size: 20px; }
-    .annotation-pane > p { margin: 0 0 16px; color: var(--text-secondary); font-size: 13px; }
+    .annotation-pane { padding: 28px; min-width: 0; grid-column: 2; }
+    .annotation-pane h2 { margin: 0 0 6px; font-size: 24px; }
+    .annotation-pane > p { margin: 0 0 20px; color: var(--text-secondary); font-size: 16px; }
     fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
-    .form-section { padding: 16px 0; border-top: 1px solid var(--border); }
+    .form-section { padding: 24px 0; border-top: 1px solid var(--border); }
     .form-section:first-child { border-top: 0; padding-top: 0; }
-    .form-section h3 { margin: 0 0 12px; font-size: 16px; }
-    .field { margin-bottom: 14px; }
+    .form-section h3 { margin: 0 0 12px; font-size: 20px; }
+    .field { margin-bottom: 24px; }
     .field > label, .field-label { display: block; margin-bottom: 6px; font-weight: 650; }
     .field select, .field input[type="text"], .field textarea { width: 100%; padding: 9px 11px; }
-    .field textarea { min-height: 94px; resize: vertical; line-height: 1.55; }
-    .helper { margin: 6px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.55; }
+    .field textarea { min-height: 94px; resize: vertical; line-height: 1.8; }
+    .helper { margin: 6px 0 0; color: var(--text-muted); font-size: 15px; line-height: 1.8; }
     .derived-result { padding: 12px; background: var(--field); border-left: 3px solid var(--cyan); color: var(--text-secondary); }
     .derived-result strong { color: var(--text); }
     .radio-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -579,23 +594,32 @@ _HTML_TEMPLATE = r'''<!doctype html>
     .radio-card:has(input:checked), .check-target:has(input:checked) { border-color: var(--lavender); background: var(--surface-raised); }
     .radio-card input, .check-target input { margin-top: 4px; accent-color: var(--lavender); }
     .radio-card span { display: block; }
-    .radio-card small { display: block; margin-top: 3px; color: var(--text-muted); line-height: 1.35; }
+    .radio-card small { display: block; margin-top: 6px; color: var(--text-muted); line-height: 1.65; font-size: 14px; }
     .confidence-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
     .confidence-grid .radio-card { align-items: center; justify-content: center; padding: 8px 4px; }
     .structure-empty { padding: 12px; color: var(--text-muted); background: var(--field); border-radius: 8px; }
     .structure-row { margin-bottom: 12px; padding: 12px; background: var(--field); border: 1px solid var(--border); border-radius: 10px; }
-    .structure-row h4 { margin: 0 0 10px; font-size: 14px; overflow-wrap: anywhere; }
+    .structure-row h4 { margin: 0 0 8px; font-size: 17px; overflow-wrap: anywhere; }
+    .evidence-excerpt { margin: 0 0 12px; color: var(--text-secondary); font-size: 17px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
     .support-targets { display: grid; gap: 6px; margin: 8px 0 12px; }
     .structure-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .structure-grid label { display: block; margin-bottom: 5px; color: var(--text-secondary); font-size: 12px; }
+    .structure-grid label { display: block; margin-bottom: 5px; color: var(--text-secondary); font-size: 15px; }
     .structure-grid select, .structure-grid input { width: 100%; padding: 8px; }
-    .case-errors { margin: 0 0 16px; padding: 12px 14px; background: rgba(255, 127, 173, .1); border: 1px solid rgba(255, 127, 173, .55); border-radius: 8px; }
+    .case-errors { margin: 0 0 16px; padding: 12px 14px; background: #fff0f2; border: 1px solid var(--danger); border-radius: 8px; }
     .case-errors[hidden] { display: none; }
     .case-errors strong { color: var(--danger); }
     .case-errors ul { margin: 7px 0 0; padding-left: 20px; }
     [aria-invalid="true"] { border-color: var(--danger) !important; }
-    .locked-banner { margin-bottom: 14px; padding: 12px; color: var(--success); background: rgba(141, 229, 184, .09); border: 1px solid rgba(141, 229, 184, .48); border-radius: 8px; }
+    .locked-banner { margin-bottom: 14px; padding: 12px; color: var(--success); background: #edf7f0; border: 1px solid var(--success); border-radius: 8px; }
     .locked-banner[hidden] { display: none; }
+    .case-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; padding-top: 24px; border-top: 1px solid var(--border); }
+    .role-help { padding: 16px 20px; margin-bottom: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+    .role-help dl { margin: 12px 0 0; }
+    .role-help dt { font-weight: 650; }
+    .role-help dd { margin: 0 0 12px; color: var(--text-secondary); font-size: 15px; }
+    .structure-section[hidden] { display: none; }
+    .declaration-details { padding: 16px; background: #f8f7fb; border: 1px solid var(--border); border-radius: 8px; }
+    .declaration-details .check-target { margin-top: 10px; }
 
     .status-region {
       position: fixed;
@@ -612,25 +636,34 @@ _HTML_TEMPLATE = r'''<!doctype html>
     }
     .status-region:empty { display: none; }
 
-    @media (max-width: 1180px) {
-      .workspace { grid-template-columns: 190px minmax(0, 1fr); }
-      .annotation-pane { grid-column: 2; }
+    @media (max-width: 1000px) {
+      .app-header { position: static; flex-wrap: wrap; }
+      .workspace { grid-template-columns: 150px minmax(0, 1fr); gap: 18px; }
+      .evidence-row { grid-template-columns: 30px minmax(0, 1fr); }
+      .role-select { grid-column: 2; width: min(100%, 230px); }
+      .case-rail { top: 18px; }
     }
     @media (max-width: 767px) {
       :root { --header-height: 0px; }
       .app-header { position: static; align-items: flex-start; flex-direction: column; }
       .toolbar { width: 100%; justify-content: flex-start; }
       .toolbar button { flex: 1 1 145px; }
+      .toolbar #download-locked { flex-basis: 100%; }
+      .file-tools > div { left: 0; right: auto; max-width: calc(100vw - 32px); }
       .privacy-strip { align-items: flex-start; flex-direction: column; }
       .privacy-strip .identity { text-align: left; }
-      .workspace { display: block; padding-inline: 12px; }
+      .workspace { display: block; padding: 16px 12px 48px; }
+      .quick-start { padding-inline: 16px; margin-top: 16px; }
+      .reading-steps { gap: 4px 24px; }
       .case-rail { position: static; margin-bottom: 14px; }
       .rail-heading, .case-list { display: none; }
       .case-mobile { display: block; }
       .annotation-pane { margin-top: 14px; }
       .evidence-row { grid-template-columns: 38px minmax(0, 1fr); gap: 8px; padding-right: 10px; }
       .role-select { grid-column: 2; width: min(100%, 180px); }
-      .line-copy { font-size: 16px; }
+      .line-copy { font-size: 18px; }
+      .case-intro, .annotation-pane { padding: 20px 18px; }
+      .document-header { padding: 16px 18px; }
       .context-grid { grid-template-columns: 1fr; }
       .context-item.wide { grid-column: auto; }
       .radio-grid { grid-template-columns: 1fr; }
@@ -649,40 +682,54 @@ _HTML_TEMPLATE = r'''<!doctype html>
   <a class="skip-link" href="#main-content">跳到当前案例</a>
   <header class="app-header">
     <div class="brand-block">
-      <h1>LoreGuard OOC 独立标注台</h1>
-      <p>逐行核对原文，再记录证据角色与人工判断。</p>
+      <h1>剧情阅读与判断</h1>
+      <p>一次只做一题。<span id="save-state">填写后自动保存进度。</span></p>
     </div>
     <div class="toolbar" aria-label="标注文件操作">
-      <button id="save-draft" type="button">保存本地草稿</button>
-      <button id="import-trigger" type="button">导入本人的锁定 JSON</button>
-      <input class="file-control" id="import-file" type="file" accept="application/json,.json" aria-label="选择本人的锁定标注 JSON">
-      <button class="quiet-danger" id="clear-draft" type="button">清除本地草稿</button>
-      <button class="lock-action" id="download-locked" type="button">校验并下载锁定 JSON</button>
-      <button id="unlock-editing" type="button" hidden>继续修订</button>
+      <button id="save-draft" type="button">保存进度</button>
+      <button class="lock-action" id="download-locked" type="button">完成任务并下载结果</button>
+      <button id="unlock-editing" type="button" hidden>修改这份结果</button>
+      <details class="file-tools">
+        <summary>文件与备份</summary>
+        <div>
+          <button id="import-trigger" type="button">导入我的结果文件</button>
+          <input class="file-control" id="import-file" type="file" accept="application/json,.json" aria-label="选择我的结果文件">
+          <button class="quiet-danger" id="clear-draft" type="button">清除本地进度</button>
+          <p>进度通常会自动保存在当前浏览器。导入的是你之前下载的结果文件；此页面不会自动上传。</p>
+        </div>
+      </details>
     </div>
   </header>
   <div class="privacy-strip">
-    <div><strong>独立盲标</strong>　此页面未载入模型预测、私有答案或同伴标注，也不会联网。</div>
-    <div class="identity" id="reviewer-summary"></div>
-    <div class="freeze-binding" id="freeze-summary"></div>
+    <div><strong>请独立完成</strong>　只根据题目判断；先不要和另一位标注者对答案，也不要让 AI 代做。</div>
+    <div class="identity">下载后把文件发回负责人。</div>
+    <details class="technical-details"><summary>文件信息（通常不用看）</summary><div id="reviewer-summary"></div><div class="freeze-binding" id="freeze-summary"></div></details>
   </div>
+  <section class="quick-start" aria-label="操作顺序">
+    <ol class="reading-steps">
+      <li><a href="#evidence-pane">看材料</a></li>
+      <li><a href="#role-help">标出原文依据</a></li>
+      <li><a href="#annotation-pane">作出判断并说明</a></li>
+    </ol>
+    <p class="helper">先通读这一题，再给有用的原文选用途。不相关的行留空；不用每行都选。遇到不确定的情况，可以如实记录。</p>
+  </section>
   <section class="error-summary" id="error-summary" role="alert" tabindex="-1" hidden>
-    <h2 id="error-summary-title">锁定前还需修正</h2>
+    <h2 id="error-summary-title">还有这些地方需要补充</h2>
     <ul id="error-summary-list"></ul>
   </section>
   <main class="workspace" id="main-content" tabindex="-1">
     <nav class="case-rail" aria-label="案例导航">
       <div class="rail-heading">
-        <h2>案例</h2>
+        <h2>题目进度</h2>
         <p id="progress-label"></p>
       </div>
       <div class="case-list" id="case-list"></div>
       <div class="case-mobile">
-        <label for="case-select">当前案例</label>
+        <label for="case-select">切换题目</label>
         <select id="case-select"></select>
       </div>
     </nav>
-    <article class="evidence-pane" id="evidence-pane" aria-label="冻结原文与证据角色"></article>
+    <article class="evidence-pane" id="evidence-pane" aria-label="阅读材料与选择原文依据"></article>
     <aside class="annotation-pane" id="annotation-pane" aria-label="人工标注表单"></aside>
   </main>
   <div class="status-region" id="status-region" aria-live="polite" aria-atomic="true"></div>
@@ -693,8 +740,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
 
     const DATA = JSON.parse(document.getElementById("annotation-data").textContent);
     const ROLE_OPTIONS = [
-      ["", "未标注"], ["B", "B · 稳定基线"], ["C", "C · 当前行为"],
-      ["G", "G · 已发生成长"], ["X", "X · 有效例外"], ["P", "P · 可能解释"]
+      ["", "不选／与判断无关"], ["B", "原设定（B）"], ["C", "新稿表现（C）"],
+      ["G", "成长经历（G）"], ["X", "当时的特殊状态（X）"], ["P", "可能的解释（P）"]
     ];
     const DIMENSIONS = [
       ["core_trait", "核心性格"], ["stable_preference", "长期偏好"],
@@ -702,10 +749,10 @@ _HTML_TEMPLATE = r'''<!doctype html>
       ["relationship_attitude", "关系态度"], ["motivation_goal", "长期动机／目标"]
     ];
     const LEVELS = {
-      L0: { outcome: "no_issue", surface: "none", label: "无问题" },
-      L1: { outcome: "indeterminate", surface: "review_clue", label: "轻度待复核" },
-      L2: { outcome: "indeterminate", surface: "review_clue", label: "明确待复核" },
-      L3: { outcome: "conflict", surface: "formal_issue", label: "正式冲突" }
+      L0: { outcome: "no_issue", surface: "none", label: "未发现冲突／变化有明确解释" },
+      L1: { outcome: "indeterminate", surface: "review_clue", label: "信息不够，暂时判断不了" },
+      L2: { outcome: "indeterminate", surface: "review_clue", label: "有疑点，还不能定为冲突" },
+      L3: { outcome: "conflict", surface: "formal_issue", label: "证据充分，存在冲突" }
     };
     const CASE_KEYS = [
       "case_id", "dimension", "outcome", "surface", "conflict_level",
@@ -733,7 +780,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
       errorList: document.getElementById("error-summary-list"),
       importFile: document.getElementById("import-file"),
       download: document.getElementById("download-locked"),
-      unlock: document.getElementById("unlock-editing")
+      unlock: document.getElementById("unlock-editing"),
+      saveState: document.getElementById("save-state")
     };
 
     function blankCase() {
@@ -873,19 +921,19 @@ _HTML_TEMPLATE = r'''<!doctype html>
         button.type = "button";
         button.dataset.index = String(index);
         button.setAttribute("aria-current", index === state.activeCase ? "true" : "false");
-        button.title = caseRow.case_id;
+        button.title = `第 ${index + 1} 题：${status}`;
         button.append(element("span", "case-number", String(index + 1).padStart(2, "0")));
-        button.append(element("span", "case-label", `案例 ${index + 1}`));
+        button.append(element("span", "case-label", `第 ${index + 1} 题`));
         button.append(element("span", "case-state", status));
         button.addEventListener("click", () => switchCase(index));
         ui.caseList.append(button);
 
-        const option = element("option", "", `案例 ${index + 1} · ${status}`);
+        const option = element("option", "", `第 ${index + 1} 题 · ${status}`);
         option.value = String(index);
         option.selected = index === state.activeCase;
         ui.caseSelect.append(option);
       });
-      ui.progress.textContent = `${complete} / ${DATA.cases.length} 个案例已填写主要字段`;
+      ui.progress.textContent = `${complete} / ${DATA.cases.length} 题已填主要字段（不代表已通过检查）`;
     }
 
     function switchCase(index, focusHeading = true) {
@@ -902,14 +950,15 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const caseState = state.cases[caseIndex];
       ui.evidence.textContent = "";
       const intro = element("header", "case-intro");
-      const heading = element("h2", "", `案例 ${caseIndex + 1} · 冻结原文`);
+      const heading = element("h2", "", `第 ${caseIndex + 1} 题，共 ${DATA.cases.length} 题`);
       heading.id = "case-heading";
       heading.tabIndex = -1;
       intro.append(heading);
-      intro.append(element("p", "data-id", `案例 ID：${caseRow.case_id}`));
-      intro.append(element("p", "data-id", `轴快照：${caseRow.axis.axis_id} · v${caseRow.axis.version}`));
+      const dimensionName = DIMENSIONS.find(([value]) => value === caseRow.dimension)?.[1] || caseRow.dimension;
+      const traitName = caseRow.author_axis?.display_name || dimensionName;
+      intro.append(element("p", "case-question", `只判断「${caseRow.candidate_selector.character_key}」的「${traitName}」，新稿有没有违背原设定？`));
       const context = element("section", "target-context");
-      context.append(element("h3", "", "本案例的作者冻结目标"));
+      context.append(element("h3", "", "这题要关注什么"));
       const contextGrid = element("dl", "context-grid");
       const addContext = (label, value, wide = false) => {
         const item = element("div", `context-item${wide ? " wide" : ""}`);
@@ -919,29 +968,57 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const selectorDocument = caseRow.documents.find(
         row => row.document_id === caseRow.candidate_selector.source_document_id
       );
-      addContext("目标角色", caseRow.candidate_selector.character_key);
-      addContext("锁定维度", `${caseRow.candidate_selector.trait_type} → ${caseRow.dimension}`);
+      addContext("指定人物", caseRow.candidate_selector.character_key);
+      addContext("只看这一项特点", traitName);
       addContext(
-        "基线 selector",
-        `${selectorDocument?.path || caseRow.candidate_selector.source_document_id} · 第 ${caseRow.candidate_selector.source_line_start}–${caseRow.candidate_selector.source_line_end} 行`
+        "对应原设定在哪里",
+        `下方材料 ${caseRow.documents.indexOf(selectorDocument) + 1}，第 ${caseRow.candidate_selector.source_line_start}–${caseRow.candidate_selector.source_line_end} 行（浅紫底）`, true
       );
       addContext(
-        "selector 属性",
-        `${caseRow.candidate_selector.origin} / ${caseRow.candidate_selector.polarity} / ${caseRow.candidate_selector.stability}`
+        "本题原设定（原文）",
+        (selectorDocument?.lines || []).filter(line =>
+          caseRow.candidate_selector.source_line_start <= line.line_number &&
+          line.line_number <= caseRow.candidate_selector.source_line_end
+        ).map(line => line.text).join("\n"), true
       );
       if (caseRow.author_axis) {
-        addContext("作者语义轴", caseRow.author_axis.display_name, true);
-        addContext("定义", caseRow.author_axis.definition, true);
-        addContext("正向命题", caseRow.author_axis.positive_proposition, true);
-        addContext("适用范围", caseRow.author_axis.applicability_scope, true);
-        addContext("轴向对齐", caseRow.author_axis.axis_alignment);
+        addContext("这个特点指什么", caseRow.author_axis.definition, true);
+        addContext("在哪些情况下适用", caseRow.author_axis.applicability_scope, true);
       } else {
-        addContext("作者语义轴", "未额外提供；按冻结 selector 的稳定特征判断。", true);
+        addContext("判断范围", "按上面指定位置的原设定判断，不扩大到人物的其他特点。", true);
       }
       context.append(contextGrid);
       intro.append(context);
-      intro.append(element("p", "shortcut-note", "证据角色下拉框中可直接按 B、C、G、X、P；Alt + ↑/↓ 切换案例，Ctrl + S 保存草稿。"));
+      const technical = element("details", "technical-details");
+      technical.append(element("summary", "", "题目信息（通常不用看）"));
+      technical.append(element("p", "data-id", `案例 ID：${caseRow.case_id}`));
+      technical.append(element("p", "data-id", `轴快照：${caseRow.axis.axis_id} · v${caseRow.axis.version} · ${caseRow.axis.sha256}`));
+      technical.append(element("p", "data-id", `目标属性：${caseRow.candidate_selector.trait_type} → ${caseRow.dimension}；${caseRow.candidate_selector.origin} / ${caseRow.candidate_selector.polarity} / ${caseRow.candidate_selector.stability}`));
+      if (caseRow.author_axis) {
+        technical.append(element("p", "", `比较时采用的说法（不一定是人物原设定）：${caseRow.author_axis.positive_proposition}`));
+        technical.append(element("p", "", "这只是比较坐标的一端，不是本题答案；人物实际原设定以上面的高亮原文为准。"));
+        technical.append(element("p", "data-id", `轴向对齐：${caseRow.author_axis.axis_alignment}`));
+      }
+      technical.append(element("p", "shortcut-note", "可用 Alt + ↑/↓ 切换题目、Ctrl + S 保存；下拉框保留 B、C、G、X、P 快捷键。"));
+      intro.append(technical);
+      intro.append(element("h3", "", "1 看材料"));
+      intro.append(element("p", "", "先看原设定和已有剧情，再看待审新稿。判断只针对本题，不要带入题外的故事。"));
       ui.evidence.append(intro);
+
+      const roleHelp = element("details", "role-help");
+      roleHelp.id = "role-help";
+      roleHelp.append(element("summary", "", "2 标出原文依据：每行旁边应该怎么选？"));
+      roleHelp.append(element("p", "", "只选支撑你判断的行。不相关的行留空；每行只能选一种用途。这些选择不是结论。"));
+      const roleDefinitions = element("dl");
+      [
+        ["原设定（B）", "指定人物原先稳定的特点。只能在本题标出的浅紫色原设定行选择。"],
+        ["新稿表现（C）", "待审新稿里，需要拿来与原设定比较的行为或说法。不是选了就代表有错。"],
+        ["成长经历（G）", "在新稿表现之前已经发生、能够解释变化的经历。只可选已有材料中的行，不能把未来计划当成已发生。"],
+        ["当时的特殊状态（X）", "在这次表现发生时确实生效的特殊情况，例如伪装或被控制；必须说明它解释哪次表现。"],
+        ["可能的解释（P）", "材料只暗示了一种解释，还不足以当成明确的成长或特殊状态。不要自行补写未提供的经历。"]
+      ].forEach(([label, help]) => roleDefinitions.append(element("dt", "", label), element("dd", "", help)));
+      roleHelp.append(roleDefinitions);
+      ui.evidence.append(roleHelp);
 
       caseRow.documents.forEach((documentRow, documentIndex) => {
         const section = element("section", "document-block");
@@ -949,14 +1026,17 @@ _HTML_TEMPLATE = r'''<!doctype html>
         section.dataset.selectorSource = String(documentRow.is_selector_source);
         section.setAttribute("aria-labelledby", `doc-${caseIndex}-${documentIndex}`);
         const header = element("header", "document-header");
-        const title = element("h3", "", documentRow.path);
+        const documentType = documentRow.is_target ? "待审新稿" : documentRow.document_role === "character_profile" ? "角色设定" : documentRow.document_role === "canon" ? "故事设定" : documentRow.publication_status === "published" ? "已发布历史" : "已有剧情";
+        const originalTitle = documentRow.lines.find(line => /^\s{0,3}#{1,6}\s+\S/.test(line.text));
+        const title = element("h3", "", `材料 ${documentIndex + 1}：${documentType}${originalTitle ? ` · ${originalTitle.text.replace(/^\s{0,3}#{1,6}\s+/, "")}` : ""}`);
         title.id = `doc-${caseIndex}-${documentIndex}`;
         header.append(title);
-        header.append(element("p", "data-id", `文档 ${documentIndex + 1} · 快照 v${documentRow.version} · ${documentRow.sha256}`));
-        header.append(element(
-          "p", "",
-          `${documentRow.phase === "target" ? "目标文档" : "基线文档"} · ${documentRow.document_role} · ${documentRow.story_scope} · ${documentRow.resolution_state}/${documentRow.publication_status} · 导入序 ${documentRow.import_order}`
-        ));
+        header.append(element("p", "", documentRow.is_target ? "这是这次要检查的新内容，可以拿它与已有材料对照。" : "这是新稿之前的参考依据；不要把它当成本次新稿表现。"));
+        const documentDetails = element("details", "technical-details");
+        documentDetails.append(element("summary", "", "文档信息（通常不用看）"));
+        documentDetails.append(element("p", "data-id", `${documentRow.path} · 快照 v${documentRow.version} · ${documentRow.sha256}`));
+        documentDetails.append(element("p", "data-id", `${documentRow.phase} · ${documentRow.document_role} · ${documentRow.story_scope} · ${documentRow.resolution_state}/${documentRow.publication_status} · 导入序 ${documentRow.import_order}`));
+        header.append(documentDetails);
         section.append(header);
         const lines = element("div", "document-lines");
         documentRow.lines.forEach(line => {
@@ -977,7 +1057,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
           const select = element("select", "role-select");
           select.id = `evidence-${caseIndex}-${line.evidence_id}`;
           select.disabled = state.locked;
-          select.setAttribute("aria-label", `${documentRow.path} 第 ${line.line_number} 行证据角色`);
+          select.setAttribute("aria-label", `材料 ${documentIndex + 1} 第 ${line.line_number} 行：选择这段原文的用途`);
           ROLE_OPTIONS.forEach(([value, label]) => {
             const option = element("option", "", label);
             option.value = value;
@@ -989,7 +1069,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
             const roleKey = event.key.toUpperCase();
             if (!["B", "C", "G", "X", "P"].includes(roleKey) || event.ctrlKey || event.altKey || event.metaKey) return;
             if (!roleAllowed(caseIndex, line.evidence_id, roleKey)) {
-              announce(`${roleKey} 不能用于这一行；B 仅限 selector，C 仅限目标文档，G 仅限基线文档。`);
+              announce("这一行不能选该用途：原设定只能选浅紫色指定行，新稿表现只能选待审新稿，成长经历只能选已有材料。");
               return;
             }
             event.preventDefault();
@@ -999,7 +1079,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
           select.addEventListener("change", () => {
             if (!roleAllowed(caseIndex, line.evidence_id, select.value)) {
               select.value = "";
-              announce("该证据角色不符合冻结来源约束，已拒绝。 ");
+              announce("这一行不能用作你选的用途，已取消该选择。可展开“每行旁边应该怎么选”查看范围。 ");
             }
             caseState.evidenceRoles[line.evidence_id] = select.value;
             row.dataset.role = select.value;
@@ -1064,10 +1144,14 @@ _HTML_TEMPLATE = r'''<!doctype html>
       if (!node) return;
       node.textContent = "";
       if (!LEVELS[level]) {
-        node.append("选择冲突等级后，页面会按标注协议生成结果与展示面。");
+        node.append("这里没有默认结论。请根据材料，自己选择上面四项中的一项。");
       } else {
-        node.append(element("strong", "", `${level} · ${LEVELS[level].label}`));
-        node.append(document.createTextNode(`　结果 ${LEVELS[level].outcome}；展示面 ${LEVELS[level].surface}`));
+        node.append(element("strong", "", `你选的是：${LEVELS[level].label}`));
+        node.append(element("p", "helper", level === "L3" ? "这项会作为正式冲突。提交前仍需满足下方的证据与独立事件要求。" : level === "L0" ? "这项不会作为问题或待复核线索。" : "这项只作为待复核线索，不算正式冲突。"));
+        const technical = element("details", "technical-details");
+        technical.append(element("summary", "", "对应记录值（不用填写）"));
+        technical.append(element("p", "data-id", `${level}；outcome=${LEVELS[level].outcome}；surface=${LEVELS[level].surface}`));
+        node.append(technical);
       }
     }
 
@@ -1078,21 +1162,24 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const caseState = state.cases[caseIndex];
       const currents = selectedByRole(caseIndex, ["C"]);
       const supports = selectedByRole(caseIndex, ["G", "X", "P"]);
+      document.getElementById("current-event-section").hidden = !currents.length;
+      document.getElementById("support-section").hidden = !supports.length;
       currentHost.textContent = "";
       supportHost.textContent = "";
 
       if (!currents.length) {
-        currentHost.append(element("p", "structure-empty", "把原文行标为 C 后，在这里记录事件组。"));
+        currentHost.append(element("p", "structure-empty", "选出新稿表现后，这里会请你区分它们属于哪一次事情。"));
       } else {
         currents.forEach((row, index) => {
           const wrapper = element("div", "structure-row");
-          wrapper.append(element("h4", "", `C${String(index + 1).padStart(2, "0")} · ${row.path} 第 ${row.lineNumber} 行`));
+          wrapper.append(element("h4", "", `新稿表现 ${index + 1}（第 ${row.lineNumber} 行）`));
+          wrapper.append(element("p", "evidence-excerpt", row.text));
           const input = document.createElement("input");
           input.type = "text";
           input.maxLength = 200;
           input.value = caseState.eventGroups[row.evidenceId] || "";
           const id = `event-group-${caseIndex}-${index}`;
-          wrapper.append(formField("事件组 ID", input, "同一事件的复述填写同一个 ID；独立事件填写不同 ID。", id));
+          wrapper.append(formField("这是哪一次事情？", input, "给事情起个简短名字，如“码头争执”。同一件事的几段描写填同名；真正不同的事情填不同名。名字由你决定，但同名或不同名会用于区分事件。", id));
           input.addEventListener("input", () => {
             caseState.eventGroups[row.evidenceId] = input.value;
             scheduleDraft();
@@ -1102,7 +1189,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       }
 
       if (!supports.length) {
-        supportHost.append(element("p", "structure-empty", "把原文行标为 G、X 或 P 后，在这里绑定它能解释的 C。"));
+        supportHost.append(element("p", "structure-empty", "选出成长经历、特殊状态或可能的解释后，这里会请你指明它解释哪次表现。"));
       } else {
         supports.forEach((support, supportIndex) => {
           const linkState = caseState.explanations[support.evidenceId] || {
@@ -1118,11 +1205,12 @@ _HTML_TEMPLATE = r'''<!doctype html>
           linkState.applicableCurrentIds = linkState.applicableCurrentIds.filter(id => currents.some(row => row.evidenceId === id));
 
           const wrapper = element("div", "structure-row");
-          wrapper.append(element("h4", "", `${support.role} · ${support.path} 第 ${support.lineNumber} 行`));
-          wrapper.append(element("p", "helper", support.role === "P" ? "P 可以不建立链接；一旦勾选 C，就会写入解释绑定。" : `${support.role} 必须至少绑定一个 C。`));
+          wrapper.append(element("h4", "", `${ROLE_OPTIONS.find(([value]) => value === support.role)[1]}（第 ${support.lineNumber} 行）`));
+          wrapper.append(element("p", "evidence-excerpt", support.text));
+          wrapper.append(element("p", "helper", support.role === "P" ? "勾选这段话可能解释的新稿表现；如果还无法对应，可以暂时不勾选。" : "请勾选这段话能够解释的至少一条新稿表现。不要把只能解释一件事的理由套到所有事情上。"));
           const targets = element("div", "support-targets");
           if (!currents.length) {
-            targets.append(element("p", "structure-empty", "尚未选择 C，无法建立解释绑定。"));
+            targets.append(element("p", "structure-empty", "请先回到原文，把要比较的行为选为“新稿表现”，再在这里勾选。"));
           } else {
             currents.forEach((current, currentIndex) => {
               const label = element("label", "check-target");
@@ -1135,7 +1223,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
                 linkState.applicableCurrentIds = [...selected];
                 scheduleDraft();
               });
-              label.append(checkbox, element("span", "", `C${String(currentIndex + 1).padStart(2, "0")} · ${current.path} 第 ${current.lineNumber} 行`));
+              label.append(checkbox, element("span", "", `新稿表现 ${currentIndex + 1}（第 ${current.lineNumber} 行）：${current.text}`));
               targets.append(label);
             });
           }
@@ -1143,10 +1231,10 @@ _HTML_TEMPLATE = r'''<!doctype html>
 
           const grid = element("div", "structure-grid");
           const causalWrap = element("div");
-          const causalLabel = element("label", "", "因果关系");
+          const causalLabel = element("label", "", "这段解释说得有多明确？");
           const causalOptions = support.role === "P"
-            ? [["explicit", "明确因果"], ["bounded", "有限解释"], ["ambiguous", "含糊／不确定"]]
-            : [["explicit", "明确因果"], ["bounded", "有限解释"]];
+            ? [["explicit", "材料明确说明原因"], ["bounded", "有明确依据，但只解释特定情况"], ["ambiguous", "仅有暗示，尚不确定"]]
+            : [["explicit", "材料明确说明原因"], ["bounded", "有明确依据，但只解释特定情况"]];
           const causal = makeSelect(causalOptions, linkState.causalRelation);
           causal.id = `causal-${caseIndex}-${supportIndex}`;
           causalLabel.htmlFor = causal.id;
@@ -1155,12 +1243,12 @@ _HTML_TEMPLATE = r'''<!doctype html>
           grid.append(causalWrap);
 
           const temporalWrap = element("div");
-          const temporalLabel = element("label", "", "时间关系");
+          const temporalLabel = element("label", "", "解释发生或生效在什么时候？");
           const temporalOptions = support.role === "G"
-            ? [["before", "发生在 C 之前"]]
+            ? [["before", "在所选新稿表现之前已发生"]]
             : support.role === "X"
-              ? [["active_during", "C 发生时有效"]]
-              : [["before", "发生在 C 之前"], ["active_during", "C 发生时有效"], ["after", "发生在 C 之后"], ["unknown", "时间不明"]];
+              ? [["active_during", "所选新稿表现发生时有效"]]
+              : [["before", "在所选表现之前"], ["active_during", "所选表现发生时有效"], ["after", "在所选表现之后"], ["unknown", "时间不明"]];
           const temporal = makeSelect(temporalOptions, linkState.temporalRelation);
           temporal.id = `temporal-${caseIndex}-${supportIndex}`;
           temporalLabel.htmlFor = temporal.id;
@@ -1177,9 +1265,9 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function renderAnnotation(caseIndex) {
       const caseState = state.cases[caseIndex];
       ui.annotation.textContent = "";
-      ui.annotation.append(element("h2", "", `案例 ${caseIndex + 1} · 人工判断`));
-      ui.annotation.append(element("p", "", "所有字段仅保存在本页和你的浏览器本地草稿中。"));
-      const locked = element("div", "locked-banner", "此工作副本已在本地锁定。继续修订会生成一份新的锁定文件，不会改变已下载的 JSON。");
+      ui.annotation.append(element("h2", "", "3 作出判断并说明"));
+      ui.annotation.append(element("p", "", "看完材料、选好依据后再填写。没有唯一措辞要求；判断不确定，也可以如实说明。"));
+      const locked = element("div", "locked-banner", "结果文件已下载，本页暂时不能改动。点击“修改这份结果”可继续编辑；已下载或已发出的文件不会改变。");
       locked.hidden = !state.locked;
       ui.annotation.append(locked);
       const errors = element("div", "case-errors");
@@ -1192,30 +1280,33 @@ _HTML_TEMPLATE = r'''<!doctype html>
       fields.disabled = state.locked;
 
       const judgement = element("section", "form-section");
-      const judgementTitle = element("h3", "", "语义轴与结论");
+      const judgementTitle = element("h3", "", "你认为属于哪种情况？");
       judgement.append(judgementTitle);
       const dimensionField = element("div", "field");
-      dimensionField.append(element("div", "field-label", "OOC 维度 · 已冻结"));
+      dimensionField.append(element("div", "field-label", "这题只判断"));
       const dimensionValue = element(
         "div", "derived-result",
-        `${DIMENSIONS.find(([value]) => value === DATA.cases[caseIndex].dimension)?.[1] || DATA.cases[caseIndex].dimension}（${DATA.cases[caseIndex].dimension}）`
+        `${DATA.cases[caseIndex].candidate_selector.character_key}的${DATA.cases[caseIndex].author_axis?.display_name || DIMENSIONS.find(([value]) => value === DATA.cases[caseIndex].dimension)?.[1] || DATA.cases[caseIndex].dimension}`
       );
       dimensionValue.id = `dimension-${caseIndex}`;
       dimensionValue.tabIndex = -1;
       dimensionField.append(
         dimensionValue,
-        element("p", "helper", "维度由作者冻结的 trait_type 映射，标注者不能改选。")
+        element("p", "helper", "判断范围已经指定，不需要另选人物特点。")
       );
       judgement.append(dimensionField);
 
-      const levelLabel = element("div", "field-label", "冲突等级 *");
+      const levelLabel = element("div", "field-label", "请选择一个结论（必填）");
+      levelLabel.id = `level-label-${caseIndex}`;
       const levels = radioGroup(`level-${caseIndex}`, [
-        ["L0", "L0", "无反向，或已有有效解释"],
-        ["L1", "L1", "主体、对象、情境或事实性不清"],
-        ["L2", "L2", "局部反向、单一事件或材料不足"],
-        ["L3", "L3", "两个独立事件构成正式冲突"]
+        ["L0", LEVELS.L0.label, "没有违背这项特点，或变化已有能覆盖对应表现的明确解释。（L0）"],
+        ["L1", LEVELS.L1.label, "例如还弄不清是谁做的、针对谁、什么情境，或这件事是否真的发生。（L1）"],
+        ["L2", LEVELS.L2.label, "已有局部反向表现，但只有一次事情、材料不足，或解释尚不能确定。（L2）"],
+        ["L3", LEVELS.L3.label, "原设定明确；至少两次独立事情中的反向表现，没有适用的成长、特殊状态或可能解释。（L3）"]
       ], caseState.conflictLevel);
       levels.id = `level-${caseIndex}`;
+      levels.setAttribute("role", "radiogroup");
+      levels.setAttribute("aria-labelledby", levelLabel.id);
       levels.addEventListener("change", event => {
         if (event.target instanceof HTMLInputElement) {
           caseState.conflictLevel = event.target.value;
@@ -1232,41 +1323,54 @@ _HTML_TEMPLATE = r'''<!doctype html>
       judgement.append(derived);
 
       const coverage = makeSelect([
-        ["complete", "完整"], ["partial", "部分缺失"], ["missing", "关键材料缺失"]
+        ["complete", "材料足够覆盖本题需要判断的内容"], ["partial", "有部分相关材料缺失"], ["missing", "缺了关键材料，无法充分判断"]
       ], caseState.materialCoverage);
       coverage.addEventListener("change", () => { caseState.materialCoverage = coverage.value; scheduleDraft(); });
-      judgement.append(formField("材料覆盖 *", coverage, "材料不完整时只能给 L1 或 L2，不能给正式冲突或无问题。", `coverage-${caseIndex}`));
+      judgement.append(formField("这题的材料够不够？（必填，请核对）", coverage, "有部分或关键材料缺失时，只能选“暂时判断不了”或“有疑点”，不能直接定为冲突或无问题。", `coverage-${caseIndex}`));
       fields.append(judgement);
 
       const structures = element("section", "form-section");
-      structures.append(element("h3", "", "C 事件组"));
+      structures.append(element("h3", "", "把所选原文对应清楚"));
+      structures.append(element("p", "helper", "下面只显示与你已经选出的原文有关的项目；不用在没有材料时编造经历或解释。"));
+      const currentSection = element("section", "structure-section");
+      currentSection.id = "current-event-section";
+      currentSection.append(element("h3", "", "这些表现是同一次事情，还是不同事情？"));
+      currentSection.append(element("p", "helper", "认定正式冲突时必须填写，并至少有两次独立事情；其他结论可按需要补充。"));
       const currentHost = element("div");
       currentHost.id = "current-event-groups";
-      structures.append(currentHost);
-      structures.append(element("h3", "", "G／X／P 到 C 的解释绑定"));
+      currentSection.append(currentHost);
+      structures.append(currentSection);
+      const supportSection = element("section", "structure-section");
+      supportSection.id = "support-section";
+      supportSection.append(element("h3", "", "这段解释说明了哪次表现？"));
       const supportHost = element("div");
       supportHost.id = "explanation-links";
-      structures.append(supportHost);
+      supportSection.append(supportHost);
+      structures.append(supportSection);
       fields.append(structures);
 
       const notes = element("section", "form-section");
-      notes.append(element("h3", "", "复核标签与说明"));
+      notes.append(element("h3", "", "记录你自己的判断依据"));
+      notes.append(element("p", "helper", "前两项写短语，方便负责人以后分类；最后一项用完整的话说明理由。都可以用普通中文，不需要写英文编码。"));
       const phenomena = document.createElement("textarea");
       phenomena.value = caseState.phenomena;
       phenomena.maxLength = 6500;
-      phenomena.addEventListener("input", () => { caseState.phenomena = phenomena.value; scheduleDraft(); });
-      notes.append(formField("现象标签 *", phenomena, "每行或逗号分隔；至少 1 个，最多 64 个，每个不超过 100 字符。", `phenomena-${caseIndex}`));
+      phenomena.addEventListener("input", () => { caseState.phenomena = phenomena.value; updateNavigation(); scheduleDraft(); });
+      notes.append(formField("你观察到了什么？（短标签，必填）", phenomena, "概括你在材料里看到的现象，至少写一项。多项可换行或用逗号分开；每项不超过 100 字，最多 64 项。", `phenomena-${caseIndex}`));
       const reasons = document.createElement("textarea");
       reasons.value = caseState.reasonCodes;
       reasons.maxLength = 6500;
-      reasons.addEventListener("input", () => { caseState.reasonCodes = reasons.value; scheduleDraft(); });
-      notes.append(formField("原因码 *", reasons, "使用中性、可复核的短语；每行或逗号分隔。", `reasons-${caseIndex}`));
+      reasons.addEventListener("input", () => { caseState.reasonCodes = reasons.value; updateNavigation(); scheduleDraft(); });
+      notes.append(formField("你据此判断的关键理由（短标签，必填）", reasons, "概括你为什么选这个结论，至少写一项。这里不是让你猜项目内部的代码；多项可换行或用逗号分开。", `reasons-${caseIndex}`));
 
-      const confidenceLabel = element("div", "field-label", "置信度 *");
+      const confidenceLabel = element("div", "field-label", "你对自己的判断有多确定？（必填）");
+      confidenceLabel.id = `confidence-label-${caseIndex}`;
       const confidence = radioGroup(`confidence-${caseIndex}`, [
         ["1", "1", ""], ["2", "2", ""], ["3", "3", ""], ["4", "4", ""], ["5", "5", ""]
       ], String(caseState.confidence || ""), "confidence-grid");
       confidence.id = `confidence-${caseIndex}`;
+      confidence.setAttribute("role", "radiogroup");
+      confidence.setAttribute("aria-labelledby", confidenceLabel.id);
       confidence.addEventListener("change", event => {
         if (event.target instanceof HTMLInputElement) {
           caseState.confidence = event.target.value;
@@ -1275,25 +1379,25 @@ _HTML_TEMPLATE = r'''<!doctype html>
         }
       });
       const confidenceField = element("div", "field");
-      confidenceField.append(confidenceLabel, confidence, element("p", "helper", "1 表示很不确定，5 表示证据与判断都很明确。"));
+      confidenceField.append(confidenceLabel, confidence, element("p", "helper", "1 很不确定；2 不太确定；3 一般；4 比较确定；5 很确定。这不是冲突严重程度。"));
       notes.append(confidenceField);
       const reviewNote = document.createElement("textarea");
       reviewNote.value = caseState.reviewNote;
       reviewNote.maxLength = 8000;
       reviewNote.addEventListener("input", () => { caseState.reviewNote = reviewNote.value; updateNavigation(); scheduleDraft(); });
-      notes.append(formField("人工说明 *", reviewNote, "说明主体、语义轴、对象、情境、事件独立性与解释覆盖；1–8000 字符。", `review-note-${caseIndex}`));
+      notes.append(formField("用自己的话说明判断（必填）", reviewNote, "指出原设定、新稿哪几行支持你的结论。若有成长或特殊状态，说清它解释哪次表现；若不确定，说清缺什么。不必把所有名词都写一遍。最多 8000 字。", `review-note-${caseIndex}`));
       fields.append(notes);
 
-      const declarations = element("section", "form-section");
+      const declarations = element("details", "form-section declaration-details");
       declarations.id = "declarations";
       declarations.tabIndex = -1;
-      declarations.append(element("h3", "", "锁定前人工声明"));
-      declarations.append(element("p", "helper", "四项都必须由标注者主动确认；页面不会替你默认勾选。"));
+      declarations.append(element("summary", "", "全部题目做完后：确认独立完成（提交时必填）"));
+      declarations.append(element("p", "helper", "下载最终结果之前，请你亲自勾选下列四项。现在没有做完，可以先不勾。"));
       [
         ["humanConfirmed", "我是本文件所列标注者本人，且由真人完成判断。"],
         ["peerBlindConfirmed", "标注期间我没有查看另一位标注者的答案。"],
         ["systemBlindConfirmed", "标注期间我没有查看系统／模型预测。"],
-        ["independenceConfirmed", "我独立完成了全部案例，并愿意以当前内容锁定提交。"]
+        ["independenceConfirmed", "我独立完成了全部题目，并确认这份结果作为本次提交。"]
       ].forEach(([key, copy]) => {
         const label = element("label", "check-target");
         const checkbox = document.createElement("input");
@@ -1308,6 +1412,28 @@ _HTML_TEMPLATE = r'''<!doctype html>
       });
       fields.append(declarations);
       ui.annotation.append(fields);
+      const actions = element("nav", "case-actions");
+      actions.setAttribute("aria-label", "本题操作");
+      const previous = element("button", "", "上一题");
+      previous.type = "button";
+      previous.id = "previous-case";
+      previous.disabled = caseIndex === 0;
+      previous.addEventListener("click", () => switchCase(caseIndex - 1));
+      const check = element("button", "", "检查本题填写情况");
+      check.type = "button";
+      check.id = "check-current-case";
+      check.addEventListener("click", () => {
+        const missing = validateCase(caseIndex);
+        showErrorSummary(missing);
+        announce(missing.length ? "请按提示补充本题；不会替你判断答案对错。" : "本题必填内容和格式检查通过，不代表你的判断就是标准答案。");
+      });
+      const next = element("button", "", "下一题");
+      next.type = "button";
+      next.id = "next-case";
+      next.disabled = caseIndex === DATA.cases.length - 1;
+      next.addEventListener("click", () => switchCase(caseIndex + 1));
+      actions.append(previous, check, next);
+      ui.annotation.append(actions);
       updateDerived(caseIndex);
       renderStructures(caseIndex);
     }
@@ -1320,6 +1446,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       document.getElementById("save-draft").disabled = state.locked;
       document.getElementById("import-trigger").disabled = state.locked;
       document.getElementById("clear-draft").disabled = state.locked;
+      if (state.locked) ui.saveState.textContent = "结果已生成，请把下载的文件发回负责人。";
     }
 
     function buildCase(caseIndex) {
@@ -1398,44 +1525,44 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const row = buildCase(caseIndex);
       const errors = [];
       const add = (field, message) => errors.push({ caseIndex, field, message });
-      if (row.dimension !== DATA.cases[caseIndex].dimension) add(`dimension-${caseIndex}`, "维度与作者冻结目标不一致。 ");
-      if (!LEVELS[row.conflict_level]) add(`level-${caseIndex}`, "请选择 L0–L3 冲突等级。 ");
-      if (!["complete", "partial", "missing"].includes(row.material_coverage)) add(`coverage-${caseIndex}`, "请选择材料覆盖状态。 ");
+      if (row.dimension !== DATA.cases[caseIndex].dimension) add(`dimension-${caseIndex}`, "判断的人物特点与本题指定范围不一致。 ");
+      if (!LEVELS[row.conflict_level]) add(`level-${caseIndex}`, "请在四种结论中选择一项。 ");
+      if (!["complete", "partial", "missing"].includes(row.material_coverage)) add(`coverage-${caseIndex}`, "请确认这题的材料够不够。 ");
       if (row.material_coverage !== "complete" && !["L1", "L2"].includes(row.conflict_level)) {
-        add(`coverage-${caseIndex}`, "材料不完整时只能选择 L1 或 L2。 ");
+        add(`coverage-${caseIndex}`, "材料有缺失时，请选“暂时判断不了”或“有疑点”，不要直接认定冲突或无问题。 ");
       }
       const roles = role => row.evidence.filter(item => item.role === role).map(item => item.evidence_id);
       const b = roles("B"), c = roles("C"), g = roles("G"), x = roles("X"), p = roles("P");
       row.evidence.forEach(item => {
         if (!roleAllowed(caseIndex, item.evidence_id, item.role)) {
-          add("evidence-pane", "证据来源不符合冻结约束：B 仅限 selector，C 仅限目标文档，G 仅限基线文档。 ");
+          add("evidence-pane", "原文用途不符合本题范围：原设定只能选浅紫色指定行，新稿表现只能选待审新稿，成长经历只能选已有材料。 ");
         }
       });
       if (row.conflict_level === "L3") {
-        if (!b.length || c.length < 2) add("evidence-pane", "L3 至少需要 1 条 B 和 2 条 C。 ");
-        if (g.length || x.length || p.length) add("evidence-pane", "L3 不得同时采用 G、X 或 P。 ");
+        if (!b.length || c.length < 2) add("evidence-pane", "认定正式冲突，至少要选出 1 行原设定和 2 行新稿表现，并确认这些表现与原设定相反。 ");
+        if (g.length || x.length || p.length) add("evidence-pane", "你同时选了成长、特殊状态或可能解释，不能直接认定正式冲突。请复核解释是否适用，不要为了通过检查删除有效依据。 ");
         const byEvidence = new Map();
         row.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => byEvidence.set(id, group.event_group_id)));
         const groups = new Set(c.map(id => byEvidence.get(id)));
-        if (groups.has(undefined) || groups.size < 2) add("current-event-groups", "L3 的每条 C 都要分组，并且至少属于两个不同事件组。 ");
+        if (groups.has(undefined) || groups.size < 2) add("current-event-groups", "认定正式冲突时，每条新稿表现都要注明属于哪件事，并且确实至少有两次独立事情。同一件事的复述不算两次。 ");
       }
-      if (["L1", "L2"].includes(row.conflict_level) && row.evidence.length === 0) add("evidence-pane", "L1／L2 至少需要一条证据。 ");
+      if (["L1", "L2"].includes(row.conflict_level) && row.evidence.length === 0) add("evidence-pane", "选择“暂时判断不了”或“有疑点”时，也请至少选一行支撑判断的原文。 ");
       const linked = new Set(row.explanation_links.map(link => link.support_evidence_id));
       [...g, ...x].forEach(id => {
         const link = row.explanation_links.find(item => item.support_evidence_id === id);
-        if (!linked.has(id) || !link || !link.applicable_current_ids.length) add("explanation-links", "每条 G 或 X 都必须至少绑定一个 C。 ");
+        if (!linked.has(id) || !link || !link.applicable_current_ids.length) add("explanation-links", "每段成长经历或特殊状态，都要勾选它能解释的至少一条新稿表现。 ");
       });
       row.explanation_links.forEach(link => {
-        if (!link.applicable_current_ids.length) add("explanation-links", "解释链接至少需要一个 C。 ");
+        if (!link.applicable_current_ids.length) add("explanation-links", "建立解释对应关系时，至少勾选一条新稿表现。 ");
         const supportRole = row.evidence.find(item => item.evidence_id === link.support_evidence_id)?.role;
         if ((supportRole === "G" || supportRole === "X") && link.causal_relation === "ambiguous") {
-          add("explanation-links", "含糊支持必须标为 P；G 或 X 只能选择明确因果或有限解释。 ");
+          add("explanation-links", "如果材料只有含糊暗示，请把该行改为“可能的解释”；成长和特殊状态需要明确依据。 ");
         }
       });
-      if (!row.phenomena.length || row.phenomena.length > 64 || row.phenomena.some(value => value.length > 100)) add(`phenomena-${caseIndex}`, "现象标签需为 1–64 个非空值，每个不超过 100 字符。 ");
-      if (!row.reason_codes.length || row.reason_codes.length > 64 || row.reason_codes.some(value => value.length > 100)) add(`reasons-${caseIndex}`, "原因码需为 1–64 个非空值，每个不超过 100 字符。 ");
-      if (!Number.isInteger(row.confidence) || row.confidence < 1 || row.confidence > 5) add(`confidence-${caseIndex}`, "请选择 1–5 的置信度。 ");
-      if (!row.review_note || row.review_note.length > 8000) add(`review-note-${caseIndex}`, "人工说明需为 1–8000 字符。 ");
+      if (!row.phenomena.length || row.phenomena.length > 64 || row.phenomena.some(value => value.length > 100)) add(`phenomena-${caseIndex}`, "请用短标签记录观察到的现象：至少 1 项，每项不超过 100 字，最多 64 项。 ");
+      if (!row.reason_codes.length || row.reason_codes.length > 64 || row.reason_codes.some(value => value.length > 100)) add(`reasons-${caseIndex}`, "请用短标签记录判断的关键理由：至少 1 项，每项不超过 100 字，最多 64 项。 ");
+      if (!Number.isInteger(row.confidence) || row.confidence < 1 || row.confidence > 5) add(`confidence-${caseIndex}`, "请在 1–5 中选择你对判断有多确定。 ");
+      if (!row.review_note || row.review_note.length > 8000) add(`review-note-${caseIndex}`, "请用自己的话说明判断，不能为空，最多 8000 字。 ");
       return errors;
     }
 
@@ -1446,7 +1573,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const local = errors.filter(error => error.caseIndex === state.activeCase);
       host.hidden = !local.length;
       if (local.length) {
-        host.append(element("strong", "", "本案例还需修正"));
+        host.append(element("strong", "", "本题还有这些地方需要补充"));
         const list = element("ul");
         local.forEach(error => list.append(element("li", "", error.message.trim())));
         host.append(list);
@@ -1457,11 +1584,19 @@ _HTML_TEMPLATE = r'''<!doctype html>
       ui.errorList.textContent = "";
       errors.forEach(error => {
         const item = element("li");
-        const button = element("button", "", `案例 ${error.caseIndex + 1}：${error.message.trim()}`);
+        const button = element("button", "", `第 ${error.caseIndex + 1} 题：${error.message.trim()}`);
         button.type = "button";
         button.addEventListener("click", () => {
           switchCase(error.caseIndex, false);
-          window.setTimeout(() => document.getElementById(error.field)?.focus(), 0);
+          window.setTimeout(() => {
+            const field = document.getElementById(error.field);
+            if (!field) return;
+            for (let parent = field; parent; parent = parent.parentElement) {
+              if (parent instanceof HTMLDetailsElement) parent.open = true;
+            }
+            field.tabIndex = field.tabIndex < 0 ? -1 : field.tabIndex;
+            field.focus();
+          }, 0);
         });
         item.append(button);
         ui.errorList.append(item);
@@ -1477,7 +1612,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       if (!declarations.humanConfirmed) errors.push({ caseIndex: state.activeCase, field: "declarations", message: "请主动确认由标注者本人以真人身份完成判断。 " });
       if (!declarations.peerBlindConfirmed) errors.push({ caseIndex: state.activeCase, field: "declarations", message: "请主动确认未查看同伴答案。 " });
       if (!declarations.systemBlindConfirmed) errors.push({ caseIndex: state.activeCase, field: "declarations", message: "请主动确认未查看系统／模型预测。 " });
-      if (!declarations.independenceConfirmed) errors.push({ caseIndex: state.activeCase, field: "declarations", message: "请主动确认独立完成并锁定当前提交。 " });
+      if (!declarations.independenceConfirmed) errors.push({ caseIndex: state.activeCase, field: "declarations", message: "请亲自确认独立完成全部题目，并确认这份结果作为本次提交。 " });
       return errors;
     }
 
@@ -1495,9 +1630,11 @@ _HTML_TEMPLATE = r'''<!doctype html>
           declarations: state.declarations,
           cases: state.cases
         }));
-        if (!silent) announce("本地草稿已保存。数据没有离开此浏览器。");
+        ui.saveState.textContent = "进度已保存在当前浏览器。";
+        if (!silent) announce("进度已保存。换浏览器或设备不会自动带过去；此页面没有上传答案。");
       } catch (_) {
-        if (!silent) announce("浏览器拒绝本地存储。请尽快下载锁定 JSON 以免丢失。 ");
+        ui.saveState.textContent = "浏览器未能保存进度，请先不要关闭页面。";
+        if (!silent) announce("浏览器拒绝保存进度，请先不要关闭页面。全部填完后可下载结果；若中途要离开，请联系负责人协助备份。 ");
       }
     }
 
@@ -1553,7 +1690,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
     }
 
     function validateImportedBundle(bundle) {
-      if (!exactKeys(bundle, BUNDLE_KEYS)) throw new Error("导入文件不是当前 ReviewerAnnotationBundle 结构。 ");
+      if (!exactKeys(bundle, BUNDLE_KEYS)) throw new Error("文件格式不对，请选择从这份页面下载的本人结果文件。 ");
       if (
         bundle.schema_version !== DATA.annotation_schema_version || bundle.dataset_id !== DATA.dataset_id ||
         bundle.public_input_sha256 !== DATA.public_input_sha256 || bundle.reviewer_kind !== "human" ||
@@ -1620,7 +1757,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       state.locked = true;
       try { localStorage.removeItem(draftKey); } catch (_) {}
       renderCase();
-      announce("锁定 JSON 已下载。本页现已锁定，已下载文件不会被后续修订改变。 ");
+      announce("结果文件已下载。请把文件发回负责人；当前为只读，后续修改不会改变已下载的文件。 ");
     }
 
     document.getElementById("reviewer-summary").textContent = `标注者：${DATA.reviewer_id}　手册：${DATA.manual_version}`;
@@ -1628,7 +1765,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
     document.getElementById("save-draft").addEventListener("click", () => saveDraft(false));
     document.getElementById("import-trigger").addEventListener("click", () => ui.importFile.click());
     document.getElementById("clear-draft").addEventListener("click", () => {
-      if (!window.confirm("清除这个标注者在本浏览器中的草稿？已下载的锁定 JSON 不受影响。")) return;
+      if (!window.confirm("清除这份文件在当前浏览器保存的全部进度？这会删掉未提交的填写内容；已下载的结果文件不受影响。")) return;
       try { localStorage.removeItem(draftKey); } catch (_) {}
       state.cases = DATA.cases.map(() => blankCase());
       state.declarations = blankDeclarations();
@@ -1636,14 +1773,15 @@ _HTML_TEMPLATE = r'''<!doctype html>
       showErrorSummary([]);
       updateNavigation();
       renderCase();
-      announce("本地草稿已清除。 ");
+      ui.saveState.textContent = "进度已清除，之后填写会重新保存。";
+      announce("当前浏览器的本地进度已清除。 ");
     });
     ui.download.addEventListener("click", downloadLocked);
     ui.unlock.addEventListener("click", () => {
       state.locked = false;
       renderCase();
       saveDraft(true);
-      announce("已进入修订状态。再次锁定会下载一份新文件。 ");
+      announce("现在可以修改了。再次完成任务会下载一份新结果；已下载或已发出的旧文件不会改变。 ");
     });
     ui.caseSelect.addEventListener("change", () => switchCase(Number(ui.caseSelect.value)));
     ui.importFile.addEventListener("change", async () => {
@@ -1659,7 +1797,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
         showErrorSummary([]);
         updateNavigation();
         renderCase();
-        announce("已导入并锁定本标注者的有效 JSON。 ");
+        announce("已打开你的结果文件，当前为只读。需要改动时，点击“修改这份结果”。 ");
       } catch (error) {
         announce(error instanceof Error ? error.message : "导入文件无效。 ");
       }
@@ -1678,11 +1816,15 @@ _HTML_TEMPLATE = r'''<!doctype html>
         switchCase(Math.max(0, state.activeCase - 1));
       }
     });
+    window.addEventListener("pagehide", () => saveDraft(true));
 
     const restored = loadDraft();
     updateNavigation();
     renderCase();
-    if (restored) announce("已恢复此标注者在本浏览器中的本地草稿。 ");
+    if (restored) {
+      ui.saveState.textContent = "已恢复当前浏览器保存的进度。";
+      announce("已恢复你在当前浏览器保存的进度，可以接着填写。 ");
+    }
   })();
   </script>
 </body>
