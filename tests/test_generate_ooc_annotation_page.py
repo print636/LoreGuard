@@ -368,6 +368,84 @@ def test_reading_first_layout_keeps_payload_and_protocol_unchanged(tmp_path):
         assert label in javascript
 
 
+def test_choice_form_is_neutral_shared_and_does_not_require_typed_answers(tmp_path):
+    public, _, root, setup, _, freeze, _ = _fixture(tmp_path)
+    html = page.render_annotation_page(page.build_page_data(
+        public, root, setup, freeze,
+        reviewer_id="reviewer-a", manual_version="ooc-manual-v2-choice",
+    ))
+    javascript = _inline_javascript(html)
+    assert "const PHENOMENA_OPTIONS = [" in javascript
+    assert "const REASON_OPTIONS = [" in javascript
+    assert javascript.count('"暂无法概括／没有合适选项"') == 2
+    assert "补充说明（选填）" in javascript
+    assert "正常完成一题不需要打字" in javascript
+    assert "不是 AI 给答案" in javascript
+    assert 'const phenomena = document.createElement("textarea")' not in javascript
+    assert 'const reasons = document.createElement("textarea")' not in javascript
+    assert 'const input = makeSelect(options, oldValue)' in javascript
+    assert '[["", "请选择属于哪件事"]]' in javascript
+    assert 'input.checked = selected.includes(value)' in javascript
+    assert "每题选项都相同，没有预选，也不是参考答案" in javascript
+    # Conclusions update the human's selected conclusion only; they cannot
+    # choose an observation/reason on behalf of the reviewer.
+    level_change = javascript.split('levels.addEventListener("change", event => {', 1)[1].split("});", 1)[0]
+    assert "phenomena" not in level_change
+    assert "reasonCodes" not in level_change
+    assert 'review_note: reviewNoteFor(caseState)' in javascript
+    assert 'caseState.reviewNote.trim()' not in javascript.split("function caseIsApparentlyComplete", 1)[1].split("function updateNavigation", 1)[0]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is unavailable")
+def test_choice_record_roundtrips_without_repeating_generated_prefix(tmp_path):
+    public, _, root, setup, _, freeze, _ = _fixture(tmp_path)
+    javascript = _inline_javascript(page.render_annotation_page(page.build_page_data(
+        public, root, setup, freeze,
+        reviewer_id="reviewer-a", manual_version="ooc-manual-v2-choice",
+    )))
+    # The presentation's note is a transparent mechanical record, not a new
+    # model-generated or independently authored rationale. No browser required.
+    helpers = javascript.split("    function parseTags(value) {", 1)[1].split("    function evidenceMeta", 1)[0]
+    script = "function parseTags(value) {" + helpers + r'''
+const assert = require("node:assert/strict");
+const state = {phenomena: "暂无法概括／没有合适选项", reasonCodes: "主体、情境或关键资料不清楚", reviewNote: ""};
+const note = reviewNoteFor(state);
+assert.ok(note.startsWith("按你的选择整理（不是 AI 给答案）。\n观察："));
+const prefix = choiceNotePrefix(parseTags(state.phenomena), parseTags(state.reasonCodes));
+const restored = {...state, reviewNote: note.slice(prefix.length)};
+assert.equal(reviewNoteFor(restored), note);
+assert.equal(restored.reviewNote, "");
+const extra = {...state, reviewNote: "我的补充说明。"};
+const extraNote = reviewNoteFor(extra);
+assert.equal(reviewNoteFor({...extra, reviewNote: extraNote.slice(prefix.length)}), extraNote);
+assert.equal(reviewNoteFor({...state, reviewNote: "原人工自由说明。", reviewNoteFormat: "legacy"}), "原人工自由说明。");
+console.log("choice-note-roundtrip-ok");
+'''
+    result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "choice-note-roundtrip-ok"
+
+
+def test_previous_round_import_requires_matching_snapshot_and_explicit_action(tmp_path):
+    public, _, root, setup, _, freeze, _ = _fixture(tmp_path)
+    javascript = _inline_javascript(page.render_annotation_page(page.build_page_data(
+        public, root, setup, freeze,
+        reviewer_id="reviewer-a", manual_version="ooc-manual-v2-choice",
+    )))
+    migration = javascript.split("function previousRoundDraft()", 1)[1].split("function stateFromLockedCase", 1)[0]
+    assert "previous.reviewer_id !== DATA.reviewer_id" in migration
+    assert "draft.author_setup_sha256 !== previous.author_setup_sha256" in migration
+    assert "draft.execution_freeze_sha256 !== previous.execution_freeze_sha256" in migration
+    assert "draft.manual_version !== previous.manual_version" in migration
+    assert "draft.cases.length !== previous.source_case_ids.length" in migration
+    assert "deepEqual(mapping.case_snapshot, snapshot)" in migration
+    assert "previous.source_case_ids[mapping.source_case_number - 1] !== caseRow.case_id" in migration
+    assert "window.confirm(" in migration
+    assert "state.declarations = blankDeclarations()" in migration
+    assert "localStorage.removeItem" not in migration
+    assert "state.locked =" not in migration
+
+
 def test_generator_writes_once_and_cli_reports_created(tmp_path, capsys):
     _, public_file, root, _, setup_file, _, freeze_file = _fixture(tmp_path)
     output = tmp_path / "reviewer-a.html"
@@ -532,12 +610,12 @@ const { pathToFileURL } = require("url");
   await roles.nth(2).selectOption("C");
   await roles.nth(3).selectOption("C");
   await page.locator('input[name="level-0"][value="L3"]').check();
-  await page.locator("#event-group-0-0").fill("event-1");
-  await page.locator("#event-group-0-1").fill("event-2");
-  await page.locator("#phenomena-0").fill("core_trait_reversal");
-  await page.locator("#reasons-0").fill("two_independent_events");
+  await page.locator("#event-group-0-0").selectOption("event-1");
+  await page.locator("#event-group-0-1").selectOption("event-2");
+  await page.locator('#phenomena-0 input[value="出现与原设定相反的表现"]').check();
+  await page.locator('#reasons-0 input[value="至少两次独立事情中的反向表现"]').check();
   await page.locator('input[name="confidence-0"][value="5"]').check();
-  await page.locator("#review-note-0").fill("两次独立行为均与冻结语义轴相反。");
+  if (await page.locator("#review-note-0").inputValue() !== "") throw new Error("optional note must start empty");
   const blocked = page.waitForEvent("download", { timeout: 600 }).then(() => false).catch(() => true);
   await page.locator("#download-locked").click();
   if (!await blocked) throw new Error("download was not blocked");

@@ -577,6 +577,14 @@ _HTML_TEMPLATE = r'''<!doctype html>
     .field > label, .field-label { display: block; margin-bottom: 6px; font-weight: 650; }
     .field select, .field input[type="text"], .field textarea { width: 100%; padding: 9px 11px; }
     .field textarea { min-height: 94px; resize: vertical; line-height: 1.8; }
+    .choice-field { min-width: 0; padding: 0; margin: 0 0 24px; border: 0; }
+    .choice-field legend { margin-bottom: 8px; font-weight: 650; }
+    .choice-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .choice-options .check-target { margin: 0; min-height: 44px; align-items: flex-start; }
+    .choice-options .check-target span { min-width: 0; overflow-wrap: anywhere; }
+    .previous-round { margin: 16px auto; max-width: 1160px; padding: 16px 20px; border: 1px solid var(--border-strong); background: var(--surface); border-radius: 8px; }
+    .previous-round[hidden] { display: none; }
+    .previous-round p { margin: 0 0 10px; }
     .helper { margin: 6px 0 0; color: var(--text-muted); font-size: 15px; line-height: 1.8; }
     .derived-result { padding: 12px; background: var(--field); border-left: 3px solid var(--cyan); color: var(--text-secondary); }
     .derived-result strong { color: var(--text); }
@@ -667,6 +675,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       .context-grid { grid-template-columns: 1fr; }
       .context-item.wide { grid-column: auto; }
       .radio-grid { grid-template-columns: 1fr; }
+      .choice-options { grid-template-columns: 1fr; }
       .status-region { bottom: 10px; right: 10px; }
     }
     @media (max-width: 420px) {
@@ -709,9 +718,13 @@ _HTML_TEMPLATE = r'''<!doctype html>
     <ol class="reading-steps">
       <li><a href="#evidence-pane">看材料</a></li>
       <li><a href="#role-help">标出原文依据</a></li>
-      <li><a href="#annotation-pane">作出判断并说明</a></li>
+      <li><a href="#annotation-pane">选择判断与理由</a></li>
     </ol>
     <p class="helper">先通读这一题，再给有用的原文选用途。不相关的行留空；不用每行都选。遇到不确定的情况，可以如实记录。</p>
+  </section>
+  <section class="previous-round" id="previous-round" aria-label="继续旧版进度" hidden>
+    <p id="previous-round-message"></p>
+    <button id="restore-previous-round" type="button" hidden>导入旧版进度，继续保留的题目</button>
   </section>
   <section class="error-summary" id="error-summary" role="alert" tabindex="-1" hidden>
     <h2 id="error-summary-title">还有这些地方需要补充</h2>
@@ -754,6 +767,19 @@ _HTML_TEMPLATE = r'''<!doctype html>
       L2: { outcome: "indeterminate", surface: "review_clue", label: "有疑点，还不能定为冲突" },
       L3: { outcome: "conflict", surface: "formal_issue", label: "证据充分，存在冲突" }
     };
+    // These options are identical for every case. They are not answers and are
+    // never selected from a case, level, model prediction, or another reviewer.
+    const PHENOMENA_OPTIONS = [
+      "没有看到反向表现", "出现与原设定相反的表现", "材料说明了变化的原因",
+      "只有可能解释或暗示", "行为归属或是否发生不清楚", "关键资料不足",
+      "材料不属于本题比较范围", "暂无法概括／没有合适选项"
+    ];
+    const REASON_OPTIONS = [
+      "表现与原设定一致", "只有一次反向表现", "至少两次独立事情中的反向表现",
+      "同一件事被多处描写", "明确原因能解释全部相关表现",
+      "原因只解释部分表现或时间不对应", "只有可能解释而不能确定",
+      "主体、情境或关键资料不清楚", "不属于本题要比较的内容", "暂无法概括／没有合适选项"
+    ];
     const CASE_KEYS = [
       "case_id", "dimension", "outcome", "surface", "conflict_level",
       "material_coverage", "evidence", "independent_event_groups",
@@ -850,6 +876,19 @@ _HTML_TEMPLATE = r'''<!doctype html>
       });
     }
 
+    function choiceNotePrefix(phenomena, reasons) {
+      return "按你的选择整理（不是 AI 给答案）。\n观察：" + JSON.stringify(phenomena) +
+        "\n理由：" + JSON.stringify(reasons) + "\n补充说明：";
+    }
+
+    function reviewNoteFor(caseState) {
+      // A pre-choice locked file can still be reopened without rewriting its
+      // original words. A human edit explicitly switches to the choice format.
+      if (caseState.reviewNoteFormat === "legacy") return caseState.reviewNote.trim();
+      return choiceNotePrefix(parseTags(caseState.phenomena), parseTags(caseState.reasonCodes)) +
+        caseState.reviewNote.trim();
+    }
+
     function evidenceMeta(caseIndex) {
       const result = new Map();
       const row = DATA.cases[caseIndex];
@@ -897,7 +936,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function caseIsStarted(caseState) {
       return Boolean(
         caseState.conflictLevel || caseState.confidence ||
-        caseState.reviewNote.trim() || Object.values(caseState.evidenceRoles).some(Boolean)
+        caseState.reviewNote.trim() || parseTags(caseState.phenomena).length ||
+        parseTags(caseState.reasonCodes).length || Object.values(caseState.evidenceRoles).some(Boolean)
       );
     }
 
@@ -905,7 +945,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       return Boolean(
         caseState.conflictLevel && caseState.materialCoverage &&
         caseState.confidence && parseTags(caseState.phenomena).length &&
-        parseTags(caseState.reasonCodes).length && caseState.reviewNote.trim()
+        parseTags(caseState.reasonCodes).length
       );
     }
 
@@ -1138,6 +1178,41 @@ _HTML_TEMPLATE = r'''<!doctype html>
       return group;
     }
 
+    function choiceField(caseIndex, key, labelText, options, id) {
+      const caseState = state.cases[caseIndex];
+      const field = element("fieldset", "choice-field");
+      field.id = id;
+      field.append(element("legend", "", labelText));
+      const helper = element("p", "helper", "可多选，至少选一项。没有合适选项时可如实选择最后一项，不用另写文字。");
+      helper.id = `${id}-help`;
+      field.setAttribute("aria-describedby", helper.id);
+      field.append(helper);
+      const group = element("div", "choice-options");
+      const selected = parseTags(caseState[key]);
+      const custom = selected.filter(value => !options.includes(value));
+      [...options, ...custom].forEach((value, index) => {
+        const label = element("label", "check-target");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.name = id;
+        input.id = `${id}-option-${index}`;
+        input.value = value;
+        input.checked = selected.includes(value);
+        input.addEventListener("change", () => {
+          const chosen = new Set(parseTags(caseState[key]));
+          input.checked ? chosen.add(value) : chosen.delete(value);
+          caseState[key] = [...chosen].join("\n");
+          caseState.reviewNoteFormat = "choice";
+          updateNavigation();
+          scheduleDraft();
+        });
+        label.append(input, element("span", "", custom.includes(value) ? `你在旧版填写的内容：${value}` : value));
+        group.append(label);
+      });
+      field.append(group);
+      return field;
+    }
+
     function updateDerived(caseIndex) {
       const level = state.cases[caseIndex].conflictLevel;
       const node = document.getElementById("derived-result");
@@ -1174,13 +1249,20 @@ _HTML_TEMPLATE = r'''<!doctype html>
           const wrapper = element("div", "structure-row");
           wrapper.append(element("h4", "", `新稿表现 ${index + 1}（第 ${row.lineNumber} 行）`));
           wrapper.append(element("p", "evidence-excerpt", row.text));
-          const input = document.createElement("input");
-          input.type = "text";
-          input.maxLength = 200;
-          input.value = caseState.eventGroups[row.evidenceId] || "";
+          const oldValue = caseState.eventGroups[row.evidenceId] || "";
+          const options = [["", "请选择属于哪件事"]];
+          for (let eventIndex = 1; eventIndex <= currents.length; eventIndex += 1) {
+            options.push([`event-${eventIndex}`, `第 ${eventIndex} 件事`]);
+          }
+          Object.values(caseState.eventGroups).forEach(value => {
+            if (typeof value === "string" && value && !options.some(([id]) => id === value)) {
+              options.push([value, `你在旧版命名的事情：${value}`]);
+            }
+          });
+          const input = makeSelect(options, oldValue);
           const id = `event-group-${caseIndex}-${index}`;
-          wrapper.append(formField("这是哪一次事情？", input, "给事情起个简短名字，如“码头争执”。同一件事的几段描写填同名；真正不同的事情填不同名。名字由你决定，但同名或不同名会用于区分事件。", id));
-          input.addEventListener("input", () => {
+          wrapper.append(formField("这是哪一次事情？", input, "同一件事的几段描写选同一个编号；不同的事情选不同编号。编号只是方便区分，不代表文中的章节或行号。", id));
+          input.addEventListener("change", () => {
             caseState.eventGroups[row.evidenceId] = input.value;
             scheduleDraft();
           });
@@ -1265,8 +1347,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function renderAnnotation(caseIndex) {
       const caseState = state.cases[caseIndex];
       ui.annotation.textContent = "";
-      ui.annotation.append(element("h2", "", "3 作出判断并说明"));
-      ui.annotation.append(element("p", "", "看完材料、选好依据后再填写。没有唯一措辞要求；判断不确定，也可以如实说明。"));
+      ui.annotation.append(element("h2", "", "3 选择判断与理由"));
+      ui.annotation.append(element("p", "", "看完材料、选好依据后再选择。正常完成一题不需要打字；不确定时可以如实选择。"));
       const locked = element("div", "locked-banner", "结果文件已下载，本页暂时不能改动。点击“修改这份结果”可继续编辑；已下载或已发出的文件不会改变。");
       locked.hidden = !state.locked;
       ui.annotation.append(locked);
@@ -1350,18 +1432,10 @@ _HTML_TEMPLATE = r'''<!doctype html>
       fields.append(structures);
 
       const notes = element("section", "form-section");
-      notes.append(element("h3", "", "记录你自己的判断依据"));
-      notes.append(element("p", "helper", "前两项写短语，方便负责人以后分类；最后一项用完整的话说明理由。都可以用普通中文，不需要写英文编码。"));
-      const phenomena = document.createElement("textarea");
-      phenomena.value = caseState.phenomena;
-      phenomena.maxLength = 6500;
-      phenomena.addEventListener("input", () => { caseState.phenomena = phenomena.value; updateNavigation(); scheduleDraft(); });
-      notes.append(formField("你观察到了什么？（短标签，必填）", phenomena, "概括你在材料里看到的现象，至少写一项。多项可换行或用逗号分开；每项不超过 100 字，最多 64 项。", `phenomena-${caseIndex}`));
-      const reasons = document.createElement("textarea");
-      reasons.value = caseState.reasonCodes;
-      reasons.maxLength = 6500;
-      reasons.addEventListener("input", () => { caseState.reasonCodes = reasons.value; updateNavigation(); scheduleDraft(); });
-      notes.append(formField("你据此判断的关键理由（短标签，必填）", reasons, "概括你为什么选这个结论，至少写一项。这里不是让你猜项目内部的代码；多项可换行或用逗号分开。", `reasons-${caseIndex}`));
+      notes.append(element("h3", "", "勾选你自己的观察与理由"));
+      notes.append(element("p", "helper", "每题选项都相同，没有预选，也不是参考答案。结果会按你的选择整理，不是 AI 给答案；补充说明可以不写。"));
+      notes.append(choiceField(caseIndex, "phenomena", "你观察到了什么？（可多选）", PHENOMENA_OPTIONS, `phenomena-${caseIndex}`));
+      notes.append(choiceField(caseIndex, "reasonCodes", "你的关键理由是什么？（可多选）", REASON_OPTIONS, `reasons-${caseIndex}`));
 
       const confidenceLabel = element("div", "field-label", "你对自己的判断有多确定？（必填）");
       confidenceLabel.id = `confidence-label-${caseIndex}`;
@@ -1383,9 +1457,9 @@ _HTML_TEMPLATE = r'''<!doctype html>
       notes.append(confidenceField);
       const reviewNote = document.createElement("textarea");
       reviewNote.value = caseState.reviewNote;
-      reviewNote.maxLength = 8000;
-      reviewNote.addEventListener("input", () => { caseState.reviewNote = reviewNote.value; updateNavigation(); scheduleDraft(); });
-      notes.append(formField("用自己的话说明判断（必填）", reviewNote, "指出原设定、新稿哪几行支持你的结论。若有成长或特殊状态，说清它解释哪次表现；若不确定，说清缺什么。不必把所有名词都写一遍。最多 8000 字。", `review-note-${caseIndex}`));
+      reviewNote.maxLength = 6000;
+      reviewNote.addEventListener("input", () => { caseState.reviewNote = reviewNote.value; caseState.reviewNoteFormat = "choice"; updateNavigation(); scheduleDraft(); });
+      notes.append(formField("补充说明（选填）", reviewNote, "选项已经表达清楚就留空。想补充具体情况时再写，最多 6000 字。", `review-note-${caseIndex}`));
       fields.append(notes);
 
       const declarations = element("details", "form-section declaration-details");
@@ -1502,7 +1576,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
         phenomena: parseTags(caseState.phenomena),
         reason_codes: parseTags(caseState.reasonCodes),
         confidence: Number(caseState.confidence),
-        review_note: caseState.reviewNote.trim()
+        review_note: reviewNoteFor(caseState)
       };
     }
 
@@ -1559,10 +1633,10 @@ _HTML_TEMPLATE = r'''<!doctype html>
           add("explanation-links", "如果材料只有含糊暗示，请把该行改为“可能的解释”；成长和特殊状态需要明确依据。 ");
         }
       });
-      if (!row.phenomena.length || row.phenomena.length > 64 || row.phenomena.some(value => value.length > 100)) add(`phenomena-${caseIndex}`, "请用短标签记录观察到的现象：至少 1 项，每项不超过 100 字，最多 64 项。 ");
-      if (!row.reason_codes.length || row.reason_codes.length > 64 || row.reason_codes.some(value => value.length > 100)) add(`reasons-${caseIndex}`, "请用短标签记录判断的关键理由：至少 1 项，每项不超过 100 字，最多 64 项。 ");
+      if (!row.phenomena.length || row.phenomena.length > 64 || row.phenomena.some(value => value.length > 100)) add(`phenomena-${caseIndex}`, "请至少勾选一项你观察到的情况。旧版保留的内容每项最多 100 字，总共最多 64 项。 ");
+      if (!row.reason_codes.length || row.reason_codes.length > 64 || row.reason_codes.some(value => value.length > 100)) add(`reasons-${caseIndex}`, "请至少勾选一项关键理由。旧版保留的内容每项最多 100 字，总共最多 64 项。 ");
       if (!Number.isInteger(row.confidence) || row.confidence < 1 || row.confidence > 5) add(`confidence-${caseIndex}`, "请在 1–5 中选择你对判断有多确定。 ");
-      if (!row.review_note || row.review_note.length > 8000) add(`review-note-${caseIndex}`, "请用自己的话说明判断，不能为空，最多 8000 字。 ");
+      if (!row.review_note || row.review_note.length > 8000) add(`review-note-${caseIndex}`, "整理后的记录超过 8000 字，请缩短补充说明或旧版标签。 ");
       return errors;
     }
 
@@ -1656,13 +1730,116 @@ _HTML_TEMPLATE = r'''<!doctype html>
           draft.reviewer_id !== DATA.reviewer_id || draft.manual_version !== DATA.manual_version ||
           !Array.isArray(draft.cases) || draft.cases.length !== DATA.cases.length
         ) return false;
-        state.declarations = { ...blankDeclarations(), ...(draft.declarations || {}) };
-        state.cases = draft.cases.map(row => ({ ...blankCase(), ...row, evidenceRoles: { ...(row.evidenceRoles || {}) }, eventGroups: { ...(row.eventGroups || {}) }, explanations: { ...(row.explanations || {}) } }));
+        const nextCases = draft.cases.map((row, index) => checkedCaseState(index, row));
+        const nextDeclarations = blankDeclarations();
+        for (const key of Object.keys(nextDeclarations)) nextDeclarations[key] = draft.declarations?.[key] === true;
+        state.declarations = nextDeclarations;
+        state.cases = nextCases;
         state.activeCase = Number.isInteger(draft.active_case) && draft.active_case >= 0 && draft.active_case < DATA.cases.length ? draft.active_case : 0;
         return true;
       } catch (_) {
         return false;
       }
+    }
+
+    function checkedCaseState(caseIndex, row) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("进度中的题目格式不完整。");
+      const next = blankCase();
+      for (const key of ["conflictLevel", "materialCoverage", "phenomena", "reasonCodes", "confidence", "reviewNote"]) {
+        if (typeof row[key] !== "string") throw new Error("进度中的填写内容格式不正确。");
+        next[key] = row[key];
+      }
+      if (row.reviewNoteFormat === "legacy") next.reviewNoteFormat = "legacy";
+      const known = evidenceMeta(caseIndex);
+      for (const key of ["evidenceRoles", "eventGroups", "explanations"]) {
+        if (!row[key] || typeof row[key] !== "object" || Array.isArray(row[key])) throw new Error("进度中的原文对应关系格式不正确。");
+        if (Object.keys(row[key]).some(id => !known.has(id))) throw new Error("进度中有不属于当前题目的原文。");
+      }
+      if (Object.entries(row.evidenceRoles).some(([id, role]) =>
+        typeof role !== "string" || !["", "B", "C", "G", "X", "P"].includes(role) || !roleAllowed(caseIndex, id, role)
+      )) throw new Error("进度中有不符合本题材料范围的原文用途。");
+      if (Object.values(row.eventGroups).some(value => typeof value !== "string" || value.length > 200)) throw new Error("进度中的事情编号不正确。");
+      for (const link of Object.values(row.explanations)) {
+        if (!link || typeof link !== "object" || !Array.isArray(link.applicableCurrentIds) ||
+          link.applicableCurrentIds.some(id => !known.has(id)) ||
+          !["explicit", "bounded", "ambiguous"].includes(link.causalRelation) ||
+          !["before", "active_during", "after", "unknown"].includes(link.temporalRelation)) {
+          throw new Error("进度中的解释对应关系不正确。");
+        }
+      }
+      next.evidenceRoles = { ...row.evidenceRoles };
+      next.eventGroups = { ...row.eventGroups };
+      next.explanations = JSON.parse(JSON.stringify(row.explanations));
+      return next;
+    }
+
+    function previousRoundDraft() {
+      const previous = DATA.previous_round;
+      if (!previous || previous.reviewer_id !== DATA.reviewer_id ||
+        previous.human_declarations_must_be_reconfirmed !== true ||
+        !Array.isArray(previous.source_case_ids) || !Array.isArray(previous.case_number_map) ||
+        !Array.isArray(previous.selected_case_ids) ||
+        !deepEqual(previous.selected_case_ids, DATA.cases.map(row => row.case_id)) ||
+        new Set(previous.source_case_ids).size !== previous.source_case_ids.length ||
+        previous.case_number_map.length !== DATA.cases.length) return null;
+      const previousKey = [
+        "loreguard-ooc-draft-v1", previous.public_input_sha256, previous.reviewer_id,
+        previous.manual_version, previous.author_setup_sha256, previous.execution_freeze_sha256
+      ].join(":");
+      if (previous.draft_key !== previousKey || previousKey === draftKey) return null;
+      for (const key of ["public_input_sha256", "author_setup_sha256", "execution_freeze_sha256"]) {
+        if (typeof previous[key] !== "string" || !/^[a-f0-9]{64}$/.test(previous[key])) return null;
+      }
+      const raw = localStorage.getItem(previousKey);
+      if (!raw || raw.length > 8 * 1024 * 1024) return null;
+      const draft = JSON.parse(raw);
+      if (draft.draft_version !== 1 || draft.public_input_sha256 !== previous.public_input_sha256 ||
+        draft.author_setup_sha256 !== previous.author_setup_sha256 ||
+        draft.execution_freeze_sha256 !== previous.execution_freeze_sha256 ||
+        draft.reviewer_id !== previous.reviewer_id || draft.manual_version !== previous.manual_version ||
+        !Array.isArray(draft.cases) || draft.cases.length !== previous.source_case_ids.length) return null;
+      const mapped = DATA.cases.map((caseRow, index) => {
+        const mapping = previous.case_number_map[index];
+        const { case_number: _caseNumber, ...snapshot } = caseRow;
+        if (!mapping || mapping.case_id !== caseRow.case_id || mapping.case_number !== index + 1 ||
+          !Number.isInteger(mapping.source_case_number) || mapping.source_case_number < 1 ||
+          previous.source_case_ids[mapping.source_case_number - 1] !== caseRow.case_id ||
+          !deepEqual(mapping.case_snapshot, snapshot)) throw new Error("旧版题目与本版材料没有完整对应。");
+        return checkedCaseState(index, draft.cases[mapping.source_case_number - 1]);
+      });
+      return mapped;
+    }
+
+    function setupPreviousRoundImport() {
+      if (!DATA.previous_round) return;
+      const panel = document.getElementById("previous-round");
+      const message = document.getElementById("previous-round-message");
+      const button = document.getElementById("restore-previous-round");
+      panel.hidden = false;
+      message.textContent = "如果已在旧版填写，请先保留旧文件和原浏览器进度。新旧版互不覆盖；当前浏览器不一定允许跨文件读取旧进度。";
+      let found = false;
+      try { found = Boolean(previousRoundDraft()); } catch (_) {}
+      if (!found) return;
+      message.textContent = "发现这位标注者的旧版进度，可以导入本版仍保留的题目。旧版进度不会被删除，独立完成确认需要重新勾选。";
+      button.hidden = false;
+      button.addEventListener("click", () => {
+        if (state.locked) { announce("请先点击“修改这份结果”，再导入旧版进度。"); return; }
+        if (!window.confirm("导入旧版中保留题目的填写，替换本版当前填写？旧版进度保持不变，四项独立完成确认将清空，需要你重新确认。")) return;
+        try {
+          const mapped = previousRoundDraft();
+          if (!mapped) throw new Error("没有找到完整匹配的旧版进度。请保留旧页面，联系负责人，不要清除原浏览器进度。");
+          state.cases = mapped;
+          state.declarations = blankDeclarations();
+          state.activeCase = 0;
+          showErrorSummary([]);
+          updateNavigation();
+          renderCase();
+          saveDraft(true);
+          announce("已导入保留题目的旧填写；原短语和补充说明保留，没有替你推断答案。提交前请重新确认独立完成。");
+        } catch (error) {
+          announce(error instanceof Error ? error.message : "旧版进度无法安全导入，原进度未改变。");
+        }
+      });
     }
 
     function stateFromLockedCase(caseIndex, row) {
@@ -1673,7 +1850,14 @@ _HTML_TEMPLATE = r'''<!doctype html>
       next.phenomena = row.phenomena.join("\n");
       next.reasonCodes = row.reason_codes.join("\n");
       next.confidence = String(row.confidence);
-      next.reviewNote = row.review_note;
+      if (typeof row.review_note !== "string") throw new Error("导入文件的说明格式不正确。 ");
+      const prefix = choiceNotePrefix(row.phenomena, row.reason_codes);
+      if (row.review_note.startsWith(prefix)) {
+        next.reviewNote = row.review_note.slice(prefix.length);
+      } else {
+        next.reviewNote = row.review_note;
+        next.reviewNoteFormat = "legacy";
+      }
       row.evidence.forEach(item => { next.evidenceRoles[item.evidence_id] = item.role; });
       row.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => { next.eventGroups[id] = group.event_group_id; }));
       row.explanation_links.forEach(link => {
@@ -1821,6 +2005,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
     const restored = loadDraft();
     updateNavigation();
     renderCase();
+    setupPreviousRoundImport();
     if (restored) {
       ui.saveState.textContent = "已恢复当前浏览器保存的进度。";
       announce("已恢复你在当前浏览器保存的进度，可以接着填写。 ");
