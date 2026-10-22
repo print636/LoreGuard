@@ -210,7 +210,7 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
     compose("unpause", "worker");
     workerPaused = false;
     await expect(page.locator(".railLiveTop span")).toContainText(
-      "运行 completed",
+      "审查完成",
       { timeout: 45_000 },
     );
     await expect(page).toHaveURL(
