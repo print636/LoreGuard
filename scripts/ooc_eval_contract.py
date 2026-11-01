@@ -63,6 +63,9 @@ EvidenceRole = Literal["B", "C", "G", "X", "P"]
 RunStatus = Literal["complete", "partial", "failed"]
 AssessmentPolicy = Literal["single-clear-event-v3"]
 EVENT_ASSESSMENT_POLICY = "single-clear-event-v3"
+RelationPolicy = Literal["directional-evidence-v1"]
+DIRECTIONAL_RELATION_POLICY = "directional-evidence-v1"
+RelationDirection = Literal["explains", "opposes", "uncertain"]
 
 
 class ContractError(ValueError):
@@ -83,7 +86,8 @@ class StrictModel(BaseModel):
         # Optional v3 extensions must not rewrite the canonical bytes of v1/v2
         # files or invalidate already-created commitments.
         data = handler(self)
-        for key in ("assessment_policy", "formal_evidence_confirmation"):
+        for key in ("assessment_policy", "formal_evidence_confirmation", "relation_policy",
+                    "relation_direction", "auxiliary_relations"):
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -98,6 +102,35 @@ class FormalEvidenceConfirmation(StrictModel):
 
     def all_confirmed(self) -> bool:
         return self.explicit_opposition and self.same_scope and self.explanations_checked
+
+
+class AuxiliaryEvidenceRelation(StrictModel):
+    """Signed human context, not a claim of native model citation support."""
+
+    support_evidence_id: OpaqueId
+    support_role: Literal["G", "X", "P"]
+    applicable_current_ids: tuple[OpaqueId, ...] = Field(min_length=1, max_length=MAX_EVIDENCE_PER_CASE)
+    causal_relation: Literal["explicit", "bounded", "ambiguous"]
+    temporal_relation: Literal["before", "active_during", "after", "unknown"]
+    relation_direction: RelationDirection
+
+    @model_validator(mode="after")
+    def validate_direction(self) -> AuxiliaryEvidenceRelation:
+        if len(set(self.applicable_current_ids)) != len(self.applicable_current_ids):
+            raise ValueError("duplicate_auxiliary_current_id")
+        if self.support_role == "G" and self.temporal_relation != "before":
+            raise ValueError("auxiliary_growth_must_precede_current")
+        if self.support_role == "X" and self.temporal_relation != "active_during":
+            raise ValueError("auxiliary_exception_must_be_active")
+        if self.support_role == "P" and self.relation_direction != "uncertain":
+            raise ValueError("auxiliary_possible_relation_must_stay_uncertain")
+        if self.relation_direction == "opposes" and (
+            self.causal_relation == "ambiguous" or self.support_role == "P"
+        ):
+            raise ValueError("auxiliary_opposition_requires_clear_G_or_X")
+        if self.relation_direction == "uncertain" and self.causal_relation != "ambiguous":
+            raise ValueError("auxiliary_uncertain_requires_ambiguous")
+        return self
 
 
 class DocumentSnapshot(StrictModel):
@@ -246,12 +279,15 @@ class PublicInputBundle(StrictModel):
     schema_version: Literal["loreguard-ooc-public-v1"] = PUBLIC_SCHEMA_VERSION
     dataset_id: OpaqueId
     assessment_policy: AssessmentPolicy | None = None
+    relation_policy: RelationPolicy | None = None
     cases: tuple[PublicInputCase, ...] = Field(
         min_length=1, max_length=MAX_CASES
     )
 
     @model_validator(mode="after")
     def validate_isolation(self) -> PublicInputBundle:
+        if self.relation_policy is not None and self.assessment_policy != EVENT_ASSESSMENT_POLICY:
+            raise ValueError("directional_relations_require_event_assessment_policy")
         validate_no_cross_split_group_leakage(self.cases)
         return self
 
@@ -317,6 +353,8 @@ class PrivateGoldCase(StrictModel):
     case_id: OpaqueId
     assessment_policy: AssessmentPolicy | None = None
     formal_evidence_confirmation: FormalEvidenceConfirmation | None = None
+    relation_policy: RelationPolicy | None = None
+    auxiliary_relations: tuple[AuxiliaryEvidenceRelation, ...] | None = Field(default=None, max_length=MAX_EVIDENCE_PER_CASE)
     outcome: GoldOutcome
     surface: Surface
     required_evidence: RequiredEvidenceGroups
@@ -333,6 +371,15 @@ class PrivateGoldCase(StrictModel):
 
     @model_validator(mode="after")
     def validate_gold_consistency(self) -> PrivateGoldCase:
+        if self.relation_policy is None and self.auxiliary_relations is not None:
+            raise ValueError("legacy_gold_cannot_claim_directional_relations")
+        if self.relation_policy is not None and self.assessment_policy != EVENT_ASSESSMENT_POLICY:
+            raise ValueError("directional_relations_require_event_assessment_policy")
+        if self.relation_policy is not None:
+            pairs = [(link.support_evidence_id, target) for link in self.auxiliary_relations or ()
+                     for target in link.applicable_current_ids]
+            if len(pairs) != len(set(pairs)):
+                raise ValueError("duplicate_auxiliary_support_current_pair")
         if (
             self.adjudication.final_outcome != self.outcome
             or self.adjudication.final_surface != self.surface
@@ -658,6 +705,8 @@ def validate_evaluation_contract(
     for case_id, gold_case in gold_cases.items():
         if gold_case.assessment_policy != public.assessment_policy:
             raise ContractError("gold_public_assessment_policy_mismatch")
+        if gold_case.relation_policy != public.relation_policy:
+            raise ContractError("gold_public_relation_policy_mismatch")
         public_case = public_cases[case_id]
         evidence_by_id = {
             row.evidence_id: row for row in public_case.evidence_catalog
@@ -674,6 +723,10 @@ def validate_evaluation_contract(
         )
         if not referenced <= known_evidence:
             raise ContractError("gold_evidence_id_not_in_public_catalog")
+        auxiliary_ids = {value for link in gold_case.auxiliary_relations or ()
+                         for value in (link.support_evidence_id, *link.applicable_current_ids)}
+        if not auxiliary_ids <= known_evidence:
+            raise ContractError("gold_auxiliary_relation_evidence_unknown")
         required = set(gold_case.required_evidence.all_ids())
         if any(
             not set(group.evidence_ids) <= required

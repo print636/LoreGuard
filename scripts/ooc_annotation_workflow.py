@@ -88,6 +88,7 @@ _TRAIT_DIMENSION = {
     "motivation_goal": "motivation_goal",
 }
 EVENT_MANUAL_VERSION = "ooc-manual-v3-event"
+RELATION_MANUAL_VERSION = "ooc-manual-v4-relations"
 
 
 class EvidenceAssignment(contract.StrictModel):
@@ -102,6 +103,7 @@ class ExplanationLink(contract.StrictModel):
     )
     causal_relation: Literal["explicit", "bounded", "ambiguous"]
     temporal_relation: Literal["before", "active_during", "after", "unknown"]
+    relation_direction: contract.RelationDirection | None = None
 
     @model_validator(mode="after")
     def validate_unique_targets(self) -> ExplanationLink:
@@ -117,7 +119,9 @@ def unexplained_current_event_ids(
 ) -> set[str]:
     """Whole events, not lines, are blocked by applicable explanations.
 
-    A support linked to any fragment of an event affects that whole event.
+    An explaining, uncertain or P link to any fragment blocks that whole
+    event. A clear opposing G/X relation does not block the event, but does
+    not establish a conflict by itself. Legacy links remain explanations.
     Unmapped P cannot be hidden to promote an otherwise uncertain case.
     This is structural validation of human labels, not a semantic classifier.
     """
@@ -136,6 +140,9 @@ def unexplained_current_event_ids(
         for link in explanation_links
         for value in link.applicable_current_ids
         if value in event_by_evidence
+        and (link.relation_direction != "opposes"
+             or link.causal_relation == "ambiguous"
+             or roles.get(link.support_evidence_id) == "P")
     }
     return set(event_by_evidence.values()) - blocked
 
@@ -151,7 +158,13 @@ def _validate_label_shape(
     material_coverage: MaterialCoverage,
     assessment_policy: contract.AssessmentPolicy | None = None,
     formal_evidence_confirmation: contract.FormalEvidenceConfirmation | None = None,
+    relation_policy: contract.RelationPolicy | None = None,
 ) -> None:
+    directional = relation_policy == contract.DIRECTIONAL_RELATION_POLICY
+    if directional and assessment_policy != contract.EVENT_ASSESSMENT_POLICY:
+        raise ValueError("directional_relations_require_event_assessment_policy")
+    if any((link.relation_direction is None) == directional for link in explanation_links):
+        raise ValueError("explanation_relation_policy_mismatch")
     if assessment_policy is None and formal_evidence_confirmation is not None:
         raise ValueError("legacy_annotation_cannot_claim_v3_confirmation")
     expected_surface = {
@@ -190,8 +203,12 @@ def _validate_label_shape(
         raise ValueError("event_group_evidence_not_assigned")
 
     explanation_support = {link.support_evidence_id for link in explanation_links}
-    if len(explanation_support) != len(explanation_links):
+    if not directional and len(explanation_support) != len(explanation_links):
         raise ValueError("duplicate_explanation_support_evidence_id")
+    pairs = [(link.support_evidence_id, target) for link in explanation_links
+             for target in link.applicable_current_ids]
+    if len(pairs) != len(set(pairs)):
+        raise ValueError("duplicate_explanation_support_current_pair")
     valid_support = set(role_ids["G"] + role_ids["X"] + role_ids["P"])
     if not explanation_support <= valid_support:
         raise ValueError("explanation_link_requires_G_X_or_P_support")
@@ -239,7 +256,17 @@ def _validate_label_shape(
     role_by_evidence = {row.evidence_id: row.role for row in evidence}
     for link in explanation_links:
         role = role_by_evidence[link.support_evidence_id]
-        if role in {"G", "X"} and link.causal_relation == "ambiguous":
+        if directional and role == "P" and link.relation_direction != "uncertain":
+            raise ValueError("possible_relation_must_stay_uncertain")
+        if directional and link.relation_direction == "opposes" and (
+            link.causal_relation == "ambiguous" or role == "P"
+        ):
+            raise ValueError("opposing_relation_requires_clear_G_or_X_evidence")
+        if directional and link.relation_direction == "uncertain" and link.causal_relation != "ambiguous":
+            raise ValueError("uncertain_relation_requires_ambiguous_causality")
+        if role in {"G", "X"} and link.causal_relation == "ambiguous" and not (
+            directional and link.relation_direction == "uncertain"
+        ):
             raise ValueError("ambiguous_support_must_be_classified_as_P")
         if role == "G" and link.temporal_relation != "before":
             raise ValueError("growth_explanation_must_precede_current_event")
@@ -251,6 +278,7 @@ class ReviewerCaseAnnotation(contract.StrictModel):
     case_id: contract.OpaqueId
     assessment_policy: contract.AssessmentPolicy | None = None
     formal_evidence_confirmation: contract.FormalEvidenceConfirmation | None = None
+    relation_policy: contract.RelationPolicy | None = None
     dimension: CharacterDimension
     outcome: contract.GoldOutcome
     surface: contract.Surface
@@ -286,6 +314,7 @@ class ReviewerCaseAnnotation(contract.StrictModel):
             material_coverage=self.material_coverage,
             assessment_policy=self.assessment_policy,
             formal_evidence_confirmation=self.formal_evidence_confirmation,
+            relation_policy=self.relation_policy,
         )
         return self
 
@@ -311,9 +340,12 @@ class ReviewerAnnotationBundle(contract.StrictModel):
         case_ids = tuple(row.case_id for row in self.cases)
         if len(case_ids) != len(set(case_ids)):
             raise ValueError("duplicate_annotation_case_id")
-        expected = contract.EVENT_ASSESSMENT_POLICY if self.manual_version == EVENT_MANUAL_VERSION else None
+        expected = contract.EVENT_ASSESSMENT_POLICY if self.manual_version in {EVENT_MANUAL_VERSION, RELATION_MANUAL_VERSION} else None
         if any(case.assessment_policy != expected for case in self.cases):
             raise ValueError("annotation_manual_assessment_policy_mismatch")
+        expected_relation = contract.DIRECTIONAL_RELATION_POLICY if self.manual_version == RELATION_MANUAL_VERSION else None
+        if any(case.relation_policy != expected_relation for case in self.cases):
+            raise ValueError("annotation_manual_relation_policy_mismatch")
         return self
 
 
@@ -321,6 +353,7 @@ class AdjudicatedCase(contract.StrictModel):
     case_id: contract.OpaqueId
     assessment_policy: contract.AssessmentPolicy | None = None
     formal_evidence_confirmation: contract.FormalEvidenceConfirmation | None = None
+    relation_policy: contract.RelationPolicy | None = None
     dimension: CharacterDimension
     final_outcome: contract.GoldOutcome
     final_surface: contract.Surface
@@ -380,6 +413,7 @@ class AdjudicatedCase(contract.StrictModel):
             material_coverage=self.material_coverage,
             assessment_policy=self.assessment_policy,
             formal_evidence_confirmation=self.formal_evidence_confirmation,
+            relation_policy=self.relation_policy,
         )
         return self
 
@@ -503,6 +537,8 @@ def validate_annotation_binding(
         raise AnnotationWorkflowError("annotation_dataset_id_mismatch")
     if any(case.assessment_policy != public.assessment_policy for case in annotation.cases):
         raise AnnotationWorkflowError("annotation_public_assessment_policy_mismatch")
+    if any(case.relation_policy != public.relation_policy for case in annotation.cases):
+        raise AnnotationWorkflowError("annotation_public_relation_policy_mismatch")
     public_digest = contract.canonical_sha256(public)
     if annotation.public_input_sha256 != public_digest:
         raise AnnotationWorkflowError("annotation_public_input_binding_mismatch")
@@ -711,15 +747,21 @@ def _event_identity(row: ReviewerCaseAnnotation) -> set[frozenset[str]]:
 
 def _explanation_identity(
     row: ReviewerCaseAnnotation,
-) -> set[tuple[str, frozenset[str], str, str]]:
+) -> set[tuple[Any, ...]]:
+    if row.relation_policy is None:
+        return {(link.support_evidence_id, frozenset(link.applicable_current_ids),
+                 link.causal_relation, link.temporal_relation)
+                for link in row.explanation_links}
     return {
         (
             link.support_evidence_id,
-            frozenset(link.applicable_current_ids),
+            target,
             link.causal_relation,
             link.temporal_relation,
+            link.relation_direction,
         )
         for link in row.explanation_links
+        for target in link.applicable_current_ids
     }
 
 
@@ -843,6 +885,8 @@ def _build_private_gold(
         resolution = resolutions[case.case_id]
         if resolution.assessment_policy != public.assessment_policy:
             raise AnnotationWorkflowError("adjudication_public_assessment_policy_mismatch")
+        if resolution.relation_policy != public.relation_policy:
+            raise AnnotationWorkflowError("adjudication_public_relation_policy_mismatch")
         if (
             resolution.adjudicator_id is not None
             and resolution.adjudicator_id in adjudication.reviewer_ids
@@ -897,6 +941,13 @@ def _build_private_gold(
                 case_id=case.case_id,
                 assessment_policy=resolution.assessment_policy,
                 formal_evidence_confirmation=resolution.formal_evidence_confirmation,
+                relation_policy=resolution.relation_policy,
+                auxiliary_relations=(tuple(contract.AuxiliaryEvidenceRelation(
+                    **link.model_dump(),
+                    support_role=next(row.role for row in resolution.required_evidence
+                                      if row.evidence_id == link.support_evidence_id),
+                ) for link in resolution.explanation_links)
+                    if resolution.relation_policy is not None else None),
                 outcome=resolution.final_outcome,
                 surface=resolution.final_surface,
                 required_evidence=contract.RequiredEvidenceGroups(**roles),

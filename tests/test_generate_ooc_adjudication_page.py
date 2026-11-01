@@ -18,6 +18,7 @@ from tests.test_generate_ooc_annotation_page import (
     DATASET_ID,
     EVIDENCE_IDS,
     _event_policy_fixture,
+    _relation_policy_fixture,
     _fixture,
 )
 
@@ -119,6 +120,26 @@ def _annotations(public: contract.PublicInputBundle):
         _annotation(public, reviewer_id="reviewer-a", variant="formal"),
         _annotation(public, reviewer_id="reviewer-b", variant="review"),
     )
+
+
+def _directional_annotation(public, reviewer_id):
+    legacy = public.model_copy(update={"relation_policy": None})
+    payload = _annotation(legacy, reviewer_id=reviewer_id, variant="formal", manual_version="ooc-manual-v3-event").model_dump(mode="json")
+    payload.update(public_input_sha256=contract.canonical_sha256(public), manual_version="ooc-manual-v4-relations")
+    case = payload["cases"][0]
+    case.update(relation_policy="directional-evidence-v1", evidence=[
+        {"evidence_id": EVIDENCE_IDS[0], "role": "B"},
+        {"evidence_id": EVIDENCE_IDS[1], "role": "G"},
+        {"evidence_id": EVIDENCE_IDS[2], "role": "C"},
+        {"evidence_id": EVIDENCE_IDS[3], "role": "C"},
+    ], independent_event_groups=[
+        {"event_group_id": "event-a", "evidence_ids": [EVIDENCE_IDS[2]]},
+        {"event_group_id": "event-b", "evidence_ids": [EVIDENCE_IDS[3]]},
+    ], explanation_links=[
+        {"support_evidence_id": EVIDENCE_IDS[1], "applicable_current_ids": [EVIDENCE_IDS[2]], "relation_direction": "explains", "causal_relation": "bounded", "temporal_relation": "before"},
+        {"support_evidence_id": EVIDENCE_IDS[1], "applicable_current_ids": [EVIDENCE_IDS[3]], "relation_direction": "opposes", "causal_relation": "explicit", "temporal_relation": "before"},
+    ])
+    return workflow.ReviewerAnnotationBundle.model_validate_json(json.dumps(payload, ensure_ascii=False))
 
 
 def _write_locked(path, value: workflow.ReviewerAnnotationBundle) -> None:
@@ -347,6 +368,58 @@ const { pathToFileURL } = require("url");
     assert adjudication.cases[0].assessment_policy == "single-clear-event-v3"
     assert adjudication.cases[0].formal_evidence_confirmation.explicit_opposition is True
     assert gold.cases[0].assessment_policy == "single-clear-event-v3"
+
+
+def test_v4_adjudication_carries_mixed_target_directions_without_adopting_confirmation(tmp_path):
+    public, root, setup, freeze = _relation_policy_fixture(tmp_path)
+    left = _directional_annotation(public, "reviewer-a")
+    right = _directional_annotation(public, "reviewer-b")
+    data = page.build_page_data(public, root, setup, freeze, left, right)
+    assert data["relation_policy"] == "directional-evidence-v1"
+    links = data["cases"][0]["reviewer_a"]["explanation_links"]
+    assert [link["relation_direction"] for link in links] == ["explains", "opposes"]
+    javascript = _inline_javascript(page.render_adjudication_page(data))
+    assert 'restoreLinks(next.explanations, source.explanation_links)' in javascript
+    assert 'relation_policy = "directional-evidence-v1"' in javascript
+    assert 'const controlId = `relation-${caseIndex}-${supportIndex}-${targetIndex}`' in javascript
+    assert '未知关系（需核对）' in javascript
+    assert 'causal.disabled = state.locked || value.direction === "uncertain" || role === "P"' in javascript
+    assert '[["ambiguous", "关系尚不确定"]]' in javascript
+
+
+@pytest.mark.skipif(shutil.which("node") is None or not (page.REPO_ROOT / "frontend" / "node_modules" / "@playwright" / "test").exists(), reason="Playwright unavailable")
+def test_browser_v4_mixed_growth_directions_adjudication_roundtrips_and_keeps_gold_context(tmp_path):
+    public, root, setup, freeze = _relation_policy_fixture(tmp_path)
+    left = _directional_annotation(public, "reviewer-a")
+    right = _directional_annotation(public, "reviewer-b")
+    html_path = tmp_path / "adjudication-v4.html"
+    html_path.write_text(page.render_adjudication_page(page.build_page_data(public, root, setup, freeze, left, right)), encoding="utf-8")
+    locked_path = tmp_path / "adjudication-v4.locked.json"
+    script = r'''
+const {chromium}=require(process.argv[1]);const {pathToFileURL}=require("node:url");
+(async()=>{const browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}});
+await page.goto(pathToFileURL(process.argv[2]).href);await page.getByRole("button",{name:/以 A .* 为起点/}).click();
+if(await page.locator("#relation-0-0-0").inputValue()!=="explains"||await page.locator("#relation-0-0-1").inputValue()!=="opposes")throw new Error("mixed same-growth directions lost on copy");
+if(await page.locator("#formal-confirm-0").isChecked())throw new Error("reviewer confirmation copied");
+await page.locator("#note-0").fill("合成仲裁：分别核对同一成长对两件事情的不同方向，不依据片段数定案。");
+await page.locator("#formal-confirm-0").check();await page.locator("#relation-0-0-1").selectOption("uncertain");
+if(await page.locator("#formal-confirm-0").isChecked())throw new Error("direction change retained stale confirmation");
+await page.locator("#download-locked").click();if(!(await page.locator("#error-summary").innerText()).includes("所选事件均有"))throw new Error("unresolved relation did not block formal issue");
+await page.locator("#relation-0-0-1").selectOption("opposes");await page.locator("#formal-confirm-0").check();
+await page.locator('#final-confirmations input[type="checkbox"]').nth(0).check();await page.locator('#final-confirmations input[type="checkbox"]').nth(1).check();
+const promise=page.waitForEvent("download");await page.locator("#download-locked").click();await(await promise).saveAs(process.argv[3]);
+await page.locator("#unlock-editing").click();await page.locator("#import-file").setInputFiles(process.argv[3]);await page.waitForFunction(()=>document.querySelector("#relation-0-0-1")?.matches(":disabled")===true);
+if(await page.locator("#relation-0-0-0").inputValue()!=="explains"||await page.locator("#relation-0-0-1").inputValue()!=="opposes")throw new Error("directions lost after locked import");
+console.log("v4-adjudication-directions-ok");await browser.close();})().catch(e=>{console.error(e);process.exit(1)});
+'''
+    result = subprocess.run([shutil.which("node"), "-e", script, str((page.REPO_ROOT / "frontend/node_modules/@playwright/test").resolve()), str(html_path), str(locked_path)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "v4-adjudication-directions-ok"
+    adjudication = workflow.AdjudicationBundle.model_validate_json(locked_path.read_text(encoding="utf-8"))
+    workflow._validate_adjudication_setup_binding(public, setup, adjudication)
+    gold = workflow._build_private_gold(public, left, right, adjudication)
+    assert {link.relation_direction for link in adjudication.cases[0].explanation_links} == {"explains", "opposes"}
+    assert {link.relation_direction for link in gold.cases[0].auxiliary_relations} == {"explains", "opposes"}
 
 
 def test_third_human_mode_uses_explicit_human_identity_and_blindness(tmp_path):

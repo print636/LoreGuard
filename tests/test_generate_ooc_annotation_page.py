@@ -208,6 +208,14 @@ def _event_policy_fixture(tmp_path):
     return public, root, setup, freeze
 
 
+def _relation_policy_fixture(tmp_path):
+    public, root, setup, freeze = _event_policy_fixture(tmp_path)
+    public = public.model_copy(update={"relation_policy": "directional-evidence-v1"})
+    setup = setup.model_copy(update={"public_input_sha256": contract.canonical_sha256(public)})
+    freeze = freeze.model_copy(update={"public_input_sha256": contract.canonical_sha256(public), "author_setup_sha256": contract.canonical_sha256(setup)})
+    return public, root, setup, freeze
+
+
 def _inline_javascript(html: str) -> str:
     matches = re.findall(r"<script(?: [^>]*)?>(.*?)</script>", html, flags=re.DOTALL)
     assert len(matches) == 2
@@ -463,7 +471,7 @@ def test_v3_policy_has_one_unselected_human_confirmation_and_no_legacy_migration
         reviewer_id="reviewer-a", manual_version="ooc-manual-v3-event")
     assert data["assessment_policy"] == "single-clear-event-v3"
     javascript = _inline_javascript(page.render_annotation_page(data))
-    assert 'const SINGLE_CLEAR_EVENT = DATA.manual_version === "ooc-manual-v3-event"' in javascript
+    assert '["ooc-manual-v3-event", "ooc-manual-v4-relations"].includes(DATA.manual_version)' in javascript
     assert 'DATA.assessment_policy === "single-clear-event-v3"' in javascript
     assert 'input.id = `formal-confirm-${caseIndex}`' in javascript
     assert "explicit_opposition: false, same_scope: false, explanations_checked: false" in javascript
@@ -489,6 +497,8 @@ def test_v3_single_clear_event_and_event_scoped_explanation_validation(tmp_path)
     script = r'''
 const assert = require("node:assert/strict");
 const SINGLE_CLEAR_EVENT = true;
+const DIRECTIONAL_RELATIONS = false;
+function relationBlocksEvent() { return true; }
 const FORMAL_CONFIRMATION_KEYS = ["explicit_opposition", "same_scope", "explanations_checked"];
 const DATA = {cases:[{dimension:"core_trait"}]};
 const LEVELS = {L0:{},L1:{},L2:{},L3:{}};
@@ -521,6 +531,55 @@ console.log("v3-event-validation-ok");
     result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "v3-event-validation-ok"
+
+
+def test_v4_direction_choices_are_per_target_neutral_and_policy_bound(tmp_path):
+    public, root, setup, freeze = _relation_policy_fixture(tmp_path)
+    data = page.build_page_data(public, root, setup, freeze, reviewer_id="reviewer-a", manual_version="ooc-manual-v4-relations")
+    assert data["relation_policy"] == "directional-evidence-v1"
+    javascript = _inline_javascript(page.render_annotation_page(data))
+    assert '["", "请选择与这次表现的关系"]' in javascript
+    assert 'const id = `relation-${caseIndex}-${supportIndex}-${currentIndex}`' in javascript
+    assert "directionalTargets" in javascript
+    assert 'row.relation_policy = "directional-evidence-v1"' in javascript
+    assert "关系方向无效，未改写成正向解释" in javascript
+    assert "Object.hasOwn(stored.directionalTargets, id)" in javascript
+    assert 'causal.disabled = value.direction === "uncertain" || support.role === "P"' in javascript
+    assert '[["ambiguous", "关系尚不确定"]]' in javascript
+    assert "只记录“关系尚不确定”" in javascript
+    assert all("explanation_links" not in row for row in data["cases"])
+    with pytest.raises(page.AnnotationPageError, match="relation_policy"):
+        page.build_page_data(public, root, setup, freeze, reviewer_id="reviewer-a", manual_version="ooc-manual-v3-event")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is unavailable")
+def test_v4_directional_links_preserve_mixed_targets_and_do_not_explain_away_opposition(tmp_path):
+    public, root, setup, freeze = _relation_policy_fixture(tmp_path)
+    javascript = _inline_javascript(page.render_annotation_page(page.build_page_data(public, root, setup, freeze, reviewer_id="reviewer-a", manual_version="ooc-manual-v4-relations")))
+    builder = "function buildDirectionalLinks(" + javascript.split("function buildDirectionalLinks(", 1)[1].split("function renderDirectionalSupport", 1)[0]
+    validator = "function validateCase(caseIndex) {" + javascript.split("function validateCase(caseIndex) {", 1)[1].split("function showCaseErrors", 1)[0]
+    script = r'''
+const assert=require("node:assert/strict");
+const SINGLE_CLEAR_EVENT=true,DIRECTIONAL_RELATIONS=true;
+const FORMAL_CONFIRMATION_KEYS=["explicit_opposition","same_scope","explanations_checked"];
+const LEVELS={L0:{},L1:{},L2:{},L3:{}};const DATA={cases:[{dimension:"core_trait"}]};
+let current;function buildCase(){return current;}function roleAllowed(){return true;}
+function base(){return {dimension:"core_trait",conflict_level:"L3",material_coverage:"complete",evidence:[{evidence_id:"b",role:"B"},{evidence_id:"c1",role:"C"},{evidence_id:"c2",role:"C"},{evidence_id:"g",role:"G"}],independent_event_groups:[{event_group_id:"one",evidence_ids:["c1"]},{event_group_id:"two",evidence_ids:["c2"]}],explanation_links:[],phenomena:["反向"],reason_codes:["核对"],confidence:5,review_note:"本人选择",formal_evidence_confirmation:{explicit_opposition:true,same_scope:true,explanations_checked:true}};}
+''' + builder + validator + r'''
+const states={g:{directionalTargets:{c1:{direction:"explains",causalRelation:"bounded",temporalRelation:"before"},c2:{direction:"opposes",causalRelation:"explicit",temporalRelation:"before"}}}};
+current=base();current.explanation_links=buildDirectionalLinks(current.evidence,states,new Set(["c1","c2"]));
+assert.equal(current.explanation_links.length,2);assert.equal(current.explanation_links[1].relation_direction,"opposes");assert.equal(current.explanation_links[1].causal_relation,"explicit");assert.deepEqual(validateCase(0),[]);
+current.independent_event_groups=[{event_group_id:"one",evidence_ids:["c1","c2"]}];assert.ok(validateCase(0).some(e=>e.message.includes("都有明确或可能解释")));
+current=base();current.explanation_links=buildDirectionalLinks(current.evidence,states,new Set(["c1","c2"]));current.explanation_links[1].relation_direction="uncertain";current.explanation_links[1].causal_relation="ambiguous";assert.ok(validateCase(0).some(e=>e.message.includes("都有明确或可能解释")));
+current.explanation_links[1].causal_relation="explicit";assert.ok(validateCase(0).some(e=>e.message.includes("明确程度必须保持未决")),"inconsistent imported certainty must be rejected, never silently normalized");
+current.explanation_links[1].relation_direction="unknown";assert.ok(validateCase(0).some(e=>e.message.includes("请选择材料与每条")));
+states.g.directionalTargets.c2.direction="invalid";assert.equal(buildDirectionalLinks(current.evidence,states,new Set(["c1","c2"]))[1].relation_direction,"invalid","invalid direction must never become explains");
+current=base();current.explanation_links=[{support_evidence_id:"g",applicable_current_ids:["c1"],relation_direction:"opposes",causal_relation:"explicit",temporal_relation:"before"}];current.formal_evidence_confirmation=null;assert.ok(validateCase(0).some(e=>e.field==="formal-confirmation-0"),"opposition does not auto-confirm formal issue");
+console.log("directional-links-ok");
+'''
+    result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "directional-links-ok"
 
 
 def test_generator_writes_once_and_cli_reports_created(tmp_path, capsys):

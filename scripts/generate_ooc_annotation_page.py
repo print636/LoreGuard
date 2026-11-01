@@ -99,8 +99,11 @@ def build_page_data(
         name="manual_version",
         maximum=MAX_MANUAL_VERSION_LENGTH,
     )
-    if (manual_version == "ooc-manual-v3-event") != (public.assessment_policy == "single-clear-event-v3"):
+    relation_policy = getattr(public, "relation_policy", None)
+    if (manual_version in {"ooc-manual-v3-event", "ooc-manual-v4-relations"}) != (public.assessment_policy == "single-clear-event-v3"):
         raise AnnotationPageError("manual_assessment_policy_mismatch")
+    if (manual_version == "ooc-manual-v4-relations") != (relation_policy == "directional-evidence-v1"):
+        raise AnnotationPageError("manual_relation_policy_mismatch")
     root_path = _local_path(bundle_root, name="bundle_root")
     workflow.validate_exhaustive_line_catalog(public, root_path)
     closed_bundle.validate_execution_freeze_binding(
@@ -204,6 +207,8 @@ def build_page_data(
     }
     if public.assessment_policy is not None:
         data["assessment_policy"] = public.assessment_policy
+    if relation_policy is not None:
+        data["relation_policy"] = relation_policy
     return data
 
 
@@ -772,8 +777,12 @@ _HTML_TEMPLATE = r'''<!doctype html>
       L2: { outcome: "indeterminate", surface: "review_clue", label: "有疑点，还不能定为冲突" },
       L3: { outcome: "conflict", surface: "formal_issue", label: "证据充分，存在冲突" }
     };
-    const SINGLE_CLEAR_EVENT = DATA.manual_version === "ooc-manual-v3-event" &&
+    const DIRECTIONAL_RELATIONS = DATA.manual_version === "ooc-manual-v4-relations" && DATA.relation_policy === "directional-evidence-v1";
+    const SINGLE_CLEAR_EVENT = ["ooc-manual-v3-event", "ooc-manual-v4-relations"].includes(DATA.manual_version) &&
       DATA.assessment_policy === "single-clear-event-v3";
+    const RELATION_OPTIONS = [["", "请选择与这次表现的关系"], ["explains", "能解释这次表现"], ["opposes", "与这次表现相反"], ["uncertain", "尚不能确定"]];
+    const LINK_KEYS = ["support_evidence_id", "applicable_current_ids", "causal_relation", "temporal_relation"];
+    if (DIRECTIONAL_RELATIONS) LINK_KEYS.push("relation_direction");
     const FORMAL_CONFIRMATION_KEYS = ["explicit_opposition", "same_scope", "explanations_checked"];
     // These options are identical for every case. They are not answers and are
     // never selected from a case, level, model prediction, or another reviewer.
@@ -794,6 +803,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       "explanation_links", "phenomena", "reason_codes", "confidence", "review_note"
     ];
     if (SINGLE_CLEAR_EVENT) CASE_KEYS.push("assessment_policy", "formal_evidence_confirmation");
+    if (DIRECTIONAL_RELATIONS) CASE_KEYS.push("relation_policy");
     const BUNDLE_KEYS = [
       "schema_version", "dataset_id", "public_input_sha256", "reviewer_kind",
       "reviewer_id", "manual_version", "blinded_to_peer",
@@ -1081,8 +1091,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
       [
         ["原设定（B）", "指定人物原先稳定的特点。只能在本题标出的浅紫色原设定行选择。"],
         ["新稿表现（C）", "待审新稿里，需要拿来与原设定比较的行为或说法。不是选了就代表有错。"],
-        ["成长经历（G）", "在新稿表现之前已经发生、能够解释变化的经历。只可选已有材料中的行，不能把未来计划当成已发生。"],
-        ["当时的特殊状态（X）", "在这次表现发生时确实生效的特殊情况，例如伪装或被控制；必须说明它解释哪次表现。"],
+        ["成长经历（G）", DIRECTIONAL_RELATIONS ? "在新稿表现之前已发生的角色成长或变化。它可能解释某次表现，也可能与其相反；请逐条选择关系，不把成长默认当作开脱。" : "在新稿表现之前已经发生、能够解释变化的经历。只可选已有材料中的行，不能把未来计划当成已发生。"],
+        ["当时的特殊状态（X）", DIRECTIONAL_RELATIONS ? "在这次表现发生时确实生效的状态，例如伪装或被控制；逐条核对它能解释、反对还是尚不能确定对应表现。" : "在这次表现发生时确实生效的特殊情况，例如伪装或被控制；必须说明它解释哪次表现。"],
         ["可能的解释（P）", "材料只暗示了一种解释，还不足以当成明确的成长或特殊状态。不要自行补写未提供的经历。"]
       ].forEach(([label, help]) => roleDefinitions.append(element("dt", "", label), element("dd", "", help)));
       roleHelp.append(roleDefinitions);
@@ -1159,6 +1169,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
               select.value = "";
               announce("这一行不能用作你选的用途，已取消该选择。可展开“每行旁边应该怎么选”查看范围。 ");
             }
+            if (DIRECTIONAL_RELATIONS && caseState.evidenceRoles[line.evidence_id] !== select.value) delete caseState.explanations[line.evidence_id];
             caseState.evidenceRoles[line.evidence_id] = select.value;
             clearFormalConfirmation(caseIndex);
             row.dataset.role = select.value;
@@ -1271,6 +1282,79 @@ _HTML_TEMPLATE = r'''<!doctype html>
       if (confirmation) confirmation.hidden = level !== "L3";
     }
 
+    function directionalTargets(linkState) {
+      if (!linkState.directionalTargets || typeof linkState.directionalTargets !== "object" || Array.isArray(linkState.directionalTargets)) linkState.directionalTargets = {};
+      return linkState.directionalTargets;
+    }
+
+    function buildDirectionalLinks(evidence, explanations, currentIds) {
+      const links = [];
+      evidence.filter(row => ["G", "X", "P"].includes(row.role)).forEach(support => {
+        const grouped = new Map();
+        Object.entries(explanations[support.evidence_id]?.directionalTargets || {}).forEach(([id, value]) => {
+          if (!currentIds.has(id)) return;
+          const key = JSON.stringify([value.direction, value.causalRelation, value.temporalRelation]);
+          if (!grouped.has(key)) grouped.set(key, { support_evidence_id: support.evidence_id, applicable_current_ids: [], relation_direction: value.direction, causal_relation: value.causalRelation, temporal_relation: value.temporalRelation });
+          grouped.get(key).applicable_current_ids.push(id);
+        });
+        links.push(...grouped.values());
+      });
+      return links;
+    }
+
+    function relationBlocksEvent(link, evidence) {
+      return !DIRECTIONAL_RELATIONS || evidence.find(row => row.evidence_id === link.support_evidence_id)?.role === "P" || link.relation_direction !== "opposes";
+    }
+
+    function renderDirectionalSupport(caseIndex, support, supportIndex, currents, host) {
+      const caseState = state.cases[caseIndex];
+      const linkState = caseState.explanations[support.evidenceId] || { directionalTargets: {} };
+      caseState.explanations[support.evidenceId] = linkState;
+      const relations = directionalTargets(linkState);
+      Object.keys(relations).forEach(id => { if (!currents.some(row => row.evidenceId === id)) delete relations[id]; });
+      const wrapper = element("div", "structure-row");
+      wrapper.append(element("h4", "", `${ROLE_OPTIONS.find(([value]) => value === support.role)[1]}（${support.positionLabel}）`), element("p", "evidence-excerpt", support.text));
+      wrapper.append(element("p", "helper", "逐条选择关系：同一段经历可以解释一个行为，也可以与另一个行为相反。不相关的留空，不会默认替你选方向。"));
+      if (support.role === "P") wrapper.append(element("p", "helper", "这段材料尚未证实，只记录“关系尚不确定”，不作为确定的正向或反向依据；它所涉及的事件须继续复核。"));
+      if (!currents.length) wrapper.append(element("p", "structure-empty", "请先回到原文选出需要核对的新稿表现，再选择它与这段材料的关系。"));
+      currents.forEach((current, currentIndex) => {
+        const target = element("div", "field");
+        const value = relations[current.evidenceId];
+        const select = makeSelect(support.role === "P" ? RELATION_OPTIONS.filter(([direction]) => !direction || direction === "uncertain") : RELATION_OPTIONS, value?.direction || "");
+        const id = `relation-${caseIndex}-${supportIndex}-${currentIndex}`;
+        target.append(formField(`新稿表现 ${currentIndex + 1}（${current.positionLabel}）：${current.text}`, select, "“相反”是反向证据，不是行为没有发生，也不是与行为无关；仍须核对适用范围与时间。", id));
+        select.addEventListener("change", () => {
+          if (!select.value) delete relations[current.evidenceId];
+          else {
+            const uncertain = select.value === "uncertain" || support.role === "P";
+            relations[current.evidenceId] = { direction: select.value, causalRelation: uncertain ? "ambiguous" : ["explicit", "bounded"].includes(value?.causalRelation) ? value.causalRelation : "bounded", temporalRelation: support.role === "G" ? "before" : support.role === "X" ? "active_during" : value?.temporalRelation || "unknown" };
+          }
+          clearFormalConfirmation(caseIndex);
+          renderStructures(caseIndex);
+          document.getElementById(id)?.focus();
+          updateNavigation();
+          scheduleDraft();
+        });
+        if (value) {
+          const details = element("details", "technical-details");
+          details.append(element("summary", "", "核对依据明确程度与时间"));
+          const causalOptions = value.direction === "uncertain" || support.role === "P" ? [["ambiguous", "关系尚不确定"]] : [["explicit", "材料明确表达这一关系"], ["bounded", "有明确依据，但只适用特定范围"]];
+          const causal = makeSelect(causalOptions, value.causalRelation);
+          causal.disabled = value.direction === "uncertain" || support.role === "P";
+          details.append(formField("这段关系的依据有多明确？", causal, "明确程度与关系方向是两回事，不会把“相反”保存成“能解释”。", `relation-causal-${caseIndex}-${supportIndex}-${currentIndex}`));
+          causal.addEventListener("change", () => { value.causalRelation = causal.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
+          const temporalOptions = support.role === "G" ? [["before", "在所选表现之前已经发生"]] : support.role === "X" ? [["active_during", "所选表现发生时有效"]] : [["before", "在所选表现之前"], ["active_during", "所选表现发生时有效"], ["after", "在所选表现之后"], ["unknown", "时间不明"]];
+          const temporal = makeSelect(temporalOptions, value.temporalRelation);
+          temporal.disabled = support.role === "G" || support.role === "X";
+          details.append(formField("材料发生或生效在什么时候？", temporal, "请依据原文核对；固定显示的来源范围不代表软件已经读懂时间关系。", `relation-temporal-${caseIndex}-${supportIndex}-${currentIndex}`));
+          temporal.addEventListener("change", () => { value.temporalRelation = temporal.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
+          target.append(details);
+        }
+        wrapper.append(target);
+      });
+      host.append(wrapper);
+    }
+
     function renderStructures(caseIndex) {
       const currentHost = document.getElementById("current-event-groups");
       const supportHost = document.getElementById("explanation-links");
@@ -1316,6 +1400,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
         supportHost.append(element("p", "structure-empty", "选出成长经历、特殊状态或可能的解释后，这里会请你指明它解释哪次表现。"));
       } else {
         supports.forEach((support, supportIndex) => {
+          if (DIRECTIONAL_RELATIONS) { renderDirectionalSupport(caseIndex, support, supportIndex, currents, supportHost); return; }
           const linkState = caseState.explanations[support.evidenceId] || {
             applicableCurrentIds: [], causalRelation: support.role === "P" ? "ambiguous" : "bounded",
             temporalRelation: support.role === "G" ? "before" : support.role === "X" ? "active_during" : "unknown"
@@ -1488,7 +1573,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       structures.append(currentSection);
       const supportSection = element("section", "structure-section");
       supportSection.id = "support-section";
-      supportSection.append(element("h3", "", "这段解释说明了哪次表现？"));
+      supportSection.append(element("h3", "", DIRECTIONAL_RELATIONS ? "这段材料与每次表现是什么关系？" : "这段解释说明了哪次表现？"));
       const supportHost = element("div");
       supportHost.id = "explanation-links";
       supportSection.append(supportHost);
@@ -1607,8 +1692,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const independent_event_groups = [...grouped.entries()].map(([event_group_id, evidence_ids]) => ({
         event_group_id, evidence_ids
       }));
-      const explanation_links = [];
-      evidence.filter(row => ["G", "X", "P"].includes(row.role)).forEach(row => {
+      const explanation_links = DIRECTIONAL_RELATIONS ? buildDirectionalLinks(evidence, caseState.explanations, currentIds) : [];
+      if (!DIRECTIONAL_RELATIONS) evidence.filter(row => ["G", "X", "P"].includes(row.role)).forEach(row => {
         const link = caseState.explanations[row.evidence_id] || {};
         const targets = Array.isArray(link.applicableCurrentIds)
           ? [...new Set(link.applicableCurrentIds.filter(value => currentIds.has(value)))] : [];
@@ -1647,6 +1732,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
         row.formal_evidence_confirmation = caseState.formalEvidenceConfirmation === null ? null :
           Object.fromEntries(FORMAL_CONFIRMATION_KEYS.map(key => [key, caseState.formalEvidenceConfirmation?.[key] === true]));
       }
+      if (DIRECTIONAL_RELATIONS) row.relation_policy = "directional-evidence-v1";
       return row;
     }
 
@@ -1690,7 +1776,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
           if (!b.length || !c.length) add("evidence-pane", "认定正式冲突，至少要选出一处原设定和一处本题人物的新稿表现；一次明确反向事件也可以，但不能把其他人的行为当证据。 ");
           if (groups.has(undefined) || !groups.size) add("current-event-groups", "请为每段新稿表现注明属于哪件事。同一件事的多个片段选同一项，不按行数判断冲突。 ");
           const coveredGroups = new Set();
-          row.explanation_links.forEach(link => link.applicable_current_ids.forEach(id => {
+          row.explanation_links.filter(link => relationBlocksEvent(link, row.evidence)).forEach(link => link.applicable_current_ids.forEach(id => {
             if (byEvidence.has(id)) coveredGroups.add(byEvidence.get(id));
           }));
           const unboundPossible = p.some(id => !row.explanation_links.some(link => link.support_evidence_id === id && link.applicable_current_ids.length));
@@ -1707,12 +1793,26 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const linked = new Set(row.explanation_links.map(link => link.support_evidence_id));
       [...g, ...x].forEach(id => {
         const link = row.explanation_links.find(item => item.support_evidence_id === id);
-        if (!linked.has(id) || !link || !link.applicable_current_ids.length) add("explanation-links", "每段成长经历或特殊状态，都要勾选它能解释的至少一条新稿表现。 ");
+        if (!linked.has(id) || !link || !link.applicable_current_ids.length) add("explanation-links", DIRECTIONAL_RELATIONS ? "请为每段成长或特殊状态至少选择一条相关表现，并亲自选择关系方向；无关材料不用标成成长依据。 " : "每段成长经历或特殊状态，都要勾选它能解释的至少一条新稿表现。 ");
       });
+      const relationPairs = new Set();
       row.explanation_links.forEach(link => {
         if (!link.applicable_current_ids.length) add("explanation-links", "建立解释对应关系时，至少勾选一条新稿表现。 ");
         const supportRole = row.evidence.find(item => item.evidence_id === link.support_evidence_id)?.role;
-        if ((supportRole === "G" || supportRole === "X") && link.causal_relation === "ambiguous") {
+        if (DIRECTIONAL_RELATIONS) {
+          if (!["explains", "opposes", "uncertain"].includes(link.relation_direction)) add("explanation-links", "请选择材料与每条相关表现的关系：能解释、相反或尚不确定；不会替你默认方向。 ");
+          if (supportRole === "P" && link.relation_direction !== "uncertain") add("explanation-links", "可能线索尚未证实，本页只允许将它的关系记录为“尚不能确定”；不会改写为正向或反向的确定依据。 ");
+          if (supportRole === "P" && link.causal_relation !== "ambiguous") add("explanation-links", "可能线索的依据必须保持未决，不能直接记录为已明确的因果或反向证据。 ");
+          if (link.relation_direction === "uncertain" && link.causal_relation !== "ambiguous") add("explanation-links", "关系尚不确定时，依据明确程度必须保持未决，不能保存为已明确关系。 ");
+          if (!["explicit", "bounded", "ambiguous"].includes(link.causal_relation) || !["before", "active_during", "after", "unknown"].includes(link.temporal_relation)) add("explanation-links", "关系的依据或时间记录无效，请按原文重新核对。 ");
+          if (["G", "X"].includes(supportRole) && link.relation_direction !== "uncertain" && link.causal_relation === "ambiguous") add("explanation-links", "关系方向仍不明确时，请选“尚不能确定”，不能把含糊依据记录成明确的反向证据。 ");
+          if ((supportRole === "G" && link.temporal_relation !== "before") || (supportRole === "X" && link.temporal_relation !== "active_during")) add("explanation-links", "成长须在对应表现前发生，特殊状态须在对应表现时有效；请核对材料时间。 ");
+          link.applicable_current_ids.forEach(id => {
+            const key = JSON.stringify([link.support_evidence_id, id]);
+            if (relationPairs.has(key)) add("explanation-links", "同一材料对同一条表现只能记录一种关系，不能同时选能解释和相反。 ");
+            relationPairs.add(key);
+          });
+        } else if ((supportRole === "G" || supportRole === "X") && link.causal_relation === "ambiguous") {
           add("explanation-links", "如果材料只有含糊暗示，请把该行改为“可能的解释”；成长和特殊状态需要明确依据。 ");
         }
       });
@@ -1848,6 +1948,14 @@ _HTML_TEMPLATE = r'''<!doctype html>
       )) throw new Error("进度中有不符合本题材料范围的原文用途。");
       if (Object.values(row.eventGroups).some(value => typeof value !== "string" || value.length > 200)) throw new Error("进度中的事情编号不正确。");
       for (const link of Object.values(row.explanations)) {
+        if (DIRECTIONAL_RELATIONS) {
+          if (!link || typeof link !== "object" || !link.directionalTargets || typeof link.directionalTargets !== "object" || Array.isArray(link.directionalTargets)) throw new Error("进度中的逐表现关系格式不正确。");
+          for (const [id, target] of Object.entries(link.directionalTargets)) {
+            if (!known.has(id) || row.evidenceRoles[id] !== "C" || !exactKeys(target, ["direction", "causalRelation", "temporalRelation"]) || !["explains", "opposes", "uncertain"].includes(target.direction) || !["explicit", "bounded", "ambiguous"].includes(target.causalRelation) || !["before", "active_during", "after", "unknown"].includes(target.temporalRelation)) throw new Error("进度中的关系方向或目标无效，未自动改为正向解释。");
+            if ((target.direction === "uncertain" && target.causalRelation !== "ambiguous") || (target.direction !== "uncertain" && target.causalRelation === "ambiguous")) throw new Error("进度中的关系方向与明确程度不一致，未自动纠正。");
+          }
+          continue;
+        }
         if (!link || typeof link !== "object" || !Array.isArray(link.applicableCurrentIds) ||
           link.applicableCurrentIds.some(id => !known.has(id)) ||
           !["explicit", "bounded", "ambiguous"].includes(link.causalRelation) ||
@@ -1902,7 +2010,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       if (SINGLE_CLEAR_EVENT) {
         const panel = document.getElementById("previous-round");
         panel.hidden = false;
-        document.getElementById("previous-round-message").textContent = "本版更新了原文片段和判断规则，请按新规则重新复核。旧版文件和旧进度未被删除；不会自动带入旧结论、证据分组或独立完成声明，请保留原文件和原浏览器。";
+        document.getElementById("previous-round-message").textContent = (DIRECTIONAL_RELATIONS ? "本版更新了材料与表现的关系记录，请逐条核对方向。" : "本版更新了原文片段和判断规则，请按新规则重新复核。") + "旧版文件和旧进度未被删除；不会自动带入旧结论、证据分组或独立完成声明，请保留原文件和原浏览器。";
         return;
       }
       if (!DATA.previous_round) return;
@@ -1939,6 +2047,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function stateFromLockedCase(caseIndex, row) {
       const next = blankCase();
       if (row.dimension !== DATA.cases[caseIndex].dimension) throw new Error("导入文件的维度与作者冻结目标不一致。 ");
+      if (DIRECTIONAL_RELATIONS && row.relation_policy !== "directional-evidence-v1") throw new Error("导入文件的证据关系规则与本版不一致。 ");
       if (SINGLE_CLEAR_EVENT) {
         if (row.assessment_policy !== "single-clear-event-v3") throw new Error("导入文件的判断规则与本版不一致。 ");
         const confirmation = row.formal_evidence_confirmation;
@@ -1961,6 +2070,16 @@ _HTML_TEMPLATE = r'''<!doctype html>
       row.evidence.forEach(item => { next.evidenceRoles[item.evidence_id] = item.role; });
       row.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => { next.eventGroups[id] = group.event_group_id; }));
       row.explanation_links.forEach(link => {
+        if (DIRECTIONAL_RELATIONS) {
+          if (!["explains", "opposes", "uncertain"].includes(link.relation_direction)) throw new Error("导入文件的关系方向无效，未改写成正向解释。 ");
+          const stored = next.explanations[link.support_evidence_id] || { directionalTargets: {} };
+          next.explanations[link.support_evidence_id] = stored;
+          link.applicable_current_ids.forEach(id => {
+            if (Object.hasOwn(stored.directionalTargets, id)) throw new Error("同一材料对同一表现有重复关系，未载入。 ");
+            stored.directionalTargets[id] = { direction: link.relation_direction, causalRelation: link.causal_relation, temporalRelation: link.temporal_relation };
+          });
+          return;
+        }
         next.explanations[link.support_evidence_id] = {
           applicableCurrentIds: [...link.applicable_current_ids],
           causalRelation: link.causal_relation,
@@ -1987,7 +2106,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
         if (!exactKeys(row, CASE_KEYS) || byCase.has(row.case_id)) throw new Error("导入文件含重复案例或未知字段。 ");
         if (!Array.isArray(row.evidence) || !row.evidence.every(item => exactKeys(item, ["evidence_id", "role"]))) throw new Error("导入文件的证据结构无效。 ");
         if (!Array.isArray(row.independent_event_groups) || !row.independent_event_groups.every(item => exactKeys(item, ["event_group_id", "evidence_ids"]))) throw new Error("导入文件的事件组结构无效。 ");
-        if (!Array.isArray(row.explanation_links) || !row.explanation_links.every(item => exactKeys(item, ["support_evidence_id", "applicable_current_ids", "causal_relation", "temporal_relation"]))) throw new Error("导入文件的解释绑定结构无效。 ");
+        if (!Array.isArray(row.explanation_links) || !row.explanation_links.every(item => exactKeys(item, LINK_KEYS))) throw new Error("导入文件的解释绑定结构无效。 ");
         if (!Array.isArray(row.phenomena) || !Array.isArray(row.reason_codes)) throw new Error("导入文件的标签结构无效。 ");
         byCase.set(row.case_id, row);
       });

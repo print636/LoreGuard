@@ -141,6 +141,7 @@ def reconstruct_source(
             raise AnnotationRoundError("source_dimension_selector_mismatch")
     public = contract.PublicInputBundle.model_validate_json(json.dumps({
         "dataset_id": data["dataset_id"], "cases": public_cases,
+        **{key: data[key] for key in ("assessment_policy", "relation_policy") if key in data},
     }))
     setup = closed.PublicAuthorSetupBundle.model_validate_json(json.dumps({
         "dataset_id": data["dataset_id"],

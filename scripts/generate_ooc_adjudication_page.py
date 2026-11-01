@@ -163,6 +163,8 @@ def build_page_data(
     }
     if public.assessment_policy is not None:
         data["assessment_policy"] = public.assessment_policy
+    if getattr(public, "relation_policy", None) is not None:
+        data["relation_policy"] = public.relation_policy
     return data
 
 
@@ -515,10 +517,15 @@ _HTML_TEMPLATE = r'''<!doctype html>
     const OUTCOMES = [["conflict", "conflict · 正式冲突"], ["no_issue", "no_issue · 无问题"], ["indeterminate", "indeterminate · 待复核"]];
     const SURFACES = [["formal_issue", "formal_issue · 正式问题"], ["none", "none · 不展示"], ["review_clue", "review_clue · 复核线索"]];
     const LEVELS = { L0: { outcome: "no_issue", surface: "none" }, L1: { outcome: "indeterminate", surface: "review_clue" }, L2: { outcome: "indeterminate", surface: "review_clue" }, L3: { outcome: "conflict", surface: "formal_issue" } };
-    const SINGLE_CLEAR_EVENT = DATA.manual_version === "ooc-manual-v3-event" && DATA.assessment_policy === "single-clear-event-v3";
+    const DIRECTIONAL_RELATIONS = DATA.manual_version === "ooc-manual-v4-relations" && DATA.relation_policy === "directional-evidence-v1";
+    const SINGLE_CLEAR_EVENT = ["ooc-manual-v3-event", "ooc-manual-v4-relations"].includes(DATA.manual_version) && DATA.assessment_policy === "single-clear-event-v3";
+    const RELATION_OPTIONS = [["", "请选择与这次表现的关系"], ["explains", "能解释这次表现"], ["opposes", "与这次表现相反"], ["uncertain", "尚不能确定"]];
+    const LINK_KEYS = ["support_evidence_id", "applicable_current_ids", "causal_relation", "temporal_relation"];
+    if (DIRECTIONAL_RELATIONS) LINK_KEYS.push("relation_direction");
     const FORMAL_CONFIRMATION_KEYS = ["explicit_opposition", "same_scope", "explanations_checked"];
     const CASE_KEYS = ["case_id", "dimension", "final_outcome", "final_surface", "conflict_level", "material_coverage", "required_evidence", "forbidden_evidence_ids", "independent_event_groups", "explanation_links", "phenomena", "reason_codes", "resolution_mode", "adjudicator_id", "adjudicator_kind", "adjudicator_blinded_to_system_prediction", "resolution_note"];
     if (SINGLE_CLEAR_EVENT) CASE_KEYS.push("assessment_policy", "formal_evidence_confirmation");
+    if (DIRECTIONAL_RELATIONS) CASE_KEYS.push("relation_policy");
     const BUNDLE_KEYS = ["schema_version", "dataset_id", "public_input_sha256", "reviewer_ids", "annotation_sha256", "consensus_confirmed_by", "cases"];
     const AGREEMENT_FIELDS = [
       ["dimension", "维度", "dimension_agrees"], ["finalOutcome", "结果", "outcome_agrees"],
@@ -555,7 +562,14 @@ _HTML_TEMPLATE = r'''<!doctype html>
     const evidenceMetaCache = new Map();
 
     function element(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
-    function exactKeys(value, keys) { if (!value || typeof value !== "object" || Array.isArray(value)) return false; const actual = Object.keys(value).sort(); const expected = [...keys].sort(); return actual.length === expected.length && actual.every((key, index) => key === expected[index]); }
+    function exactKeys(value, keys) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+      // The legacy import validator keeps its original four link keys; the
+      // explicit v4 policy requires the direction key as well, never guesses it.
+      if (DIRECTIONAL_RELATIONS && keys.join(",") === "support_evidence_id,applicable_current_ids,causal_relation,temporal_relation") keys = LINK_KEYS;
+      const actual = Object.keys(value).sort(), expected = [...keys].sort();
+      return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+    }
     function deepEqual(left, right) { if (Object.is(left, right)) return true; if (Array.isArray(left) || Array.isArray(right)) return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => deepEqual(value, right[index])); if (!left || !right || typeof left !== "object" || typeof right !== "object") return false; const a = Object.keys(left).sort(), b = Object.keys(right).sort(); return a.length === b.length && a.every((key, index) => key === b[index] && deepEqual(left[key], right[key])); }
     function announce(message) { ui.status.textContent = message; window.clearTimeout(announce.timer); announce.timer = window.setTimeout(() => { ui.status.textContent = ""; }, 4500); }
     function parseTags(value) { const seen = new Set(); return String(value || "").split(/[\n,，]+/).map(item => item.trim()).filter(item => { if (!item || seen.has(item)) return false; seen.add(item); return true; }); }
@@ -569,7 +583,34 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function caseApparentlyComplete(row) { return Boolean(row.finalOutcome && row.finalSurface && row.conflictLevel && row.materialCoverage && parseTags(row.phenomena).length && parseTags(row.reasonCodes).length && row.resolutionMode && row.resolutionNote.trim()); }
     function formatEvidence(caseIndex, rows) { const meta = evidenceMeta(caseIndex); return rows.length ? rows.map(item => { const place = meta.get(item.evidence_id); return `${item.role} · ${place ? `${place.path} 第 ${place.lineNumber} 行` : item.evidence_id}`; }).join("\n") : "未采用"; }
     function formatGroups(caseIndex, groups) { const meta = evidenceMeta(caseIndex); return groups.length ? groups.map(group => `${group.event_group_id}: ${group.evidence_ids.map(id => meta.get(id) ? `第 ${meta.get(id).lineNumber} 行` : id).join("、")}`).join("\n") : "无"; }
-    function formatLinks(caseIndex, links) { const meta = evidenceMeta(caseIndex); return links.length ? links.map(link => { const source = meta.get(link.support_evidence_id); const targets = link.applicable_current_ids.map(id => meta.get(id) ? `第 ${meta.get(id).lineNumber} 行` : id).join("、"); return `${source ? `第 ${source.lineNumber} 行` : link.support_evidence_id} → ${targets}；${link.causal_relation}/${link.temporal_relation}`; }).join("\n") : "无"; }
+    function formatLinks(caseIndex, links) { const meta = evidenceMeta(caseIndex); return links.length ? links.map(link => { const source = meta.get(link.support_evidence_id); const targets = link.applicable_current_ids.map(id => meta.get(id) ? `第 ${meta.get(id).lineNumber} 行` : id).join("、"); const direction = DIRECTIONAL_RELATIONS ? `${RELATION_OPTIONS.find(([value]) => value === link.relation_direction)?.[1] || "未知关系（需核对）"}；` : ""; return `${source ? `第 ${source.lineNumber} 行` : link.support_evidence_id} → ${targets}；${direction}${link.causal_relation}/${link.temporal_relation}`; }).join("\n") : "无"; }
+    function restoreLinks(target, links) {
+      links.forEach(link => {
+        if (!DIRECTIONAL_RELATIONS) { target[link.support_evidence_id] = { applicableCurrentIds: [...link.applicable_current_ids], causalRelation: link.causal_relation, temporalRelation: link.temporal_relation }; return; }
+        if (!exactKeys(link, LINK_KEYS) || !["explains", "opposes", "uncertain"].includes(link.relation_direction)) throw new Error("证据关系方向无效，未回退为正向解释。");
+        const stored = target[link.support_evidence_id] || { directionalTargets: {} };
+        target[link.support_evidence_id] = stored;
+        link.applicable_current_ids.forEach(id => {
+          if (Object.hasOwn(stored.directionalTargets, id)) throw new Error("同一材料对同一表现有重复方向，未载入。");
+          stored.directionalTargets[id] = { direction: link.relation_direction, causalRelation: link.causal_relation, temporalRelation: link.temporal_relation };
+        });
+      });
+    }
+    function buildDirectionalLinks(evidence, explanations, currentIds) {
+      const links = [];
+      evidence.filter(row => ["G", "X", "P"].includes(row.role)).forEach(support => {
+        const grouped = new Map();
+        Object.entries(explanations[support.evidence_id]?.directionalTargets || {}).forEach(([id, value]) => {
+          if (!currentIds.has(id)) return;
+          const key = JSON.stringify([value.direction, value.causalRelation, value.temporalRelation]);
+          if (!grouped.has(key)) grouped.set(key, { support_evidence_id: support.evidence_id, applicable_current_ids: [], relation_direction: value.direction, causal_relation: value.causalRelation, temporal_relation: value.temporalRelation });
+          grouped.get(key).applicable_current_ids.push(id);
+        });
+        links.push(...grouped.values());
+      });
+      return links;
+    }
+    function relationBlocksEvent(link, evidence) { return !DIRECTIONAL_RELATIONS || evidence.find(row => row.evidence_id === link.support_evidence_id)?.role === "P" || link.relation_direction !== "opposes"; }
     function displayValue(caseIndex, field, row) { if (field === "dimension") return row.dimension; if (field === "finalOutcome") return row.outcome; if (field === "finalSurface") return row.surface; if (field === "conflictLevel") return row.conflict_level; if (field === "materialCoverage") return row.material_coverage; if (field === "evidence") return formatEvidence(caseIndex, row.evidence); if (field === "eventGroups") return formatGroups(caseIndex, row.independent_event_groups); if (field === "explanations") return formatLinks(caseIndex, row.explanation_links); if (field === "phenomena") return row.phenomena.join("、"); if (field === "reasonCodes") return row.reason_codes.join("、"); return ""; }
 
     function updateNavigation() {
@@ -587,7 +628,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const next = blankCase(); next.source = side; next.finalOutcome = source.outcome; next.finalSurface = source.surface; next.conflictLevel = source.conflict_level; next.materialCoverage = source.material_coverage; next.phenomena = source.phenomena.join("\n"); next.reasonCodes = source.reason_codes.join("\n"); next.resolutionMode = previousMode; next.resolutionNote = previousNote;
       source.evidence.forEach(item => { next.evidenceRoles[item.evidence_id] = item.role; });
       source.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => { next.eventGroups[id] = group.event_group_id; }));
-      source.explanation_links.forEach(link => { next.explanations[link.support_evidence_id] = { applicableCurrentIds: [...link.applicable_current_ids], causalRelation: link.causal_relation, temporalRelation: link.temporal_relation }; });
+      restoreLinks(next.explanations, source.explanation_links);
       state.cases[caseIndex] = next; updateNavigation(); renderCase(); scheduleDraft(); announce(`已把标注者 ${side} 的提交作为可编辑起点；尚未形成最终裁决。`);
     }
 
@@ -605,7 +646,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       if (field === "materialCoverage") row.materialCoverage = source.material_coverage;
       if (field === "evidence") { row.evidenceRoles = {}; source.evidence.forEach(item => { row.evidenceRoles[item.evidence_id] = item.role; row.forbidden[item.evidence_id] = false; }); }
       if (field === "eventGroups") { row.eventGroups = {}; source.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => { row.eventGroups[id] = group.event_group_id; })); }
-      if (field === "explanations") { row.explanations = {}; source.explanation_links.forEach(link => { row.explanations[link.support_evidence_id] = { applicableCurrentIds: [...link.applicable_current_ids], causalRelation: link.causal_relation, temporalRelation: link.temporal_relation }; }); }
+      if (field === "explanations") { row.explanations = {}; restoreLinks(row.explanations, source.explanation_links); }
       if (field === "phenomena") row.phenomena = source.phenomena.join("\n");
       if (field === "reasonCodes") row.reasonCodes = source.reason_codes.join("\n");
       return true;
@@ -661,6 +702,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
               role.value = "";
               announce("该证据角色不符合冻结来源约束，已拒绝。 ");
             }
+            if (DIRECTIONAL_RELATIONS && caseState.evidenceRoles[evidenceId] !== role.value) delete caseState.explanations[evidenceId];
             caseState.evidenceRoles[evidenceId] = role.value;
             clearFormalConfirmation(caseIndex);
             if (role.value) caseState.forbidden[evidenceId] = false;
@@ -696,7 +738,63 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const notes = element("div", "review-notes"); [["A", caseRow.reviewer_a], ["B", caseRow.reviewer_b]].forEach(([side, source]) => { const note = element("article", "review-note"); note.append(element("h4", "", `标注者 ${side} 的人工说明`), element("p", "", source.review_note)); notes.append(note); }); panel.append(notes); return panel;
     }
 
+    function renderDirectionalStructures(caseIndex, host) {
+      const row = state.cases[caseIndex], meta = evidenceMeta(caseIndex);
+      const currents = Object.entries(row.evidenceRoles).filter(([id, role]) => meta.has(id) && role === "C").map(([id]) => id);
+      host.append(element("h4", "", "新稿表现分别属于哪次事情？"));
+      currents.forEach((id, index) => {
+        const wrap = element("div", "structure-row"), info = meta.get(id);
+        wrap.append(element("p", "evidence-excerpt", info.text));
+        const options = [["", "请选择属于哪件事"], ...currents.map((_, i) => [`event-${i + 1}`, `第 ${i + 1} 件事`])];
+        Object.values(row.eventGroups).forEach(value => { if (value && !options.some(([id]) => id === value)) options.push([value, `已记录的事情：${value}`]); });
+        const input = makeSelect(options, row.eventGroups[id] || "");
+        input.disabled = state.locked;
+        input.addEventListener("change", () => { row.eventGroups[id] = input.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
+        wrap.append(formField(`新稿表现 ${index + 1}（第 ${info.lineNumber} 行）`, input, "同一事件的多个片段选同一件事，不用片段数凑事件数。", `event-${caseIndex}-${index}`));
+        host.append(wrap);
+      });
+      host.append(element("h4", "", "成长或状态与每次表现的关系"));
+      Object.entries(row.evidenceRoles).filter(([id, role]) => meta.has(id) && ["G", "X", "P"].includes(role)).forEach(([id, role], supportIndex) => {
+        const info = meta.get(id), existing = row.explanations[id] || { directionalTargets: {} };
+        row.explanations[id] = existing;
+        if (!existing.directionalTargets || typeof existing.directionalTargets !== "object") existing.directionalTargets = {};
+        const relations = existing.directionalTargets;
+        Object.keys(relations).forEach(target => { if (!currents.includes(target)) delete relations[target]; });
+        const wrap = element("div", "structure-row");
+        wrap.append(element("h5", "", `${ROLES.find(([value]) => value === role)?.[1]}（第 ${info.lineNumber} 行）`), element("p", "evidence-excerpt", info.text), element("p", "helper", "逐条选择：同一段成长可以解释一个表现，也可以与另一个表现相反。不相关的留空。"));
+        if (role === "P") wrap.append(element("p", "helper", "可能线索只记录未决关系，不能直接充作确定的反向证据。"));
+        currents.forEach((targetId, targetIndex) => {
+          const value = relations[targetId], targetInfo = meta.get(targetId), target = element("div", "field");
+          const options = role === "P" ? RELATION_OPTIONS.filter(([direction]) => !direction || direction === "uncertain") : RELATION_OPTIONS;
+          const input = makeSelect(options, value?.direction || "");
+          input.disabled = state.locked;
+          const controlId = `relation-${caseIndex}-${supportIndex}-${targetIndex}`;
+          target.append(formField(`新稿表现 ${targetIndex + 1}（第 ${targetInfo.lineNumber} 行）：${targetInfo.text}`, input, "“相反”是反向证据，不是行为未发生或与其无关；不会自动替你判正式冲突。", controlId));
+          input.addEventListener("change", () => {
+            if (!input.value) delete relations[targetId];
+            else relations[targetId] = { direction: input.value, causalRelation: input.value === "uncertain" || role === "P" ? "ambiguous" : ["explicit", "bounded"].includes(value?.causalRelation) ? value.causalRelation : "bounded", temporalRelation: role === "G" ? "before" : role === "X" ? "active_during" : value?.temporalRelation || "unknown" };
+            clearFormalConfirmation(caseIndex); renderStructures(caseIndex, host); document.getElementById(controlId)?.focus(); scheduleDraft();
+          });
+          if (value) {
+            const details = element("details", "technical-details"); details.append(element("summary", "", "核对依据明确程度与时间"));
+            const causalOptions = value.direction === "uncertain" || role === "P" ? [["ambiguous", "关系尚不确定"]] : [["explicit", "原文明说这一关系"], ["bounded", "有上下文依据，仅适用特定范围"]];
+            const causal = makeSelect(causalOptions, value.causalRelation); causal.disabled = state.locked || value.direction === "uncertain" || role === "P";
+            details.append(formField("关系依据有多明确？", causal, "关系方向不会因明确程度改变而被改写。", `relation-causal-${caseIndex}-${supportIndex}-${targetIndex}`));
+            causal.addEventListener("change", () => { value.causalRelation = causal.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
+            const temporal = makeSelect(role === "G" ? [["before", "所选表现之前已发生"]] : role === "X" ? [["active_during", "所选表现发生时有效"]] : [["before", "在表现之前"], ["active_during", "表现发生时有效"], ["after", "在表现之后"], ["unknown", "时间不明"]], value.temporalRelation);
+            temporal.disabled = state.locked || role === "G" || role === "X";
+            details.append(formField("发生或生效时间", temporal, "仍须依据原文核对，不以固定选项替代判断。", `relation-temporal-${caseIndex}-${supportIndex}-${targetIndex}`));
+            temporal.addEventListener("change", () => { value.temporalRelation = temporal.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
+            target.append(details);
+          }
+          wrap.append(target);
+        });
+        host.append(wrap);
+      });
+    }
+
     function renderStructures(caseIndex, host) {
+      if (DIRECTIONAL_RELATIONS) { host.textContent = ""; renderDirectionalStructures(caseIndex, host); return; }
       const row = state.cases[caseIndex], meta = evidenceMeta(caseIndex), required = Object.entries(row.evidenceRoles).filter(([id, role]) => meta.has(id) && role), currents = required.filter(([, role]) => role === "C").map(([id]) => id), supports = required.filter(([, role]) => ["G","X","P"].includes(role));
       const groupTitle = element("h4", "", "C 事件组"), groups = element("div"); host.append(groupTitle, groups); if (!currents.length) groups.append(element("p", "structure-empty", "把最终必要证据标为 C 后，在这里记录事件组。")); currents.forEach((id, index) => { const info = meta.get(id), wrap = element("div", "structure-row"); wrap.append(element("h5", "", `C${String(index + 1).padStart(2,"0")} · ${info.path} 第 ${info.lineNumber} 行`)); const input = document.createElement("input"); input.type = "text"; input.maxLength = 200; input.value = row.eventGroups[id] || ""; input.disabled = state.locked; input.addEventListener("input", () => { row.eventGroups[id] = input.value; scheduleDraft(); }); wrap.append(formField("事件组 ID", input, "同一事件填相同 ID；独立事件填不同 ID。", `event-${caseIndex}-${index}`)); groups.append(wrap); });
       const linkTitle = element("h4", "", "G／X／P 到 C 的解释绑定"), links = element("div"); host.append(linkTitle, links); if (!supports.length) links.append(element("p", "structure-empty", "采用 G、X 或 P 后，在这里绑定其解释的 C。")); supports.forEach(([id, role], supportIndex) => { const info = meta.get(id), existing = row.explanations[id] || { applicableCurrentIds: [], causalRelation: role === "P" ? "ambiguous" : "bounded", temporalRelation: role === "G" ? "before" : role === "X" ? "active_during" : "unknown" }; row.explanations[id] = existing; if ((role === "G" || role === "X") && existing.causalRelation === "ambiguous") existing.causalRelation = "bounded"; if (role === "G") existing.temporalRelation = "before"; if (role === "X") existing.temporalRelation = "active_during"; existing.applicableCurrentIds = (existing.applicableCurrentIds || []).filter(target => currents.includes(target)); const wrap = element("div", "structure-row"); wrap.append(element("h5", "", `${role} · ${info.path} 第 ${info.lineNumber} 行`), element("p", "helper", role === "P" ? "P 可不建立链接；一旦选择 C 就写入绑定。" : `${role} 必须至少绑定一个 C。`)); const targets = element("div", "targets"); currents.forEach((target, targetIndex) => { const targetInfo = meta.get(target), label = element("label", "target-check"), checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = existing.applicableCurrentIds.includes(target); checkbox.disabled = state.locked; checkbox.addEventListener("change", () => { const selected = new Set(existing.applicableCurrentIds); checkbox.checked ? selected.add(target) : selected.delete(target); existing.applicableCurrentIds = [...selected]; scheduleDraft(); }); label.append(checkbox, element("span", "", `C${String(targetIndex + 1).padStart(2,"0")} · 第 ${targetInfo.lineNumber} 行`)); targets.append(label); }); if (!currents.length) targets.append(element("p", "structure-empty", "尚未采用 C，无法建立解释绑定。")); wrap.append(targets); const grid = element("div", "structure-grid"), causalWrap = element("div"), causalLabel = element("label", "", "因果关系"), causalOptions = role === "P" ? [["explicit","明确因果"],["bounded","有限解释"],["ambiguous","含糊／不确定"]] : [["explicit","明确因果"],["bounded","有限解释"]], causal = makeSelect(causalOptions, existing.causalRelation); causal.id = `causal-${caseIndex}-${supportIndex}`; causal.disabled = state.locked; causalLabel.htmlFor = causal.id; causal.addEventListener("change", () => { existing.causalRelation = causal.value; scheduleDraft(); }); causalWrap.append(causalLabel, causal); const temporalWrap = element("div"), temporalLabel = element("label", "", "时间关系"), temporalOptions = role === "G" ? [["before","发生在 C 之前"]] : role === "X" ? [["active_during","C 发生时有效"]] : [["before","发生在 C 之前"],["active_during","C 发生时有效"],["after","发生在 C 之后"],["unknown","时间不明"]], temporal = makeSelect(temporalOptions, existing.temporalRelation); temporal.id = `temporal-${caseIndex}-${supportIndex}`; temporal.disabled = state.locked || role === "G" || role === "X"; temporalLabel.htmlFor = temporal.id; temporal.addEventListener("change", () => { existing.temporalRelation = temporal.value; scheduleDraft(); }); temporalWrap.append(temporalLabel, temporal); grid.append(causalWrap, temporalWrap); wrap.append(grid); links.append(wrap); });
@@ -859,13 +957,15 @@ _HTML_TEMPLATE = r'''<!doctype html>
 
     function buildCase(caseIndex) {
       const source = DATA.cases[caseIndex], row = state.cases[caseIndex], meta = evidenceMeta(caseIndex), required_evidence = Object.entries(row.evidenceRoles).filter(([id, role]) => meta.has(id) && ["B","C","G","X","P"].includes(role)).map(([evidence_id, role]) => ({ evidence_id, role })), requiredIds = new Set(required_evidence.map(item => item.evidence_id)), forbidden_evidence_ids = Object.entries(row.forbidden).filter(([id, value]) => value && meta.has(id) && !requiredIds.has(id)).map(([id]) => id), currentIds = new Set(required_evidence.filter(item => item.role === "C").map(item => item.evidence_id)), grouped = new Map(); currentIds.forEach(id => { const group = String(row.eventGroups[id] || "").trim(); if (group) { const values = grouped.get(group) || []; values.push(id); grouped.set(group, values); } }); const independent_event_groups = [...grouped.entries()].map(([event_group_id, evidence_ids]) => ({ event_group_id, evidence_ids })), explanation_links = [];
-      required_evidence.filter(item => ["G","X","P"].includes(item.role)).forEach(item => { const link = row.explanations[item.evidence_id] || {}, targets = Array.isArray(link.applicableCurrentIds) ? [...new Set(link.applicableCurrentIds.filter(id => currentIds.has(id)))] : []; if (item.role === "G" || item.role === "X" || targets.length) { const allowed = item.role === "P" ? ["explicit","bounded","ambiguous"] : ["explicit","bounded"]; explanation_links.push({ support_evidence_id: item.evidence_id, applicable_current_ids: targets, causal_relation: allowed.includes(link.causalRelation) ? link.causalRelation : item.role === "P" ? "ambiguous" : "bounded", temporal_relation: item.role === "G" ? "before" : item.role === "X" ? "active_during" : ["before","active_during","after","unknown"].includes(link.temporalRelation) ? link.temporalRelation : "unknown" }); } });
+      if (DIRECTIONAL_RELATIONS) explanation_links.push(...buildDirectionalLinks(required_evidence, row.explanations, currentIds));
+      else required_evidence.filter(item => ["G","X","P"].includes(item.role)).forEach(item => { const link = row.explanations[item.evidence_id] || {}, targets = Array.isArray(link.applicableCurrentIds) ? [...new Set(link.applicableCurrentIds.filter(id => currentIds.has(id)))] : []; if (item.role === "G" || item.role === "X" || targets.length) { const allowed = item.role === "P" ? ["explicit","bounded","ambiguous"] : ["explicit","bounded"]; explanation_links.push({ support_evidence_id: item.evidence_id, applicable_current_ids: targets, causal_relation: allowed.includes(link.causalRelation) ? link.causalRelation : item.role === "P" ? "ambiguous" : "bounded", temporal_relation: item.role === "G" ? "before" : item.role === "X" ? "active_during" : ["before","active_during","after","unknown"].includes(link.temporalRelation) ? link.temporalRelation : "unknown" }); } });
       const third = row.resolutionMode === "third_human";
       const result = { case_id: source.case_id, dimension: source.dimension, final_outcome: row.finalOutcome, final_surface: row.finalSurface, conflict_level: row.conflictLevel, material_coverage: row.materialCoverage, required_evidence, forbidden_evidence_ids, independent_event_groups, explanation_links, phenomena: parseTags(row.phenomena), reason_codes: parseTags(row.reasonCodes), resolution_mode: row.resolutionMode, adjudicator_id: third ? DATA.third_human_id : null, adjudicator_kind: third && state.confirmations.thirdHuman ? "human" : null, adjudicator_blinded_to_system_prediction: third && state.confirmations.thirdHumanBlind ? true : null, resolution_note: row.resolutionNote.trim() };
       if (SINGLE_CLEAR_EVENT) {
         result.assessment_policy = "single-clear-event-v3";
         result.formal_evidence_confirmation = row.formalEvidenceConfirmation === null ? null : Object.fromEntries(FORMAL_CONFIRMATION_KEYS.map(key => [key, row.formalEvidenceConfirmation?.[key] === true]));
       }
+      if (DIRECTIONAL_RELATIONS) result.relation_policy = "directional-evidence-v1";
       return result;
     }
     function buildBundle() { return { schema_version: DATA.adjudication_schema_version, dataset_id: DATA.dataset_id, public_input_sha256: DATA.public_input_sha256, reviewer_ids: DATA.reviewers.map(row => row.reviewer_id), annotation_sha256: DATA.reviewers.map(row => row.annotation_sha256), consensus_confirmed_by: [state.confirmations.reviewerA ? DATA.reviewers[0].reviewer_id : null, state.confirmations.reviewerB ? DATA.reviewers[1].reviewer_id : null].filter(Boolean), cases: DATA.cases.map((_, index) => buildCase(index)) }; }
@@ -889,7 +989,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
           if (!b.length || !c.length) add("evidence-final", "L3 至少需要一处原设定和一处明确的新稿表现证据。 ");
           if (groups.has(undefined) || !groups.size) add("structures", "每段新稿表现都要归到对应事件；同一事件的多个片段仍是同一组。 ");
           const coveredGroups = new Set();
-          row.explanation_links.forEach(link => link.applicable_current_ids.forEach(id => { if (byEvidence.has(id)) coveredGroups.add(byEvidence.get(id)); }));
+          row.explanation_links.filter(link => relationBlocksEvent(link, row.required_evidence)).forEach(link => link.applicable_current_ids.forEach(id => { if (byEvidence.has(id)) coveredGroups.add(byEvidence.get(id)); }));
           if (p.some(id => !row.explanation_links.some(link => link.support_evidence_id === id && link.applicable_current_ids.length))) add("structures", "可能解释尚未对应具体事件，不能直接认定正式冲突。请如实对应或保留为待复核。 ");
           if (![...groups].some(group => group !== undefined && !coveredGroups.has(group))) add("structures", "所选事件均有明确或可能解释，不能认定正式冲突；解释只影响其对应事件。 ");
           if (!FORMAL_CONFIRMATION_KEYS.every(key => row.formal_evidence_confirmation?.[key] === true)) add(`formal-confirmation-${caseIndex}`, "请由仲裁者主动核对明确相反、同一范围及解释条件；不能直接继承 A／B 的确认。 ");
@@ -900,7 +1000,22 @@ _HTML_TEMPLATE = r'''<!doctype html>
         }
       }
       if (["L1","L2"].includes(row.conflict_level) && !row.required_evidence.length) add("evidence-final", "L1／L2 至少需要一条必要证据。 ");
-      const linked = new Set(row.explanation_links.map(link => link.support_evidence_id)); [...g,...x].forEach(id => { if (!linked.has(id)) add("structures", "每条 G 或 X 都必须绑定至少一个 C。 "); }); row.explanation_links.forEach(link => { if (!link.applicable_current_ids.length) add("structures", "解释绑定至少需要一个 C。 "); const role = row.required_evidence.find(item => item.evidence_id === link.support_evidence_id)?.role; if ((role === "G" || role === "X") && link.causal_relation === "ambiguous") add("structures", "含糊支持必须标为 P。 "); });
+      const linked = new Set(row.explanation_links.map(link => link.support_evidence_id));
+      [...g,...x].forEach(id => { if (!linked.has(id)) add("structures", DIRECTIONAL_RELATIONS ? "每段成长或状态至少对应一条相关表现，并亲自选择关系方向。 " : "每条 G 或 X 都必须绑定至少一个 C。 "); });
+      const relationPairs = new Set();
+      row.explanation_links.forEach(link => {
+        if (!link.applicable_current_ids.length) add("structures", "关系至少需要一条对应的新稿表现。 ");
+        const role = row.required_evidence.find(item => item.evidence_id === link.support_evidence_id)?.role;
+        if (DIRECTIONAL_RELATIONS) {
+          if (!["explains", "opposes", "uncertain"].includes(link.relation_direction)) add("structures", "关系方向无效或尚未选择；不会替你默认能解释。 ");
+          if (!["explicit", "bounded", "ambiguous"].includes(link.causal_relation) || !["before", "active_during", "after", "unknown"].includes(link.temporal_relation)) add("structures", "关系依据或时间格式无效，请核对。 ");
+          if (["G", "X"].includes(role) && link.relation_direction !== "uncertain" && link.causal_relation === "ambiguous") add("structures", "关系仍含糊时须选“尚不能确定”，不能用作确定的反向证据。 ");
+          if (role === "P" && (link.relation_direction !== "uncertain" || link.causal_relation !== "ambiguous")) add("structures", "可能线索只能保留尚不确定的关系，不能充作确定解释或反向证据。 ");
+          if (link.relation_direction === "uncertain" && link.causal_relation !== "ambiguous") add("structures", "未决关系的明确程度也必须保持未决，不能自动改为确定关系。 ");
+          if ((role === "G" && link.temporal_relation !== "before") || (role === "X" && link.temporal_relation !== "active_during")) add("structures", "成长须早于对应表现，特殊状态须在对应表现时有效。 ");
+          link.applicable_current_ids.forEach(id => { const key = JSON.stringify([link.support_evidence_id, id]); if (relationPairs.has(key)) add("structures", "同一材料对同一表现只能记录一种关系。 "); relationPairs.add(key); });
+        } else if ((role === "G" || role === "X") && link.causal_relation === "ambiguous") add("structures", "含糊支持必须标为 P。 ");
+      });
       if (!row.phenomena.length || row.phenomena.length > 64 || row.phenomena.some(value => value.length > 100)) add(`phenomena-${caseIndex}`, "现象标签需为 1–64 个非空值，每个不超过 100 字符。 ");
       if (!row.reason_codes.length || row.reason_codes.length > 64 || row.reason_codes.some(value => value.length > 100)) add(`reasons-${caseIndex}`, "原因码需为 1–64 个非空值，每个不超过 100 字符。 ");
       if (!["reviewer_consensus","third_human"].includes(row.resolution_mode)) add(`mode-${caseIndex}`, "请选择裁决模式。 ");
@@ -915,11 +1030,39 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function saveDraft(silent = false) { if (state.locked) return; try { localStorage.setItem(draftKey, JSON.stringify({ draft_version: 1, public_input_sha256: DATA.public_input_sha256, author_setup_sha256: DATA.author_setup_sha256, execution_freeze_sha256: DATA.execution_freeze_sha256, manual_version: DATA.manual_version, reviewer_ids: DATA.reviewers.map(row => row.reviewer_id), annotation_sha256: DATA.reviewers.map(row => row.annotation_sha256), third_human_id: DATA.third_human_id, active_case: state.activeCase, confirmations: state.confirmations, cases: state.cases })); if (!silent) announce("本地草稿已保存。数据没有离开此浏览器。 "); } catch (_) { if (!silent) announce("浏览器拒绝本地存储。请尽快下载锁定 JSON。 "); } }
     function invalidateFinalConfirmations() { if (!Object.values(state.confirmations).some(Boolean)) return; state.confirmations = blankConfirmations(); document.querySelectorAll('#final-confirmations input[type="checkbox"]').forEach(input => { input.checked = false; }); announce("仲裁内容已修改，最终确认已撤回；锁定前请 A、B 重新确认。 "); }
     function scheduleDraft(contentChanged = true) { if (state.locked) return; if (contentChanged) invalidateFinalConfirmations(); window.clearTimeout(scheduleDraft.timer); scheduleDraft.timer = window.setTimeout(() => saveDraft(true), 500); }
-    function loadDraft() { try { const raw = localStorage.getItem(draftKey); if (!raw) return false; const draft = JSON.parse(raw), reviewerIds = DATA.reviewers.map(row => row.reviewer_id), digests = DATA.reviewers.map(row => row.annotation_sha256); if (draft.draft_version !== 1 || draft.public_input_sha256 !== DATA.public_input_sha256 || draft.author_setup_sha256 !== DATA.author_setup_sha256 || draft.execution_freeze_sha256 !== DATA.execution_freeze_sha256 || draft.manual_version !== DATA.manual_version || !deepEqual(draft.reviewer_ids, reviewerIds) || !deepEqual(draft.annotation_sha256, digests) || draft.third_human_id !== DATA.third_human_id || !Array.isArray(draft.cases) || draft.cases.length !== DATA.cases.length) return false; const confirmations = draft.confirmations || {}; state.confirmations = { reviewerA: confirmations.reviewerA === true, reviewerB: confirmations.reviewerB === true, thirdHuman: confirmations.thirdHuman === true, thirdHumanBlind: confirmations.thirdHumanBlind === true }; state.cases = draft.cases.map(row => ({ ...blankCase(), ...row, evidenceRoles: { ...(row.evidenceRoles || {}) }, forbidden: { ...(row.forbidden || {}) }, eventGroups: { ...(row.eventGroups || {}) }, explanations: { ...(row.explanations || {}) } })); state.activeCase = Number.isInteger(draft.active_case) && draft.active_case >= 0 && draft.active_case < DATA.cases.length ? draft.active_case : 0; return true; } catch (_) { return false; } }
+    function checkedDirectionalDraft(caseIndex, row) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("草稿格式不正确。");
+      const known = evidenceMeta(caseIndex);
+      for (const key of ["evidenceRoles", "eventGroups", "forbidden", "explanations"]) {
+        if (!row[key] || typeof row[key] !== "object" || Array.isArray(row[key]) || Object.keys(row[key]).some(id => !known.has(id))) throw new Error("草稿引用不属于本题的材料。");
+      }
+      for (const link of Object.values(row.explanations)) {
+        if (!link || !link.directionalTargets || typeof link.directionalTargets !== "object" || Array.isArray(link.directionalTargets)) throw new Error("草稿缺少逐表现关系。");
+        for (const [id, value] of Object.entries(link.directionalTargets)) {
+          if (!known.has(id) || row.evidenceRoles[id] !== "C" || !exactKeys(value, ["direction", "causalRelation", "temporalRelation"]) || !["explains", "opposes", "uncertain"].includes(value.direction) || !["explicit", "bounded", "ambiguous"].includes(value.causalRelation) || !["before", "active_during", "after", "unknown"].includes(value.temporalRelation)) throw new Error("草稿方向或目标无效，未回退为正向解释。");
+          if ((value.direction === "uncertain" && value.causalRelation !== "ambiguous") || (value.direction !== "uncertain" && value.causalRelation === "ambiguous")) throw new Error("草稿关系方向与明确程度不一致，未自动纠正。");
+        }
+      }
+      return { ...blankCase(), ...row, formalEvidenceConfirmation: checkedFormalConfirmation(row.formalEvidenceConfirmation), evidenceRoles: { ...row.evidenceRoles }, forbidden: { ...row.forbidden }, eventGroups: { ...row.eventGroups }, explanations: JSON.parse(JSON.stringify(row.explanations)) };
+    }
+    function loadDraft() {
+      try {
+        const raw = localStorage.getItem(draftKey); if (!raw) return false;
+        const draft = JSON.parse(raw), reviewerIds = DATA.reviewers.map(row => row.reviewer_id), digests = DATA.reviewers.map(row => row.annotation_sha256);
+        if (draft.draft_version !== 1 || draft.public_input_sha256 !== DATA.public_input_sha256 || draft.author_setup_sha256 !== DATA.author_setup_sha256 || draft.execution_freeze_sha256 !== DATA.execution_freeze_sha256 || draft.manual_version !== DATA.manual_version || !deepEqual(draft.reviewer_ids, reviewerIds) || !deepEqual(draft.annotation_sha256, digests) || draft.third_human_id !== DATA.third_human_id || !Array.isArray(draft.cases) || draft.cases.length !== DATA.cases.length) return false;
+        const nextCases = draft.cases.map((row, index) => DIRECTIONAL_RELATIONS ? checkedDirectionalDraft(index, row) : ({ ...blankCase(), ...row, evidenceRoles: { ...(row.evidenceRoles || {}) }, forbidden: { ...(row.forbidden || {}) }, eventGroups: { ...(row.eventGroups || {}) }, explanations: { ...(row.explanations || {}) } }));
+        const confirmations = draft.confirmations || {};
+        state.confirmations = { reviewerA: confirmations.reviewerA === true, reviewerB: confirmations.reviewerB === true, thirdHuman: confirmations.thirdHuman === true, thirdHumanBlind: confirmations.thirdHumanBlind === true };
+        state.cases = nextCases;
+        state.activeCase = Number.isInteger(draft.active_case) && draft.active_case >= 0 && draft.active_case < DATA.cases.length ? draft.active_case : 0;
+        return true;
+      } catch (_) { return false; }
+    }
 
     function stateFromLocked(caseIndex, row) {
       const next = blankCase();
       if (row.dimension !== DATA.cases[caseIndex].dimension) throw new Error("导入文件的维度与作者冻结目标不一致。 ");
+      if (DIRECTIONAL_RELATIONS && row.relation_policy !== "directional-evidence-v1") throw new Error("导入文件的关系规则与本版不一致。 ");
       if (SINGLE_CLEAR_EVENT) {
         if (row.assessment_policy !== "single-clear-event-v3") throw new Error("导入文件的判断规则与本版不一致。 ");
         next.formalEvidenceConfirmation = checkedFormalConfirmation(row.formal_evidence_confirmation);
@@ -928,7 +1071,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       row.required_evidence.forEach(item => { next.evidenceRoles[item.evidence_id] = item.role; });
       row.forbidden_evidence_ids.forEach(id => { next.forbidden[id] = true; });
       row.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => { next.eventGroups[id] = group.event_group_id; }));
-      row.explanation_links.forEach(link => { next.explanations[link.support_evidence_id] = { applicableCurrentIds: [...link.applicable_current_ids], causalRelation: link.causal_relation, temporalRelation: link.temporal_relation }; });
+      restoreLinks(next.explanations, row.explanation_links);
       const known = evidenceMeta(caseIndex);
       if ([...Object.keys(next.evidenceRoles), ...Object.keys(next.forbidden)].some(id => !known.has(id))) throw new Error("导入文件引用了本案例不存在的证据。 ");
       if (Object.entries(next.evidenceRoles).some(([id, role]) => !roleAllowed(caseIndex, id, role))) throw new Error("导入文件的 B/C/G 来源不符合作者冻结目标。 ");

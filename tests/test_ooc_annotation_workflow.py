@@ -1123,3 +1123,145 @@ def test_annotation_dimension_and_bc_roles_are_bound_to_frozen_author_setup():
     )
     with pytest.raises(workflow.AnnotationWorkflowError, match="target_document"):
         workflow._validate_annotation_setup_binding(public, setup, wrong_current)
+
+
+def _v4_row(**updates):
+    return _v3_row(relation_policy=contract.DIRECTIONAL_RELATION_POLICY, **updates)
+
+
+def _direction(support, target, direction, *, role="G", causal=None, temporal=None):
+    return {"support_evidence_id": support, "applicable_current_ids": [target],
+            "relation_direction": direction,
+            "causal_relation": causal or ("ambiguous" if direction == "uncertain" else "bounded"),
+            "temporal_relation": temporal or ("before" if role == "G" else "active_during")}
+
+
+@pytest.mark.parametrize("direction", ["explains", "opposes", "uncertain"])
+def test_v4_growth_direction_has_real_event_effect_without_automatic_verdict(direction):
+    row = _v4_row(evidence=_evidence(("b", "B"), ("c1", "C"), ("g", "G")),
+                  explanation_links=[_direction("g", "c1", direction)])
+    if direction == "opposes":
+        parsed = workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+        assert workflow.unexplained_current_event_ids(parsed.evidence, parsed.independent_event_groups,
+                                                       parsed.explanation_links) == {"one"}
+        row["formal_evidence_confirmation"]["same_scope"] = False
+        with pytest.raises(ValidationError, match="human_evidence_confirmation"):
+            workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+    else:
+        with pytest.raises(ValidationError, match="unexplained_clear_event"):
+            workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+        row.update(outcome="indeterminate", surface="review_clue", conflict_level="L2")
+        assert workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row)).conflict_level == "L2"
+
+
+def test_v4_one_growth_explains_one_event_and_opposes_another_without_global_direction():
+    row = _v4_row(evidence=_evidence(("b", "B"), ("c1", "C"), ("c2", "C"), ("g", "G")),
+                  independent_event_groups=[{"event_group_id": "a", "evidence_ids": ["c1"]},
+                                            {"event_group_id": "b", "evidence_ids": ["c2"]}],
+                  explanation_links=[_direction("g", "c1", "explains"), _direction("g", "c2", "opposes")])
+    parsed = workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+    assert workflow.unexplained_current_event_ids(parsed.evidence, parsed.independent_event_groups,
+                                                   parsed.explanation_links) == {"b"}
+    row["independent_event_groups"] = [{"event_group_id": "same-event", "evidence_ids": ["c1", "c2"]}]
+    with pytest.raises(ValidationError, match="unexplained_clear_event"):
+        workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+
+
+@pytest.mark.parametrize("mutation", ["missing", "unknown", "duplicate", "old_policy", "unclear_opposes", "late_growth", "unmapped_P"])
+def test_v4_direction_is_fail_closed_and_cannot_be_silently_recast_as_explanation(mutation):
+    row = _v4_row(evidence=_evidence(("b", "B"), ("c1", "C"), ("g", "G")),
+                  explanation_links=[_direction("g", "c1", "opposes")])
+    if mutation == "missing":
+        row["explanation_links"][0].pop("relation_direction")
+    elif mutation == "unknown":
+        row["explanation_links"][0]["relation_direction"] = "contradictory-unknown"
+    elif mutation == "duplicate":
+        row["explanation_links"].append(_direction("g", "c1", "explains"))
+    elif mutation == "old_policy":
+        row.pop("relation_policy")
+    elif mutation == "unclear_opposes":
+        row["explanation_links"][0]["causal_relation"] = "ambiguous"
+    elif mutation == "late_growth":
+        row["explanation_links"][0]["temporal_relation"] = "after"
+    else:
+        row["evidence"].append({"evidence_id": "possible", "role": "P"})
+    with pytest.raises(ValidationError):
+        workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+
+
+def test_v4_relation_agreement_compares_atomic_targets_including_direction():
+    row = _v4_row(outcome="indeterminate", surface="review_clue", conflict_level="L2",
+                  evidence=_evidence(("b", "B"), ("c1", "C"), ("c2", "C"), ("g", "G")),
+                  explanation_links=[{**_direction("g", "c1", "explains"), "applicable_current_ids": ["c1", "c2"]}])
+    grouped = workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+    row["explanation_links"] = [_direction("g", "c1", "explains"), _direction("g", "c2", "explains")]
+    split = workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+    assert workflow._explanation_identity(grouped) == workflow._explanation_identity(split)
+    row["explanation_links"][1]["relation_direction"] = "opposes"
+    opposite = workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+    assert workflow._explanation_identity(grouped) != workflow._explanation_identity(opposite)
+
+
+def _v4_gold_fixture():
+    public, _, old = _setup_bound_fixture()
+    public = public.model_copy(update={"assessment_policy": contract.EVENT_ASSESSMENT_POLICY,
+                                       "relation_policy": contract.DIRECTIONAL_RELATION_POLICY})
+    row = _v4_row(case_id=public.cases[0].case_id,
+        evidence=_evidence(("baseline-selected", "B"), ("current-one", "C"),
+                           ("current-two", "C"), ("baseline-other", "G")),
+        independent_event_groups=[{"event_group_id": "a", "evidence_ids": ["current-one"]},
+                                  {"event_group_id": "b", "evidence_ids": ["current-two"]}],
+        explanation_links=[_direction("baseline-other", "current-one", "explains"),
+                           _direction("baseline-other", "current-two", "opposes")])
+    payload = old.model_dump(mode="json")
+    payload.update(public_input_sha256=contract.canonical_sha256(public),
+                   manual_version=workflow.RELATION_MANUAL_VERSION, cases=[row])
+    left = workflow.ReviewerAnnotationBundle.model_validate_json(json.dumps(payload))
+    right = left.model_copy(update={"reviewer_id": "another-human"})
+    resolution = {key: value for key, value in row.items()
+                  if key not in {"outcome", "surface", "evidence", "confidence", "review_note"}}
+    resolution.update(final_outcome="conflict", final_surface="formal_issue", required_evidence=row["evidence"],
+                       resolution_mode="reviewer_consensus", resolution_note="Synthetic independent consensus.")
+    adjudication = workflow.AdjudicationBundle.model_validate_json(json.dumps({
+        "dataset_id": public.dataset_id, "public_input_sha256": contract.canonical_sha256(public),
+        "reviewer_ids": [left.reviewer_id, right.reviewer_id],
+        "annotation_sha256": [contract.canonical_sha256(left), contract.canonical_sha256(right)],
+        "consensus_confirmed_by": [left.reviewer_id, right.reviewer_id], "cases": [resolution],
+    }))
+    return public, left, right, adjudication, workflow._build_private_gold(public, left, right, adjudication)
+
+
+def test_v4_gold_keeps_signed_opposing_and_explaining_context_without_forging_native_required_G():
+    public, left, right, adjudication, gold = _v4_gold_fixture()
+    assert gold.cases[0].required_evidence.C == ("current-two",)
+    assert gold.cases[0].required_evidence.G == ()
+    assert [link.relation_direction for link in gold.cases[0].auxiliary_relations] == ["explains", "opposes"]
+    assert all(link.support_role == "G" for link in gold.cases[0].auxiliary_relations)
+    contract.validate_evaluation_contract(public, gold)
+    key = bytes(range(32))
+    commitment = workflow._create_closed_gold_commitment(
+        gold, left, right, adjudication, author_setup_sha256=SHA_B,
+        execution_freeze_sha256=SHA_C, run_config_sha256=SHA_D, hmac_key=key)
+    assert workflow._verify_closed_gold_commitment(gold, commitment, hmac_key=key)
+    payload = gold.model_dump(mode="json")
+    payload["cases"][0]["auxiliary_relations"][1]["relation_direction"] = "explains"
+    tampered = contract.PrivateGoldBundle.model_validate_json(json.dumps(payload))
+    assert not workflow._verify_closed_gold_commitment(tampered, commitment, hmac_key=key)
+    payload["cases"][0]["auxiliary_relations"][1]["support_evidence_id"] = "not-in-public-input"
+    with pytest.raises(contract.ContractError, match="auxiliary_relation_evidence_unknown"):
+        contract.validate_evaluation_contract(public, contract.PrivateGoldBundle.model_validate_json(json.dumps(payload)))
+
+
+def test_v4_relation_policy_cannot_be_injected_into_legacy_manual_or_public_binding():
+    public, left, _, _, _ = _v4_gold_fixture()
+    payload = left.model_dump(mode="json")
+    payload["manual_version"] = workflow.EVENT_MANUAL_VERSION
+    with pytest.raises(ValidationError, match="manual_relation_policy"):
+        workflow.ReviewerAnnotationBundle.model_validate_json(json.dumps(payload))
+    old_public = public.model_copy(update={"relation_policy": None})
+    with pytest.raises(workflow.AnnotationWorkflowError, match="public_relation_policy"):
+        workflow.validate_annotation_binding(old_public, left)
+    legacy = _setup_bound_fixture()[2]
+    assert "relation_policy" not in legacy.cases[0].model_dump()
+    assert "relation_direction" not in workflow.ExplanationLink(
+        support_evidence_id="g", applicable_current_ids=("c",), causal_relation="bounded", temporal_relation="before").model_dump()
