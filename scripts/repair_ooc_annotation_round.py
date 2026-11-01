@@ -31,8 +31,11 @@ from scripts import run_ooc_sealed_http as sealed_http
 
 ROUND_ID = "ooc-event-fragment-round-v3"
 MANUAL_VERSION = "ooc-manual-v3-event"
-SEGMENTATION_POLICY = "punctuation-fragments-v1"
-_BOUNDARY = re.compile(r"[，,。；;！？!?]+[\u201d\u2019」』》】）)]*")
+SEGMENTATION_POLICY = "semicolons-and-periods-v2"
+# The annotation pilot is Simplified Chinese. Only Chinese full stops and
+# Chinese/ASCII semicolons are boundaries. In particular, commas, questions,
+# exclamations and ASCII dots stay intact (including decimals/abbreviations).
+_BOUNDARY = re.compile(r"[。；;]+[\u201d\u2019\u0022\u0027」』》】）)]*")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+\S")
 
 
@@ -43,8 +46,9 @@ class AnnotationRepairError(ValueError):
 def fragment_document(payload: bytes) -> tuple[bytes, list[dict[str, int]]]:
     """Insert LF only, keeping a reversible Unicode-codepoint source map.
 
-    Apply exactly the same punctuation rule to every ordinary line of every
-    supplied document. Fragment boundaries are not events or evidence labels.
+    Apply the same Chinese-full-stop/semicolon rule to every ordinary line of
+    every supplied document. Fragment boundaries are not events or labels.
+    Commas, ASCII dots and question/exclamation marks do not split fragments.
     Markdown headings remain intact; existing blank lines and final LF remain.
     """
     if b"\r" in payload:
@@ -260,7 +264,8 @@ def repair_annotation_round(
     with (output / "批次说明.md").open("x", encoding="utf-8", newline="\n") as target:
         target.write(
             "# 18 题修复版：按原文片段记录事件\n\n"
-            "仍是同一组18题，原文只按统一标点规则新增换行，其他字符一个不改。"
+            "仍是同一组18题，原文只在中文句号‘。’和分号‘；’‘;’后新增换行，"
+            "逗号、问叹号和英文点号不拆，其他字符一个不改。"
             "片段不是独立事件；同一件事的多个片段仍选同一事情。没有预选答案。\n\n"
             "单次明确且材料完整、范围一致、没有适用解释的反向行为，可以由真人判为正式冲突；"
             "有歧义时保留待复核，多次仅增强证据，不是硬门槛。选择正式冲突还须主动完成核对。\n\n"

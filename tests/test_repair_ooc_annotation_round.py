@@ -27,7 +27,7 @@ def v2_source(tmp_path):
         target = f"target-{group}.md"
         (stories / baseline).write_bytes(f"角色{group}明确的设定，附带适用范围。\n".encode("utf-8"))
         (stories / target).write_bytes((f"# 合成新稿 {group}\n"
-                                        f"周一角色{group}做一件事，五天后又做另一件事。\n"
+                                        f"周一角色{group}做一件事，仍在同一场合；五天后又做另一件事。\n"
                                         f"另一个角色{group}的记事，保持完整上下文。\n").encode("utf-8"))
         documents = [
             {"document_key": "baseline", "source_path": baseline, "phase": "baseline",
@@ -78,7 +78,23 @@ def test_fragmentation_only_inserts_lf_and_retains_exact_source_offsets(ending):
     old_lines = original.decode().splitlines()
     for row, fragment in zip(mapping, new.decode().splitlines()):
         assert fragment == old_lines[row["source_line_number"] - 1][row["source_char_start"]:row["source_char_end"]]
-    assert len([row for row in mapping if row["source_line_number"] == 2]) == 3
+    assert len([row for row in mapping if row["source_line_number"] == 2]) == 2
+
+
+@pytest.mark.parametrize(("original", "expected"), [
+    ("甲，乙,丙：丁:戊？己?庚！辛!壬。", "甲，乙,丙：丁:戊？己?庚！辛!壬。"),
+    ("甲；乙;丙。丁", "甲；\n乙;\n丙。\n丁"),
+    ("她说：“甲，乙。”她离开；他点头;结束。", "她说：“甲，乙。”\n她离开；\n他点头;\n结束。"),
+    ('他说:"甲，乙。"她离开；他答:\'好的；\'然后结束。', '他说:"甲，乙。"\n她离开；\n他答:\'好的；\'\n然后结束。'),
+    ("版本v1.2.3;Dr. Wang... said. 3.14", "版本v1.2.3;\nDr. Wang... said. 3.14"),
+])
+def test_only_chinese_full_stops_and_semicolons_split_fragments(original, expected):
+    reformatted, mapping = repair.fragment_document(original.encode("utf-8"))
+    assert reformatted.decode("utf-8") == expected
+    assert reformatted.replace(b"\n", b"") == original.encode("utf-8")
+    for row, fragment in zip(mapping, expected.splitlines(), strict=True):
+        assert row["source_line_number"] == 1
+        assert original[row["source_char_start"]:row["source_char_end"]] == fragment
 
 
 def test_repaired_round_is_new_frozen_policy_with_same_cases_and_original_archives(v2_source, tmp_path):
@@ -106,6 +122,9 @@ def test_repaired_round_is_new_frozen_policy_with_same_cases_and_original_archiv
         key: value for key, value in new_b.items() if key != "reviewer_id"}
     assert "previous_round" not in new_a
     assert new_a["manual_version"] == repair.MANUAL_VERSION
+    assert new_a["annotation_round"]["segmentation_policy"] == "semicolons-and-periods-v2"
+    manifest = json.loads((output / "round-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["segmentation_policy"] == repair.SEGMENTATION_POLICY
     assert new_a["annotation_round"]["automatic_answer_migration"] is False
     assert set(Counter(row["dimension"] for row in new_a["cases"]).values()) == {3}
     documents_by_id = {row.document_id: row for case in public.cases for row in case.documents}
@@ -121,11 +140,14 @@ def test_repaired_round_is_new_frozen_policy_with_same_cases_and_original_archiv
         assert old_bytes.replace(b"\n", b"") == new_bytes.replace(b"\n", b"")
     first_setup = setup.cases[0]
     assert first_setup.candidate_selector.source_line_start == 1
-    assert first_setup.candidate_selector.source_line_end == 2
+    assert first_setup.candidate_selector.source_line_end == 1
     target = next(doc for doc in new_a["cases"][0]["documents"] if doc["is_target"])
     mapping = new_a["source_position_map"][target["document_id"]]
     same_original_line = [row for row in mapping["fragments"] if row["source_line_number"] == 2]
     assert len(same_original_line) == 2
+    target_lines = {row["line_number"]: row["text"] for row in target["lines"]}
+    assert "，仍在同一场合；" in target_lines[same_original_line[0]["line_number"]]
+    assert target_lines[same_original_line[1]["line_number"]].startswith("五天后")
     assert mapping["offset_unit"] == "unicode_codepoint"
 
 
