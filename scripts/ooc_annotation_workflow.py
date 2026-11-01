@@ -87,6 +87,7 @@ _TRAIT_DIMENSION = {
     "relationship_attitude": "relationship_attitude",
     "motivation_goal": "motivation_goal",
 }
+EVENT_MANUAL_VERSION = "ooc-manual-v3-event"
 
 
 class EvidenceAssignment(contract.StrictModel):
@@ -109,6 +110,36 @@ class ExplanationLink(contract.StrictModel):
         return self
 
 
+def unexplained_current_event_ids(
+    evidence: Sequence[EvidenceAssignment],
+    event_groups: Sequence[contract.IndependentEventGroup],
+    explanation_links: Sequence[ExplanationLink],
+) -> set[str]:
+    """Whole events, not lines, are blocked by applicable explanations.
+
+    A support linked to any fragment of an event affects that whole event.
+    Unmapped P cannot be hidden to promote an otherwise uncertain case.
+    This is structural validation of human labels, not a semantic classifier.
+    """
+    roles = {row.evidence_id: row.role for row in evidence}
+    event_by_evidence = {
+        evidence_id: group.event_group_id
+        for group in event_groups for evidence_id in group.evidence_ids
+        if roles.get(evidence_id) == "C"
+    }
+    support_links = {row.support_evidence_id: row for row in explanation_links}
+    if any(role == "P" and evidence_id not in support_links
+           for evidence_id, role in roles.items()):
+        return set()
+    blocked = {
+        event_by_evidence[value]
+        for link in explanation_links
+        for value in link.applicable_current_ids
+        if value in event_by_evidence
+    }
+    return set(event_by_evidence.values()) - blocked
+
+
 def _validate_label_shape(
     *,
     outcome: contract.GoldOutcome,
@@ -118,7 +149,11 @@ def _validate_label_shape(
     explanation_links: Sequence[ExplanationLink],
     conflict_level: ConflictLevel,
     material_coverage: MaterialCoverage,
+    assessment_policy: contract.AssessmentPolicy | None = None,
+    formal_evidence_confirmation: contract.FormalEvidenceConfirmation | None = None,
 ) -> None:
+    if assessment_policy is None and formal_evidence_confirmation is not None:
+        raise ValueError("legacy_annotation_cannot_claim_v3_confirmation")
     expected_surface = {
         "conflict": "formal_issue",
         "no_issue": "none",
@@ -172,7 +207,13 @@ def _validate_label_shape(
         raise ValueError("every_G_or_X_requires_an_explanation_link")
 
     if outcome == "conflict":
-        if (
+        event_policy = assessment_policy == contract.EVENT_ASSESSMENT_POLICY
+        if event_policy:
+            if formal_evidence_confirmation is None or not formal_evidence_confirmation.all_confirmed():
+                raise ValueError("v3_formal_annotation_requires_human_evidence_confirmation")
+            if not role_ids["B"] or not role_ids["C"]:
+                raise ValueError("v3_formal_annotation_requires_B_and_C")
+        elif (
             not role_ids["B"]
             or len(role_ids["C"]) < 2
             or role_ids["G"]
@@ -186,8 +227,12 @@ def _validate_label_shape(
             for evidence_id in group.evidence_ids
         }
         current_groups = {event_by_evidence.get(value) for value in role_ids["C"]}
-        if None in current_groups or len(current_groups) < 2:
-            raise ValueError("formal_annotation_requires_two_independent_current_events")
+        minimum = 1 if event_policy else 2
+        if None in current_groups or len(current_groups) < minimum:
+            raise ValueError("v3_formal_annotation_requires_current_event"
+                             if event_policy else "formal_annotation_requires_two_independent_current_events")
+        if event_policy and not unexplained_current_event_ids(evidence, event_groups, explanation_links):
+            raise ValueError("v3_formal_annotation_requires_unexplained_clear_event")
     elif outcome == "indeterminate" and not evidence:
         raise ValueError("indeterminate_annotation_requires_evidence")
 
@@ -204,6 +249,8 @@ def _validate_label_shape(
 
 class ReviewerCaseAnnotation(contract.StrictModel):
     case_id: contract.OpaqueId
+    assessment_policy: contract.AssessmentPolicy | None = None
+    formal_evidence_confirmation: contract.FormalEvidenceConfirmation | None = None
     dimension: CharacterDimension
     outcome: contract.GoldOutcome
     surface: contract.Surface
@@ -237,6 +284,8 @@ class ReviewerCaseAnnotation(contract.StrictModel):
             explanation_links=self.explanation_links,
             conflict_level=self.conflict_level,
             material_coverage=self.material_coverage,
+            assessment_policy=self.assessment_policy,
+            formal_evidence_confirmation=self.formal_evidence_confirmation,
         )
         return self
 
@@ -262,11 +311,16 @@ class ReviewerAnnotationBundle(contract.StrictModel):
         case_ids = tuple(row.case_id for row in self.cases)
         if len(case_ids) != len(set(case_ids)):
             raise ValueError("duplicate_annotation_case_id")
+        expected = contract.EVENT_ASSESSMENT_POLICY if self.manual_version == EVENT_MANUAL_VERSION else None
+        if any(case.assessment_policy != expected for case in self.cases):
+            raise ValueError("annotation_manual_assessment_policy_mismatch")
         return self
 
 
 class AdjudicatedCase(contract.StrictModel):
     case_id: contract.OpaqueId
+    assessment_policy: contract.AssessmentPolicy | None = None
+    formal_evidence_confirmation: contract.FormalEvidenceConfirmation | None = None
     dimension: CharacterDimension
     final_outcome: contract.GoldOutcome
     final_surface: contract.Surface
@@ -324,6 +378,8 @@ class AdjudicatedCase(contract.StrictModel):
             explanation_links=self.explanation_links,
             conflict_level=self.conflict_level,
             material_coverage=self.material_coverage,
+            assessment_policy=self.assessment_policy,
+            formal_evidence_confirmation=self.formal_evidence_confirmation,
         )
         return self
 
@@ -445,6 +501,8 @@ def validate_annotation_binding(
 ) -> None:
     if annotation.dataset_id != public.dataset_id:
         raise AnnotationWorkflowError("annotation_dataset_id_mismatch")
+    if any(case.assessment_policy != public.assessment_policy for case in annotation.cases):
+        raise AnnotationWorkflowError("annotation_public_assessment_policy_mismatch")
     public_digest = contract.canonical_sha256(public)
     if annotation.public_input_sha256 != public_digest:
         raise AnnotationWorkflowError("annotation_public_input_binding_mismatch")
@@ -783,6 +841,8 @@ def _build_private_gold(
     gold_cases: list[contract.PrivateGoldCase] = []
     for case in public.cases:
         resolution = resolutions[case.case_id]
+        if resolution.assessment_policy != public.assessment_policy:
+            raise AnnotationWorkflowError("adjudication_public_assessment_policy_mismatch")
         if (
             resolution.adjudicator_id is not None
             and resolution.adjudicator_id in adjudication.reviewer_ids
@@ -814,16 +874,34 @@ def _build_private_gold(
             )
             for role in ("B", "C", "G", "X", "P")
         }
+        gold_event_groups = resolution.independent_event_groups
+        if (public.assessment_policy == contract.EVENT_ASSESSMENT_POLICY
+                and resolution.final_outcome == "conflict"):
+            # The signed annotation/adjudication retains every human-selected
+            # explanation. A formal issue's mandatory evidence contains only
+            # the still-unexplained events, not unrelated explained behavior.
+            eligible = unexplained_current_event_ids(
+                resolution.required_evidence, resolution.independent_event_groups,
+                resolution.explanation_links,
+            )
+            gold_event_groups = tuple(group for group in gold_event_groups
+                                      if group.event_group_id in eligible)
+            current_ids = {value for group in gold_event_groups for value in group.evidence_ids}
+            roles["C"] = tuple(value for value in roles["C"] if value in current_ids)
+            for role in ("G", "X", "P"):
+                roles[role] = ()
         first = reviewer_cases[0][case.case_id]
         second = reviewer_cases[1][case.case_id]
         gold_cases.append(
             contract.PrivateGoldCase(
                 case_id=case.case_id,
+                assessment_policy=resolution.assessment_policy,
+                formal_evidence_confirmation=resolution.formal_evidence_confirmation,
                 outcome=resolution.final_outcome,
                 surface=resolution.final_surface,
                 required_evidence=contract.RequiredEvidenceGroups(**roles),
                 forbidden_evidence_ids=resolution.forbidden_evidence_ids,
-                independent_event_groups=resolution.independent_event_groups,
+                independent_event_groups=gold_event_groups,
                 phenomena=resolution.phenomena,
                 adjudication=contract.DualAdjudication(
                     adjudicated=True,

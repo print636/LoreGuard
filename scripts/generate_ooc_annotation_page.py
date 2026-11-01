@@ -99,6 +99,8 @@ def build_page_data(
         name="manual_version",
         maximum=MAX_MANUAL_VERSION_LENGTH,
     )
+    if (manual_version == "ooc-manual-v3-event") != (public.assessment_policy == "single-clear-event-v3"):
+        raise AnnotationPageError("manual_assessment_policy_mismatch")
     root_path = _local_path(bundle_root, name="bundle_root")
     workflow.validate_exhaustive_line_catalog(public, root_path)
     closed_bundle.validate_execution_freeze_binding(
@@ -189,7 +191,7 @@ def build_page_data(
             }
         )
 
-    return {
+    data = {
         "page_schema_version": PAGE_SCHEMA_VERSION,
         "annotation_schema_version": workflow.ANNOTATION_SCHEMA_VERSION,
         "dataset_id": public.dataset_id,
@@ -200,6 +202,9 @@ def build_page_data(
         "manual_version": manual_version,
         "cases": cases,
     }
+    if public.assessment_policy is not None:
+        data["assessment_policy"] = public.assessment_policy
+    return data
 
 
 def _safe_json_for_script(value: Any) -> str:
@@ -767,6 +772,9 @@ _HTML_TEMPLATE = r'''<!doctype html>
       L2: { outcome: "indeterminate", surface: "review_clue", label: "有疑点，还不能定为冲突" },
       L3: { outcome: "conflict", surface: "formal_issue", label: "证据充分，存在冲突" }
     };
+    const SINGLE_CLEAR_EVENT = DATA.manual_version === "ooc-manual-v3-event" &&
+      DATA.assessment_policy === "single-clear-event-v3";
+    const FORMAL_CONFIRMATION_KEYS = ["explicit_opposition", "same_scope", "explanations_checked"];
     // These options are identical for every case. They are not answers and are
     // never selected from a case, level, model prediction, or another reviewer.
     const PHENOMENA_OPTIONS = [
@@ -775,7 +783,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       "材料不属于本题比较范围", "暂无法概括／没有合适选项"
     ];
     const REASON_OPTIONS = [
-      "表现与原设定一致", "只有一次反向表现", "至少两次独立事情中的反向表现",
+      "表现与原设定一致", SINGLE_CLEAR_EVENT ? "单次表现可供核对" : "只有一次反向表现", SINGLE_CLEAR_EVENT ? "多次独立表现可供核对" : "至少两次独立事情中的反向表现",
       "同一件事被多处描写", "明确原因能解释全部相关表现",
       "原因只解释部分表现或时间不对应", "只有可能解释而不能确定",
       "主体、情境或关键资料不清楚", "不属于本题要比较的内容", "暂无法概括／没有合适选项"
@@ -785,6 +793,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       "material_coverage", "evidence", "independent_event_groups",
       "explanation_links", "phenomena", "reason_codes", "confidence", "review_note"
     ];
+    if (SINGLE_CLEAR_EVENT) CASE_KEYS.push("assessment_policy", "formal_evidence_confirmation");
     const BUNDLE_KEYS = [
       "schema_version", "dataset_id", "public_input_sha256", "reviewer_kind",
       "reviewer_id", "manual_version", "blinded_to_peer",
@@ -814,8 +823,19 @@ _HTML_TEMPLATE = r'''<!doctype html>
       return {
         conflictLevel: "", materialCoverage: "complete",
         evidenceRoles: {}, eventGroups: {}, explanations: {}, phenomena: "",
-        reasonCodes: "", confidence: "", reviewNote: ""
+        reasonCodes: "", confidence: "", reviewNote: "",
+        formalEvidenceConfirmation: { explicit_opposition: false, same_scope: false, explanations_checked: false }
       };
+    }
+
+    function clearFormalConfirmation(caseIndex) {
+      if (!SINGLE_CLEAR_EVENT) return;
+      state.cases[caseIndex].formalEvidenceConfirmation = {
+        explicit_opposition: false, same_scope: false, explanations_checked: false
+      };
+      if (caseIndex !== state.activeCase) return;
+      const input = document.getElementById(`formal-confirm-${caseIndex}`);
+      if (input) input.checked = false;
     }
 
     function blankDeclarations() {
@@ -900,6 +920,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
               documentId: documentRow.document_id,
               path: documentRow.path,
               lineNumber: line.line_number,
+              positionLabel: sourcePositionLabel(documentRow.document_id, line.line_number),
               text: line.text,
               phase: documentRow.phase,
               isTarget: documentRow.is_target,
@@ -913,6 +934,11 @@ _HTML_TEMPLATE = r'''<!doctype html>
         });
       });
       return result;
+    }
+
+    function sourcePositionLabel(documentId, lineNumber) {
+      const fragment = DATA.source_position_map?.[documentId]?.fragments?.find(row => row.line_number === lineNumber);
+      return fragment ? `原第 ${fragment.source_line_number} 行 · 片段 ${lineNumber}` : `第 ${lineNumber} 行`;
     }
 
     function roleAllowed(caseIndex, evidenceId, role) {
@@ -945,7 +971,9 @@ _HTML_TEMPLATE = r'''<!doctype html>
       return Boolean(
         caseState.conflictLevel && caseState.materialCoverage &&
         caseState.confidence && parseTags(caseState.phenomena).length &&
-        parseTags(caseState.reasonCodes).length
+        parseTags(caseState.reasonCodes).length &&
+        (!SINGLE_CLEAR_EVENT || caseState.conflictLevel !== "L3" ||
+          FORMAL_CONFIRMATION_KEYS.every(key => caseState.formalEvidenceConfirmation?.[key] === true))
       );
     }
 
@@ -1048,7 +1076,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const roleHelp = element("details", "role-help");
       roleHelp.id = "role-help";
       roleHelp.append(element("summary", "", "2 标出原文依据：每行旁边应该怎么选？"));
-      roleHelp.append(element("p", "", "只选支撑你判断的行。不相关的行留空；每行只能选一种用途。这些选择不是结论。"));
+      roleHelp.append(element("p", "", SINGLE_CLEAR_EVENT ? "只选支撑你判断的原文片段，不相关的留空；每个片段只能选一种用途。按标点分片只是方便选择，不代表软件已经判断成不同事件；请结合前后文阅读。" : "只选支撑你判断的行。不相关的行留空；每行只能选一种用途。这些选择不是结论。"));
       const roleDefinitions = element("dl");
       [
         ["原设定（B）", "指定人物原先稳定的特点。只能在本题标出的浅紫色原设定行选择。"],
@@ -1072,10 +1100,16 @@ _HTML_TEMPLATE = r'''<!doctype html>
         title.id = `doc-${caseIndex}-${documentIndex}`;
         header.append(title);
         header.append(element("p", "", documentRow.is_target ? "这是这次要检查的新内容，可以拿它与已有材料对照。" : "这是新稿之前的参考依据；不要把它当成本次新稿表现。"));
+        if (SINGLE_CLEAR_EVENT && DATA.source_position_map?.[documentRow.document_id]) header.append(element("p", "helper", "下面按标点展示原文片段。请连续阅读；同一事情的多个片段仍是同一件事，人物或时间承接要结合上下文判断。"));
         const documentDetails = element("details", "technical-details");
         documentDetails.append(element("summary", "", "文档信息（通常不用看）"));
         documentDetails.append(element("p", "data-id", `${documentRow.path} · 快照 v${documentRow.version} · ${documentRow.sha256}`));
         documentDetails.append(element("p", "data-id", `${documentRow.phase} · ${documentRow.document_role} · ${documentRow.story_scope} · ${documentRow.resolution_state}/${documentRow.publication_status} · 导入序 ${documentRow.import_order}`));
+        const positions = DATA.source_position_map?.[documentRow.document_id];
+        if (positions) {
+          documentDetails.append(element("p", "helper", "片段均能追溯到原文；字符位置按 Unicode 字符从 0 开始，结束位置不包含该字符。"));
+          positions.fragments.forEach(fragment => documentDetails.append(element("p", "data-id", `片段 ${fragment.line_number}：原第 ${fragment.source_line_number} 行，字符 ${fragment.source_char_start}–${fragment.source_char_end}`)));
+        }
         header.append(documentDetails);
         section.append(header);
         const lines = element("div", "document-lines");
@@ -1093,11 +1127,15 @@ _HTML_TEMPLATE = r'''<!doctype html>
             line.line_number <= caseRow.candidate_selector.source_line_end
           );
           row.append(element("span", "line-number", String(line.line_number)));
-          row.append(element("p", "line-copy", line.text));
+          if (positions) {
+            const copy = element("div", "line-copy");
+            copy.append(element("div", "helper", sourcePositionLabel(documentRow.document_id, line.line_number)), element("div", "", line.text));
+            row.append(copy);
+          } else row.append(element("p", "line-copy", line.text));
           const select = element("select", "role-select");
           select.id = `evidence-${caseIndex}-${line.evidence_id}`;
           select.disabled = state.locked;
-          select.setAttribute("aria-label", `材料 ${documentIndex + 1} 第 ${line.line_number} 行：选择这段原文的用途`);
+          select.setAttribute("aria-label", `材料 ${documentIndex + 1} ${sourcePositionLabel(documentRow.document_id, line.line_number)}：选择这段原文的用途`);
           ROLE_OPTIONS.forEach(([value, label]) => {
             const option = element("option", "", label);
             option.value = value;
@@ -1122,6 +1160,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
               announce("这一行不能用作你选的用途，已取消该选择。可展开“每行旁边应该怎么选”查看范围。 ");
             }
             caseState.evidenceRoles[line.evidence_id] = select.value;
+            clearFormalConfirmation(caseIndex);
             row.dataset.role = select.value;
             renderStructures(caseIndex);
             updateNavigation();
@@ -1222,12 +1261,14 @@ _HTML_TEMPLATE = r'''<!doctype html>
         node.append("这里没有默认结论。请根据材料，自己选择上面四项中的一项。");
       } else {
         node.append(element("strong", "", `你选的是：${LEVELS[level].label}`));
-        node.append(element("p", "helper", level === "L3" ? "这项会作为正式冲突。提交前仍需满足下方的证据与独立事件要求。" : level === "L0" ? "这项不会作为问题或待复核线索。" : "这项只作为待复核线索，不算正式冲突。"));
+        node.append(element("p", "helper", level === "L3" ? (SINGLE_CLEAR_EVENT ? "这项会作为正式冲突。一次明确、同范围且无适用解释的表现也可以；有歧义或材料不足时应保留为线索。请亲自完成下方核对。" : "这项会作为正式冲突。提交前仍需满足下方的证据与独立事件要求。") : level === "L0" ? "这项不会作为问题或待复核线索。" : "这项只作为待复核线索，不算正式冲突。"));
         const technical = element("details", "technical-details");
         technical.append(element("summary", "", "对应记录值（不用填写）"));
         technical.append(element("p", "data-id", `${level}；outcome=${LEVELS[level].outcome}；surface=${LEVELS[level].surface}`));
         node.append(technical);
       }
+      const confirmation = document.getElementById(`formal-confirmation-${caseIndex}`);
+      if (confirmation) confirmation.hidden = level !== "L3";
     }
 
     function renderStructures(caseIndex) {
@@ -1247,7 +1288,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       } else {
         currents.forEach((row, index) => {
           const wrapper = element("div", "structure-row");
-          wrapper.append(element("h4", "", `新稿表现 ${index + 1}（第 ${row.lineNumber} 行）`));
+          wrapper.append(element("h4", "", `新稿表现 ${index + 1}（${row.positionLabel}）`));
           wrapper.append(element("p", "evidence-excerpt", row.text));
           const oldValue = caseState.eventGroups[row.evidenceId] || "";
           const options = [["", "请选择属于哪件事"]];
@@ -1264,6 +1305,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
           wrapper.append(formField("这是哪一次事情？", input, "同一件事的几段描写选同一个编号；不同的事情选不同编号。编号只是方便区分，不代表文中的章节或行号。", id));
           input.addEventListener("change", () => {
             caseState.eventGroups[row.evidenceId] = input.value;
+            clearFormalConfirmation(caseIndex);
             scheduleDraft();
           });
           currentHost.append(wrapper);
@@ -1287,7 +1329,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
           linkState.applicableCurrentIds = linkState.applicableCurrentIds.filter(id => currents.some(row => row.evidenceId === id));
 
           const wrapper = element("div", "structure-row");
-          wrapper.append(element("h4", "", `${ROLE_OPTIONS.find(([value]) => value === support.role)[1]}（第 ${support.lineNumber} 行）`));
+          wrapper.append(element("h4", "", `${ROLE_OPTIONS.find(([value]) => value === support.role)[1]}（${support.positionLabel}）`));
           wrapper.append(element("p", "evidence-excerpt", support.text));
           wrapper.append(element("p", "helper", support.role === "P" ? "勾选这段话可能解释的新稿表现；如果还无法对应，可以暂时不勾选。" : "请勾选这段话能够解释的至少一条新稿表现。不要把只能解释一件事的理由套到所有事情上。"));
           const targets = element("div", "support-targets");
@@ -1303,9 +1345,10 @@ _HTML_TEMPLATE = r'''<!doctype html>
                 const selected = new Set(linkState.applicableCurrentIds);
                 checkbox.checked ? selected.add(current.evidenceId) : selected.delete(current.evidenceId);
                 linkState.applicableCurrentIds = [...selected];
+                clearFormalConfirmation(caseIndex);
                 scheduleDraft();
               });
-              label.append(checkbox, element("span", "", `新稿表现 ${currentIndex + 1}（第 ${current.lineNumber} 行）：${current.text}`));
+              label.append(checkbox, element("span", "", `新稿表现 ${currentIndex + 1}（${current.positionLabel}）：${current.text}`));
               targets.append(label);
             });
           }
@@ -1320,7 +1363,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
           const causal = makeSelect(causalOptions, linkState.causalRelation);
           causal.id = `causal-${caseIndex}-${supportIndex}`;
           causalLabel.htmlFor = causal.id;
-          causal.addEventListener("change", () => { linkState.causalRelation = causal.value; scheduleDraft(); });
+          causal.addEventListener("change", () => { linkState.causalRelation = causal.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
           causalWrap.append(causalLabel, causal);
           grid.append(causalWrap);
 
@@ -1335,7 +1378,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
           temporal.id = `temporal-${caseIndex}-${supportIndex}`;
           temporalLabel.htmlFor = temporal.id;
           temporal.disabled = support.role === "G" || support.role === "X";
-          temporal.addEventListener("change", () => { linkState.temporalRelation = temporal.value; scheduleDraft(); });
+          temporal.addEventListener("change", () => { linkState.temporalRelation = temporal.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
           temporalWrap.append(temporalLabel, temporal);
           grid.append(temporalWrap);
           wrapper.append(grid);
@@ -1383,8 +1426,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const levels = radioGroup(`level-${caseIndex}`, [
         ["L0", LEVELS.L0.label, "没有违背这项特点，或变化已有能覆盖对应表现的明确解释。（L0）"],
         ["L1", LEVELS.L1.label, "例如还弄不清是谁做的、针对谁、什么情境，或这件事是否真的发生。（L1）"],
-        ["L2", LEVELS.L2.label, "已有局部反向表现，但只有一次事情、材料不足，或解释尚不能确定。（L2）"],
-        ["L3", LEVELS.L3.label, "原设定明确；至少两次独立事情中的反向表现，没有适用的成长、特殊状态或可能解释。（L3）"]
+        ["L2", LEVELS.L2.label, SINGLE_CLEAR_EVENT ? "存在疑点，但行为是否真正相反、适用情境或解释还不能确定。（L2）" : "已有局部反向表现，但只有一次事情、材料不足，或解释尚不能确定。（L2）"],
+        ["L3", LEVELS.L3.label, SINGLE_CLEAR_EVENT ? "原设定明确，至少一次表现确实与它直接相反，人物、对象与适用情境一致，且对应事件没有有效解释或待确认解释。（L3）" : "原设定明确；至少两次独立事情中的反向表现，没有适用的成长、特殊状态或可能解释。（L3）"]
       ], caseState.conflictLevel);
       levels.id = `level-${caseIndex}`;
       levels.setAttribute("role", "radiogroup");
@@ -1392,6 +1435,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       levels.addEventListener("change", event => {
         if (event.target instanceof HTMLInputElement) {
           caseState.conflictLevel = event.target.value;
+          clearFormalConfirmation(caseIndex);
           updateDerived(caseIndex);
           updateNavigation();
           scheduleDraft();
@@ -1407,9 +1451,29 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const coverage = makeSelect([
         ["complete", "材料足够覆盖本题需要判断的内容"], ["partial", "有部分相关材料缺失"], ["missing", "缺了关键材料，无法充分判断"]
       ], caseState.materialCoverage);
-      coverage.addEventListener("change", () => { caseState.materialCoverage = coverage.value; scheduleDraft(); });
+      coverage.addEventListener("change", () => { caseState.materialCoverage = coverage.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
       judgement.append(formField("这题的材料够不够？（必填，请核对）", coverage, "有部分或关键材料缺失时，只能选“暂时判断不了”或“有疑点”，不能直接定为冲突或无问题。", `coverage-${caseIndex}`));
       fields.append(judgement);
+
+      if (SINGLE_CLEAR_EVENT) {
+        const confirmation = element("section", "form-section");
+        confirmation.id = `formal-confirmation-${caseIndex}`;
+        confirmation.append(element("h3", "", "正式冲突：请亲自核对"));
+        confirmation.append(element("p", "helper", "这些不是软件替你做出的判断。材料或原文对应关系改变后需要重新确认；只出现一次并不自动等于冲突，多次表现也不是固定概率加分。"));
+        const label = element("label", "check-target");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.id = `formal-confirm-${caseIndex}`;
+        input.checked = FORMAL_CONFIRMATION_KEYS.every(key => caseState.formalEvidenceConfirmation?.[key] === true);
+        input.addEventListener("change", () => {
+          caseState.formalEvidenceConfirmation = Object.fromEntries(FORMAL_CONFIRMATION_KEYS.map(key => [key, input.checked]));
+          updateNavigation();
+          scheduleDraft();
+        });
+        label.append(input, element("span", "", "我已核对：至少一次表现确已实际发生，并与原设定直接相反，属于同一人物、对象和适用情境，且对应事件没有适用的明确解释或待确认解释。"));
+        confirmation.append(label);
+        fields.append(confirmation);
+      }
 
       const structures = element("section", "form-section");
       structures.append(element("h3", "", "把所选原文对应清楚"));
@@ -1417,7 +1481,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const currentSection = element("section", "structure-section");
       currentSection.id = "current-event-section";
       currentSection.append(element("h3", "", "这些表现是同一次事情，还是不同事情？"));
-      currentSection.append(element("p", "helper", "认定正式冲突时必须填写，并至少有两次独立事情；其他结论可按需要补充。"));
+      currentSection.append(element("p", "helper", SINGLE_CLEAR_EVENT ? "认定正式冲突时，为每段表现选择它属于哪件事。一次明确冲突也可以，同一事件的多个片段仍选同一件事；不要用片段或换行数冒充事件数。" : "认定正式冲突时必须填写，并至少有两次独立事情；其他结论可按需要补充。"));
       const currentHost = element("div");
       currentHost.id = "current-event-groups";
       currentSection.append(currentHost);
@@ -1563,7 +1627,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
         }
       });
       const level = LEVELS[caseState.conflictLevel] || { outcome: "", surface: "" };
-      return {
+      const row = {
         case_id: caseRow.case_id,
         dimension: caseRow.dimension,
         outcome: level.outcome,
@@ -1578,6 +1642,12 @@ _HTML_TEMPLATE = r'''<!doctype html>
         confidence: Number(caseState.confidence),
         review_note: reviewNoteFor(caseState)
       };
+      if (SINGLE_CLEAR_EVENT) {
+        row.assessment_policy = "single-clear-event-v3";
+        row.formal_evidence_confirmation = caseState.formalEvidenceConfirmation === null ? null :
+          Object.fromEntries(FORMAL_CONFIRMATION_KEYS.map(key => [key, caseState.formalEvidenceConfirmation?.[key] === true]));
+      }
+      return row;
     }
 
     function buildBundle() {
@@ -1613,12 +1683,25 @@ _HTML_TEMPLATE = r'''<!doctype html>
         }
       });
       if (row.conflict_level === "L3") {
-        if (!b.length || c.length < 2) add("evidence-pane", "认定正式冲突，至少要选出 1 行原设定和 2 行新稿表现，并确认这些表现与原设定相反。 ");
-        if (g.length || x.length || p.length) add("evidence-pane", "你同时选了成长、特殊状态或可能解释，不能直接认定正式冲突。请复核解释是否适用，不要为了通过检查删除有效依据。 ");
         const byEvidence = new Map();
         row.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => byEvidence.set(id, group.event_group_id)));
         const groups = new Set(c.map(id => byEvidence.get(id)));
-        if (groups.has(undefined) || groups.size < 2) add("current-event-groups", "认定正式冲突时，每条新稿表现都要注明属于哪件事，并且确实至少有两次独立事情。同一件事的复述不算两次。 ");
+        if (SINGLE_CLEAR_EVENT) {
+          if (!b.length || !c.length) add("evidence-pane", "认定正式冲突，至少要选出一处原设定和一处本题人物的新稿表现；一次明确反向事件也可以，但不能把其他人的行为当证据。 ");
+          if (groups.has(undefined) || !groups.size) add("current-event-groups", "请为每段新稿表现注明属于哪件事。同一件事的多个片段选同一项，不按行数判断冲突。 ");
+          const coveredGroups = new Set();
+          row.explanation_links.forEach(link => link.applicable_current_ids.forEach(id => {
+            if (byEvidence.has(id)) coveredGroups.add(byEvidence.get(id));
+          }));
+          const unboundPossible = p.some(id => !row.explanation_links.some(link => link.support_evidence_id === id && link.applicable_current_ids.length));
+          if (unboundPossible) add("explanation-links", "存在尚未对应具体表现的可能解释。请如实标明它可能解释哪次表现；无法对应时应保留为待复核，不要删除有效暗示来通过检查。 ");
+          if (![...groups].some(group => group !== undefined && !coveredGroups.has(group))) add("explanation-links", "所选反向事件都有明确或可能解释，不能直接认定正式冲突。解释只影响它对应的事件，不影响其他独立事件。 ");
+          if (!FORMAL_CONFIRMATION_KEYS.every(key => row.formal_evidence_confirmation?.[key] === true)) add(`formal-confirmation-${caseIndex}`, "请亲自核对并勾选正式冲突确认；材料、人物与情境、相反表现或解释仍有疑问时，选择待复核线索。 ");
+        } else {
+          if (!b.length || c.length < 2) add("evidence-pane", "认定正式冲突，至少要选出 1 行原设定和 2 行新稿表现，并确认这些表现与原设定相反。 ");
+          if (g.length || x.length || p.length) add("evidence-pane", "你同时选了成长、特殊状态或可能解释，不能直接认定正式冲突。请复核解释是否适用，不要为了通过检查删除有效依据。 ");
+          if (groups.has(undefined) || groups.size < 2) add("current-event-groups", "认定正式冲突时，每条新稿表现都要注明属于哪件事，并且确实至少有两次独立事情。同一件事的复述不算两次。 ");
+        }
       }
       if (["L1", "L2"].includes(row.conflict_level) && row.evidence.length === 0) add("evidence-pane", "选择“暂时判断不了”或“有疑点”时，也请至少选一行支撑判断的原文。 ");
       const linked = new Set(row.explanation_links.map(link => link.support_evidence_id));
@@ -1750,6 +1833,11 @@ _HTML_TEMPLATE = r'''<!doctype html>
         next[key] = row[key];
       }
       if (row.reviewNoteFormat === "legacy") next.reviewNoteFormat = "legacy";
+      if (SINGLE_CLEAR_EVENT) {
+        const confirmation = row.formalEvidenceConfirmation;
+        if (confirmation !== null && (!exactKeys(confirmation, FORMAL_CONFIRMATION_KEYS) || FORMAL_CONFIRMATION_KEYS.some(key => typeof confirmation[key] !== "boolean"))) throw new Error("进度中的正式冲突核对格式不正确。");
+        next.formalEvidenceConfirmation = confirmation === null ? null : { ...confirmation };
+      }
       const known = evidenceMeta(caseIndex);
       for (const key of ["evidenceRoles", "eventGroups", "explanations"]) {
         if (!row[key] || typeof row[key] !== "object" || Array.isArray(row[key])) throw new Error("进度中的原文对应关系格式不正确。");
@@ -1811,6 +1899,12 @@ _HTML_TEMPLATE = r'''<!doctype html>
     }
 
     function setupPreviousRoundImport() {
+      if (SINGLE_CLEAR_EVENT) {
+        const panel = document.getElementById("previous-round");
+        panel.hidden = false;
+        document.getElementById("previous-round-message").textContent = "本版更新了原文片段和判断规则，请按新规则重新复核。旧版文件和旧进度未被删除；不会自动带入旧结论、证据分组或独立完成声明，请保留原文件和原浏览器。";
+        return;
+      }
       if (!DATA.previous_round) return;
       const panel = document.getElementById("previous-round");
       const message = document.getElementById("previous-round-message");
@@ -1845,6 +1939,12 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function stateFromLockedCase(caseIndex, row) {
       const next = blankCase();
       if (row.dimension !== DATA.cases[caseIndex].dimension) throw new Error("导入文件的维度与作者冻结目标不一致。 ");
+      if (SINGLE_CLEAR_EVENT) {
+        if (row.assessment_policy !== "single-clear-event-v3") throw new Error("导入文件的判断规则与本版不一致。 ");
+        const confirmation = row.formal_evidence_confirmation;
+        if (confirmation !== null && (!exactKeys(confirmation, FORMAL_CONFIRMATION_KEYS) || FORMAL_CONFIRMATION_KEYS.some(key => typeof confirmation[key] !== "boolean"))) throw new Error("导入文件的正式冲突核对格式不正确。 ");
+        next.formalEvidenceConfirmation = confirmation === null ? null : { ...confirmation };
+      }
       next.conflictLevel = row.conflict_level;
       next.materialCoverage = row.material_coverage;
       next.phenomena = row.phenomena.join("\n");

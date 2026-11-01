@@ -174,6 +174,66 @@ def _fixtures() -> tuple[contract.PublicInputBundle, contract.PrivateGoldBundle]
     return public, gold
 
 
+def test_v3_public_policy_accepts_one_confirmed_formal_event_without_changing_legacy():
+    payload = _public_payload()
+    payload["assessment_policy"] = contract.EVENT_ASSESSMENT_POLICY
+    public = _parse(contract.PublicInputBundle, payload)
+    gold_payload = _gold_payload(public)
+    for row in gold_payload["cases"]:
+        row["assessment_policy"] = contract.EVENT_ASSESSMENT_POLICY
+    positive = gold_payload["cases"][0]
+    positive["required_evidence"]["C"] = ["current C"]
+    positive["independent_event_groups"] = positive["independent_event_groups"][:1]
+    positive["formal_evidence_confirmation"] = {
+        "explicit_opposition": True, "same_scope": True, "explanations_checked": True,
+    }
+    gold = _parse(contract.PrivateGoldBundle, gold_payload)
+    contract.validate_evaluation_contract(public, gold)
+    prediction_payload = {
+        "case_id": "正例 #1", "outcome": "conflict", "surface": "formal_issue",
+        "assessment_policy": contract.EVENT_ASSESSMENT_POLICY,
+        "citations": [{"evidence_id": evidence_id, "role": role,
+                       "document_id": "doc + positive", "snapshot_version": 1,
+                       "snapshot_sha256": SHA_A, "line_start": line, "line_end": line}
+                      for evidence_id, role, line in (("base B", "B", 1), ("current C", "C", 2))],
+        "stage_funnel": {"input_candidates": 1, "retrieved_candidates": 1,
+                         "grounded_candidates": 1, "adjudicated_candidates": 1, "surfaced_candidates": 1},
+    }
+    run = _parse(contract.PredictionBundle, {
+        "dataset_id": public.dataset_id, "public_input_sha256": contract.canonical_sha256(public),
+        "run_id": "v3-single", "repeat_id": "v3-single", "run_status": "complete",
+        "predictions": [prediction_payload],
+    })
+    contract.validate_evaluation_contract(public, gold, [run])
+    legacy_public = _parse(contract.PublicInputBundle, _public_payload())
+    legacy_gold = _parse(contract.PrivateGoldBundle, _gold_payload(legacy_public))
+    legacy_run = run.model_copy(update={"public_input_sha256": contract.canonical_sha256(legacy_public)})
+    with pytest.raises(contract.ContractError, match="prediction_public_assessment_policy_mismatch"):
+        contract.validate_evaluation_contract(legacy_public, legacy_gold, [legacy_run])
+    prediction_payload.pop("assessment_policy")
+    with pytest.raises(ValidationError, match="formal_prediction_requires_B_and_two_C"):
+        _parse(contract.CasePrediction, prediction_payload)
+
+
+def test_v3_gold_policy_cannot_mismatch_public_policy_or_omit_confirmation():
+    public, legacy_gold = _fixtures()
+    v3_public = public.model_copy(update={"assessment_policy": contract.EVENT_ASSESSMENT_POLICY})
+    rebound = legacy_gold.model_copy(update={"public_input_sha256": contract.canonical_sha256(v3_public)})
+    with pytest.raises(contract.ContractError, match="gold_public_assessment_policy_mismatch"):
+        contract.validate_evaluation_contract(v3_public, rebound)
+    row = legacy_gold.cases[0].model_dump(mode="json")
+    row["assessment_policy"] = contract.EVENT_ASSESSMENT_POLICY
+    with pytest.raises(ValidationError, match="human_evidence_confirmation"):
+        _parse(contract.PrivateGoldCase, row)
+
+
+def test_legacy_gold_serialization_has_no_v3_extension_fields():
+    public, gold = _fixtures()
+    assert b"assessment_policy" not in contract.canonical_json_bytes(public)
+    assert b"assessment_policy" not in contract.canonical_json_bytes(gold)
+    assert b"formal_evidence_confirmation" not in contract.canonical_json_bytes(gold)
+
+
 def _funnel(*, surfaced: int) -> dict:
     return {
         "input_candidates": 1,

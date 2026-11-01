@@ -240,6 +240,135 @@ def _evidence(*values: tuple[str, str]) -> list[dict[str, str]]:
     return [{"evidence_id": evidence_id, "role": role} for evidence_id, role in values]
 
 
+def _v3_row(**updates):
+    row = {
+        "case_id": "v3-case", "dimension": "core_trait", "outcome": "conflict",
+        "surface": "formal_issue", "conflict_level": "L3", "material_coverage": "complete",
+        "assessment_policy": contract.EVENT_ASSESSMENT_POLICY,
+        "formal_evidence_confirmation": {"explicit_opposition": True, "same_scope": True,
+                                         "explanations_checked": True},
+        "evidence": _evidence(("b", "B"), ("c1", "C")),
+        "independent_event_groups": [{"event_group_id": "one", "evidence_ids": ["c1"]}],
+        "explanation_links": [], "phenomena": ["human_selected"], "reason_codes": ["clear"],
+        "confidence": 5, "review_note": "Synthetic human confirmation, not a real answer.",
+    }
+    row.update(updates)
+    return row
+
+
+def test_v3_one_clear_confirmed_event_is_valid_but_legacy_stays_strict():
+    row = _v3_row()
+    assert workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row)).outcome == "conflict"
+    row.pop("assessment_policy")
+    row.pop("formal_evidence_confirmation")
+    with pytest.raises(ValidationError, match="formal_annotation_requires_B_two_C"):
+        workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+
+
+@pytest.mark.parametrize("missing", ["explicit_opposition", "same_scope", "explanations_checked"])
+def test_v3_formal_requires_all_explicit_human_checks(missing):
+    row = _v3_row()
+    row["formal_evidence_confirmation"][missing] = False
+    with pytest.raises(ValidationError, match="requires_human_evidence_confirmation"):
+        workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+
+
+@pytest.mark.parametrize("coverage", ["partial", "missing"])
+def test_v3_single_event_does_not_override_incomplete_material(coverage):
+    with pytest.raises(ValidationError, match="incomplete_material"):
+        workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(_v3_row(material_coverage=coverage)))
+
+
+@pytest.mark.parametrize("support", ["G", "X", "P"])
+def test_v3_partial_explanation_only_blocks_its_whole_event(support):
+    row = _v3_row(
+        evidence=_evidence(("b", "B"), ("c1", "C"), ("c2", "C"), ("s", support)),
+        independent_event_groups=[{"event_group_id": "one", "evidence_ids": ["c1"]},
+                                  {"event_group_id": "two", "evidence_ids": ["c2"]}],
+        explanation_links=[{"support_evidence_id": "s", "applicable_current_ids": ["c1"],
+                            "causal_relation": "ambiguous" if support == "P" else "explicit",
+                            "temporal_relation": "before" if support == "G" else "active_during"}],
+    )
+    parsed = workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+    assert workflow.unexplained_current_event_ids(parsed.evidence, parsed.independent_event_groups,
+                                                   parsed.explanation_links) == {"two"}
+    row["independent_event_groups"] = [{"event_group_id": "one", "evidence_ids": ["c1", "c2"]}]
+    with pytest.raises(ValidationError, match="requires_unexplained_clear_event"):
+        workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+
+
+def test_v3_unmapped_possible_explanation_blocks_formal_without_deleting_support():
+    row = _v3_row(evidence=_evidence(("b", "B"), ("c1", "C"), ("p", "P")))
+    with pytest.raises(ValidationError, match="requires_unexplained_clear_event"):
+        workflow.ReviewerCaseAnnotation.model_validate_json(json.dumps(row))
+
+
+def test_v3_policy_requires_v3_manual_and_matching_public_freeze():
+    public, setup, legacy = _setup_bound_fixture()
+    row = _v3_row(case_id=public.cases[0].case_id,
+                  evidence=_evidence(("baseline-selected", "B"), ("current-one", "C")),
+                  independent_event_groups=[{"event_group_id": "one", "evidence_ids": ["current-one"]}])
+    payload = legacy.model_dump(mode="json")
+    payload["cases"] = [row]
+    with pytest.raises(ValidationError, match="manual_assessment_policy_mismatch"):
+        workflow.ReviewerAnnotationBundle.model_validate_json(json.dumps(payload))
+    payload["manual_version"] = workflow.EVENT_MANUAL_VERSION
+    parsed = workflow.ReviewerAnnotationBundle.model_validate_json(json.dumps(payload))
+    with pytest.raises(workflow.AnnotationWorkflowError, match="public_assessment_policy_mismatch"):
+        workflow.validate_annotation_binding(public, parsed)
+    updated_public = public.model_copy(update={"assessment_policy": contract.EVENT_ASSESSMENT_POLICY})
+    payload["public_input_sha256"] = contract.canonical_sha256(updated_public)
+    parsed = workflow.ReviewerAnnotationBundle.model_validate_json(json.dumps(payload))
+    workflow.validate_annotation_binding(updated_public, parsed)
+
+
+def test_legacy_optional_policy_extensions_do_not_change_canonical_json():
+    public, _, annotation = _setup_bound_fixture()
+    for value in (public, annotation, annotation.cases[0]):
+        encoded = contract.canonical_json_bytes(value)
+        assert b"assessment_policy" not in encoded and b"formal_evidence_confirmation" not in encoded
+        dumped = value.model_dump(mode="json")
+        assert encoded == json.dumps(dumped, ensure_ascii=False, sort_keys=True,
+                                      separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def test_v3_gold_keeps_only_unexplained_formal_events_but_retains_signed_full_adjudication():
+    old_public, _, legacy = _setup_bound_fixture()
+    public = old_public.model_copy(update={"assessment_policy": contract.EVENT_ASSESSMENT_POLICY})
+    row = _v3_row(
+        case_id=public.cases[0].case_id,
+        evidence=_evidence(("baseline-selected", "B"), ("current-one", "C"),
+                           ("current-two", "C"), ("baseline-other", "G")),
+        independent_event_groups=[{"event_group_id": "explained", "evidence_ids": ["current-one"]},
+                                  {"event_group_id": "unexplained", "evidence_ids": ["current-two"]}],
+        explanation_links=[{"support_evidence_id": "baseline-other",
+                            "applicable_current_ids": ["current-one"],
+                            "causal_relation": "explicit", "temporal_relation": "before"}],
+    )
+    payload = legacy.model_dump(mode="json")
+    payload.update(public_input_sha256=contract.canonical_sha256(public),
+                   manual_version=workflow.EVENT_MANUAL_VERSION, cases=[row])
+    left = workflow.ReviewerAnnotationBundle.model_validate_json(json.dumps(payload))
+    right = left.model_copy(update={"reviewer_id": "second-reviewer"})
+    resolution = {key: value for key, value in row.items()
+                  if key not in {"outcome", "surface", "evidence", "confidence", "review_note"}}
+    resolution.update(final_outcome="conflict", final_surface="formal_issue", required_evidence=row["evidence"],
+                       resolution_mode="reviewer_consensus", resolution_note="Synthetic joint decision.")
+    adjudication = workflow.AdjudicationBundle.model_validate_json(json.dumps({
+        "dataset_id": public.dataset_id, "public_input_sha256": contract.canonical_sha256(public),
+        "reviewer_ids": [left.reviewer_id, right.reviewer_id],
+        "annotation_sha256": [contract.canonical_sha256(left), contract.canonical_sha256(right)],
+        "consensus_confirmed_by": [left.reviewer_id, right.reviewer_id], "cases": [resolution],
+    }))
+    gold = workflow._build_private_gold(public, left, right, adjudication)
+    assert gold.cases[0].required_evidence.C == ("current-two",)
+    assert gold.cases[0].required_evidence.G == ()
+    assert len(adjudication.cases[0].required_evidence) == 4
+    assert len(adjudication.cases[0].explanation_links) == 1
+    assert gold.cases[0].assessment_policy == public.assessment_policy
+    contract.validate_evaluation_contract(public, gold)
+
+
 def _case_rows(*, changed_review: bool = False) -> list[dict]:
     return [
         {

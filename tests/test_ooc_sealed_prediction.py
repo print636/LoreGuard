@@ -416,3 +416,35 @@ def test_artifact_requires_exactly_one_snapshot_for_every_public_case():
         build_prediction_artifact(public, (first,), **kwargs)
     with pytest.raises(PredictionProjectionError, match="duplicate_runtime_case_id"):
         build_prediction_artifact(public, (first, first), **kwargs)
+
+
+def test_v3_projection_uses_public_policy_for_single_event_not_gold_or_promotion():
+    public = _public()
+    case = public.cases[0]
+    refs = (_ref(case, "B", 1), _ref(case, "C", 1, event_group_id="one"))
+    snapshot = _snapshot(case, citations=refs)
+    assert project_case_prediction(case, snapshot).outcome == "unassessed"
+    assert project_case_prediction(case, snapshot,
+                                   assessment_policy=contract.EVENT_ASSESSMENT_POLICY).outcome == "conflict"
+    v3_public = public.model_copy(update={"assessment_policy": contract.EVENT_ASSESSMENT_POLICY})
+    artifact = build_prediction_artifact(v3_public, (snapshot,), run_id="v3", repeat_id="one",
+                                         author_setup_sha256=SHA_A, execution_freeze_sha256=SHA_B,
+                                         runtime_provenance_sha256=SHA_D)
+    assert artifact.prediction.run_status == "complete"
+    assert artifact.public_input_sha256 == contract.canonical_sha256(v3_public)
+    # Public policy never manufactures a formal issue from a native clue.
+    clue = _snapshot(case, outcome="needs_confirmation", citations=refs)
+    assert project_case_prediction(case, clue,
+                                   assessment_policy=contract.EVENT_ASSESSMENT_POLICY).surface == "review_clue"
+    incomplete = snapshot.model_copy(update={"explanation_coverage": "partial"})
+    assert project_case_prediction(case, incomplete,
+                                   assessment_policy=contract.EVENT_ASSESSMENT_POLICY).outcome == "unassessed"
+
+
+def test_v3_projection_still_requires_bound_report_and_clear_event_identity():
+    case = _public().cases[0]
+    refs = (_ref(case, "B", 1), _ref(case, "C", 1))
+    assert project_case_prediction(case, _snapshot(case, citations=refs),
+                                   assessment_policy=contract.EVENT_ASSESSMENT_POLICY).outcome == "unassessed"
+    with pytest.raises(PredictionProjectionError, match="unknown_public_assessment_policy"):
+        project_case_prediction(case, _snapshot(case), assessment_policy="invented")

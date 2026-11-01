@@ -14,6 +14,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scripts.ooc_eval_contract import (
+    AssessmentPolicy,
+    EVENT_ASSESSMENT_POLICY,
     CasePrediction,
     Citation,
     OpaqueId,
@@ -104,9 +106,10 @@ class PredictionProjectionError(ValueError):
     pass
 
 
-def _unassessed(snapshot: RuntimeCaseSnapshot) -> CasePrediction:
+def _unassessed(snapshot: RuntimeCaseSnapshot, assessment_policy: AssessmentPolicy | None = None) -> CasePrediction:
     return CasePrediction(
         case_id=snapshot.case_id,
+        assessment_policy=assessment_policy,
         outcome="unassessed",
         surface="none",
         citations=(),
@@ -178,7 +181,11 @@ def _surface_refs_are_exact(snapshot: RuntimeCaseSnapshot) -> bool:
 def project_case_prediction(
     public_case: PublicInputCase,
     snapshot: RuntimeCaseSnapshot,
+    *,
+    assessment_policy: AssessmentPolicy | None = None,
 ) -> CasePrediction:
+    if assessment_policy not in {None, EVENT_ASSESSMENT_POLICY}:
+        raise PredictionProjectionError("unknown_public_assessment_policy")
     if snapshot.case_id != public_case.case_id:
         raise PredictionProjectionError("runtime_case_id_mismatch")
     complete = bool(
@@ -190,7 +197,7 @@ def project_case_prediction(
         and snapshot.trace_count == 1
     )
     if not complete:
-        return _unassessed(snapshot)
+        return _unassessed(snapshot, assessment_policy)
 
     surfaced = snapshot.final_outcome in {
         "conflict",
@@ -198,9 +205,9 @@ def project_case_prediction(
         "unverifiable",
     }
     if surfaced and not _surface_refs_are_exact(snapshot):
-        return _unassessed(snapshot)
+        return _unassessed(snapshot, assessment_policy)
     if not surfaced and snapshot.report_evidence:
-        return _unassessed(snapshot)
+        return _unassessed(snapshot, assessment_policy)
 
     # Surfaced predictions are projected only from evidence proven to exist on
     # the bound report row.  A no-issue decision has no report row, so its
@@ -210,7 +217,7 @@ def project_case_prediction(
     )
     citations = _project_citations(public_case, projection_refs)
     if citations is None:
-        return _unassessed(snapshot)
+        return _unassessed(snapshot, assessment_policy)
 
     if snapshot.final_outcome == "conflict":
         formal_shape = bool(
@@ -220,10 +227,11 @@ def project_case_prediction(
         )
         current_refs = [row for row in projection_refs if row.role == "C"]
         event_groups = {row.event_group_id for row in current_refs}
-        has_two_events = bool(
-            len(current_refs) >= 2
+        minimum = 1 if assessment_policy == EVENT_ASSESSMENT_POLICY else 2
+        has_required_events = bool(
+            len(current_refs) >= minimum
             and None not in event_groups
-            and len(event_groups) >= 2
+            and len(event_groups) >= minimum
         )
         nonoverlapping = all(
             left.document_id != right.document_id
@@ -235,23 +243,24 @@ def project_case_prediction(
         roles = [row.role for row in citations]
         if not (
             formal_shape
-            and has_two_events
+            and has_required_events
             and nonoverlapping
             and "B" in roles
-            and roles.count("C") >= 2
+            and roles.count("C") >= minimum
             and not {"G", "X", "P"}.intersection(roles)
         ):
-            return _unassessed(snapshot)
+            return _unassessed(snapshot, assessment_policy)
         try:
             return CasePrediction(
                 case_id=snapshot.case_id,
+                assessment_policy=assessment_policy,
                 outcome="conflict",
                 surface="formal_issue",
                 citations=citations,
                 stage_funnel=snapshot.stage_funnel,
             )
         except ValueError:
-            return _unassessed(snapshot)
+            return _unassessed(snapshot, assessment_policy)
 
     if snapshot.final_outcome in {"needs_confirmation", "unverifiable"}:
         if not (
@@ -260,9 +269,10 @@ def project_case_prediction(
             and snapshot.provisional_clue_count == 0
             and citations
         ):
-            return _unassessed(snapshot)
+            return _unassessed(snapshot, assessment_policy)
         return CasePrediction(
             case_id=snapshot.case_id,
+            assessment_policy=assessment_policy,
             outcome="indeterminate",
             surface="review_clue",
             citations=citations,
@@ -277,16 +287,17 @@ def project_case_prediction(
                 snapshot.provisional_clue_count,
             )
         ) or any(row.role == "P" for row in citations):
-            return _unassessed(snapshot)
+            return _unassessed(snapshot, assessment_policy)
         return CasePrediction(
             case_id=snapshot.case_id,
+            assessment_policy=assessment_policy,
             outcome="no_issue",
             surface="none",
             citations=citations,
             stage_funnel=snapshot.stage_funnel,
         )
 
-    return _unassessed(snapshot)
+    return _unassessed(snapshot, assessment_policy)
 
 
 def build_prediction_artifact(
@@ -306,7 +317,8 @@ def build_prediction_artifact(
     if set(by_case) != public_ids:
         raise PredictionProjectionError("runtime_snapshots_must_cover_every_public_case")
     predictions = tuple(
-        project_case_prediction(case, by_case[case.case_id]) for case in public.cases
+        project_case_prediction(case, by_case[case.case_id], assessment_policy=public.assessment_policy)
+        for case in public.cases
     )
     run_status = (
         "complete"

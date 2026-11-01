@@ -27,6 +27,7 @@ from pydantic import (
     Field,
     ValidationError,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -60,6 +61,8 @@ PredictionOutcome = Literal[
 Surface = Literal["formal_issue", "review_clue", "none"]
 EvidenceRole = Literal["B", "C", "G", "X", "P"]
 RunStatus = Literal["complete", "partial", "failed"]
+AssessmentPolicy = Literal["single-clear-event-v3"]
+EVENT_ASSESSMENT_POLICY = "single-clear-event-v3"
 
 
 class ContractError(ValueError):
@@ -74,6 +77,27 @@ class StrictModel(BaseModel):
     """Shared fail-closed settings for every persisted contract model."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    @model_serializer(mode="wrap")
+    def omit_unused_event_policy(self, handler: Any) -> dict[str, Any]:
+        # Optional v3 extensions must not rewrite the canonical bytes of v1/v2
+        # files or invalidate already-created commitments.
+        data = handler(self)
+        for key in ("assessment_policy", "formal_evidence_confirmation"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+class FormalEvidenceConfirmation(StrictModel):
+    """Human-only, explicit checks. Evidence count never supplies these checks."""
+
+    explicit_opposition: bool
+    same_scope: bool
+    explanations_checked: bool
+
+    def all_confirmed(self) -> bool:
+        return self.explicit_opposition and self.same_scope and self.explanations_checked
 
 
 class DocumentSnapshot(StrictModel):
@@ -221,6 +245,7 @@ def validate_no_cross_split_group_leakage(
 class PublicInputBundle(StrictModel):
     schema_version: Literal["loreguard-ooc-public-v1"] = PUBLIC_SCHEMA_VERSION
     dataset_id: OpaqueId
+    assessment_policy: AssessmentPolicy | None = None
     cases: tuple[PublicInputCase, ...] = Field(
         min_length=1, max_length=MAX_CASES
     )
@@ -290,6 +315,8 @@ class DualAdjudication(StrictModel):
 
 class PrivateGoldCase(StrictModel):
     case_id: OpaqueId
+    assessment_policy: AssessmentPolicy | None = None
+    formal_evidence_confirmation: FormalEvidenceConfirmation | None = None
     outcome: GoldOutcome
     surface: Surface
     required_evidence: RequiredEvidenceGroups
@@ -334,10 +361,17 @@ class PrivateGoldCase(StrictModel):
         if (self.surface == "formal_issue") != (self.outcome == "conflict"):
             raise ValueError("formal_issue_must_match_conflict_outcome")
         if self.surface == "formal_issue":
+            if self.assessment_policy == EVENT_ASSESSMENT_POLICY and (
+                self.formal_evidence_confirmation is None
+                or not self.formal_evidence_confirmation.all_confirmed()
+            ):
+                raise ValueError("v3_formal_gold_requires_human_evidence_confirmation")
             if self.required_evidence.P:
                 raise ValueError("formal_issue_cannot_require_P_evidence")
-            if len(self.required_evidence.C) < 2:
-                raise ValueError("formal_issue_requires_two_current_evidence")
+            minimum = 1 if self.assessment_policy == EVENT_ASSESSMENT_POLICY else 2
+            if len(self.required_evidence.C) < minimum:
+                raise ValueError("v3_formal_issue_requires_current_evidence"
+                                 if minimum == 1 else "formal_issue_requires_two_current_evidence")
             group_by_evidence = {
                 evidence_id: group.event_group_id
                 for group in self.independent_event_groups
@@ -347,8 +381,11 @@ class PrivateGoldCase(StrictModel):
                 group_by_evidence.get(evidence_id)
                 for evidence_id in self.required_evidence.C
             }
-            if None in current_groups or len(current_groups) < 2:
-                raise ValueError("formal_issue_requires_two_independent_current_events")
+            if None in current_groups or len(current_groups) < minimum:
+                raise ValueError("v3_formal_issue_requires_current_event"
+                                 if minimum == 1 else "formal_issue_requires_two_independent_current_events")
+        if self.assessment_policy is None and self.formal_evidence_confirmation is not None:
+            raise ValueError("legacy_gold_cannot_claim_v3_confirmation")
         return self
 
 
@@ -411,6 +448,7 @@ class StageFunnel(StrictModel):
 
 class CasePrediction(StrictModel):
     case_id: OpaqueId
+    assessment_policy: AssessmentPolicy | None = None
     outcome: PredictionOutcome
     surface: Surface
     citations: tuple[Citation, ...] = Field(
@@ -438,8 +476,10 @@ class CasePrediction(StrictModel):
             }
             if "P" in roles:
                 raise ValueError("formal_prediction_cannot_cite_P")
-            if "B" not in roles or len(current_ids) < 2:
-                raise ValueError("formal_prediction_requires_B_and_two_C")
+            minimum = 1 if self.assessment_policy == EVENT_ASSESSMENT_POLICY else 2
+            if "B" not in roles or len(current_ids) < minimum:
+                raise ValueError("v3_formal_prediction_requires_B_and_C"
+                                 if minimum == 1 else "formal_prediction_requires_B_and_two_C")
         return self
 
 
@@ -616,6 +656,8 @@ def validate_evaluation_contract(
     if set(public_cases) != set(gold_cases):
         raise ContractError("public_gold_case_set_mismatch")
     for case_id, gold_case in gold_cases.items():
+        if gold_case.assessment_policy != public.assessment_policy:
+            raise ContractError("gold_public_assessment_policy_mismatch")
         public_case = public_cases[case_id]
         evidence_by_id = {
             row.evidence_id: row for row in public_case.evidence_catalog
@@ -670,6 +712,8 @@ def validate_evaluation_contract(
         if not {row.case_id for row in run.predictions} <= set(public_cases):
             raise ContractError("prediction_case_not_in_public_inputs")
         for prediction in run.predictions:
+            if prediction.assessment_policy != public.assessment_policy:
+                raise ContractError("prediction_public_assessment_policy_mismatch")
             if prediction.surface != "formal_issue":
                 continue
             current = tuple(
@@ -677,9 +721,11 @@ def validate_evaluation_contract(
                 for citation in prediction.citations
                 if citation.role == "C"
             )
-            if len({citation.evidence_id for citation in current}) < 2:
+            minimum = 1 if public.assessment_policy == EVENT_ASSESSMENT_POLICY else 2
+            if len({citation.evidence_id for citation in current}) < minimum:
                 raise ContractError(
-                    "formal_prediction_requires_two_nonoverlapping_current_evidence"
+                    "v3_formal_prediction_requires_current_evidence" if minimum == 1
+                    else "formal_prediction_requires_two_nonoverlapping_current_evidence"
                 )
             for index, left in enumerate(current):
                 for right in current[index + 1 :]:

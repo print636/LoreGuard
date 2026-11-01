@@ -136,7 +136,7 @@ def build_page_data(
         row["reviewer_b"] = right_cases[case_id].model_dump(mode="json")
         row["agreement"] = agreement_cases[case_id].model_dump(mode="json")
 
-    return {
+    data = {
         "page_schema_version": PAGE_SCHEMA_VERSION,
         "adjudication_schema_version": workflow.ADJUDICATION_SCHEMA_VERSION,
         "dataset_id": public.dataset_id,
@@ -161,6 +161,9 @@ def build_page_data(
         "agreement_summary": agreement.model_dump(mode="json", exclude={"cases"}),
         "cases": cases,
     }
+    if public.assessment_policy is not None:
+        data["assessment_policy"] = public.assessment_policy
+    return data
 
 
 def render_adjudication_page(data: dict[str, Any]) -> str:
@@ -512,7 +515,10 @@ _HTML_TEMPLATE = r'''<!doctype html>
     const OUTCOMES = [["conflict", "conflict · 正式冲突"], ["no_issue", "no_issue · 无问题"], ["indeterminate", "indeterminate · 待复核"]];
     const SURFACES = [["formal_issue", "formal_issue · 正式问题"], ["none", "none · 不展示"], ["review_clue", "review_clue · 复核线索"]];
     const LEVELS = { L0: { outcome: "no_issue", surface: "none" }, L1: { outcome: "indeterminate", surface: "review_clue" }, L2: { outcome: "indeterminate", surface: "review_clue" }, L3: { outcome: "conflict", surface: "formal_issue" } };
+    const SINGLE_CLEAR_EVENT = DATA.manual_version === "ooc-manual-v3-event" && DATA.assessment_policy === "single-clear-event-v3";
+    const FORMAL_CONFIRMATION_KEYS = ["explicit_opposition", "same_scope", "explanations_checked"];
     const CASE_KEYS = ["case_id", "dimension", "final_outcome", "final_surface", "conflict_level", "material_coverage", "required_evidence", "forbidden_evidence_ids", "independent_event_groups", "explanation_links", "phenomena", "reason_codes", "resolution_mode", "adjudicator_id", "adjudicator_kind", "adjudicator_blinded_to_system_prediction", "resolution_note"];
+    if (SINGLE_CLEAR_EVENT) CASE_KEYS.push("assessment_policy", "formal_evidence_confirmation");
     const BUNDLE_KEYS = ["schema_version", "dataset_id", "public_input_sha256", "reviewer_ids", "annotation_sha256", "consensus_confirmed_by", "cases"];
     const AGREEMENT_FIELDS = [
       ["dimension", "维度", "dimension_agrees"], ["finalOutcome", "结果", "outcome_agrees"],
@@ -531,9 +537,20 @@ _HTML_TEMPLATE = r'''<!doctype html>
     const draftKey = ["loreguard-ooc-adjudication-draft-v1", DATA.public_input_sha256, DATA.author_setup_sha256, DATA.execution_freeze_sha256, ...DATA.reviewers.map(row => row.annotation_sha256), DATA.third_human_id || "consensus-only"].join(":");
 
     function blankCase() {
-      return { source: "", finalOutcome: "", finalSurface: "", conflictLevel: "", materialCoverage: "complete", evidenceRoles: {}, forbidden: {}, eventGroups: {}, explanations: {}, phenomena: "", reasonCodes: "", resolutionMode: DATA.default_resolution_mode, resolutionNote: "" };
+      return { source: "", finalOutcome: "", finalSurface: "", conflictLevel: "", materialCoverage: "complete", evidenceRoles: {}, forbidden: {}, eventGroups: {}, explanations: {}, phenomena: "", reasonCodes: "", resolutionMode: DATA.default_resolution_mode, resolutionNote: "", formalEvidenceConfirmation: { explicit_opposition: false, same_scope: false, explanations_checked: false } };
     }
     function blankConfirmations() { return { reviewerA: false, reviewerB: false, thirdHuman: false, thirdHumanBlind: false }; }
+    function clearFormalConfirmation(caseIndex) {
+      if (!SINGLE_CLEAR_EVENT) return;
+      state.cases[caseIndex].formalEvidenceConfirmation = { explicit_opposition: false, same_scope: false, explanations_checked: false };
+      const input = document.getElementById(`formal-confirm-${caseIndex}`);
+      if (input) input.checked = false;
+    }
+    function checkedFormalConfirmation(value) {
+      if (value === null) return null;
+      if (!exactKeys(value, FORMAL_CONFIRMATION_KEYS) || FORMAL_CONFIRMATION_KEYS.some(key => typeof value[key] !== "boolean")) throw new Error("正式冲突人工核对格式不正确。 ");
+      return { ...value };
+    }
     const state = { activeCase: 0, locked: false, confirmations: blankConfirmations(), cases: DATA.cases.map(blankCase) };
     const evidenceMetaCache = new Map();
 
@@ -581,6 +598,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
         announce(source.dimension === caseRow.dimension ? "维度已由作者冻结，无需采纳。 " : "冻结维度与提交不一致，已拒绝采纳。 ");
         return false;
       }
+      if (["finalOutcome", "finalSurface", "conflictLevel", "materialCoverage", "evidence", "eventGroups", "explanations"].includes(field)) clearFormalConfirmation(caseIndex);
       if (field === "finalOutcome") row.finalOutcome = source.outcome;
       if (field === "finalSurface") row.finalSurface = source.surface;
       if (field === "conflictLevel") row.conflictLevel = source.conflict_level;
@@ -644,6 +662,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
               announce("该证据角色不符合冻结来源约束，已拒绝。 ");
             }
             caseState.evidenceRoles[evidenceId] = role.value;
+            clearFormalConfirmation(caseIndex);
             if (role.value) caseState.forbidden[evidenceId] = false;
             renderCase();
             scheduleDraft();
@@ -654,6 +673,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
           forbidden.disabled = state.locked;
           forbidden.addEventListener("change", () => {
             caseState.forbidden[evidenceId] = forbidden.checked;
+            clearFormalConfirmation(caseIndex);
             if (forbidden.checked) caseState.evidenceRoles[evidenceId] = "";
             renderCase();
             scheduleDraft();
@@ -704,21 +724,38 @@ _HTML_TEMPLATE = r'''<!doctype html>
       dimensionField.append(dimensionLabel, dimension, element("p", "helper", "维度由作者冻结的 trait_type 映射，仲裁者不能改选。"));
       labels.append(dimensionField);
       const labelGrid = element("div", "form-grid"), outcome = makeSelect([["","请选择结果"], ...OUTCOMES], row.finalOutcome), surface = makeSelect([["","请选择展示面"], ...SURFACES], row.finalSurface);
-      outcome.addEventListener("change", () => { row.finalOutcome = outcome.value; scheduleDraft(); });
-      surface.addEventListener("change", () => { row.finalSurface = surface.value; scheduleDraft(); });
+      outcome.addEventListener("change", () => { row.finalOutcome = outcome.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
+      surface.addEventListener("change", () => { row.finalSurface = surface.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
       labelGrid.append(formField("最终 outcome *", outcome, "必须与 L0–L3 对应。", `outcome-${caseIndex}`), formField("最终 surface *", surface, "必须与 outcome 对应。", `surface-${caseIndex}`));
       labels.append(labelGrid);
       const level = makeSelect([["","请选择等级"],["L0","L0 · 无问题"],["L1","L1 · 轻度待复核"],["L2","L2 · 明确待复核"],["L3","L3 · 正式冲突"]], row.conflictLevel);
-      level.addEventListener("change", () => { row.conflictLevel = level.value; scheduleDraft(); });
+      level.addEventListener("change", () => { row.conflictLevel = level.value; clearFormalConfirmation(caseIndex); const confirmation = document.getElementById(`formal-confirmation-${caseIndex}`); if (confirmation) confirmation.hidden = level.value !== "L3"; scheduleDraft(); });
       const coverage = makeSelect([["complete","完整"],["partial","部分缺失"],["missing","关键材料缺失"]], row.materialCoverage);
-      coverage.addEventListener("change", () => { row.materialCoverage = coverage.value; scheduleDraft(); });
+      coverage.addEventListener("change", () => { row.materialCoverage = coverage.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
       const secondGrid = element("div", "form-grid");
-      secondGrid.append(formField("冲突等级 *", level, "L3 需要 B、两条 C 和两个独立事件组。", `level-${caseIndex}`), formField("材料覆盖 *", coverage, "不完整时只能为 L1 或 L2。", `coverage-${caseIndex}`));
+      secondGrid.append(formField("冲突等级 *", level, SINGLE_CLEAR_EVENT ? "一次明确、同范围且无适用解释的反向事件也可为 L3；仍需原设定、表现证据与人工核对，歧义只能保留为线索。" : "L3 需要 B、两条 C 和两个独立事件组。", `level-${caseIndex}`), formField("材料覆盖 *", coverage, "不完整时只能为 L1 或 L2。", `coverage-${caseIndex}`));
       labels.append(secondGrid);
       fields.append(labels);
 
+      if (SINGLE_CLEAR_EVENT) {
+        const confirmation = element("section", "form-section");
+        confirmation.id = `formal-confirmation-${caseIndex}`;
+        confirmation.hidden = row.conflictLevel !== "L3";
+        confirmation.append(element("h4", "", "正式冲突：仲裁者主动核对"), element("p", "helper", "不会采纳 A／B 的勾选。修改材料、证据、事件或解释后需重新确认。"));
+        const label = element("label", "target-check"), input = document.createElement("input");
+        input.type = "checkbox";
+        input.id = `formal-confirm-${caseIndex}`;
+        input.checked = FORMAL_CONFIRMATION_KEYS.every(key => row.formalEvidenceConfirmation?.[key] === true);
+        input.addEventListener("change", () => { row.formalEvidenceConfirmation = Object.fromEntries(FORMAL_CONFIRMATION_KEYS.map(key => [key, input.checked])); updateNavigation(); scheduleDraft(); });
+        label.append(input, element("span", "", "我已核对：至少一次表现确已实际发生，并与原设定直接相反，属于同一人物、对象和适用情境，且对应事件没有适用的明确解释或待确认解释。"));
+        confirmation.append(label);
+        fields.append(confirmation);
+      }
+
       const structures = element("section", "form-section");
       renderStructures(caseIndex, structures);
+      structures.addEventListener("input", () => clearFormalConfirmation(caseIndex));
+      structures.addEventListener("change", () => clearFormalConfirmation(caseIndex));
       fields.append(structures);
 
       const codes = element("section", "form-section");
@@ -824,7 +861,12 @@ _HTML_TEMPLATE = r'''<!doctype html>
       const source = DATA.cases[caseIndex], row = state.cases[caseIndex], meta = evidenceMeta(caseIndex), required_evidence = Object.entries(row.evidenceRoles).filter(([id, role]) => meta.has(id) && ["B","C","G","X","P"].includes(role)).map(([evidence_id, role]) => ({ evidence_id, role })), requiredIds = new Set(required_evidence.map(item => item.evidence_id)), forbidden_evidence_ids = Object.entries(row.forbidden).filter(([id, value]) => value && meta.has(id) && !requiredIds.has(id)).map(([id]) => id), currentIds = new Set(required_evidence.filter(item => item.role === "C").map(item => item.evidence_id)), grouped = new Map(); currentIds.forEach(id => { const group = String(row.eventGroups[id] || "").trim(); if (group) { const values = grouped.get(group) || []; values.push(id); grouped.set(group, values); } }); const independent_event_groups = [...grouped.entries()].map(([event_group_id, evidence_ids]) => ({ event_group_id, evidence_ids })), explanation_links = [];
       required_evidence.filter(item => ["G","X","P"].includes(item.role)).forEach(item => { const link = row.explanations[item.evidence_id] || {}, targets = Array.isArray(link.applicableCurrentIds) ? [...new Set(link.applicableCurrentIds.filter(id => currentIds.has(id)))] : []; if (item.role === "G" || item.role === "X" || targets.length) { const allowed = item.role === "P" ? ["explicit","bounded","ambiguous"] : ["explicit","bounded"]; explanation_links.push({ support_evidence_id: item.evidence_id, applicable_current_ids: targets, causal_relation: allowed.includes(link.causalRelation) ? link.causalRelation : item.role === "P" ? "ambiguous" : "bounded", temporal_relation: item.role === "G" ? "before" : item.role === "X" ? "active_during" : ["before","active_during","after","unknown"].includes(link.temporalRelation) ? link.temporalRelation : "unknown" }); } });
       const third = row.resolutionMode === "third_human";
-      return { case_id: source.case_id, dimension: source.dimension, final_outcome: row.finalOutcome, final_surface: row.finalSurface, conflict_level: row.conflictLevel, material_coverage: row.materialCoverage, required_evidence, forbidden_evidence_ids, independent_event_groups, explanation_links, phenomena: parseTags(row.phenomena), reason_codes: parseTags(row.reasonCodes), resolution_mode: row.resolutionMode, adjudicator_id: third ? DATA.third_human_id : null, adjudicator_kind: third && state.confirmations.thirdHuman ? "human" : null, adjudicator_blinded_to_system_prediction: third && state.confirmations.thirdHumanBlind ? true : null, resolution_note: row.resolutionNote.trim() };
+      const result = { case_id: source.case_id, dimension: source.dimension, final_outcome: row.finalOutcome, final_surface: row.finalSurface, conflict_level: row.conflictLevel, material_coverage: row.materialCoverage, required_evidence, forbidden_evidence_ids, independent_event_groups, explanation_links, phenomena: parseTags(row.phenomena), reason_codes: parseTags(row.reasonCodes), resolution_mode: row.resolutionMode, adjudicator_id: third ? DATA.third_human_id : null, adjudicator_kind: third && state.confirmations.thirdHuman ? "human" : null, adjudicator_blinded_to_system_prediction: third && state.confirmations.thirdHumanBlind ? true : null, resolution_note: row.resolutionNote.trim() };
+      if (SINGLE_CLEAR_EVENT) {
+        result.assessment_policy = "single-clear-event-v3";
+        result.formal_evidence_confirmation = row.formalEvidenceConfirmation === null ? null : Object.fromEntries(FORMAL_CONFIRMATION_KEYS.map(key => [key, row.formalEvidenceConfirmation?.[key] === true]));
+      }
+      return result;
     }
     function buildBundle() { return { schema_version: DATA.adjudication_schema_version, dataset_id: DATA.dataset_id, public_input_sha256: DATA.public_input_sha256, reviewer_ids: DATA.reviewers.map(row => row.reviewer_id), annotation_sha256: DATA.reviewers.map(row => row.annotation_sha256), consensus_confirmed_by: [state.confirmations.reviewerA ? DATA.reviewers[0].reviewer_id : null, state.confirmations.reviewerB ? DATA.reviewers[1].reviewer_id : null].filter(Boolean), cases: DATA.cases.map((_, index) => buildCase(index)) }; }
 
@@ -839,7 +881,24 @@ _HTML_TEMPLATE = r'''<!doctype html>
       if (row.material_coverage !== "complete" && row.final_outcome !== "indeterminate") add(`coverage-${caseIndex}`, "材料不完整时 outcome 必须为 indeterminate。 ");
       const roles = role => row.required_evidence.filter(item => item.role === role).map(item => item.evidence_id), b = roles("B"), c = roles("C"), g = roles("G"), x = roles("X"), p = roles("P");
       row.required_evidence.forEach(item => { if (!roleAllowed(caseIndex, item.evidence_id, item.role)) add("evidence-final", "证据来源不符合冻结约束：B 仅限 selector，C 仅限目标文档，G 仅限基线文档。 "); });
-      if (row.conflict_level === "L3") { if (!b.length || c.length < 2) add("evidence-final", "L3 至少需要 1 条 B 和 2 条 C。 "); if (g.length || x.length || p.length) add("evidence-final", "L3 不得采用 G、X 或 P。 "); const byEvidence = new Map(); row.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => byEvidence.set(id, group.event_group_id))); const groups = new Set(c.map(id => byEvidence.get(id))); if (groups.has(undefined) || groups.size < 2) add("structures", "L3 的每条 C 都要分组，且至少属于两个独立事件组。 "); }
+      if (row.conflict_level === "L3") {
+        const byEvidence = new Map();
+        row.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => byEvidence.set(id, group.event_group_id)));
+        const groups = new Set(c.map(id => byEvidence.get(id)));
+        if (SINGLE_CLEAR_EVENT) {
+          if (!b.length || !c.length) add("evidence-final", "L3 至少需要一处原设定和一处明确的新稿表现证据。 ");
+          if (groups.has(undefined) || !groups.size) add("structures", "每段新稿表现都要归到对应事件；同一事件的多个片段仍是同一组。 ");
+          const coveredGroups = new Set();
+          row.explanation_links.forEach(link => link.applicable_current_ids.forEach(id => { if (byEvidence.has(id)) coveredGroups.add(byEvidence.get(id)); }));
+          if (p.some(id => !row.explanation_links.some(link => link.support_evidence_id === id && link.applicable_current_ids.length))) add("structures", "可能解释尚未对应具体事件，不能直接认定正式冲突。请如实对应或保留为待复核。 ");
+          if (![...groups].some(group => group !== undefined && !coveredGroups.has(group))) add("structures", "所选事件均有明确或可能解释，不能认定正式冲突；解释只影响其对应事件。 ");
+          if (!FORMAL_CONFIRMATION_KEYS.every(key => row.formal_evidence_confirmation?.[key] === true)) add(`formal-confirmation-${caseIndex}`, "请由仲裁者主动核对明确相反、同一范围及解释条件；不能直接继承 A／B 的确认。 ");
+        } else {
+          if (!b.length || c.length < 2) add("evidence-final", "L3 至少需要 1 条 B 和 2 条 C。 ");
+          if (g.length || x.length || p.length) add("evidence-final", "L3 不得采用 G、X 或 P。 ");
+          if (groups.has(undefined) || groups.size < 2) add("structures", "L3 的每条 C 都要分组，且至少属于两个独立事件组。 ");
+        }
+      }
       if (["L1","L2"].includes(row.conflict_level) && !row.required_evidence.length) add("evidence-final", "L1／L2 至少需要一条必要证据。 ");
       const linked = new Set(row.explanation_links.map(link => link.support_evidence_id)); [...g,...x].forEach(id => { if (!linked.has(id)) add("structures", "每条 G 或 X 都必须绑定至少一个 C。 "); }); row.explanation_links.forEach(link => { if (!link.applicable_current_ids.length) add("structures", "解释绑定至少需要一个 C。 "); const role = row.required_evidence.find(item => item.evidence_id === link.support_evidence_id)?.role; if ((role === "G" || role === "X") && link.causal_relation === "ambiguous") add("structures", "含糊支持必须标为 P。 "); });
       if (!row.phenomena.length || row.phenomena.length > 64 || row.phenomena.some(value => value.length > 100)) add(`phenomena-${caseIndex}`, "现象标签需为 1–64 个非空值，每个不超过 100 字符。 ");
@@ -858,7 +917,23 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function scheduleDraft(contentChanged = true) { if (state.locked) return; if (contentChanged) invalidateFinalConfirmations(); window.clearTimeout(scheduleDraft.timer); scheduleDraft.timer = window.setTimeout(() => saveDraft(true), 500); }
     function loadDraft() { try { const raw = localStorage.getItem(draftKey); if (!raw) return false; const draft = JSON.parse(raw), reviewerIds = DATA.reviewers.map(row => row.reviewer_id), digests = DATA.reviewers.map(row => row.annotation_sha256); if (draft.draft_version !== 1 || draft.public_input_sha256 !== DATA.public_input_sha256 || draft.author_setup_sha256 !== DATA.author_setup_sha256 || draft.execution_freeze_sha256 !== DATA.execution_freeze_sha256 || draft.manual_version !== DATA.manual_version || !deepEqual(draft.reviewer_ids, reviewerIds) || !deepEqual(draft.annotation_sha256, digests) || draft.third_human_id !== DATA.third_human_id || !Array.isArray(draft.cases) || draft.cases.length !== DATA.cases.length) return false; const confirmations = draft.confirmations || {}; state.confirmations = { reviewerA: confirmations.reviewerA === true, reviewerB: confirmations.reviewerB === true, thirdHuman: confirmations.thirdHuman === true, thirdHumanBlind: confirmations.thirdHumanBlind === true }; state.cases = draft.cases.map(row => ({ ...blankCase(), ...row, evidenceRoles: { ...(row.evidenceRoles || {}) }, forbidden: { ...(row.forbidden || {}) }, eventGroups: { ...(row.eventGroups || {}) }, explanations: { ...(row.explanations || {}) } })); state.activeCase = Number.isInteger(draft.active_case) && draft.active_case >= 0 && draft.active_case < DATA.cases.length ? draft.active_case : 0; return true; } catch (_) { return false; } }
 
-    function stateFromLocked(caseIndex, row) { const next = blankCase(); if (row.dimension !== DATA.cases[caseIndex].dimension) throw new Error("导入文件的维度与作者冻结目标不一致。 "); next.source = "locked"; next.finalOutcome = row.final_outcome; next.finalSurface = row.final_surface; next.conflictLevel = row.conflict_level; next.materialCoverage = row.material_coverage; next.phenomena = row.phenomena.join("\n"); next.reasonCodes = row.reason_codes.join("\n"); next.resolutionMode = row.resolution_mode; next.resolutionNote = row.resolution_note; row.required_evidence.forEach(item => { next.evidenceRoles[item.evidence_id] = item.role; }); row.forbidden_evidence_ids.forEach(id => { next.forbidden[id] = true; }); row.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => { next.eventGroups[id] = group.event_group_id; })); row.explanation_links.forEach(link => { next.explanations[link.support_evidence_id] = { applicableCurrentIds: [...link.applicable_current_ids], causalRelation: link.causal_relation, temporalRelation: link.temporal_relation }; }); const known = evidenceMeta(caseIndex); if ([...Object.keys(next.evidenceRoles), ...Object.keys(next.forbidden)].some(id => !known.has(id))) throw new Error("导入文件引用了本案例不存在的证据。 "); if (Object.entries(next.evidenceRoles).some(([id, role]) => !roleAllowed(caseIndex, id, role))) throw new Error("导入文件的 B/C/G 来源不符合作者冻结目标。 "); return next; }
+    function stateFromLocked(caseIndex, row) {
+      const next = blankCase();
+      if (row.dimension !== DATA.cases[caseIndex].dimension) throw new Error("导入文件的维度与作者冻结目标不一致。 ");
+      if (SINGLE_CLEAR_EVENT) {
+        if (row.assessment_policy !== "single-clear-event-v3") throw new Error("导入文件的判断规则与本版不一致。 ");
+        next.formalEvidenceConfirmation = checkedFormalConfirmation(row.formal_evidence_confirmation);
+      }
+      next.source = "locked"; next.finalOutcome = row.final_outcome; next.finalSurface = row.final_surface; next.conflictLevel = row.conflict_level; next.materialCoverage = row.material_coverage; next.phenomena = row.phenomena.join("\n"); next.reasonCodes = row.reason_codes.join("\n"); next.resolutionMode = row.resolution_mode; next.resolutionNote = row.resolution_note;
+      row.required_evidence.forEach(item => { next.evidenceRoles[item.evidence_id] = item.role; });
+      row.forbidden_evidence_ids.forEach(id => { next.forbidden[id] = true; });
+      row.independent_event_groups.forEach(group => group.evidence_ids.forEach(id => { next.eventGroups[id] = group.event_group_id; }));
+      row.explanation_links.forEach(link => { next.explanations[link.support_evidence_id] = { applicableCurrentIds: [...link.applicable_current_ids], causalRelation: link.causal_relation, temporalRelation: link.temporal_relation }; });
+      const known = evidenceMeta(caseIndex);
+      if ([...Object.keys(next.evidenceRoles), ...Object.keys(next.forbidden)].some(id => !known.has(id))) throw new Error("导入文件引用了本案例不存在的证据。 ");
+      if (Object.entries(next.evidenceRoles).some(([id, role]) => !roleAllowed(caseIndex, id, role))) throw new Error("导入文件的 B/C/G 来源不符合作者冻结目标。 ");
+      return next;
+    }
     function validateImported(bundle) { if (!exactKeys(bundle, BUNDLE_KEYS)) throw new Error("导入文件不是当前 AdjudicationBundle 结构。 "); const reviewerIds = DATA.reviewers.map(row => row.reviewer_id), digests = DATA.reviewers.map(row => row.annotation_sha256); if (bundle.schema_version !== DATA.adjudication_schema_version || bundle.dataset_id !== DATA.dataset_id || bundle.public_input_sha256 !== DATA.public_input_sha256 || !deepEqual(bundle.reviewer_ids, reviewerIds) || !deepEqual(bundle.annotation_sha256, digests) || !deepEqual(bundle.consensus_confirmed_by, reviewerIds) || !Array.isArray(bundle.cases)) throw new Error("导入文件与当前公开数据或两份冻结提交不一致。 "); const byCase = new Map(); bundle.cases.forEach(row => { if (!exactKeys(row, CASE_KEYS) || byCase.has(row.case_id)) throw new Error("导入文件含重复案例或未知字段。 "); if (!Array.isArray(row.required_evidence) || !row.required_evidence.every(item => exactKeys(item, ["evidence_id","role"]))) throw new Error("导入文件的必要证据结构无效。 "); if (!Array.isArray(row.forbidden_evidence_ids) || !Array.isArray(row.independent_event_groups) || !row.independent_event_groups.every(item => exactKeys(item, ["event_group_id","evidence_ids"])) || !Array.isArray(row.explanation_links) || !row.explanation_links.every(item => exactKeys(item, ["support_evidence_id","applicable_current_ids","causal_relation","temporal_relation"])) || !Array.isArray(row.phenomena) || !Array.isArray(row.reason_codes)) throw new Error("导入文件的案例结构无效。 "); byCase.set(row.case_id, row); }); if (byCase.size !== DATA.cases.length || DATA.cases.some(row => !byCase.has(row.case_id))) throw new Error("导入文件没有完整覆盖公开案例。 "); const next = DATA.cases.map((caseRow, index) => stateFromLocked(index, byCase.get(caseRow.case_id))), previous = state.cases, previousConfirmations = state.confirmations; state.cases = next; const hasThird = bundle.cases.some(row => row.resolution_mode === "third_human"); state.confirmations = { reviewerA: true, reviewerB: true, thirdHuman: hasThird, thirdHumanBlind: hasThird }; const errors = validateAll(); if (errors.length) { state.cases = previous; state.confirmations = previousConfirmations; throw new Error(`导入文件未通过协议校验：${errors[0].message.trim()}`); } const rebuilt = new Map(DATA.cases.map((caseRow, index) => [caseRow.case_id, buildCase(index)])); if (bundle.cases.some(row => !deepEqual(row, rebuilt.get(row.case_id)))) { state.cases = previous; state.confirmations = previousConfirmations; throw new Error("导入文件不能由本页无损还原；可能含重复值或非法类型。 "); } return next; }
 
     function downloadLocked() { const errors = validateAll(); if (errors.length) { showErrors(errors); announce(`还有 ${errors.length} 项需要修正。`); return; } showErrors([]); const payload = JSON.stringify(buildBundle(), null, 2) + "\n", blob = new Blob([payload], { type: "application/json;charset=utf-8" }), url = URL.createObjectURL(blob), anchor = document.createElement("a"); anchor.href = url; anchor.download = `ooc-adjudication-${DATA.public_input_sha256.slice(0,12)}.locked.json`; document.body.append(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); state.locked = true; try { localStorage.removeItem(draftKey); } catch (_) {} renderCase(); announce("锁定仲裁 JSON 已下载；当前工作副本已锁定。 "); }

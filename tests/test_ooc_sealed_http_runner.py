@@ -523,6 +523,33 @@ def test_setup_aware_evidence_roles_and_exact_anchor_boundaries(tmp_path, mutati
     assert set(by_document) == {baseline, target}
 
 
+def test_v3_runtime_refs_can_represent_one_reviewed_event_without_claiming_independence(tmp_path):
+    bundle, public_case, setup_case = _write_bundle(tmp_path / "bundle")
+    baseline = setup_case.candidate_selector.source_document_id
+    target = setup_case.target_document_id
+    refs = [
+        {"handle": "B01", "role": "B", "document_name": f"{baseline}.md", "line_start": 1, "line_end": 1},
+        {"handle": "C01", "role": "C", "document_name": f"{target}.md", "line_start": 1, "line_end": 1},
+        {"handle": "C02", "role": "C", "document_name": f"{target}.md", "line_start": 2, "line_end": 2},
+    ]
+    trace = {"citation_refs_incomplete": False, "citation_refs": refs,
+             "scoped_axis_review": {"independent_events": "unknown", "observations": [
+                 {"citation": handle, "object_match": "same", "situation_match": "same"}
+                 for handle in ("C01", "C02")
+             ]}}
+    old_refs = runner._strict_runtime_refs(public_case, setup_case, trace)
+    assert old_refs is not None and all(ref.event_group_id is None for ref in old_refs)
+    v3_refs = runner._strict_runtime_refs(public_case, setup_case, trace,
+                                          assessment_policy=contract.EVENT_ASSESSMENT_POLICY)
+    groups = {ref.event_group_id for ref in v3_refs if ref.role == "C"}
+    assert len(groups) == 1 and None not in groups
+    # Missing same-object/situation proof must not get a fabricated event ID.
+    trace["scoped_axis_review"]["observations"] = []
+    absent = runner._strict_runtime_refs(public_case, setup_case, trace,
+                                         assessment_policy=contract.EVENT_ASSESSMENT_POLICY)
+    assert all(ref.event_group_id is None for ref in absent)
+
+
 def test_bundle_loader_reads_only_fixed_controls_and_manifest_documents(tmp_path, monkeypatch):
     root = tmp_path / "bundle"
     bundle, _, _ = _write_bundle(root)

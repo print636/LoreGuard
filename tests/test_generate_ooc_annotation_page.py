@@ -197,6 +197,17 @@ def _embedded_data(html: str) -> dict:
     return json.loads(match.group(1))
 
 
+def _event_policy_fixture(tmp_path):
+    public, _, root, setup, _, freeze, _ = _fixture(tmp_path)
+    public = public.model_copy(update={"assessment_policy": "single-clear-event-v3"})
+    setup = setup.model_copy(update={"public_input_sha256": contract.canonical_sha256(public)})
+    freeze = freeze.model_copy(update={
+        "public_input_sha256": contract.canonical_sha256(public),
+        "author_setup_sha256": contract.canonical_sha256(setup),
+    })
+    return public, root, setup, freeze
+
+
 def _inline_javascript(html: str) -> str:
     matches = re.findall(r"<script(?: [^>]*)?>(.*?)</script>", html, flags=re.DOTALL)
     assert len(matches) == 2
@@ -444,6 +455,72 @@ def test_previous_round_import_requires_matching_snapshot_and_explicit_action(tm
     assert "state.declarations = blankDeclarations()" in migration
     assert "localStorage.removeItem" not in migration
     assert "state.locked =" not in migration
+
+
+def test_v3_policy_has_one_unselected_human_confirmation_and_no_legacy_migration(tmp_path):
+    public, root, setup, freeze = _event_policy_fixture(tmp_path)
+    data = page.build_page_data(public, root, setup, freeze,
+        reviewer_id="reviewer-a", manual_version="ooc-manual-v3-event")
+    assert data["assessment_policy"] == "single-clear-event-v3"
+    javascript = _inline_javascript(page.render_annotation_page(data))
+    assert 'const SINGLE_CLEAR_EVENT = DATA.manual_version === "ooc-manual-v3-event"' in javascript
+    assert 'DATA.assessment_policy === "single-clear-event-v3"' in javascript
+    assert 'input.id = `formal-confirm-${caseIndex}`' in javascript
+    assert "explicit_opposition: false, same_scope: false, explanations_checked: false" in javascript
+    assert "原设定明确，至少一次表现确实与它直接相反" in javascript
+    assert "同一事情的多个片段仍是同一件事" in javascript
+    assert 'row.assessment_policy = "single-clear-event-v3"' in javascript
+    assert "row.formal_evidence_confirmation" in javascript
+    assert "旧版文件和旧进度未被删除" in javascript
+    assert "不会自动带入旧结论、证据分组或独立完成声明" in javascript
+    migration = javascript.split("function setupPreviousRoundImport()", 1)[1].split("function stateFromLockedCase", 1)[0]
+    assert migration.index("if (SINGLE_CLEAR_EVENT)") < migration.index("previousRoundDraft()")
+    assert "clearFormalConfirmation(caseIndex)" in javascript
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is unavailable")
+def test_v3_single_clear_event_and_event_scoped_explanation_validation(tmp_path):
+    public, root, setup, freeze = _event_policy_fixture(tmp_path)
+    javascript = _inline_javascript(page.render_annotation_page(page.build_page_data(
+        public, root, setup, freeze,
+        reviewer_id="reviewer-a", manual_version="ooc-manual-v3-event",
+    )))
+    validator = "function validateCase(caseIndex) {" + javascript.split("function validateCase(caseIndex) {", 1)[1].split("function showCaseErrors", 1)[0]
+    script = r'''
+const assert = require("node:assert/strict");
+const SINGLE_CLEAR_EVENT = true;
+const FORMAL_CONFIRMATION_KEYS = ["explicit_opposition", "same_scope", "explanations_checked"];
+const DATA = {cases:[{dimension:"core_trait"}]};
+const LEVELS = {L0:{},L1:{},L2:{},L3:{}};
+let current;
+function buildCase() {return current;}
+function roleAllowed() {return true;}
+function base() { return {
+  dimension:"core_trait",conflict_level:"L3",material_coverage:"complete",
+  evidence:[{evidence_id:"b",role:"B"},{evidence_id:"c1",role:"C"}],
+  independent_event_groups:[{event_group_id:"event-1",evidence_ids:["c1"]}],
+  explanation_links:[],phenomena:["反向表现"],reason_codes:["明确相反"],confidence:5,
+  review_note:"按本人选择整理。",formal_evidence_confirmation:{explicit_opposition:true,same_scope:true,explanations_checked:true}
+};}
+''' + validator + r'''
+current=base(); assert.deepEqual(validateCase(0),[],"one clear event must be representable");
+current.formal_evidence_confirmation=null; assert.ok(validateCase(0).some(row=>row.field==="formal-confirmation-0"));
+current=base(); current.material_coverage="partial"; assert.ok(validateCase(0).some(row=>row.field==="coverage-0"));
+current=base(); current.evidence.push({evidence_id:"c2",role:"C"},{evidence_id:"g",role:"G"});
+current.independent_event_groups.push({event_group_id:"event-2",evidence_ids:["c2"]});
+current.explanation_links.push({support_evidence_id:"g",applicable_current_ids:["c1"],causal_relation:"explicit",temporal_relation:"before"});
+assert.deepEqual(validateCase(0),[],"growth for one event must not veto a separate unexplained event");
+current.independent_event_groups=[{event_group_id:"event-1",evidence_ids:["c1","c2"]}];
+assert.ok(validateCase(0).some(row=>row.message.includes("都有明确或可能解释")),"linked explanation covers its whole event");
+current=base(); current.evidence.push({evidence_id:"p",role:"P"});
+assert.ok(validateCase(0).some(row=>row.message.includes("尚未对应具体表现")),"unbound possible explanation cannot be hidden");
+current.explanation_links=[{support_evidence_id:"p",applicable_current_ids:["c1"],causal_relation:"ambiguous",temporal_relation:"unknown"}];
+assert.ok(validateCase(0).some(row=>row.message.includes("都有明确或可能解释")));
+console.log("v3-event-validation-ok");
+'''
+    result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "v3-event-validation-ok"
 
 
 def test_generator_writes_once_and_cli_reports_created(tmp_path, capsys):

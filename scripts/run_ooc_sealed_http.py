@@ -1216,6 +1216,8 @@ def _strict_runtime_refs(
     public_case: contract.PublicInputCase,
     setup_case: PublicAuthorSetupCase,
     trace: Mapping[str, Any],
+    *,
+    assessment_policy: contract.AssessmentPolicy | None = None,
 ) -> tuple[RuntimeEvidenceRef, ...] | None:
     raw = trace.get("citation_refs")
     if trace.get("citation_refs_incomplete") is not False or type(raw) is not list:
@@ -1290,6 +1292,14 @@ def _strict_runtime_refs(
         if role == "C" and independent and handle in reviewed_c:
             event_group = hashlib.sha256(
                 f"{public_case.case_id}\0{handle}".encode("utf-8")
+            ).hexdigest()
+        elif (role == "C" and assessment_policy == contract.EVENT_ASSESSMENT_POLICY
+              and handle in reviewed_c):
+            # V3 needs a reviewed event, not a claim of multiple independent
+            # events. Without independence proof conservatively put all such
+            # fragments in one event; never manufacture extra independent ones.
+            event_group = hashlib.sha256(
+                f"{public_case.case_id}\0reviewed-current-event".encode("utf-8")
             ).hexdigest()
         refs.append(
             RuntimeEvidenceRef(
@@ -1448,6 +1458,8 @@ def _snapshot_from_reports(
     review_raw: object,
     provisional_raw: object,
     funnel: contract.StageFunnel,
+    *,
+    assessment_policy: contract.AssessmentPolicy | None = None,
 ) -> RuntimeCaseSnapshot:
     stage = diagnostics.get("character_consistency")
     if type(stage) is not dict:
@@ -1473,7 +1485,7 @@ def _snapshot_from_reports(
     if len(all_traces) != 1 or len(traces) != 1:
         return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
     trace = traces[0]
-    refs = _strict_runtime_refs(public_case, setup_case, trace)
+    refs = _strict_runtime_refs(public_case, setup_case, trace, assessment_policy=assessment_policy)
     if refs is None:
         return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
     final_outcome = trace.get("final_outcome")
@@ -1725,6 +1737,7 @@ def _case_execution(
         review,
         provisional,
         funnel,
+        assessment_policy=bundle.public.assessment_policy,
     )
 
 

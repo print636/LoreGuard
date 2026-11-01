@@ -17,6 +17,7 @@ from tests.test_generate_ooc_annotation_page import (
     CASE_ID,
     DATASET_ID,
     EVIDENCE_IDS,
+    _event_policy_fixture,
     _fixture,
 )
 
@@ -83,6 +84,18 @@ def _annotation(
         }
     else:  # pragma: no cover - test helper guard
         raise AssertionError(variant)
+    if manual_version == "ooc-manual-v3-event":
+        case["assessment_policy"] = "single-clear-event-v3"
+        case["formal_evidence_confirmation"] = {
+            "explicit_opposition": variant == "formal",
+            "same_scope": variant == "formal",
+            "explanations_checked": variant == "formal",
+        }
+        if variant == "formal":
+            case["evidence"] = case["evidence"][:2]
+            case["independent_event_groups"] = case["independent_event_groups"][:1]
+            case["reason_codes"] = ["single_clear_event"]
+            case["review_note"] = "一次明确表现与作者冻结基线直接相反，已核对适用范围和解释。"
     return workflow.ReviewerAnnotationBundle.model_validate_json(
         json.dumps(
             {
@@ -259,6 +272,81 @@ def test_javascript_targets_exact_adjudication_schema_and_active_confirmations(
     )
     workflow._validate_adjudication_setup_binding(public, setup, valid)
     workflow._build_private_gold(public, left, right, valid)
+
+
+def test_v3_adjudication_preserves_policy_but_does_not_adopt_human_confirmation(tmp_path):
+    public, root, setup, freeze = _event_policy_fixture(tmp_path)
+    left = _annotation(public, reviewer_id="reviewer-a", variant="formal", manual_version="ooc-manual-v3-event")
+    right = _annotation(public, reviewer_id="reviewer-b", variant="formal", manual_version="ooc-manual-v3-event")
+    data = page.build_page_data(public, root, setup, freeze, left, right)
+    assert data["assessment_policy"] == "single-clear-event-v3"
+    assert data["cases"][0]["reviewer_a"]["formal_evidence_confirmation"]["explicit_opposition"] is True
+    javascript = _inline_javascript(page.render_adjudication_page(data))
+    assert 'input.id = `formal-confirm-${caseIndex}`' in javascript
+    assert "explicit_opposition: false, same_scope: false, explanations_checked: false" in javascript
+    assert 'result.assessment_policy = "single-clear-event-v3"' in javascript
+    assert "result.formal_evidence_confirmation" in javascript
+    copier = javascript.split("function copyReviewer", 1)[1].split("function adoptField", 1)[0]
+    assert "const next = blankCase()" in copier
+    assert "formalEvidenceConfirmation = source" not in copier
+    assert "formal_evidence_confirmation" not in copier
+    assert "不能直接继承 A／B 的确认" in javascript
+
+
+@pytest.mark.skipif(
+    shutil.which("node") is None or not (page.REPO_ROOT / "frontend" / "node_modules" / "@playwright" / "test").exists(),
+    reason="Playwright is unavailable",
+)
+def test_browser_v3_single_event_adjudication_requires_own_confirmation_and_roundtrips(tmp_path):
+    public, root, setup, freeze = _event_policy_fixture(tmp_path)
+    left = _annotation(public, reviewer_id="reviewer-a", variant="formal", manual_version="ooc-manual-v3-event")
+    right = _annotation(public, reviewer_id="reviewer-b", variant="formal", manual_version="ooc-manual-v3-event")
+    html_path = tmp_path / "adjudication-v3.html"
+    html_path.write_text(page.render_adjudication_page(page.build_page_data(public, root, setup, freeze, left, right)), encoding="utf-8")
+    locked_path = tmp_path / "adjudication-v3.locked.json"
+    browser_script = r'''
+const { chromium } = require(process.argv[1]);
+const { pathToFileURL } = require("url");
+(async()=>{
+  const browser=await chromium.launch({headless:true});
+  const page=await browser.newPage({viewport:{width:1440,height:1000}});
+  await page.goto(pathToFileURL(process.argv[2]).href);
+  await page.getByRole("button",{name:/以 A .* 为起点/}).click();
+  if(await page.locator("#formal-confirm-0").isChecked()) throw new Error("adjudicator confirmation silently copied");
+  await page.locator("#note-0").fill("两位真人复核一次明确事件，确认人物、范围及解释条件。");
+  await page.locator("#download-locked").click();
+  if(!(await page.locator("#error-summary").innerText()).includes("仲裁者主动核对")) throw new Error("fresh human confirmation not required");
+  await page.locator("#formal-confirm-0").check();
+  await page.locator("#coverage-0").selectOption("partial");
+  if(await page.locator("#formal-confirm-0").isChecked()) throw new Error("material edit retained stale confirmation");
+  await page.locator("#coverage-0").selectOption("complete");
+  await page.locator("#formal-confirm-0").check();
+  const declarations=page.locator('#final-confirmations input[type="checkbox"]');
+  await declarations.nth(0).check(); await declarations.nth(1).check();
+  const downloadPromise=page.waitForEvent("download");
+  await page.locator("#download-locked").click();
+  await (await downloadPromise).saveAs(process.argv[3]);
+  await page.locator("#unlock-editing").click();
+  await page.locator("#import-file").setInputFiles(process.argv[3]);
+  await page.waitForFunction(()=>document.querySelector("#unlock-editing")?.hidden===false && document.querySelector("#formal-confirm-0")?.matches(":disabled")===true);
+  if(!await page.locator("#formal-confirm-0").isChecked()) throw new Error("locked confirmation did not roundtrip");
+  console.log("v3-adjudication-browser-ok");
+  await browser.close();
+})().catch(error=>{console.error(error);process.exit(1);});
+'''
+    result = subprocess.run([
+        shutil.which("node"), "-e", browser_script,
+        str((page.REPO_ROOT / "frontend" / "node_modules" / "@playwright" / "test").resolve()),
+        str(html_path), str(locked_path),
+    ], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "v3-adjudication-browser-ok"
+    adjudication = workflow.AdjudicationBundle.model_validate_json(locked_path.read_text(encoding="utf-8"))
+    workflow._validate_adjudication_setup_binding(public, setup, adjudication)
+    gold = workflow._build_private_gold(public, left, right, adjudication)
+    assert adjudication.cases[0].assessment_policy == "single-clear-event-v3"
+    assert adjudication.cases[0].formal_evidence_confirmation.explicit_opposition is True
+    assert gold.cases[0].assessment_policy == "single-clear-event-v3"
 
 
 def test_third_human_mode_uses_explicit_human_identity_and_blindness(tmp_path):
