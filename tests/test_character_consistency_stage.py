@@ -2805,6 +2805,7 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
                 "explanation_coverage": "not_run",
                 "support_count": 0,
                 "review_outcome": "completed",
+                "review_required": True,
                 "review_verdict": "contradicts",
                 "citation_roles": ["B", "C"],
                 "citation_refs": [
@@ -2815,6 +2816,37 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
                 "final_outcome": "needs_confirmation",
                 "visible": True,
                 "promote_reason": "explanation_search_incomplete",
+                "target_coverage": {
+                    "schema_version": "character-target-coverage-v1",
+                    "confirmed_candidate_id_sha256": hashlib.sha256(
+                        candidate_id.encode("utf-8")
+                    ).hexdigest(),
+                    "character_key": "林澈",
+                    "dimension": "preference",
+                    "comparison_key": "preference:蜜瓜",
+                    "material_coverage": "complete",
+                    "explanation_coverage": "not_run",
+                    "matched_observation_count": 1,
+                    "status": "partial",
+                    "processing": {
+                        "planned_chunks": 2,
+                        "processed_chunks": 2,
+                        "model_completed_chunks": 2,
+                        "model_incomplete_chunks": 0,
+                        "model_uncalled_chunks": 0,
+                    },
+                    "alias_disposition": {
+                        "total": 0,
+                        "proven_outside_target": 0,
+                        "possibly_target": 0,
+                        "unknown": 0,
+                        "outside_proofs": [],
+                    },
+                    "non_alias_blockers": [
+                        "case_explanation_incomplete",
+                        "post_alias_processing_gap",
+                    ],
+                },
             }
         ]
 
