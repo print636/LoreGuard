@@ -43,6 +43,8 @@ from .character_draft_actor_review import (
     DraftActorClauseIndex,
     DraftActorProposal,
     TargetBoundSlotConflict,
+    TargetBoundNegativeSlot,
+    TargetBoundReviewReason,
     TargetBoundDraftProposal,
     TargetBoundDraftReviewProposal,
     TargetBoundDraftReviewRequest,
@@ -112,6 +114,16 @@ CoreLabelScopeKind = Literal[
     "anchor_unresolved",
     "other",
 ]
+StatementSupportFailureKind = Literal[
+    "lexical_polarity", "statement_too_short", "anchor_empty",
+    "anchor_overlap", "assertion_rewrite", "claim_direction", "binding_guard_other",
+]
+
+
+class _StatementSupportFailure(ValueError):
+    def __init__(self, kind: StatementSupportFailureKind) -> None:
+        super().__init__("statement_support")
+        self.kind = kind
 
 # Runtime allowlist derived from the same closed type used by the evaluator.
 # This contains no model-authored strings and is reused by the stage's final
@@ -1391,6 +1403,49 @@ class BaselineCoverageTraceV1(BaseModel):
         return self
 
 
+class TargetBoundFailureEventV1(BaseModel):
+    """Validated semantic failure slots, with source/target identities only."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    target_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_line_start: int = Field(ge=1, le=10_000_000)
+    source_line_end: int = Field(ge=1, le=10_000_000)
+    requested_polarity: Literal["positive", "negative"]
+    raw_verdict: Literal["supported", "rejected", "uncertain"]
+    verdict: Literal["rejected", "uncertain"]
+    reason: TargetBoundReviewReason
+    negative_slots: tuple[TargetBoundNegativeSlot, ...] = Field(max_length=7)
+
+    @model_validator(mode="after")
+    def _valid_range(self):
+        if self.source_line_start > self.source_line_end:
+            raise ValueError("failure event line range is invalid")
+        return self
+
+
+class CharacterSignalFailureDiagnosticsV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    statement_support_counts: dict[StatementSupportFailureKind, StrictInt] = Field(
+        default_factory=dict
+    )
+    target_bound_events: tuple[TargetBoundFailureEventV1, ...] = Field(
+        default=(), max_length=64
+    )
+    target_bound_events_omitted: int = Field(default=0, ge=0, le=1_000_000)
+    # Attempts count actual additional logical calls; succeeded/failed count
+    # original conflicting items. A valid rejection resolves the contract too.
+    scope_review_slot_recovery_attempts: int = Field(default=0, ge=0, le=1)
+    scope_review_slot_recovery_succeeded: int = Field(default=0, ge=0, le=64)
+    scope_review_slot_recovery_failed: int = Field(default=0, ge=0, le=64)
+
+    @model_validator(mode="after")
+    def _bounded_counts(self):
+        if any(not 0 < count <= 128 for count in self.statement_support_counts.values()):
+            raise ValueError("failure counts exceed bound")
+        return self
+
+
 class CharacterSignalDiagnostics(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -1401,6 +1456,9 @@ class CharacterSignalDiagnostics(BaseModel):
     rejected_records: int = Field(ge=0)
     ignored_duplicate_records: int = Field(default=0, ge=0)
     reason_counts: dict[str, int] = Field(default_factory=dict)
+    failure_diagnostics: CharacterSignalFailureDiagnosticsV1 | None = Field(
+        default=None, exclude=True
+    )
     # Classification is content-free and never changes record admission.
     evidence_mismatch_counts: dict[EvidenceMismatchKind, int] = Field(
         default_factory=dict
@@ -1459,6 +1517,7 @@ class _SignalValidationFailure:
 
     record_index: int | None
     reason: str
+    statement_support_kind: StatementSupportFailureKind | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -1472,6 +1531,11 @@ class _SignalValidationFailure:
             )
         ):
             raise ValueError("unsafe signal validation failure")
+        if self.statement_support_kind is not None and (
+            self.reason != "statement_support"
+            or self.statement_support_kind not in get_args(StatementSupportFailureKind)
+        ):
+            raise ValueError("unsafe statement failure kind")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1551,6 +1615,7 @@ class _TargetBoundDraftOutcome:
     rejected_count: int = 0
     reason_counts: tuple[tuple[str, int], ...] = ()
     slot_conflict_counts: tuple[tuple[TargetBoundSlotConflict, int], ...] = ()
+    failure_events: tuple[TargetBoundFailureEventV1, ...] = ()
     attempted_calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -1570,6 +1635,10 @@ class _ScopeReviewOutcome:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     charged_tokens: int = 0
+    initial_decisions: tuple[ScopeReviewDecision, ...] = ()
+    slot_recovery_attempts: int = 0
+    slot_recovery_succeeded: int = 0
+    slot_recovery_failed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2447,6 +2516,7 @@ class CharacterSignalExtractor:
         target_bound_slot_conflict_counts: Counter[
             TargetBoundSlotConflict
         ] = Counter()
+        target_bound_failure_events: list[TargetBoundFailureEventV1] = []
         retry_categories: tuple[str, ...] = ()
         retry_failures: tuple[_SignalValidationFailure, ...] = ()
 
@@ -2532,6 +2602,7 @@ class CharacterSignalExtractor:
                         target_bound_slot_conflict_counts=dict(
                             target_bound_slot_conflict_counts
                         ),
+                        target_bound_failure_events=target_bound_failure_events,
                         support_index=trace_index,
                         draft_trace_enabled=draft_trace_enabled,
                         baseline_trace_enabled=baseline_trace_enabled,
@@ -2579,6 +2650,7 @@ class CharacterSignalExtractor:
                     target_bound_slot_conflict_counts=dict(
                         target_bound_slot_conflict_counts
                     ),
+                    target_bound_failure_events=target_bound_failure_events,
                     token_admission=admission,
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
@@ -2601,6 +2673,7 @@ class CharacterSignalExtractor:
                     target_bound_slot_conflict_counts=dict(
                         target_bound_slot_conflict_counts
                     ),
+                    target_bound_failure_events=target_bound_failure_events,
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
                     baseline_trace_enabled=baseline_trace_enabled,
@@ -2640,6 +2713,7 @@ class CharacterSignalExtractor:
                     target_bound_slot_conflict_counts=dict(
                         target_bound_slot_conflict_counts
                     ),
+                    target_bound_failure_events=target_bound_failure_events,
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
                     baseline_trace_enabled=baseline_trace_enabled,
@@ -2660,6 +2734,7 @@ class CharacterSignalExtractor:
                     target_bound_slot_conflict_counts=dict(
                         target_bound_slot_conflict_counts
                     ),
+                    target_bound_failure_events=target_bound_failure_events,
                     support_index=trace_index,
                     draft_trace_enabled=draft_trace_enabled,
                     baseline_trace_enabled=baseline_trace_enabled,
@@ -2746,6 +2821,7 @@ class CharacterSignalExtractor:
                     target_bound_slot_conflict_counts.update(
                         dict(target_review.slot_conflict_counts)
                     )
+                    target_bound_failure_events.extend(target_review.failure_events)
                     validation = _resolve_completed_target_bound_discovery(
                         validation,
                         target_review,
@@ -2892,6 +2968,7 @@ class CharacterSignalExtractor:
                 target_bound_slot_conflict_counts.update(
                     dict(target_review.slot_conflict_counts)
                 )
+                target_bound_failure_events.extend(target_review.failure_events)
                 validation = _resolve_target_bound_validation(
                     validation, target_review
                 )
@@ -3046,7 +3123,10 @@ class CharacterSignalExtractor:
                         reasons["baseline_coverage_scope_incomplete"] += 1
                 slot_conflict_counts = Counter(
                     conflict
-                    for decision in (review_outcome.decisions if review_outcome else ())
+                    for decision in (
+                        (review_outcome.initial_decisions or review_outcome.decisions)
+                        if review_outcome else ()
+                    )
                     if decision.reason == "slot_conflict"
                     for conflict in decision.slot_conflicts
                 )
@@ -3108,6 +3188,9 @@ class CharacterSignalExtractor:
                             )
                         ),
                         reason_counts=dict(sorted(reasons.items())),
+                        failure_diagnostics=_failure_diagnostics_for_result(
+                            validation_attempts, target_bound_failure_events, review_outcome
+                        ),
                         evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
                         scope_review_slot_conflict_counts=dict(
                             sorted(slot_conflict_counts.items())
@@ -3183,6 +3266,7 @@ class CharacterSignalExtractor:
             target_bound_slot_conflict_counts=dict(
                 target_bound_slot_conflict_counts
             ),
+            target_bound_failure_events=target_bound_failure_events,
             support_index=trace_index,
             draft_trace_enabled=draft_trace_enabled,
             baseline_trace_enabled=baseline_trace_enabled,
@@ -3412,7 +3496,10 @@ def _validate_signal_package(
                     mismatch_counts[_classify_evidence_mismatch(record, chunk)] += 1
                 elif safe_reason == "core_label_scope":
                     core_scope_counts[_classify_core_label_scope(record, chunk)] += 1
-                failures.append(_SignalValidationFailure(record_index, safe_reason))
+                failures.append(_SignalValidationFailure(
+                    record_index, safe_reason,
+                    exc.kind if isinstance(exc, _StatementSupportFailure) else None,
+                ))
                 continue
 
         group_identity = _raw_signal_group_identity(record)
@@ -4322,6 +4409,47 @@ def _anchor_identity(value: str) -> str:
     return _compact(unicodedata.normalize("NFKC", value).casefold())
 
 
+def _failure_diagnostics_for_result(
+    attempts: list[_ValidatedSignalPackage],
+    target_events: list[TargetBoundFailureEventV1] | tuple[TargetBoundFailureEventV1, ...] = (),
+    scope_review: _ScopeReviewOutcome | None = None,
+) -> CharacterSignalFailureDiagnosticsV1 | None:
+    counts = Counter(
+        failure.statement_support_kind or "binding_guard_other"
+        for attempt in attempts for failure in attempt.failures
+        if failure.reason == "statement_support"
+    )
+    recovery = {
+        f"scope_review_slot_recovery_{kind}": getattr(scope_review, f"slot_recovery_{kind}", 0)
+        for kind in ("attempts", "succeeded", "failed")
+    }
+    if not counts and not target_events and not any(recovery.values()):
+        return None
+    return CharacterSignalFailureDiagnosticsV1(
+        statement_support_counts=dict(sorted(counts.items())),
+        target_bound_events=tuple(target_events[:64]),
+        target_bound_events_omitted=max(0, len(target_events) - 64),
+        **recovery,
+    )
+
+
+def _target_bound_failure_event(request, proposal, decision) -> TargetBoundFailureEventV1 | None:
+    # Synthetic uncertainty has no validated semantic item and cannot invent slots.
+    if decision.verdict == "supported" or decision.raw_verdict is None:
+        return None
+    return TargetBoundFailureEventV1(
+        source_sha256=request.content_sha256,
+        target_digest=request.target_digest,
+        source_line_start=proposal.line_start,
+        source_line_end=proposal.line_end,
+        requested_polarity=request.target.requested_polarity,
+        raw_verdict=decision.raw_verdict,
+        verdict=decision.verdict,
+        reason=decision.reason,
+        negative_slots=decision.negative_slots,
+    )
+
+
 def _failed_package_result(
     attempts: list[_ValidatedSignalPackage],
     *,
@@ -4337,6 +4465,7 @@ def _failed_package_result(
     target_bound_slot_conflict_counts: dict[
         TargetBoundSlotConflict, int
     ] | None = None,
+    target_bound_failure_events: list[TargetBoundFailureEventV1] | tuple[TargetBoundFailureEventV1, ...] = (),
     token_admission: CharacterSignalTokenAdmission | None = None,
     support_index: AssertionIndexV1 | None = None,
     draft_trace_enabled: bool = False,
@@ -4410,6 +4539,7 @@ def _failed_package_result(
         completion_tokens=completion_tokens,
         charged_tokens=charged_tokens,
         reason_counts=dict(sorted(reasons.items())),
+        failure_diagnostics=_failure_diagnostics_for_result(attempts, target_bound_failure_events),
         evidence_mismatch_counts=dict(sorted(mismatch_counts.items())),
         target_bound_slot_conflict_counts=dict(
             sorted((target_bound_slot_conflict_counts or {}).items())
@@ -5538,6 +5668,7 @@ def _review_target_bound_draft_candidates(
     rejected = 0
     review_reasons: Counter[str] = Counter()
     slot_conflict_counts: Counter[TargetBoundSlotConflict] = Counter()
+    failure_events: list[TargetBoundFailureEventV1] = []
     if run.failure_reason is not None:
         review_reasons[f"target_bound_{run.failure_reason}"] += len(deferred)
     if len(run.evaluation.evaluations) != len(entries):
@@ -5565,6 +5696,9 @@ def _review_target_bound_draft_candidates(
                     review_reasons["target_bound_response_mismatch"] += 1
                     continue
                 item, request, proposal = candidate
+                event = _target_bound_failure_event(request, proposal, decision)
+                if event is not None:
+                    failure_events.append(event)
                 if decision.verdict == "rejected":
                     rejected += 1
                     resolved.add(item.record_index)
@@ -5604,6 +5738,7 @@ def _review_target_bound_draft_candidates(
         rejected_count=rejected,
         reason_counts=tuple(sorted(review_reasons.items())),
         slot_conflict_counts=tuple(sorted(slot_conflict_counts.items())),
+        failure_events=tuple(failure_events),
         attempted_calls=run.attempted_calls,
         prompt_tokens=run.prompt_tokens,
         completion_tokens=run.completion_tokens,
@@ -5694,6 +5829,7 @@ def _review_target_bound_discoveries_v3(
     rejected = 0
     reasons: Counter[str] = Counter()
     slot_conflict_counts: Counter[TargetBoundSlotConflict] = Counter()
+    failure_events: list[TargetBoundFailureEventV1] = []
     if run.failure_reason is not None:
         reasons[f"target_bound_{run.failure_reason}"] += len(discoveries)
     decisions_seen = 0
@@ -5720,6 +5856,9 @@ def _review_target_bound_discoveries_v3(
                     reasons["target_bound_response_mismatch"] += 1
                     continue
                 request, proposal = candidate
+                event = _target_bound_failure_event(request, proposal, decision)
+                if event is not None:
+                    failure_events.append(event)
                 if decision.verdict == "rejected":
                     rejected += 1
                     continue
@@ -5753,6 +5892,7 @@ def _review_target_bound_discoveries_v3(
         rejected_count=rejected,
         reason_counts=tuple(sorted(reasons.items())),
         slot_conflict_counts=tuple(sorted(slot_conflict_counts.items())),
+        failure_events=tuple(failure_events),
         attempted_calls=run.attempted_calls,
         prompt_tokens=run.prompt_tokens,
         completion_tokens=run.completion_tokens,
@@ -6093,9 +6233,20 @@ def _review_clean_signals(
         if decision.verdict == "supported"
     )
     reasons: Counter[str] = Counter()
+    initial_evaluation = getattr(run, "initial_evaluation", None)
+    original_conflict_ids = {
+        decision.proposal_id for decision in (
+            initial_evaluation.decisions if initial_evaluation is not None else ()
+        ) if decision.reason == "slot_conflict"
+    }
     for decision in run.evaluation.decisions:
         if decision.verdict != "supported":
-            reasons[f"scope_review_{run.failure_reason or decision.reason}"] += 1
+            failure = (
+                run.failure_reason
+                if initial_evaluation is None or decision.proposal_id in original_conflict_ids
+                else None
+            )
+            reasons[f"scope_review_{failure or decision.reason}"] += 1
     return _ScopeReviewOutcome(
         supported=supported,
         decisions=run.evaluation.decisions,
@@ -6104,6 +6255,13 @@ def _review_clean_signals(
         prompt_tokens=run.prompt_tokens,
         completion_tokens=run.completion_tokens,
         charged_tokens=run.charged_tokens,
+        initial_decisions=(
+            run.initial_evaluation.decisions
+            if getattr(run, "initial_evaluation", None) is not None else ()
+        ),
+        slot_recovery_attempts=getattr(run, "slot_recovery_attempts", 0),
+        slot_recovery_succeeded=getattr(run, "slot_recovery_succeeded", 0),
+        slot_recovery_failed=getattr(run, "slot_recovery_failed", 0),
     )
 
 
@@ -6650,7 +6808,7 @@ def _v4_support_scope(
     if statement != source and not (
         core_head is not None and statement == character + core_head.group(1)
     ):
-        raise ValueError("statement_support")
+        raise _StatementSupportFailure("assertion_rewrite")
     if record.dimension == "preference" and record.key_object:
         object_direction = _v4_preference_object_direction(
             source, record.character, record.key_object
@@ -6658,11 +6816,10 @@ def _v4_support_scope(
         if object_direction is None:
             raise ValueError("key_object_support")
         if record.polarity != object_direction:
-            raise ValueError("statement_support")
+            raise _StatementSupportFailure("claim_direction")
     if record.key_object and _compact(record.key_object) not in _compact(clause.text):
         raise ValueError("key_object_support")
-    if not _statement_supported(record, clause.text):
-        raise ValueError("statement_support")
+    _require_statement_supported(record, clause.text)
 
     # The following assertion can label this one only through the pre-existing
     # narrow same-character anaphora guard; it never supplies actor, statement,
@@ -7003,12 +7160,11 @@ def _v5_support_scope(
     if statement != expected and not (
         direct_actor and core_head is not None and statement == character + core_head.group(1)
     ):
-        raise ValueError("statement_support")
-    if not _statement_supported(record, target.text):
-        raise ValueError("statement_support")
+        raise _StatementSupportFailure("assertion_rewrite")
+    _require_statement_supported(record, target.text)
     explicit_absence = _v5_object_absence_direction(source, record.key_object)
     if explicit_absence is not None and record.polarity != explicit_absence:
-        raise ValueError("statement_support")
+        raise _StatementSupportFailure("claim_direction")
     if record.key_object and _compact(record.key_object) not in _compact(target.text):
         raise ValueError("key_object_support")
     if record.dimension == "preference" and record.key_object:
@@ -7019,7 +7175,7 @@ def _v5_support_scope(
         if _compact(unicodedata.normalize("NFKC", record.key_object)).casefold() != whole_object:
             raise ValueError("key_object_support")
         if record.polarity != direction:
-            raise ValueError("statement_support")
+            raise _StatementSupportFailure("claim_direction")
 
     label = None
     label_kind = None
@@ -7470,21 +7626,17 @@ def _bind_record(
             if model_object != whole_object:
                 raise ValueError("key_object_support")
             if record.polarity != direction:
-                raise ValueError("statement_support")
+                raise _StatementSupportFailure("claim_direction")
             statement_claim = _single_direct_formal_preference_claim(
                 record.statement, record.character
             )
             if statement_claim is not None and statement_claim != direct_claim:
-                raise ValueError("statement_support")
-    if (
-        not scope_review_v1
-        and not skip_target_bound_semantic_binding
-        and not _statement_supported(
-        record, v4_clause.text if v4_clause is not None else evidence_text,
-        skip_lexical_polarity=skip_lexical_polarity,
+                raise _StatementSupportFailure("claim_direction")
+    if not scope_review_v1 and not skip_target_bound_semantic_binding:
+        _require_statement_supported(
+            record, v4_clause.text if v4_clause is not None else evidence_text,
+            skip_lexical_polarity=skip_lexical_polarity,
         )
-    ):
-        raise ValueError("statement_support")
     if (
         chunk.source_kind == "draft"
         and dimension == "preference"
@@ -9825,12 +9977,12 @@ def trait_keys_compatible(
     return len(left_grams & right_grams) / len(left_grams | right_grams) >= 0.5
 
 
-def _statement_supported(
+def _statement_support_failure(
     record: _RawCharacterSignal,
     evidence: str,
     *,
     skip_lexical_polarity: bool = False,
-) -> bool:
+) -> StatementSupportFailureKind | None:
     statement_compact = _compact(record.statement)
     evidence_compact = _compact(evidence)
     if not skip_lexical_polarity and not _polarity_supported(
@@ -9841,11 +9993,11 @@ def _statement_supported(
         key_object=record.key_object,
         trait_key=record.trait_key,
     ):
-        return False
+        return "lexical_polarity"
     if statement_compact in evidence_compact:
-        return True
+        return None
     if len(statement_compact) < 2:
-        return False
+        return "statement_too_short"
     statement_anchor = statement_compact.replace(_compact(record.character), "")
     evidence_anchor = evidence_compact.replace(_compact(record.character), "")
     if record.key_object:
@@ -9854,7 +10006,7 @@ def _statement_supported(
     for word in _GENERIC_SIGNAL_WORDS:
         statement_anchor = statement_anchor.replace(word, "")
     if not statement_anchor:
-        return False
+        return "anchor_empty"
     grams = {
         statement_anchor[index : index + 2]
         for index in range(len(statement_anchor) - 1)
@@ -9863,9 +10015,27 @@ def _statement_supported(
         )
     }
     if not grams:
-        return statement_anchor in evidence_anchor
+        return None if statement_anchor in evidence_anchor else "anchor_overlap"
     hits = sum(gram in evidence_anchor for gram in grams)
-    return hits >= 1 and hits / len(grams) >= 0.5
+    return None if hits >= 1 and hits / len(grams) >= 0.5 else "anchor_overlap"
+
+
+def _statement_supported(
+    record: _RawCharacterSignal, evidence: str, *, skip_lexical_polarity: bool = False,
+) -> bool:
+    return _statement_support_failure(
+        record, evidence, skip_lexical_polarity=skip_lexical_polarity
+    ) is None
+
+
+def _require_statement_supported(
+    record: _RawCharacterSignal, evidence: str, *, skip_lexical_polarity: bool = False,
+) -> None:
+    failure = _statement_support_failure(
+        record, evidence, skip_lexical_polarity=skip_lexical_polarity
+    )
+    if failure is not None:
+        raise _StatementSupportFailure(failure)
 
 
 def _history_target_anchor(

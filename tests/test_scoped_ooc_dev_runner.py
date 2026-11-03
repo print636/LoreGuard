@@ -53,7 +53,8 @@ def test_default_port_fails_before_any_http(monkeypatch):
              "signal_semantic_scope_version": None,
              "signal_scope_review_v1": False,
              "signal_scope_review_schema_version": None,
-             "signal_scope_review_prompt_version": None},
+             "signal_scope_review_prompt_version": None,
+             "signal_scope_review_contract_recovery_version": None},
             (), "signal_support_id_v4_not_enabled",
         ),
         ({}, ("signal_support_id_v4",), "signal_support_id_v4_not_enabled"),
@@ -66,7 +67,8 @@ def test_default_port_fails_before_any_http(monkeypatch):
              "signal_semantic_scope_version": None,
              "signal_scope_review_v1": False,
              "signal_scope_review_schema_version": None,
-             "signal_scope_review_prompt_version": None},
+             "signal_scope_review_prompt_version": None,
+             "signal_scope_review_contract_recovery_version": None},
             (), "signal_semantic_scope_v5_not_enabled",
         ),
         (
@@ -76,7 +78,8 @@ def test_default_port_fails_before_any_http(monkeypatch):
         (
             {"signal_scope_review_v1": False,
              "signal_scope_review_schema_version": None,
-             "signal_scope_review_prompt_version": None},
+             "signal_scope_review_prompt_version": None,
+             "signal_scope_review_contract_recovery_version": None},
             (), "signal_scope_review_v1_not_enabled",
         ),
         (
@@ -86,6 +89,10 @@ def test_default_port_fails_before_any_http(monkeypatch):
         (
             {"signal_scope_review_prompt_version": "character-scope-review-prompt-v2"},
             (), "signal_scope_review_prompt_version_mismatch",
+        ),
+        (
+            {"signal_scope_review_contract_recovery_version": "unknown"},
+            (), "signal_scope_review_contract_recovery_version_mismatch",
         ),
     ],
 )
@@ -103,6 +110,7 @@ def test_prepare_requires_exact_support_binding_health_before_project_create(
         "signal_scope_review_v1": True,
         "signal_scope_review_schema_version": "character-scope-review-v2",
         "signal_scope_review_prompt_version": "character-scope-review-prompt-v4",
+        "signal_scope_review_contract_recovery_version": "character-scope-review-contract-recovery-v1",
     }
     limits.update(changes)
     for field in missing:

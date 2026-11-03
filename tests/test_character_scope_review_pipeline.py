@@ -491,7 +491,7 @@ def test_slot_conflict_counts_are_content_free_and_do_not_admit_candidate():
             "statement_relation": "ambiguous", "object_relation": "different",
         }]),
     )
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3  # Primary, scope, one bounded slot correction.
     assert result.signals == result.pending_candidates == ()
     assert result.diagnostics.outcome == "partial"
     assert result.diagnostics.reason_counts == {"scope_review_slot_conflict": 1}
@@ -499,6 +499,14 @@ def test_slot_conflict_counts_are_content_free_and_do_not_admit_candidate():
         "actor": 1, "actuality": 1, "statement_relation": 1,
         "object_relation": 1,
     }
+    recovery = result.diagnostics.failure_diagnostics
+    assert recovery is not None
+    assert recovery.scope_review_slot_recovery_attempts == 1
+    assert recovery.scope_review_slot_recovery_succeeded == 0
+    assert recovery.scope_review_slot_recovery_failed == 1
+    assert result.diagnostics.attempted_calls == 3
+    assert result.diagnostics.charged_tokens > 0
+    assert result.diagnostics.support_trace.final_accepted_slots == ()
     serialized = json.dumps(result.diagnostics.model_dump(mode="json"), ensure_ascii=False)
     for private in (line, "桑衍", "蜜瓜", "frozen-input-1", "document-1", "L2:A1"):
         assert private not in serialized
@@ -734,7 +742,7 @@ def test_stage_passes_frozen_run_identity_and_keeps_rejected_local_out_of_candid
     assert provider.review_payload["request"]["document_version"] == 7
 
 
-def test_stage_exports_only_slot_conflict_categories_and_counts():
+def test_stage_preserves_slot_conflict_history_when_correction_budget_is_exhausted():
     line = "桑衍喜欢蜜瓜。"
     frozen = "## 桑衍\n" + line + "\n"
     document = DocumentInput("document-1", "profile.md", frozen, role="character_profile")
@@ -758,10 +766,23 @@ def test_stage_exports_only_slot_conflict_categories_and_counts():
         None, run_id="private-run-1", project_id="private-project-1",
         documents=[document], metadata=[], remaining_run_tokens=30_000,
     )
-    assert result.diagnostics["reason_counts"]["scope_review_slot_conflict"] == 1
+    # The stage's reserved scope allowance cannot fund the second review. The
+    # original veto remains visible without admitting a fact or fabricating a
+    # recovery call/usage event.
+    assert result.diagnostics["reason_counts"]["scope_review_token_budget"] == 1
     assert result.diagnostics["scope_review_slot_conflict_counts"] == {
         "actor": 1, "statement_relation": 1,
     }
+    recovery = result.diagnostics["failure_diagnostics_v1"]["chunks"][0]["diagnostics"]
+    assert recovery["scope_review_slot_recovery_attempts"] == 0
+    assert recovery["scope_review_slot_recovery_succeeded"] == 0
+    assert recovery["scope_review_slot_recovery_failed"] == 1
+    assert result.diagnostics["outcome"] == "partial"
+    assert result.diagnostics["material_coverage"] == "partial"
+    assert result.diagnostics["counts"]["signal_count"] == 0
+    assert result.diagnostics["counts"]["pending_candidate_count"] == 0
+    assert result.diagnostics["usage"]["attempted_calls"] == len(provider.calls) == 3
+    assert result.diagnostics["usage"]["charged_tokens"] > 0
     serialized = json.dumps(result.diagnostics, ensure_ascii=False)
     for private in (
         line, "桑衍", "蜜瓜", "private-run-input-9", "private-run-1",

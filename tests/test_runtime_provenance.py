@@ -742,6 +742,8 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     assert limits["signal_scope_review_v1"] is True
     assert limits["signal_scope_review_schema_version"] == "character-scope-review-v2"
     assert limits["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v4"
+    assert limits["signal_scope_review_contract_recovery_version"] == "character-scope-review-contract-recovery-v1"
+    assert off["character_consistency_limits"]["signal_scope_review_contract_recovery_version"] is None
     assert limits["signal_scope_review_token_reserve"] == 6_000
     assert limits["signal_scope_review_completion_tokens"] == 2_048
     assert limits["signal_scope_review_max_response_bytes"] == 32_768
@@ -758,6 +760,7 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     assert summary["signal_scope_review_v1"] is True
     assert summary["signal_scope_review_schema_version"] == "character-scope-review-v2"
     assert summary["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v4"
+    assert summary["signal_scope_review_contract_recovery_version"] == "character-scope-review-contract-recovery-v1"
     assert summary["signal_scope_review_limits"][
         "signal_scope_review_provider_max_completion_tokens"
     ] == 1_024
@@ -776,6 +779,7 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
             "character-scope-review-v1"
         )
         old_limits["signal_scope_review_prompt_version"] = old_prompt_version
+        old_limits.pop("signal_scope_review_contract_recovery_version")
         assert live_runner._safe_runtime_provenance(old_report) == old_report
         old_axis = axis_live._safe_character_runtime_provenance(old_report)
         assert old_axis is not None
@@ -818,6 +822,9 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
         {"signal_scope_review_prompt_version": None},
         {"signal_scope_review_prompt_version": "character-scope-review-prompt-v0"},
         {"signal_scope_review_prompt_version": ["character-scope-review-prompt-v2"]},
+        {"signal_scope_review_contract_recovery_version": None},
+        {"signal_scope_review_contract_recovery_version": "unknown"},
+        {"signal_scope_review_contract_recovery_version": ["character-scope-review-contract-recovery-v1"]},
         {"signal_semantic_scope_v5": False, "signal_semantic_scope_version": None},
         {"signal_scope_review_completion_tokens": True},
         {"signal_scope_review_provider_max_completion_tokens": 1_025},
@@ -832,6 +839,16 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     for missing in live_runner._CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS:
         malformed = json.loads(json.dumps(on))
         del malformed["character_consistency_limits"][missing]
+        if missing == "signal_scope_review_contract_recovery_version":
+            # Historical reports remain readable but cannot pass live preflight.
+            assert live_runner._safe_runtime_provenance(malformed) == malformed
+            assert axis_live._safe_character_runtime_provenance(malformed) is not None
+            old_limits = malformed["character_consistency_limits"]
+            assert not live_runner._valid_character_scope_review_limits(old_limits)
+            assert live_runner._valid_character_scope_review_limits(
+                old_limits, allow_legacy_prompt_version=True,
+            )
+            continue
         assert live_runner._safe_runtime_provenance(malformed) is None, missing
         assert axis_live._safe_character_runtime_provenance(malformed) is None, missing
 

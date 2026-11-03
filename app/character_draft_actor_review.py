@@ -1745,6 +1745,11 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
 
 
 TargetBoundReviewVerdict = Literal["supported", "rejected", "uncertain"]
+TargetBoundNegativeSlot = Literal[
+    "actor_other", "actuality_reported", "actuality_hypothetical",
+    "actuality_question", "statement_contradicted", "axis_different",
+    "object_different", "polarity_opposite", "polarity_neutral", "corrected",
+]
 TargetBoundReviewReason = Literal[
     "supported",
     "reviewer_rejected",
@@ -1829,6 +1834,12 @@ class TargetBoundDraftReviewDecision(BaseModel):
     proposal_id: str = Field(pattern=_TARGET_PROPOSAL_ID)
     verdict: TargetBoundReviewVerdict
     reason: TargetBoundReviewReason
+    # Internal diagnostic metadata comes only from a validated semantic item.
+    # Absent on synthetic protocol/provider failures; legacy JSON is unchanged.
+    raw_verdict: TargetBoundReviewVerdict | None = Field(default=None, exclude=True)
+    negative_slots: tuple[TargetBoundNegativeSlot, ...] = Field(
+        default=(), max_length=7, exclude=True
+    )
     basis_ids: tuple[str, ...] = Field(
         default=(), max_length=MAX_DRAFT_ACTOR_CLAUSES
     )
@@ -2570,16 +2581,27 @@ def _target_bound_observed_object(
     return observed, fact.support_id
 
 
-def _target_bound_negative_slot(item: TargetBoundDraftReviewItem) -> bool:
-    return (
-        item.actor == "other"
-        or item.actuality in {"reported", "hypothetical", "question"}
-        or item.statement_relation == "contradicted"
-        or item.axis_relation == "different"
-        or item.object_relation == "different"
-        or item.polarity_relation in {"opposite", "neutral"}
-        or item.correction_relation == "corrected"
+def _target_bound_negative_slots(
+    item: TargetBoundDraftReviewItem,
+) -> tuple[TargetBoundNegativeSlot, ...]:
+    return tuple(
+        kind for applies, kind in (
+            (item.actor == "other", "actor_other"),
+            (item.actuality == "reported", "actuality_reported"),
+            (item.actuality == "hypothetical", "actuality_hypothetical"),
+            (item.actuality == "question", "actuality_question"),
+            (item.statement_relation == "contradicted", "statement_contradicted"),
+            (item.axis_relation == "different", "axis_different"),
+            (item.object_relation == "different", "object_different"),
+            (item.polarity_relation == "opposite", "polarity_opposite"),
+            (item.polarity_relation == "neutral", "polarity_neutral"),
+            (item.correction_relation == "corrected", "corrected"),
+        ) if applies
     )
+
+
+def _target_bound_negative_slot(item: TargetBoundDraftReviewItem) -> bool:
+    return bool(_target_bound_negative_slots(item))
 
 
 def _target_bound_source_context_veto(
@@ -2725,6 +2747,12 @@ def evaluate_target_bound_draft_review(
                 verdict="uncertain",
                 reason="reviewer_uncertain",
             ))
+    # Keep the semantic tuple even when local guards normalize its verdict.
+    # This metadata is never used to admit a proposal.
+    decisions = [decision.model_copy(update={
+        "raw_verdict": returned[decision.proposal_id].verdict,
+        "negative_slots": _target_bound_negative_slots(returned[decision.proposal_id]),
+    }) for decision in decisions]
     return TargetBoundDraftReviewEvaluation(
         request_digest=target_bound_draft_review_request_digest(request),
         decisions=tuple(decisions),

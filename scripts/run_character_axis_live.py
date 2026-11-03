@@ -893,7 +893,10 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         or ooc_protocol_keys not in (
             set(), set(_CHARACTER_OOC_PROTOCOL_KEYS)
         )
-        or set(limits) - (
+        or (set(limits) | (
+            {"signal_scope_review_contract_recovery_version"}
+            if _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY in limits else set()
+        )) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
             | _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
@@ -2787,6 +2790,9 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
         "signal_scope_review_prompt_version": (
             limits["signal_scope_review_prompt_version"] if scope_review_valid else None
         ),
+        "signal_scope_review_contract_recovery_version": (
+            limits.get("signal_scope_review_contract_recovery_version") if scope_review_valid else None
+        ),
         "signal_scope_review_limits": (
             {
                 key: limits[key]
@@ -2794,6 +2800,7 @@ def _runtime_summary(health: dict[str, Any]) -> dict[str, Any]:
                     _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY,
                     "signal_scope_review_schema_version",
                     "signal_scope_review_prompt_version",
+                    "signal_scope_review_contract_recovery_version",
                 })
             }
             if scope_review_valid else None

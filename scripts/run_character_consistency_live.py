@@ -85,6 +85,7 @@ _ALPHA_FORMAL_SUPPORT_BINDING_IDENTITY = {
     "signal_scope_review_v1": True,
     "signal_scope_review_schema_version": "character-scope-review-v2",
     "signal_scope_review_prompt_version": "character-scope-review-prompt-v4",
+    "signal_scope_review_contract_recovery_version": "character-scope-review-contract-recovery-v1",
 }
 _ALPHA_EXPLANATION_REVIEW_IDENTITY = {
     "explanation_review_v1": True,

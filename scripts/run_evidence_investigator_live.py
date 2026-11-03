@@ -427,6 +427,7 @@ _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS = frozenset({
     _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY,
     "signal_scope_review_schema_version",
     "signal_scope_review_prompt_version",
+    "signal_scope_review_contract_recovery_version",
     "signal_scope_review_token_reserve",
     "signal_scope_review_completion_tokens",
     "signal_scope_review_max_response_bytes",
@@ -441,6 +442,7 @@ _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS = frozenset({
 _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION = "character-scope-review-v2"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_SCHEMA_VERSION = "character-scope-review-v1"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v4"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_CONTRACT_RECOVERY_VERSION = "character-scope-review-contract-recovery-v1"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSIONS = frozenset({
     "character-scope-review-prompt-v1",
     "character-scope-review-prompt-v2",
@@ -3046,6 +3048,14 @@ def _valid_character_scope_review_limits(
             and limits.get("signal_scope_review_schema_version")
             == _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION
             and prompt_version == _CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION
+            and (
+                limits.get("signal_scope_review_contract_recovery_version")
+                == _CHARACTER_SIGNAL_SCOPE_REVIEW_CONTRACT_RECOVERY_VERSION
+                or (
+                    allow_legacy_prompt_version
+                    and "signal_scope_review_contract_recovery_version" not in limits
+                )
+            )
         )
         legacy_identity = (
             allow_legacy_prompt_version
@@ -3054,12 +3064,14 @@ def _valid_character_scope_review_limits(
             and limits.get("signal_scope_review_schema_version")
             == _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_SCHEMA_VERSION
             and prompt_version in _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSIONS
+            and limits.get("signal_scope_review_contract_recovery_version") is None
         )
         if not (current_identity or legacy_identity):
             return False
     elif (
         limits.get("signal_scope_review_schema_version") is not None
         or prompt_version is not None
+        or limits.get("signal_scope_review_contract_recovery_version") is not None
     ):
         return False
     integers = {
@@ -3462,7 +3474,13 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         or ooc_protocol_keys not in (
             set(), set(_CHARACTER_OOC_PROTOCOL_KEYS)
         )
-        or set(character_limits) - (
+        # Reports written before contract recovery have no recovery-version
+        # key. The read-only validator below explicitly handles that absence;
+        # live preflight still requires the current fixed version.
+        or (set(character_limits) | (
+            {"signal_scope_review_contract_recovery_version"}
+            if _CHARACTER_SIGNAL_SCOPE_REVIEW_KEY in character_limits else set()
+        )) - (
             _CHARACTER_SIGNAL_DRAFT_TRACE_KEYS
             | _CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS
             | _CHARACTER_HISTORY_SEMANTIC_REVIEW_KEYS
@@ -3614,6 +3632,7 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             return None
         safe_character_limits.update({
             key: character_limits[key] for key in _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS
+            if key in character_limits
         })
     if history_review_keys:
         if not _valid_character_history_semantic_review_limits(character_limits):

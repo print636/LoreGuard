@@ -329,6 +329,7 @@ def test_alpha_fixture_is_developer_visible_and_covers_bounded_major_scenarios()
         ("signal_scope_review_v1", False),
         ("signal_scope_review_schema_version", "unknown"),
         ("signal_scope_review_prompt_version", "character-scope-review-prompt-v2"),
+        ("signal_scope_review_contract_recovery_version", "unknown"),
         ("draft_actor_review_v1", False),
         ("target_bound_draft_review_v3", False),
         ("target_bound_draft_review_schema_version", "unknown"),
@@ -379,6 +380,7 @@ def test_alpha_runner_preflight_requires_strict_formal_support_binding_identity(
             "signal_scope_review_v1": False,
             "signal_scope_review_schema_version": None,
             "signal_scope_review_prompt_version": None,
+            "signal_scope_review_contract_recovery_version": None,
         })
     elif support_identity == "v4_only":
         limits.update({
@@ -387,12 +389,14 @@ def test_alpha_runner_preflight_requires_strict_formal_support_binding_identity(
             "signal_scope_review_v1": False,
             "signal_scope_review_schema_version": None,
             "signal_scope_review_prompt_version": None,
+            "signal_scope_review_contract_recovery_version": None,
         })
     elif support_identity == "v4_v5_only":
         limits.update({
             "signal_scope_review_v1": False,
             "signal_scope_review_schema_version": None,
             "signal_scope_review_prompt_version": None,
+            "signal_scope_review_contract_recovery_version": None,
         })
     elif support_identity == "missing":
         limits.pop("signal_support_id_v4")

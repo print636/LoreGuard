@@ -40,8 +40,9 @@ SCOPE_REVIEW_SYSTEM_PROMPT = """你是 LoreGuard 的独立角色设定语义复�
 SCOPE_REVIEW_USER_PREFIX = "请审查以下服务端冻结请求 JSON：\n"
 MAX_SCOPE_REVIEW_REPORTED_TOKENS = 1_000_000
 MAX_SCOPE_REVIEW_CONTRACT_ATTEMPTS = 2
+SCOPE_REVIEW_CONTRACT_RECOVERY_V1 = "character-scope-review-contract-recovery-v1"
 
-ScopeReviewContractFailure = Literal["response_invalid", "response_mismatch"]
+ScopeReviewContractFailure = Literal["response_invalid", "response_mismatch", "slot_conflict"]
 
 ScopeReviewFailure = Literal[
     "source_mismatch",
@@ -69,6 +70,12 @@ class ScopeReviewRun:
     completion_tokens: int
     charged_tokens: int
     failure_reason: ScopeReviewFailure | None = None
+    # Internal evaluation history: diagnostics must retain the first slot veto
+    # even when the bounded regeneration later resolves it.
+    initial_evaluation: ScopeReviewEvaluation | None = None
+    slot_recovery_attempts: int = 0
+    slot_recovery_succeeded: int = 0
+    slot_recovery_failed: int = 0
 
 
 def build_scope_review_prompts(request: ScopeReviewRequest) -> tuple[str, str]:
@@ -107,12 +114,13 @@ def _build_scope_review_contract_regeneration_prompts(
     request: ScopeReviewRequest,
     *,
     failure: ScopeReviewContractFailure,
+    slot_evaluation: ScopeReviewEvaluation | None = None,
 ) -> tuple[str, str]:
     """Rebuild one whole batch from frozen input, never from prior model text.
 
     The retry metadata is entirely server-authored and content-free.  It can
-    correct a malformed envelope or stale/missing item identity, but it neither
-    supplies a desired verdict nor changes any semantic review rule.
+    correct a malformed envelope, identity or supported/slot contradiction. It
+    supplies no desired slot value or verdict and changes no semantic rule.
     """
 
     system, user = build_scope_review_prompts(request)
@@ -162,6 +170,22 @@ def _build_scope_review_contract_regeneration_prompts(
         "additional_fields_allowed": False,
         "markdown_allowed": False,
     }
+    if failure == "slot_conflict":
+        if slot_evaluation is None:
+            raise ValueError("slot regeneration requires a validated evaluation")
+        payload["validation_retry"]["conflicting_items"] = [
+            {
+                "proposal_id": decision.proposal_id,
+                "support_id": decision.support_id,
+                "conflicting_fields": list(decision.slot_conflicts),
+            }
+            for decision in _recoverable_slot_decisions(slot_evaluation)
+        ]
+        payload["validation_retry"]["review_instruction"] = (
+            "先前各列名所指语义槽与 supported 判定存在合同矛盾。请依据同一冻结原文"
+            "独立重审这些项，并输出完整批次。仅报告冲突字段，不预设任何字段值或判定；"
+            "仍可判 rejected 或 uncertain，不得为消除矛盾而强行判 supported。"
+        )
     return system, SCOPE_REVIEW_USER_PREFIX + json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
@@ -281,7 +305,7 @@ def _provider_failure(exc: Exception) -> ScopeReviewFailure:
 
 def _contract_failure(
     evaluation: ScopeReviewEvaluation,
-) -> ScopeReviewContractFailure | None:
+) -> Literal["response_invalid", "response_mismatch"] | None:
     """Return only whole-response contract failures eligible for one retry."""
 
     reasons = {decision.reason for decision in evaluation.decisions}
@@ -291,6 +315,23 @@ def _contract_failure(
     if only_reason in {"response_invalid", "response_mismatch"}:
         return only_reason
     return None
+
+
+def _recoverable_slot_decisions(
+    evaluation: ScopeReviewEvaluation,
+) -> tuple[ScopeReviewDecision, ...]:
+    """Only supported verdicts with mechanically incompatible slots may retry.
+
+    Rejected-without-signal has its own mandatory category; neither those
+    decisions nor ordinary abstentions qualify for semantic regeneration.
+    """
+
+    return tuple(
+        decision for decision in evaluation.decisions
+        if decision.reason == "slot_conflict"
+        and decision.slot_conflicts
+        and "rejected_without_rejection_signal" not in decision.slot_conflicts
+    )
 
 
 def run_scope_review(
@@ -312,7 +353,9 @@ def run_scope_review(
 
     ``token_budget`` is the caller's *remaining* shared allowance. Each logical
     call counts once even when the provider performs transport retries. A whole
-    batch may be regenerated once only after a response-contract failure.
+    batch may be regenerated once after an envelope or supported/slot contract
+    failure. A slot retry can replace only the first response's conflicting
+    items; every other first-response decision remains frozen.
     """
 
     if not isinstance(request, ScopeReviewRequest):
@@ -357,6 +400,48 @@ def run_scope_review(
     total_completion_tokens = 0
     total_charged_tokens = 0
     retry_reason: ScopeReviewContractFailure | None = None
+    initial_evaluation: ScopeReviewEvaluation | None = None
+    slot_recovery_attempts = 0
+
+    def finish(
+        evaluation: ScopeReviewEvaluation,
+        failure_reason: ScopeReviewFailure | None,
+    ) -> ScopeReviewRun:
+        recovery_succeeded = 0
+        recovery_failed = 0
+        if initial_evaluation is not None:
+            eligible = {
+                decision.proposal_id
+                for decision in _recoverable_slot_decisions(initial_evaluation)
+            }
+            # Whole-response/transport failures cannot erase validated first
+            # decisions. A valid reply still passes the original per-item
+            # basis, source and semantic-slot gates before this merge.
+            replacements = {
+                decision.proposal_id: decision
+                for decision in evaluation.decisions
+            } if failure_reason is None else {}
+            evaluation = ScopeReviewEvaluation(
+                request_digest=initial_evaluation.request_digest,
+                decisions=tuple(
+                    replacements.get(decision.proposal_id, decision)
+                    if decision.proposal_id in eligible else decision
+                    for decision in initial_evaluation.decisions
+                ),
+            )
+            recovery_succeeded = sum(
+                decision.proposal_id in eligible
+                and decision.verdict in {"supported", "rejected"}
+                for decision in evaluation.decisions
+            )
+            recovery_failed = len(eligible) - recovery_succeeded
+        return ScopeReviewRun(
+            evaluation, total_estimated_tokens, attempted_calls,
+            total_prompt_tokens, total_completion_tokens,
+            total_charged_tokens, failure_reason,
+            initial_evaluation, slot_recovery_attempts,
+            recovery_succeeded, recovery_failed,
+        )
 
     for contract_attempt in range(MAX_SCOPE_REVIEW_CONTRACT_ATTEMPTS):
         if contract_attempt == 0:
@@ -367,26 +452,19 @@ def run_scope_review(
             assert retry_reason is not None
             system, user = _build_scope_review_contract_regeneration_prompts(
                 request, failure=retry_reason,
+                slot_evaluation=initial_evaluation,
             )
         estimate = estimate_issue_evidence_review_tokens(
             system, user, completion_reserve=completion_reserve,
         )
         total_estimated_tokens += estimate
         if total_charged_tokens + estimate > token_budget:
-            return ScopeReviewRun(
-                _uncertain(request), total_estimated_tokens, attempted_calls,
-                total_prompt_tokens, total_completion_tokens,
-                total_charged_tokens, "token_budget",
-            )
+            return finish(_uncertain(request), "token_budget")
 
         elapsed = monotonic() - started
         remaining_deadline = float(remaining_deadline_seconds) - elapsed
         if remaining_deadline <= 0:
-            return ScopeReviewRun(
-                _uncertain(request), total_estimated_tokens, attempted_calls,
-                total_prompt_tokens, total_completion_tokens,
-                total_charged_tokens, "deadline",
-            )
+            return finish(_uncertain(request), "deadline")
 
         effective_timeout = min(float(timeout_seconds), remaining_deadline)
         try:
@@ -399,13 +477,11 @@ def run_scope_review(
                 max_attempts=max_attempts,
             )
         except Exception:
-            return ScopeReviewRun(
-                _uncertain(request), total_estimated_tokens, attempted_calls,
-                total_prompt_tokens, total_completion_tokens,
-                total_charged_tokens, "provider_error",
-            )
+            return finish(_uncertain(request), "provider_error")
 
         attempted_calls += 1
+        if initial_evaluation is not None:
+            slot_recovery_attempts += 1
         call_started = monotonic()
         try:
             response = call_provider.complete(system, user)
@@ -418,20 +494,12 @@ def run_scope_review(
                 "provider_timeout" if call_elapsed > timeout_seconds else
                 _provider_failure(exc)
             )
-            return ScopeReviewRun(
-                _uncertain(request), total_estimated_tokens, attempted_calls,
-                total_prompt_tokens, total_completion_tokens,
-                total_charged_tokens, failure,
-            )
+            return finish(_uncertain(request), failure)
 
         tokens = _reported_tokens(response)
         if tokens is None:
             total_charged_tokens += estimate
-            return ScopeReviewRun(
-                _uncertain(request), total_estimated_tokens, attempted_calls,
-                total_prompt_tokens, total_completion_tokens,
-                total_charged_tokens, "response_invalid",
-            )
+            return finish(_uncertain(request), "response_invalid")
         call_prompt_tokens, call_completion_tokens = tokens
         total_prompt_tokens += call_prompt_tokens
         total_completion_tokens += call_completion_tokens
@@ -444,10 +512,8 @@ def run_scope_review(
             elapsed > float(remaining_deadline_seconds)
             or call_elapsed > float(timeout_seconds)
         ):
-            return ScopeReviewRun(
-                _uncertain(request), total_estimated_tokens, attempted_calls,
-                total_prompt_tokens, total_completion_tokens,
-                total_charged_tokens,
+            return finish(
+                _uncertain(request),
                 "deadline" if elapsed > remaining_deadline_seconds
                 else "provider_timeout",
             )
@@ -456,25 +522,13 @@ def run_scope_review(
         except Exception:
             raw_response = None
         if not isinstance(raw_response, str):
-            return ScopeReviewRun(
-                _uncertain(request), total_estimated_tokens, attempted_calls,
-                total_prompt_tokens, total_completion_tokens,
-                total_charged_tokens, "response_invalid",
-            )
+            return finish(_uncertain(request), "response_invalid")
         try:
             response_size = len(raw_response.encode("utf-8"))
         except UnicodeEncodeError:
-            return ScopeReviewRun(
-                _uncertain(request), total_estimated_tokens, attempted_calls,
-                total_prompt_tokens, total_completion_tokens,
-                total_charged_tokens, "response_invalid",
-            )
+            return finish(_uncertain(request), "response_invalid")
         if response_size > max_response_bytes:
-            return ScopeReviewRun(
-                _uncertain(request), total_estimated_tokens, attempted_calls,
-                total_prompt_tokens, total_completion_tokens,
-                total_charged_tokens, "response_too_large",
-            )
+            return finish(_uncertain(request), "response_too_large")
 
         try:
             evaluation = evaluate_scope_review(
@@ -483,17 +537,16 @@ def run_scope_review(
                 expected_block_line_start=expected_block_line_start,
             )
         except Exception:
-            return ScopeReviewRun(
-                _uncertain(request), total_estimated_tokens, attempted_calls,
-                total_prompt_tokens, total_completion_tokens,
-                total_charged_tokens, "response_invalid",
-            )
+            return finish(_uncertain(request), "response_invalid")
         contract_failure = _contract_failure(evaluation)
+        recoverable_slots = _recoverable_slot_decisions(evaluation)
         if (
-            contract_failure is not None
+            (contract_failure is not None or recoverable_slots)
             and contract_attempt + 1 < MAX_SCOPE_REVIEW_CONTRACT_ATTEMPTS
         ):
-            retry_reason = contract_failure
+            retry_reason = contract_failure or "slot_conflict"
+            if recoverable_slots:
+                initial_evaluation = evaluation
             continue
 
         reasons = {decision.reason for decision in evaluation.decisions}
@@ -502,10 +555,6 @@ def run_scope_review(
             only_reason = next(iter(reasons))
             if only_reason in {"source_mismatch", "response_too_large"}:
                 failure_reason = only_reason
-        return ScopeReviewRun(
-            evaluation, total_estimated_tokens, attempted_calls,
-            total_prompt_tokens, total_completion_tokens,
-            total_charged_tokens, failure_reason,
-        )
+        return finish(evaluation, failure_reason)
 
     raise AssertionError("scope review contract loop exhausted")

@@ -52,6 +52,7 @@ from .character_trait_extraction import (
     CharacterSignalChunk,
     CharacterDimension,
     CharacterSignalExtractor,
+    CharacterSignalFailureDiagnosticsV1,
     CharacterSignalTarget,
     DraftSignalTraceV1,
     PendingTraitCandidate,
@@ -520,6 +521,8 @@ class CharacterConsistencyStage:
         core_label_scope_counts: Counter[str] = Counter()
         evidence_mismatch_chunks: list[dict[str, Any]] = []
         evidence_mismatch_chunks_omitted = 0
+        failure_diagnostic_chunks: list[dict[str, Any]] = []
+        failure_diagnostic_chunks_omitted = 0
         support_trace_chunks: list[dict[str, Any]] = []
         support_trace_chunks_omitted = 0
         draft_trace_chunks: list[dict[str, Any]] = []
@@ -880,7 +883,7 @@ class CharacterConsistencyStage:
         token_admission_events: list[dict[str, int | str | None]] = []
         token_admission_omitted = 0
 
-        def record_evidence_mismatch(
+        def record_extraction_failure_diagnostics(
             phase: str,
             extraction: object,
             *,
@@ -890,7 +893,23 @@ class CharacterConsistencyStage:
             target_ordinal: int | None = None,
         ) -> None:
             nonlocal evidence_mismatch_chunks_omitted
+            nonlocal failure_diagnostic_chunks_omitted
             diagnostics = getattr(extraction, "diagnostics", None)
+            safe_failure = _validated_failure_diagnostics_payload(
+                getattr(diagnostics, "failure_diagnostics", None)
+            )
+            if safe_failure is not None:
+                if len(failure_diagnostic_chunks) >= _MAX_EVIDENCE_MISMATCH_CHUNKS:
+                    failure_diagnostic_chunks_omitted += 1
+                else:
+                    failure_diagnostic_chunks.append({
+                        "source_document_ordinal": source.ordinal,
+                        "document_chunk_ordinal": original_chunk_ordinals[id(chunk)],
+                        "stage_chunk_ordinal": chunk_ordinal,
+                        "phase": phase,
+                        "target_ordinal": target_ordinal,
+                        "diagnostics": safe_failure,
+                    })
             counts = getattr(diagnostics, "evidence_mismatch_counts", {})
             if not isinstance(counts, dict):
                 return
@@ -1221,7 +1240,7 @@ class CharacterConsistencyStage:
                 ),
             )
             usage.add(extraction.diagnostics)
-            record_evidence_mismatch(
+            record_extraction_failure_diagnostics(
                 "primary_extraction", extraction,
                 source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
             )
@@ -1417,7 +1436,7 @@ class CharacterConsistencyStage:
                     reviewer_reserve=targeted_reviewer_reserve_tokens,
                 )
                 usage.add(targeted.diagnostics)
-                record_evidence_mismatch(
+                record_extraction_failure_diagnostics(
                     "targeted_recall", targeted,
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
                     target_ordinal=target_index + 1,
@@ -1619,7 +1638,7 @@ class CharacterConsistencyStage:
                     reviewer_reserve=targeted_reviewer_reserve_tokens,
                 )
                 usage.add(verification.diagnostics)
-                record_evidence_mismatch(
+                record_extraction_failure_diagnostics(
                     "targeted_verification", verification,
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
                     target_ordinal=target_index + 1,
@@ -2829,6 +2848,8 @@ class CharacterConsistencyStage:
             ),
             token_admission_events=token_admission_events,
             evidence_mismatch_counts=evidence_mismatch_counts,
+            failure_diagnostic_chunks=failure_diagnostic_chunks,
+            failure_diagnostic_chunks_omitted_count=failure_diagnostic_chunks_omitted,
             scope_review_slot_conflict_counts=scope_review_slot_conflict_counts,
             scope_review_basis_invalid_counts=scope_review_basis_invalid_counts,
             target_bound_slot_conflict_counts=target_bound_slot_conflict_counts,
@@ -7474,6 +7495,18 @@ def _validated_baseline_trace_payload(trace: object) -> dict[str, Any] | None:
         return None
 
 
+def _validated_failure_diagnostics_payload(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, CharacterSignalFailureDiagnosticsV1):
+        return None
+    try:
+        # Revalidate even model_construct/model_copy data at the export boundary.
+        return CharacterSignalFailureDiagnosticsV1.model_validate(
+            value.model_dump(mode="python", warnings=False)
+        ).model_dump(mode="json")
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def _diagnostics(
     *,
     outcome: str,
@@ -7491,6 +7524,8 @@ def _diagnostics(
     accepted_draft_observation_refs_truncated: bool = False,
     token_admission_events: list[dict[str, int | str | None]] | None = None,
     evidence_mismatch_counts: Counter[str] | None = None,
+    failure_diagnostic_chunks: list[dict[str, Any]] | None = None,
+    failure_diagnostic_chunks_omitted_count: int = 0,
     scope_review_slot_conflict_counts: Counter[str] | None = None,
     scope_review_basis_invalid_counts: Counter[str] | None = None,
     target_bound_slot_conflict_counts: Counter[str] | None = None,
@@ -7565,6 +7600,11 @@ def _diagnostics(
             "scope, branch compatibility or confirmation state."
         ),
     }
+    if failure_diagnostic_chunks or failure_diagnostic_chunks_omitted_count:
+        diagnostics["failure_diagnostics_v1"] = {
+            "chunks": list(failure_diagnostic_chunks or ()),
+            "chunks_omitted_count": failure_diagnostic_chunks_omitted_count,
+        }
     if support_trace_enabled:
         diagnostics["support_trace_chunks"] = list(support_trace_chunks or ())
         diagnostics["support_trace_chunks_omitted_count"] = (

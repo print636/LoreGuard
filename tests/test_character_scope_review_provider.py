@@ -470,7 +470,7 @@ def test_batch_identity_mismatch_can_regenerate_once_from_same_request():
         "basis_ids": [],
     },
     {"verdict": "rejected", "actor": "other", "basis_ids": []},
-    {"verdict": "supported", "actor": "ambiguous"},
+    {"verdict": "rejected", "basis_ids": []},
     {"verdict": "supported", "basis_ids": []},
 ))
 def test_semantic_or_evidence_decision_never_triggers_contract_regeneration(
@@ -483,6 +483,147 @@ def test_semantic_or_evidence_decision_never_triggers_contract_regeneration(
 
     assert result.attempted_calls == len(provider.calls) == 1
     assert result.failure_reason is None
+
+
+def _mixed_scope_batch():
+    request, source, frozen = _source_request()
+    request = ScopeReviewRequest(**{
+        **request.model_dump(),
+        "proposals": tuple(
+            request.proposals[0].model_copy(update={"proposal_id": f"proposal-{index}"})
+            for index in range(1, 6)
+        ),
+    })
+    envelope = json.loads(_response(request))
+    original_item = envelope["items"][0]
+    envelope["items"] = [
+        {**original_item, "proposal_id": proposal.proposal_id}
+        for proposal in request.proposals
+    ]
+    envelope["items"][0]["polarity_relation"] = "opposite"
+    envelope["items"][2].update(verdict="rejected", actor="other", basis_ids=[])
+    envelope["items"][3].update(verdict="uncertain", basis_ids=[])
+    envelope["items"][4]["basis_ids"] = []
+    return request, source, frozen, envelope
+
+
+@pytest.mark.parametrize("verdict,overrides,recovered", (
+    ("supported", {}, 1),
+    ("rejected", {"polarity_relation": "opposite", "basis_ids": []}, 1),
+    ("uncertain", {"polarity_relation": "ambiguous", "basis_ids": []}, 0),
+))
+def test_slot_regeneration_only_replaces_original_conflicts(verdict, overrides, recovered):
+    request, source, frozen, first = _mixed_scope_batch()
+    second = json.loads(json.dumps(first))
+    second["items"][0].update({"verdict": verdict, "polarity_relation": "same", **overrides})
+    # These changes are valid decisions but cannot overwrite first-round
+    # supported, rejected, uncertain, or evidence-invalid non-conflicting items.
+    second["items"][1].update(verdict="rejected", actor="other", basis_ids=[])
+    for item in second["items"][2:]:
+        item.update(verdict="supported", actor="proposed", basis_ids=["L2:A1", "L2:A2", "L2:A3"])
+    provider = SequencedProvider([
+        _provider_response(json.dumps(first), prompt_tokens=7, completion_tokens=3),
+        _provider_response(json.dumps(second), prompt_tokens=11, completion_tokens=5),
+    ])
+
+    result = _run(request, source, frozen, provider)
+
+    assert result.attempted_calls == len(provider.calls) == 2
+    assert (result.prompt_tokens, result.completion_tokens) == (18, 8)
+    assert result.charged_tokens == result.estimated_tokens
+    assert result.initial_evaluation is not None
+    assert result.initial_evaluation.decisions[0].reason == "slot_conflict"
+    assert result.initial_evaluation.decisions[0].slot_conflicts == ("polarity_relation",)
+    assert result.evaluation.decisions[1:] == result.initial_evaluation.decisions[1:]
+    assert [item.verdict for item in result.evaluation.decisions] == [
+        verdict, "supported", "rejected", "uncertain", "uncertain",
+    ]
+    assert (result.slot_recovery_attempts, result.slot_recovery_succeeded,
+            result.slot_recovery_failed) == (1, recovered, 1 - recovered)
+    retry = json.loads(provider.calls[1][1].removeprefix(SCOPE_REVIEW_USER_PREFIX))
+    original = json.loads(provider.calls[0][1].removeprefix(SCOPE_REVIEW_USER_PREFIX))
+    assert provider.calls[1][0] == provider.calls[0][0]
+    assert retry["request"] == original["request"]
+    assert retry["request_digest"] == original["request_digest"]
+    assert retry["basis_path_hints"] == original["basis_path_hints"]
+    assert retry["validation_retry"]["conflicting_items"] == [{
+        "proposal_id": "proposal-1", "support_id": "L2:A3",
+        "conflicting_fields": ["polarity_relation"],
+    }]
+    assert "expected_polarity" not in retry["validation_retry"]
+
+
+@pytest.mark.parametrize("failure", ("invalid", "mismatch", "timeout", "budget", "deadline"))
+def test_slot_retry_failure_preserves_first_legal_items_and_bounds_calls(failure):
+    request, source, frozen, first = _mixed_scope_batch()
+    second = json.loads(json.dumps(first))
+    second["items"][0]["polarity_relation"] = "same"
+    if failure == "mismatch":
+        second["request_digest"] = "0" * 64
+    clock = [0.0]
+
+    class Provider(SequencedProvider):
+        def complete(self, system, user):
+            if failure == "timeout" and self.calls:
+                clock[0] += 6
+            if failure == "deadline" and not self.calls:
+                clock[0] += 5
+            return super().complete(system, user)
+
+    provider = Provider([
+        _provider_response(json.dumps(first)),
+        _provider_response("{broken" if failure == "invalid" else json.dumps(second)),
+        _provider_response(json.dumps(second)),
+    ])
+    kwargs = {"monotonic": lambda: clock[0]}
+    if failure == "budget":
+        system, user = build_scope_review_prompts(request)
+        kwargs["token_budget"] = estimate_issue_evidence_review_tokens(
+            system, user, completion_reserve=256,
+        )
+    if failure == "deadline":
+        kwargs.update(timeout_seconds=10, remaining_deadline_seconds=5)
+
+    result = _run(request, source, frozen, provider, **kwargs)
+
+    expected_calls = 1 if failure in {"budget", "deadline"} else 2
+    assert result.attempted_calls == len(provider.calls) == expected_calls
+    assert result.evaluation == result.initial_evaluation
+    assert result.evaluation.decisions[0].reason == "slot_conflict"
+    assert result.evaluation.decisions[1].verdict == "supported"
+    assert result.slot_recovery_attempts == expected_calls - 1
+    assert (result.slot_recovery_succeeded, result.slot_recovery_failed) == (0, 1)
+    assert result.failure_reason == {
+        "invalid": "response_invalid", "mismatch": "response_mismatch",
+        "timeout": "provider_timeout", "budget": "token_budget", "deadline": "deadline",
+    }[failure]
+
+
+def test_envelope_retry_then_slot_conflict_has_no_third_call():
+    request, source, frozen = _source_request()
+    provider = SequencedProvider([
+        _provider_response("{broken"),
+        _provider_response(_response(request, polarity_relation="opposite")),
+        _provider_response(_response(request)),
+    ])
+    result = _run(request, source, frozen, provider)
+    assert result.attempted_calls == len(provider.calls) == 2
+    assert result.evaluation.decisions[0].reason == "slot_conflict"
+    assert result.initial_evaluation is None
+    assert result.slot_recovery_attempts == 0
+    assert len(provider.responses) == 1
+
+
+def test_slot_regeneration_keeps_original_basis_gate():
+    request, source, frozen = _source_request()
+    provider = SequencedProvider([
+        _provider_response(_response(request, polarity_relation="opposite")),
+        _provider_response(_response(request, basis_ids=["L2:A3"])),
+    ])
+    result = _run(request, source, frozen, provider)
+    assert result.evaluation.decisions[0].reason == "basis_invalid"
+    assert result.slot_recovery_succeeded == 0
+    assert result.slot_recovery_failed == 1
 
 
 def test_second_contract_failure_stays_fail_closed_without_third_call():

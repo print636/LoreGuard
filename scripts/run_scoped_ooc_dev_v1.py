@@ -346,6 +346,8 @@ def _service_preflight(client: httpx.Client) -> tuple[dict[str, Any], str, dict[
         != REQUIRED_SCOPE_REVIEW_PROMPT_VERSION
     ):
         _fail("signal_scope_review_prompt_version_mismatch", "runtime_preflight")
+    if limits.get("signal_scope_review_contract_recovery_version") != "character-scope-review-contract-recovery-v1":
+        _fail("signal_scope_review_contract_recovery_version_mismatch", "runtime_preflight")
     model = health.get("model")
     configured = type(model) is dict and model.get("configured") is True
     if not configured:
