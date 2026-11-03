@@ -63,18 +63,17 @@ from .character_drift import (
     CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT,
     CHARACTER_REVIEW_SYSTEM_PROMPT,
     CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT,
+    CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT,
 )
 from .character_trait_extraction import (
     CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
     CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
     CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1,
-    CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1,
-    CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1,
-    CHARACTER_SIGNAL_SEMANTIC_SCOPE_PROMPT_V5,
     CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4,
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
-    CHARACTER_SIGNAL_SYSTEM_PROMPT_V5,
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
+    build_baseline_coverage_system_prompt,
+    build_formal_character_signal_system_prompt,
     _validate_signal_prompt_variant_settings,
     _bounded_provider,
 )
@@ -826,20 +825,21 @@ class _CharacterConsistencyAccountingProvider:
             )
         )
         allowed_primary_systems = {active_primary_system}
+        allowed_baseline_coverage_systems: set[str] = set()
         if self.settings.character_draft_actor_review_v1:
             allowed_primary_systems.add(
                 active_primary_system + CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
             )
         if self.settings.character_signal_semantic_scope_v5:
-            allowed_primary_systems.add(
-                CHARACTER_SIGNAL_SYSTEM_PROMPT_V5
-                + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
-                + (
-                    CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1
-                    + CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1
-                    if self.settings.character_signal_scope_review_v1
-                    else CHARACTER_SIGNAL_SEMANTIC_SCOPE_PROMPT_V5
-                )
+            active_formal_system = build_formal_character_signal_system_prompt(
+                scope_review_v1=self.settings.character_signal_scope_review_v1,
+            )
+            allowed_primary_systems.add(active_formal_system)
+            # The formal-profile omission check reuses the exact active V5
+            # extraction rules with one unambiguous server-owned envelope.
+            # Do not accept suffix/sub-string matches on arbitrary prompts.
+            allowed_baseline_coverage_systems.add(
+                build_baseline_coverage_system_prompt(active_formal_system)
             )
         elif self.settings.character_signal_support_id_v4:
             allowed_primary_systems.add(
@@ -851,7 +851,11 @@ class _CharacterConsistencyAccountingProvider:
                 TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
                 + CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
             )
-        if system in allowed_primary_systems | allowed_targeted_systems:
+        if system in (
+            allowed_primary_systems
+            | allowed_targeted_systems
+            | allowed_baseline_coverage_systems
+        ):
             provider = self.signal_provider
             completion_reserve = self.settings.character_signal_max_completion_tokens
         elif (
@@ -947,6 +951,7 @@ class _CharacterConsistencyAccountingProvider:
             CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
             CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT,
             CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT,
+            CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT,
             EXPLANATION_REVIEW_SYSTEM_PROMPT,
         }:
             provider = self.drift_provider

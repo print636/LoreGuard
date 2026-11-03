@@ -14,7 +14,11 @@ from app.character_consistency_stage import (
     _safe_target_bound_slot_conflict_counts,
     project_provisional_draft_clues,
 )
-from app.character_drift import ConfirmedTraitSnapshot
+from app.character_drift import (
+    CharacterReviewDiagnostics,
+    CharacterReviewResult,
+    ConfirmedTraitSnapshot,
+)
 from app.character_scope_review import ScopeReviewSourceIdentity
 from app.character_trait_extraction import (
     CharacterSignal,
@@ -449,13 +453,29 @@ def test_flag_on_wires_one_frozen_identity_through_all_three_draft_paths(
     monkeypatch.setattr(
         stage_module, "draft_actor_review_evidence_range", actor_range
     )
+    recovered = _reverse_action(source)
     recorder = _ExtractionRecorder(
-        primary_result=_result(_reverse_action(source)),
-        targeted_results=[_result(), _result()],
+        # Both initial passes deliberately miss the opposing line. Candidate
+        # verification must still run, then return that exact allowed span.
+        primary_result=_result(),
+        targeted_results=[_result(), _result(recovered)],
     )
     monkeypatch.setattr(
         stage_module, "CharacterSignalExtractor", recorder.extractor_type()
     )
+    drift_cases = []
+
+    class UnavailableReviewer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def review(self, prepared):
+            drift_cases.append(prepared)
+            return CharacterReviewResult(diagnostics=CharacterReviewDiagnostics(
+                outcome="skipped", reason="fixture_review_unavailable",
+            ))
+
+    monkeypatch.setattr(stage_module, "CharacterConsistencyReviewer", UnavailableReviewer)
     settings = _settings(
         character_signal_full_line_prompt_v2=True,
         character_draft_actor_review_v1=True,
@@ -489,7 +509,15 @@ def test_flag_on_wires_one_frozen_identity_through_all_three_draft_paths(
         for call in recorder.targeted_calls
     )
     assert "candidate_evidence_ranges" not in recorder.targeted_calls[0]
-    assert recorder.targeted_calls[1]["candidate_evidence_ranges"] == ((3, 4),)
+    assert recorder.targeted_calls[1]["candidate_evidence_ranges"] == ((2, 2), (3, 4))
+    assert (recovered.evidence.line_start, recovered.evidence.line_end) in (
+        recorder.targeted_calls[1]["candidate_evidence_ranges"]
+    )
+    assert all(
+        call["targets"][0].requested_polarity == "negative"
+        and call["targets"][0].existing_evidence_ranges == ()
+        for call in recorder.targeted_calls
+    )
     assert any(
         call["named_line"] == 3
         and call["source_identity"] is identity
@@ -498,12 +526,19 @@ def test_flag_on_wires_one_frozen_identity_through_all_three_draft_paths(
     )
 
     assert result.issues == ()
+    assert len(drift_cases) == 1
+    assert drift_cases[0].matching_observations == (recovered,)
+    counts = result.diagnostics["counts"]
+    assert counts["targeted_verification_first_empty_target_count"] == 1
+    assert counts["targeted_verification_completed_count"] == 1
+    assert counts["targeted_verification_signal_added_count"] == 1
+    assert counts["draft_observation_count"] == 1
     assert len(result.review_clues) == 1
     assert result.review_clues[0].metadata["final_outcome"] == (
-        "needs_confirmation"
+        "unverifiable"
     )
     assert result.review_clues[0].metadata["review_reason"] == (
-        "single_behavior_is_not_drift"
+        "single_event_review_unavailable"
     )
 
 
@@ -705,6 +740,18 @@ def test_target_bound_v2_unresolved_binding_keeps_case_partial_and_non_formal(
         stage_module, "CharacterSignalExtractor", recorder.extractor_type()
     )
 
+    reviewed_cases = []
+
+    def unavailable_review(prepared):
+        reviewed_cases.append(prepared)
+        return CharacterReviewResult(diagnostics=CharacterReviewDiagnostics(
+            outcome="skipped", reason="fixture_review_unavailable",
+        ))
+
+    monkeypatch.setattr(
+        stage_module, "CharacterConsistencyReviewer",
+        lambda *_args, **_kwargs: SimpleNamespace(review=unavailable_review),
+    )
     result = _run(
         _FrozenStage(
             source=source,
@@ -720,10 +767,35 @@ def test_target_bound_v2_unresolved_binding_keeps_case_partial_and_non_formal(
 
     assert result.issues == ()
     assert len(result.review_clues) == 1
-    assert result.review_clues[0].metadata["final_outcome"] == (
-        "needs_confirmation"
-    )
+    clue = result.review_clues[0]
+    assert clue.metadata["final_outcome"] == "unverifiable"
+    assert clue.metadata["review_reason"] == "single_event_review_unavailable"
+    assert clue.metadata["material_coverage"] == "partial"
+    assert clue.metadata["evidence_binding"] == "server_evidence_pair_v1"
+    assert clue.evidence == [_baseline_entry()[1].evidence[0], reverse_action.evidence]
+    # Model review receipts are unavailable. A full server B/C receipt is also
+    # unavailable here because _FrozenStage freezes only the draft: the
+    # profile-document-1 baseline span has no frozen source row in this fixture.
+    for unverified_binding in ("reviewed_events", "review_citation_refs", "server_evidence_pair"):
+        assert unverified_binding not in clue.metadata
+
+    assert len(recorder.targeted_calls) == 1
+    primary = recorder.primary_calls[0]
+    targeted = recorder.targeted_calls[0]
+    assert targeted["source_identity"] is primary["source_identity"]
+    assert targeted["source_identity"].model_dump() == {
+        "run_input_id": source.input_id,
+        "document_id": source.document.id,
+        "document_version": source.document_version,
+        "content_sha256": source.content_sha256,
+    }
+    assert primary["frozen_content"] == targeted["frozen_content"] == source.document.content
+    assert len(reviewed_cases) == 1
+    assert reviewed_cases[0].case.material_coverage == "partial"
+    assert reviewed_cases[0].matching_observations == (reverse_action,)
     diagnostics = result.diagnostics
+    assert diagnostics["outcome"] == "partial"
+    assert diagnostics["counts"]["pending_candidate_count"] == 0
     assert diagnostics["counts"]["case_material_complete_count"] == 0
     assert diagnostics["counts"]["case_material_partial_count"] == 1
     assert diagnostics["case_material_partial_reason_counts"] == {
@@ -731,7 +803,9 @@ def test_target_bound_v2_unresolved_binding_keeps_case_partial_and_non_formal(
         "targeted_package_incomplete": 1,
     }
     assert diagnostics["case_trace"][0]["material_coverage"] == "partial"
-    assert diagnostics["case_trace"][0]["review_outcome"] == "not_run"
+    assert diagnostics["case_trace"][0]["review_outcome"] == "skipped"
+    assert "reviewed_events" not in diagnostics["case_trace"][0]
+    assert "server_evidence_pair" not in diagnostics["case_trace"][0]
     assert diagnostics["reason_counts"]["target_bound_provider_timeout"] == 1
     assert (
         diagnostics["reason_counts"][

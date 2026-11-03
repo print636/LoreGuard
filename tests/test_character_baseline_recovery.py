@@ -13,6 +13,8 @@ from app.character_trait_extraction import (
     BASELINE_COVERAGE_SYSTEM_PROMPT_V1,
     CharacterSignalChunk,
     CharacterSignalExtractor,
+    build_baseline_coverage_system_prompt,
+    build_formal_character_signal_system_prompt,
     _assertion_index_v1,
     _recover_baseline_coverage,
 )
@@ -84,6 +86,9 @@ def test_omitted_stable_speech_is_recovered_and_independently_source_reviewed():
     assert {row.dimension for row in result.pending_candidates} == {"preference", "speech_pattern"}
     assert all(row.status == "pending" for row in result.pending_candidates)
     assert provider.audit_calls == 1
+    assert provider.calls[1][0] == build_baseline_coverage_system_prompt(
+        build_formal_character_signal_system_prompt(scope_review_v1=True)
+    )
     assert len(provider.calls) == 3  # primary, one audit, one shared scope review
     trace = result.diagnostics.baseline_coverage_trace
     assert (trace.status, trace.added_records, trace.recovered_support_slots) == ("audited", 1, (2,))
@@ -200,7 +205,9 @@ def test_budget_and_deadline_admission_do_not_call_or_claim_a_completed_audit():
         (200000, 0.0, "baseline_coverage_deadline"),
     ):
         outcome = _recover_baseline_coverage(
-            (), index=_assertion_index_v1(chunk), system_prompt="rules", user_prompt=text,
+            (), index=_assertion_index_v1(chunk),
+            system_prompt=build_formal_character_signal_system_prompt(scope_review_v1=True),
+            user_prompt=text,
             settings=_settings(), provider=provider, token_budget=budget,
             remaining_deadline_seconds=deadline, already_used=False,
             validate_response=lambda _: pytest.fail("validation must not run"),

@@ -1359,7 +1359,8 @@ class BaselineSignalTraceV1(BaseModel):
 
 
 BASELINE_COVERAGE_SCHEMA_V1 = "character-baseline-coverage-v1"
-BASELINE_COVERAGE_PROMPT_VERSION = "character-baseline-coverage-prompt-v1"
+BASELINE_COVERAGE_PROMPT_VERSION_V1 = "character-baseline-coverage-prompt-v1"
+BASELINE_COVERAGE_PROMPT_VERSION = "character-baseline-coverage-prompt-v2"
 
 
 class BaselineCoverageTraceV1(BaseModel):
@@ -1819,6 +1820,49 @@ records 的每一条仍严格遵守主抽取的完整记录、support_id、actor
 """
 
 
+def build_formal_character_signal_system_prompt(*, scope_review_v1: bool) -> str:
+    """Return the exact registered V5 primary prompt; its bytes are unchanged."""
+    if type(scope_review_v1) is not bool:
+        raise ValueError("formal_scope_review_variant_invalid")
+    return (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT_V5
+        + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
+        + (
+            CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1
+            + CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1
+            if scope_review_v1 else CHARACTER_SIGNAL_SEMANTIC_SCOPE_PROMPT_V5
+        )
+    )
+
+
+def build_baseline_coverage_system_prompt(primary_system: str) -> str:
+    """Use one audit envelope without changing the primary or per-record rules.
+
+    This is an exact allowlist: neither arbitrary prompts nor a previous audit
+    composite can gain the runtime audit purpose through suffix matching.
+    """
+    registered = {
+        build_formal_character_signal_system_prompt(scope_review_v1=False),
+        build_formal_character_signal_system_prompt(scope_review_v1=True),
+    }
+    if type(primary_system) is not str or primary_system not in registered:
+        raise ValueError("baseline_coverage_primary_prompt_unregistered")
+    envelope = '只返回 JSON 对象 {"records":[...]}，不得返回 Markdown 或其他字段。'
+    empty_response = '没有有效记录时返回 {"records":[]}。'
+    if primary_system.count(envelope) != 1 or primary_system.count(empty_response) != 1:
+        raise ValueError("baseline_coverage_primary_envelope_changed")
+    audit_primary = primary_system.replace(
+        envelope,
+        "本次是补漏审查，顶层 JSON 字段由文末补漏协议统一规定；不得返回 Markdown。",
+        1,
+    ).replace(
+        empty_response,
+        "没有有效补充记录时，records 为空数组；assessments 仍须覆盖全部 missing_support_ids。",
+        1,
+    )
+    return audit_primary + BASELINE_COVERAGE_SYSTEM_PROMPT_V1
+
+
 @dataclass(frozen=True, slots=True)
 class _BaselineCoverageRecoveryOutcome:
     signals: tuple[CharacterSignal, ...]
@@ -1900,7 +1944,7 @@ def _recover_baseline_coverage(
             for signal in signals
         ],
     }, ensure_ascii=False, separators=(",", ":"))
-    audit_system = system_prompt + BASELINE_COVERAGE_SYSTEM_PROMPT_V1
+    audit_system = build_baseline_coverage_system_prompt(system_prompt)
     estimate = estimate_issue_evidence_review_tokens(
         audit_system, audit_user,
         completion_reserve=settings.character_signal_max_completion_tokens,
@@ -2058,14 +2102,7 @@ class CharacterSignalExtractor:
             chunk,
             system_prompt=(
                 (
-                    CHARACTER_SIGNAL_SYSTEM_PROMPT_V5
-                    + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
-                    + (
-                        CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1
-                        if scope_review_v1
-                        else CHARACTER_SIGNAL_SEMANTIC_SCOPE_PROMPT_V5
-                    )
-                    + (CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1 if scope_review_v1 else "")
+                    build_formal_character_signal_system_prompt(scope_review_v1=scope_review_v1)
                 )
                 if formal_scope_v5
                 else (

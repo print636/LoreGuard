@@ -370,6 +370,14 @@ _CHARACTER_BASELINE_COVERAGE_KEYS = frozenset({
     "baseline_coverage_recovery_prompt_sha256",
     "baseline_coverage_recovery_prompt_version",
 })
+# This stdlib-only reader recognizes historical producer identities without
+# importing the live application. V1 recorded the unchanged audit suffix;
+# V2 records the complete, envelope-corrected active formal audit prompt.
+# A regression test binds V2 to the application's actual shared builder.
+_CHARACTER_BASELINE_COVERAGE_PROMPT_HASHES = {
+    "character-baseline-coverage-prompt-v1": "eb333171dd61e9cdbda16f9be4bafcd187bf61f55e3f206651d7c818085689d9",
+    "character-baseline-coverage-prompt-v2": "79ad2973beb91f4d9ea0beeb6d142a1ba464fe64c4dc3370a772384e223d8a80",
+}
 
 
 def _safe_character_review_extensions(value: object) -> dict[str, Any] | None:
@@ -393,8 +401,8 @@ def _safe_character_review_extensions(value: object) -> dict[str, Any] | None:
         prompt_version = value["baseline_coverage_recovery_prompt_version"]
         if enabled:
             if (schema != "character-baseline-coverage-v1" or type(prompt_hash) is not str
-                    or prompt_version != "character-baseline-coverage-prompt-v1"
-                    or re.fullmatch(r"[a-f0-9]{64}", prompt_hash) is None):
+                    or type(prompt_version) is not str
+                    or prompt_hash != _CHARACTER_BASELINE_COVERAGE_PROMPT_HASHES.get(prompt_version)):
                 return None
         elif schema is not None or prompt_hash is not None or prompt_version is not None:
             return None

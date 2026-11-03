@@ -20,8 +20,9 @@ from .character_trait_extraction import (
     TARGET_BOUND_DRAFT_SIGNAL_PROMPT_V3,
     SUPPORT_TRACE_V1,
     BASELINE_COVERAGE_SCHEMA_V1,
-    BASELINE_COVERAGE_SYSTEM_PROMPT_V1,
     BASELINE_COVERAGE_PROMPT_VERSION,
+    build_baseline_coverage_system_prompt,
+    build_formal_character_signal_system_prompt,
 )
 from .character_scope_review import SCOPE_REVIEW_PROMPT_V4, SCOPE_REVIEW_SCHEMA_V2
 from .character_history_semantic_review import (
@@ -329,7 +330,11 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
                 and settings.character_signal_scope_review_v1 else None
             ),
             "baseline_coverage_recovery_prompt_sha256": (
-                _fingerprint(BASELINE_COVERAGE_SYSTEM_PROMPT_V1)
+                _fingerprint(build_baseline_coverage_system_prompt(
+                    build_formal_character_signal_system_prompt(
+                        scope_review_v1=settings.character_signal_scope_review_v1,
+                    )
+                ))
                 if settings.character_signal_support_id_v4
                 and settings.character_signal_semantic_scope_v5
                 and settings.character_signal_scope_review_v1 else None
