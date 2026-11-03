@@ -100,6 +100,20 @@ async function mockApi(page: Page, state: Fixture) {
     else if (/^\/api\/v1\/analysis-runs\/history-run-\d+\/clarifications$/.test(endpoint)) body = [];
     else if (/^\/api\/v1\/analysis-runs\/history-run-\d+\/review-clues$/.test(endpoint)) body = { items: [], truncated: false, unavailable_count: 0 };
     else if (/^\/api\/v1\/analysis-runs\/history-run-\d+\/provisional-clues$/.test(endpoint)) body = { items: [], truncated: false };
+    else if (method === "GET" && history.some((item) => endpoint === `/api/v1/analysis-runs/${item.id}/character-observations`)) {
+      const selectedRun = history.find((item) => endpoint === `/api/v1/analysis-runs/${item.id}/character-observations`)!;
+      const offset = Number(url.searchParams.get("offset") ?? 0);
+      const limit = Number(url.searchParams.get("limit") ?? 50);
+      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+        state.unexpected.push(`${method} ${endpoint}${url.search}`);
+        await route.fulfill({ status: 400, json: { detail: "Unexpected isolated fixture pagination" } }); return;
+      }
+      body = { schema_version: "character-observations-v1", run_id: selectedRun.id, project_id: selectedRun.project_id,
+        match_semantics: "matched means selected for baseline comparison; it is not a consistency verdict",
+        recording: { status: "legacy_unavailable", stored_status: null, incomplete_reason: null, coverage: {},
+          recorded_at: null, completed_at: null, source_manifest_sha256: null, baseline_manifest_sha256: null, observation_count: 0 },
+        page: { offset, limit, total_items: 0, has_more: false }, items: [] };
+    }
     else if (/^\/api\/v1\/issues\/history-issue-[12]\/feedback$/.test(endpoint)) {
       const id = endpoint.split("/")[4];
       if (method === "POST") {
