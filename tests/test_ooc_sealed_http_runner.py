@@ -20,13 +20,13 @@ def _sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _write_bundle(root: Path):
+def _write_bundle(root: Path, *, baseline_text: str | None = None, target_text: str | None = None):
     root.mkdir()
     dataset_id, group_id, world_id = _uuid(1), _uuid(2), _uuid(3)
     case_id, axis_id = _uuid(4), _uuid(5)
     baseline_id, target_id = _uuid(6), _uuid(7)
-    baseline = "林澈长期保持克制，不会公开发怒。\n"
-    target = (
+    baseline = baseline_text or "林澈长期保持克制，不会公开发怒。\n"
+    target = target_text or (
         "林澈当众掀翻会议桌。\n"
         "次日，林澈再次怒斥无关人员。\n"
         "第三日，林澈在走廊砸碎了花瓶。\n"
@@ -719,3 +719,155 @@ def test_report_binds_execution_and_project_receipt(tmp_path):
         report.project_receipts
     )
     assert report.independent_project_count == 1
+
+
+def _scoped_target_fixture(tmp_path, *, server_pair=False):
+    """Independent synthetic actors; no actual holdout material is loaded."""
+    from copy import deepcopy
+
+    bundle, case, setup = _write_bundle(
+        tmp_path / "scoped-bundle",
+        baseline_text="林澈长期保持克制，不会公开发怒。\n周辙是独立的记录员，习惯安静记录。\n",
+        target_text="林澈当众掀翻会议桌。\n次日林澈再次怒斥无关人员。\n周辙依旧安静记录。\n",
+    )
+    api = SuccessfulApi(bundle)
+    with httpx.Client(base_url=_config().base_url, transport=httpx.MockTransport(api)) as client:
+        diagnostics = client.get(f"/api/v1/analysis-runs/{api.draft_run_id}/diagnostics").json()
+        formal = client.get(f"/api/v1/analysis-runs/{api.draft_run_id}/issues").json()
+    stage, trace = diagnostics["character_consistency"], diagnostics["character_consistency"]["case_trace"][0]
+    stage.update(outcome="partial", material_coverage="partial", reason_counts={"unmatched_character_alias": 1})
+    stage["counts"]["model_completed_chunks"] = 1
+    trace.update(character_key="林澈", dimension="core_personality", comparison_key="core_personality:restraint",
+                 matched_observation_count=2, matched_observation_refs_truncated=False, material_coverage_reasons=[])
+    profile_id, draft_id = setup.candidate_selector.source_document_id, setup.target_document_id
+    documents = {item.document_id: item for item in case.documents}
+    def source_ref(document_id, line):
+        text = bundle.documents[document_id].splitlines()[line - 1]
+        return {"document_name": f"{document_id}.md", "document_version": 1,
+                "content_sha256": documents[document_id].sha256, "line_start": line, "line_end": line,
+                "text_sha256": _sha(text)}
+    trace["target_coverage"] = {
+        "schema_version": "character-target-coverage-v1",
+        "confirmed_candidate_id_sha256": _sha(api.candidate_id),
+        "character_key": "林澈", "dimension": "core_personality", "comparison_key": trace["comparison_key"],
+        "status": "complete", "material_coverage": "complete", "explanation_coverage": "complete",
+        "matched_observation_count": 2, "processing": deepcopy(stage["counts"]),
+        "alias_disposition": {"total": 1, "proven_outside_target": 1, "possibly_target": 0, "unknown": 0,
+            "outside_proofs": [{"proof_kind": "formal_actor_and_draft_binding_v1", "observation_id_sha256": _sha("other-signal"),
+                "actor_key": "周辙", "source_refs": [source_ref(profile_id, 2), source_ref(draft_id, 3)]}]},
+        "non_alias_blockers": [],
+    }
+    review = {"items": [], "truncated": False, "unavailable_count": 0, "scan_limited": False}
+    if server_pair:
+        trace.update(final_outcome="needs_confirmation", citation_refs=[], event_independence="unknown")
+        trace.pop("independent_event_citations", None)
+        refs = [dict(source_ref(profile_id, 1), evidence_index=0, role="B"),
+                dict(source_ref(draft_id, 1), evidence_index=1, role="C")]
+        # A legitimate source excerpt need not repeat the whole line.
+        excerpt = "长期保持克制"
+        refs[0]["text_sha256"] = _sha(excerpt)
+        certificate = {"schema_version": "character-server-evidence-pair-v1",
+            "confirmed_candidate_id_sha256": _sha(api.candidate_id), "report_class": "review_clue", "evidence_refs": refs}
+        trace["server_evidence_pair"] = deepcopy(certificate)
+        review["items"] = [{"report_class": "review_clue", "category": "character_drift",
+            "metadata": {"confirmed_candidate_id": api.candidate_id, "final_outcome": "needs_confirmation",
+                         "evidence_binding": "server_evidence_pair_v1", "server_evidence_pair": deepcopy(certificate)},
+            "evidence": [{"document_id": api.baseline_runtime_id, "document_name": f"{profile_id}.md", "line_start": 1, "line_end": 1, "text": excerpt},
+                         {"document_id": api.target_runtime_id, "document_name": f"{draft_id}.md", "line_start": 1, "line_end": 1, "text": bundle.documents[draft_id].splitlines()[0]}]}]
+        formal = []
+    return bundle, case, setup, api, diagnostics, formal, review
+
+
+def _scoped_snapshot(fixture):
+    bundle, case, setup, api, diagnostics, formal, review = fixture
+    return runner._snapshot_from_reports(
+        case, setup, api.candidate_id, {"status": "completed"}, diagnostics,
+        formal, review, {"items": [], "truncated": False},
+        contract.StageFunnel(input_candidates=1, retrieved_candidates=1, grounded_candidates=1, adjudicated_candidates=1, surfaced_candidates=1),
+        source_documents=bundle.documents,
+        runtime_document_ids={setup.candidate_selector.source_document_id: api.baseline_runtime_id,
+                              setup.target_document_id: api.target_runtime_id},
+    )
+
+
+def test_target_certificate_keeps_global_warning_but_allows_complete_target(tmp_path):
+    fixture = _scoped_target_fixture(tmp_path)
+    snapshot = _scoped_snapshot(fixture)
+    assert snapshot.stage_status == "completed"
+    assert fixture[4]["character_consistency"]["outcome"] == "partial"
+    assert fixture[4]["character_consistency"]["material_coverage"] == "partial"
+    from scripts.ooc_sealed_prediction import project_case_prediction
+    assert project_case_prediction(fixture[1], snapshot).outcome == "conflict"
+    assert not runner._run_stage_complete({"status": "completed"}, fixture[4])  # baseline rule stays strict
+
+
+@pytest.mark.parametrize("mutation", ["legacy", "local_partial", "explanation_not_run", "no_matching", "unknown_alias",
+                                    "possible_target", "alias_count", "missing_chunk", "blocker", "missing_proof", "source_hash"])
+def test_partial_target_requires_full_source_bound_local_coverage(tmp_path, mutation):
+    fixture = _scoped_target_fixture(tmp_path)
+    stage = fixture[4]["character_consistency"]
+    trace = stage["case_trace"][0]
+    cert = trace["target_coverage"]
+    if mutation == "legacy":
+        del trace["target_coverage"]
+    elif mutation == "local_partial":
+        trace["material_coverage"] = cert["material_coverage"] = "partial"
+    elif mutation == "explanation_not_run":
+        trace["explanation_coverage"] = cert["explanation_coverage"] = "not_run"
+    elif mutation == "no_matching":
+        trace["prepare_reason"] = "no_matching_observation"
+    elif mutation in {"unknown_alias", "possible_target"}:
+        key = "unknown" if mutation == "unknown_alias" else "possibly_target"
+        cert["alias_disposition"].update(proven_outside_target=0, **{key: 1})
+    elif mutation == "alias_count":
+        stage["reason_counts"]["unmatched_character_alias"] = 2
+    elif mutation == "missing_chunk":
+        cert["processing"]["model_completed_chunks"] = 0
+        stage["counts"]["model_completed_chunks"] = 0
+    elif mutation == "blocker":
+        cert["non_alias_blockers"] = ["targeted_package_incomplete"]
+    elif mutation == "missing_proof":
+        cert["alias_disposition"]["outside_proofs"] = []
+    else:
+        cert["alias_disposition"]["outside_proofs"][0]["source_refs"][0]["content_sha256"] = "0" * 64
+    from scripts.ooc_sealed_prediction import project_case_prediction
+    assert project_case_prediction(fixture[1], _scoped_snapshot(fixture)).outcome == "unassessed"
+
+
+def test_server_pair_clue_is_bound_to_real_excerpt_and_never_claims_review(tmp_path):
+    fixture = _scoped_target_fixture(tmp_path, server_pair=True)
+    snapshot = _scoped_snapshot(fixture)
+    from scripts.ooc_sealed_prediction import project_case_prediction
+    prediction = project_case_prediction(fixture[1], snapshot)
+    assert (prediction.outcome, prediction.surface) == ("indeterminate", "review_clue")
+    assert snapshot.evidence_binding == "server_evidence_pair_v1"
+    assert [ref.role for ref in snapshot.citations] == ["B", "C"]
+    assert all(ref.event_group_id is None for ref in snapshot.citations)
+    assert fixture[4]["character_consistency"]["case_trace"][0]["citation_refs"] == []
+
+
+@pytest.mark.parametrize("mutation", ["old_no_certificate", "different_certificate", "swapped_roles", "false_excerpt",
+                                    "wrong_version", "wrong_runtime_document", "duplicate_index", "event_claim"])
+def test_server_pair_invalid_binding_is_not_promoted_or_projected(tmp_path, mutation):
+    fixture = _scoped_target_fixture(tmp_path, server_pair=True)
+    trace = fixture[4]["character_consistency"]["case_trace"][0]
+    row = fixture[6]["items"][0]
+    if mutation == "old_no_certificate":
+        del trace["server_evidence_pair"]
+    elif mutation == "different_certificate":
+        row["metadata"]["server_evidence_pair"]["confirmed_candidate_id_sha256"] = "0" * 64
+    elif mutation == "false_excerpt":
+        row["evidence"][0]["text"] = "本行没有这段内容"
+        for cert in (trace["server_evidence_pair"], row["metadata"]["server_evidence_pair"]):
+            cert["evidence_refs"][0]["text_sha256"] = _sha(row["evidence"][0]["text"])
+    elif mutation == "wrong_runtime_document":
+        row["evidence"][0]["document_id"] = _uuid(999)
+    else:
+        for cert in (trace["server_evidence_pair"], row["metadata"]["server_evidence_pair"]):
+            ref = cert["evidence_refs"][0]
+            if mutation == "swapped_roles": ref["role"] = "C"
+            elif mutation == "wrong_version": ref["document_version"] = 2
+            elif mutation == "duplicate_index": cert["evidence_refs"][1]["evidence_index"] = 0
+            else: ref["event_group_id"] = "invented"
+    from scripts.ooc_sealed_prediction import project_case_prediction
+    assert project_case_prediction(fixture[1], _scoped_snapshot(fixture)).outcome == "unassessed"

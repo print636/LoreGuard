@@ -4960,7 +4960,11 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
             hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()
             for candidate_id in confirmed_candidate_ids
         }
-        assert by_character["林澈"] == {
+        lin_trace = dict(by_character["林澈"])
+        assert lin_trace.pop("target_coverage")["status"] == "partial"
+        assert isinstance(lin_trace.pop("review_required"), bool)
+        lin_trace.pop("server_evidence_pair", None)
+        assert lin_trace == {
             "character_key": "林澈",
             "dimension": "core_personality",
             "comparison_key": "core_personality:社交主动性",
@@ -5008,7 +5012,7 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
         assert by_character["祁雾"]["prepare_reason"] == "no_matching_observation"
         assert by_character["祁雾"]["final_outcome"] == "unverifiable"
         serialized = json.dumps(trace, ensure_ascii=False)
-        assert "evidence" not in serialized
+        assert '"evidence":' not in serialized
         assert "statement" not in serialized
         assert "document_id" not in serialized
         for marker in ("机密原文甲", "机密原文乙", "机密原文丙", "机密草稿丁", "机密草稿戊"):
@@ -6541,10 +6545,19 @@ def test_scoped_axis_same_event_repeated_on_two_lines_cannot_be_conflict():
 
 
 def test_scoped_axis_unclear_situation_is_review_clue_not_formal_issue():
-    result, _ = _run_scoped_axis_stage(
-        ("林澈抛下家人独自离开，但家人当时是否遇险未写明。",),
-        situation_match="unclear",
-    )
+    # This legacy stage fixture used opaque non-UUID IDs. Bind a real-shaped
+    # frozen identity here so this test also exercises the new certificate.
+    candidate_id = str(uuid4())
+    original_trait, original_stub = _confirmed_trait, _snapshot_stub
+    with patch(__name__ + "._confirmed_trait", side_effect=lambda **kwargs:
+               original_trait(**kwargs).model_copy(update={"id":f"ct_{candidate_id}"})), patch(
+        __name__ + "._snapshot_stub", side_effect=lambda _candidate_id, comparison_key=None:
+        original_stub(candidate_id, comparison_key),
+    ):
+        result, _ = _run_scoped_axis_stage(
+            ("林澈抛下家人独自离开，但家人当时是否遇险未写明。",),
+            situation_match="unclear",
+        )
     assert result.issues == ()
     assert len(result.review_clues) == 1
     clue = result.review_clues[0]
@@ -6553,6 +6566,10 @@ def test_scoped_axis_unclear_situation_is_review_clue_not_formal_issue():
     assert len(clue.evidence) >= 2
     assert clue.evidence[0].document_id != clue.evidence[1].document_id
     assert result.diagnostics["outcome"] == "partial"
+    coverage = result.diagnostics["case_trace"][0]["target_coverage"]
+    assert coverage["status"] == "partial"
+    assert "post_alias_processing_gap" in coverage["non_alias_blockers"]
+    assert "case_outcome_unverifiable" in coverage["non_alias_blockers"]
 
 
 def test_scoped_axis_review_is_default_off_with_explicit_partial_coverage():

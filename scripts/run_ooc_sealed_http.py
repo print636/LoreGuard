@@ -840,6 +840,158 @@ def _run_stage_complete(run: object, diagnostics: object) -> bool:
     )
 
 
+def _outside_alias_proofs_bound(
+    public_case: contract.PublicInputCase,
+    setup_case: PublicAuthorSetupCase,
+    proofs: object,
+    expected_count: int,
+) -> bool:
+    """Check bounded source provenance, not infer a new actor from its name."""
+
+    if type(proofs) is not list or len(proofs) != expected_count or len(proofs) > 10_000:
+        return False
+    documents = {f"{item.document_id}.md": item for item in public_case.documents}
+    profile_ids = {item.document_id for item in setup_case.documents
+                   if item.phase == "baseline" and item.document_role == "character_profile"}
+    anchors = {(a.document_id, a.line_start, a.line_end) for a in public_case.evidence_catalog}
+    seen_observations: set[str] = set()
+    for proof in proofs:
+        if type(proof) is not dict or proof.get("proof_kind") not in {
+            "formal_actor_and_draft_binding_v1", "typed_target_binding_v1",
+        }:
+            return False
+        identity = proof.get("observation_id_sha256")
+        actor = proof.get("actor_key")
+        sources = proof.get("source_refs")
+        if not (
+            type(identity) is str and re.fullmatch(r"[a-f0-9]{64}", identity)
+            and identity not in seen_observations
+            and type(actor) is str and 0 < len(actor) <= 64
+            and actor != setup_case.candidate_selector.character_key
+            and type(sources) is list and 2 <= len(sources) <= 16
+        ):
+            return False
+        seen_observations.add(identity)
+        seen_sources: set[tuple[str, int, int, str]] = set()
+        source_documents: set[str] = set()
+        for source in sources:
+            if type(source) is not dict:
+                return False
+            doc = documents.get(source.get("document_name"))
+            start, end = source.get("line_start"), source.get("line_end")
+            text_sha = source.get("text_sha256")
+            if not (
+                doc is not None
+                and type(source.get("document_version")) is int and source["document_version"] == doc.version
+                and source.get("content_sha256") == doc.sha256
+                and type(start) is int and type(end) is int and 0 < start <= end
+                and type(text_sha) is str and re.fullmatch(r"[a-f0-9]{64}", text_sha)
+                and (doc.document_id, start, start) in anchors
+                and (doc.document_id, end, end) in anchors
+            ):
+                return False
+            source_key = (doc.document_id, start, end, text_sha)
+            if source_key in seen_sources:
+                return False
+            seen_sources.add(source_key)
+            source_documents.add(doc.document_id)
+        if not (source_documents & profile_ids and setup_case.target_document_id in source_documents):
+            return False
+    return True
+
+
+def _draft_target_stage_complete(
+    public_case: contract.PublicInputCase,
+    run: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+    trace: Mapping[str, Any],
+    setup_case: PublicAuthorSetupCase,
+    candidate_id: str,
+) -> bool:
+    """Consume a server-certified target scope without changing global coverage.
+
+    Old runs retain the strict whole-stage rule.  A new certificate must be
+    internally consistent even when the global stage says complete; malformed
+    new data never silently falls back to the old path.
+    """
+
+    if "target_coverage" not in trace:
+        return _run_stage_complete(run, diagnostics)
+    stage = diagnostics.get("character_consistency")
+    cert = trace.get("target_coverage")
+    if type(stage) is not dict or type(cert) is not dict:
+        return False
+    processing = cert.get("processing")
+    counts = stage.get("counts")
+    aliases = cert.get("alias_disposition")
+    reasons = stage.get("reason_counts")
+    processing_keys = (
+        "planned_chunks", "processed_chunks", "model_completed_chunks",
+        "model_incomplete_chunks", "model_uncalled_chunks",
+    )
+    alias_keys = ("total", "proven_outside_target", "possibly_target", "unknown")
+    if not (
+        run.get("status") == "completed"
+        and cert.get("schema_version") == "character-target-coverage-v1"
+        and cert.get("confirmed_candidate_id_sha256") == _candidate_hash(candidate_id)
+        and cert.get("confirmed_candidate_id_sha256") == trace.get("confirmed_candidate_id_sha256")
+        and cert.get("character_key") == trace.get("character_key") == setup_case.candidate_selector.character_key
+        and cert.get("dimension") == trace.get("dimension") == setup_case.candidate_selector.trait_type
+        and type(cert.get("comparison_key")) is str
+        and bool(cert["comparison_key"])
+        and cert["comparison_key"] == trace.get("comparison_key")
+        and cert.get("status") == "complete"
+        and cert.get("material_coverage") == trace.get("material_coverage") == "complete"
+        and cert.get("explanation_coverage") == trace.get("explanation_coverage") == "complete"
+        and type(cert.get("matched_observation_count")) is int
+        and cert["matched_observation_count"] > 0
+        and type(trace.get("matched_observation_count")) is int
+        and cert["matched_observation_count"] == trace.get("matched_observation_count")
+        and trace.get("prepare_reason") != "no_matching_observation"
+        and trace.get("matched_observation_refs_truncated") is False
+        and trace.get("material_coverage_reasons") == []
+        and cert.get("non_alias_blockers") == []
+        and type(processing) is dict and type(counts) is dict
+        and type(aliases) is dict and type(reasons) is dict
+    ):
+        return False
+    if any(
+        type(processing.get(key)) is not int
+        or type(counts.get(key)) is not int
+        or not 0 <= processing[key] <= contract.MAX_COUNTER
+        or processing[key] != counts.get(key)
+        for key in processing_keys
+    ):
+        return False
+    if not (
+        processing["planned_chunks"] > 0
+        and processing["planned_chunks"] == processing["processed_chunks"] == processing["model_completed_chunks"]
+        and processing["model_incomplete_chunks"] == 0
+        and processing["model_uncalled_chunks"] == 0
+    ):
+        return False
+    if any(type(aliases.get(key)) is not int or not 0 <= aliases[key] <= contract.MAX_COUNTER for key in alias_keys):
+        return False
+    global_alias_counts = [reasons.get(key, 0) for key in ("unmatched_character_alias", "ambiguous_character_alias")]
+    if any(type(value) is not int or value < 0 for value in global_alias_counts):
+        return False
+    if not (
+        aliases["total"] == sum(global_alias_counts)
+        and aliases["total"] == aliases["proven_outside_target"] + aliases["possibly_target"] + aliases["unknown"]
+        and aliases["possibly_target"] == aliases["unknown"] == 0
+        and _outside_alias_proofs_bound(public_case, setup_case, aliases.get("outside_proofs"), aliases["proven_outside_target"])
+    ):
+        return False
+    if _run_stage_complete(run, diagnostics):
+        return aliases["total"] == 0
+    return bool(
+        stage.get("outcome") == "partial"
+        and stage.get("material_coverage") == "partial"
+        and aliases["total"] > 0
+        and aliases["proven_outside_target"] == aliases["total"]
+    )
+
+
 def _list_pending(client: TransportLike, project_id: str) -> list[dict[str, Any]]:
     characters: list[str] = []
     page = 1
@@ -1313,6 +1465,92 @@ def _strict_runtime_refs(
     return tuple(refs)
 
 
+def _strict_server_pair_refs(
+    public_case: contract.PublicInputCase,
+    setup_case: PublicAuthorSetupCase,
+    trace: Mapping[str, Any],
+    row: Mapping[str, Any],
+    *,
+    source_documents: Mapping[str, str] | None,
+    runtime_document_ids: Mapping[str, str] | None,
+) -> tuple[RuntimeEvidenceRef, ...] | None:
+    """Validate server-selected clue provenance without inventing a review.
+
+    The certificate is emitted independently in the trace and visible row.
+    Frozen document bytes and the actual report excerpt are checked as well;
+    a digest agreeing with another digest is not source verification.
+    """
+
+    metadata, evidence = row.get("metadata"), row.get("evidence")
+    certificate = trace.get("server_evidence_pair")
+    if not (
+        row.get("report_class") == "review_clue"
+        and trace.get("final_outcome") in {"needs_confirmation", "unverifiable"}
+        and trace.get("citation_refs") == []
+        and trace.get("citation_refs_incomplete") is False
+        and type(metadata) is dict
+        and metadata.get("evidence_binding") == "server_evidence_pair_v1"
+        and metadata.get("final_outcome") == trace.get("final_outcome")
+        and _is_uuid4(metadata.get("confirmed_candidate_id"))
+        and type(certificate) is dict
+        and metadata.get("server_evidence_pair") == certificate
+        and set(certificate) == {"schema_version", "confirmed_candidate_id_sha256", "report_class", "evidence_refs"}
+        and certificate.get("schema_version") == "character-server-evidence-pair-v1"
+        and certificate.get("report_class") == "review_clue"
+        and certificate.get("confirmed_candidate_id_sha256") == trace.get("confirmed_candidate_id_sha256")
+        and certificate.get("confirmed_candidate_id_sha256") == _candidate_hash(metadata["confirmed_candidate_id"])
+        and type(evidence) is list and len(evidence) == 2
+        and isinstance(source_documents, Mapping)
+        and isinstance(runtime_document_ids, Mapping)
+    ):
+        return None
+    raw_refs = certificate.get("evidence_refs")
+    if type(raw_refs) is not list or len(raw_refs) != 2:
+        return None
+    documents = {f"{doc.document_id}.md": doc for doc in public_case.documents}
+    anchors = {(a.document_id, a.line_start, a.line_end) for a in public_case.evidence_catalog}
+    refs: list[RuntimeEvidenceRef] = []
+    seen_coordinates: set[tuple[str, int, int]] = set()
+    keys = {"evidence_index", "role", "document_name", "document_version", "content_sha256", "line_start", "line_end", "text_sha256"}
+    for index, (raw, item, role) in enumerate(zip(raw_refs, evidence, ("B", "C"))):
+        if type(raw) is not dict or set(raw) != keys or type(item) is not dict:
+            return None
+        document = documents.get(raw.get("document_name"))
+        start, end = raw.get("line_start"), raw.get("line_end")
+        quote_text = item.get("text")
+        if not (
+            type(raw.get("evidence_index")) is int and raw["evidence_index"] == index
+            and raw.get("role") == role and document is not None
+            and type(raw.get("document_version")) is int and raw["document_version"] == document.version
+            and raw.get("content_sha256") == document.sha256
+            and type(start) is int and type(end) is int and start == end
+            and (document.document_id, start, end) in anchors
+            and item.get("document_name") == raw["document_name"]
+            and item.get("document_id") == runtime_document_ids.get(document.document_id)
+            and _is_uuid4(item.get("document_id"))
+            and type(item.get("line_start")) is int and item["line_start"] == start
+            and type(item.get("line_end")) is int and item["line_end"] == end
+            and type(quote_text) is str and bool(quote_text.strip())
+            and raw.get("text_sha256") == hashlib.sha256(quote_text.encode("utf-8")).hexdigest()
+        ):
+            return None
+        source = source_documents.get(document.document_id)
+        if type(source) is not str or hashlib.sha256(source.encode("utf-8")).hexdigest() != document.sha256:
+            return None
+        lines = source.splitlines()
+        if end > len(lines) or quote_text not in "\n".join(lines[start - 1:end]):
+            return None
+        coordinate = (document.document_id, start, end)
+        if coordinate in seen_coordinates or not _runtime_ref_role_allowed(
+            setup_case, role=role, document_id=document.document_id, line_start=start, line_end=end,
+        ):
+            return None
+        seen_coordinates.add(coordinate)
+        refs.append(RuntimeEvidenceRef(role=role, document_id=document.document_id,
+                                       line_start=start, line_end=end))
+    return tuple(refs)
+
+
 def _strict_report_evidence_refs(
     public_case: contract.PublicInputCase,
     setup_case: PublicAuthorSetupCase,
@@ -1460,6 +1698,8 @@ def _snapshot_from_reports(
     funnel: contract.StageFunnel,
     *,
     assessment_policy: contract.AssessmentPolicy | None = None,
+    source_documents: Mapping[str, str] | None = None,
+    runtime_document_ids: Mapping[str, str] | None = None,
 ) -> RuntimeCaseSnapshot:
     stage = diagnostics.get("character_consistency")
     if type(stage) is not dict:
@@ -1485,9 +1725,6 @@ def _snapshot_from_reports(
     if len(all_traces) != 1 or len(traces) != 1:
         return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
     trace = traces[0]
-    refs = _strict_runtime_refs(public_case, setup_case, trace, assessment_policy=assessment_policy)
-    if refs is None:
-        return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
     final_outcome = trace.get("final_outcome")
     if final_outcome not in {
         "conflict", "needs_confirmation", "unverifiable", "no_issue", "unknown"
@@ -1527,7 +1764,32 @@ def _snapshot_from_reports(
         # therefore remain trace-backed and are checked by the projector.
         reports_match = True
 
-    if surfaced_row is not None and metadata_matches:
+    evidence_binding = None
+    server_pair = bool(
+        "server_evidence_pair" in trace
+        or (surfaced_row is not None and (
+            surfaced_row["metadata"].get("evidence_binding") == "server_evidence_pair_v1"
+            or "server_evidence_pair" in surfaced_row["metadata"]
+        ))
+    )
+    if server_pair:
+        if surfaced_row is None or not metadata_matches:
+            return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
+        refs = _strict_server_pair_refs(
+            public_case, setup_case, trace, surfaced_row,
+            source_documents=source_documents, runtime_document_ids=runtime_document_ids,
+        )
+        if refs is None:
+            return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
+        report_evidence = refs
+        reports_match = True
+        evidence_binding = "server_evidence_pair_v1"
+    else:
+        refs = _strict_runtime_refs(public_case, setup_case, trace, assessment_policy=assessment_policy)
+        if refs is None:
+            return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
+
+    if not server_pair and surfaced_row is not None and metadata_matches:
         raw_report_refs = _strict_report_evidence_refs(
             public_case,
             setup_case,
@@ -1541,7 +1803,7 @@ def _snapshot_from_reports(
                 reports_match = True
     if not metadata_matches:
         reports_match = False
-    stage_complete = _run_stage_complete(run, diagnostics)
+    stage_complete = _draft_target_stage_complete(public_case, run, diagnostics, trace, setup_case, candidate_id)
     explanation = trace.get("explanation_coverage")
     material = trace.get("material_coverage")
     stage_status: Literal["completed", "partial", "failed"] = (
@@ -1569,6 +1831,7 @@ def _snapshot_from_reports(
         provisional_clue_count=len(provisional_items),
         citations=refs,
         report_evidence=report_evidence,
+        evidence_binding=evidence_binding,
         stage_funnel=safe_funnel,
     )
 
@@ -1692,6 +1955,7 @@ def _case_execution(
         target_setup,
         bundle.documents[target_setup.document_id],
     )
+    runtime_docs[target_setup.document_id] = target_runtime_id
     draft_id = _start_run(
         client,
         project_id,
@@ -1738,6 +2002,8 @@ def _case_execution(
         provisional,
         funnel,
         assessment_policy=bundle.public.assessment_policy,
+        source_documents=bundle.documents,
+        runtime_document_ids=runtime_docs,
     )
 
 

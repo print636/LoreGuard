@@ -448,3 +448,43 @@ def test_v3_projection_still_requires_bound_report_and_clear_event_identity():
                                    assessment_policy=contract.EVENT_ASSESSMENT_POLICY).outcome == "unassessed"
     with pytest.raises(PredictionProjectionError, match="unknown_public_assessment_policy"):
         project_case_prediction(case, _snapshot(case), assessment_policy="invented")
+
+
+def test_server_pair_projects_only_a_clue_without_review_or_event_claims():
+    case = _public().cases[0]
+    refs = (_ref(case, "B", 1), _ref(case, "C", 1))
+    snapshot = _snapshot(case, outcome="needs_confirmation", citations=refs,
+                         evidence_binding="server_evidence_pair_v1")
+    projected = project_case_prediction(case, snapshot,
+                                        assessment_policy=contract.EVENT_ASSESSMENT_POLICY)
+    assert (projected.outcome, projected.surface) == ("indeterminate", "review_clue")
+    assert [row.role for row in projected.citations] == ["B", "C"]
+    assert all(row.event_group_id is None for row in snapshot.citations)
+
+
+@pytest.mark.parametrize("mutation", ["formal", "no_issue", "event", "extra_role"])
+def test_server_pair_never_claims_a_formal_review_or_explained_result(mutation):
+    case = _public().cases[0]
+    refs = (_ref(case, "B", 1), _ref(case, "C", 1))
+    values = {"outcome": "needs_confirmation", "citations": refs,
+              "evidence_binding": "server_evidence_pair_v1"}
+    if mutation == "formal":
+        values.update(outcome="conflict", citations=(refs[0], _ref(case, "C", 1, event_group_id="one")))
+    elif mutation == "no_issue":
+        values.update(outcome="no_issue", citations=())
+    elif mutation == "event":
+        values["citations"] = (refs[0], _ref(case, "C", 1, event_group_id="not-reviewed"))
+    else:
+        values["citations"] = (*refs, _ref(case, "G", 2))
+    snapshot = _snapshot(case, **values)
+    assert project_case_prediction(case, snapshot,
+                                   assessment_policy=contract.EVENT_ASSESSMENT_POLICY).outcome == "unassessed"
+
+
+def test_new_optional_binding_preserves_legacy_snapshot_canonical_shape():
+    case = _public().cases[0]
+    snapshot = _snapshot(case)
+    old_shape = snapshot.model_dump(mode="json")
+    assert "evidence_binding" not in old_shape
+    assert old_shape["citations"][0]["event_group_id"] is None
+    assert RuntimeCaseSnapshot.model_validate_json(snapshot.model_dump_json()).model_dump(mode="json") == old_shape

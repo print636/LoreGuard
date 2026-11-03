@@ -67,6 +67,9 @@ from .character_trait_extraction import (
     stable_trait_identity,
     target_bound_signal_matches_frozen_baseline,
     trait_keys_compatible,
+    _RawCharacterSignal,
+    _character_attribution_supported,
+    _statement_supported,
 )
 from .character_traits import (
     TraitCandidateInput,
@@ -1785,11 +1788,14 @@ class CharacterConsistencyStage:
             reason_counts["no_confirmed_character_traits"] += 1
         resolved_drafts: dict[str, list[CharacterSignal]] = defaultdict(list)
         ambiguous_aliases = 0
+        partial_before_alias_resolution = partial
+        unresolved_alias_observations: list[tuple[CharacterSignal, tuple[str, ...]]] = []
         for observation in draft_signals:
             alias = _key(observation.character)
             character_keys = alias_map.get(alias, ())
             if len(character_keys) != 1:
                 ambiguous_aliases += 1
+                unresolved_alias_observations.append((observation, character_keys))
                 reason_counts[
                     "ambiguous_character_alias"
                     if character_keys
@@ -1799,6 +1805,10 @@ class CharacterConsistencyStage:
             resolved_drafts[character_keys[0]].append(observation)
         if ambiguous_aliases:
             partial = True
+
+        # Keep later non-alias gaps independent of this already-true global
+        # flag. Otherwise an unrelated alias could conceal a later failure.
+        post_alias_non_alias_partial = False
 
         issues: list[ConsistencyIssue] = []
         review_clues: list[ConsistencyIssue] = []
@@ -1852,6 +1862,7 @@ class CharacterConsistencyStage:
                 )
                 if axis_match is None:
                     partial = True
+                    post_alias_non_alias_partial = True
                     reason_counts["object_baseline_identity_unavailable"] += 1
                     case_material_reasons.add(
                         "case_comparison_identity_unavailable"
@@ -1865,6 +1876,7 @@ class CharacterConsistencyStage:
                     )
                     if len(axis_directions) != 1:
                         partial = True
+                        post_alias_non_alias_partial = True
                         reason_counts["approved_axis_observation_direction_ambiguous"] += 1
                         case_material_reasons.add(
                             "case_observation_direction_ambiguous"
@@ -1891,6 +1903,7 @@ class CharacterConsistencyStage:
                 )
                 if release_applicability is None:
                     partial = True
+                    post_alias_non_alias_partial = True
                     reason_counts["drift_release_unknown"] += 1
                     case_material_reasons.add("case_release_unknown")
                     continue
@@ -1908,6 +1921,7 @@ class CharacterConsistencyStage:
                     reason_counts[f"drift_scope_{relation}"] += 1
                     if relation == "unknown":
                         partial = True
+                        post_alias_non_alias_partial = True
                         case_material_reasons.add("case_scope_unknown")
                     continue
                 matches.append(
@@ -1936,6 +1950,7 @@ class CharacterConsistencyStage:
                 draft_ordinals = draft_ordinals[:24]
                 draft_document_ids = draft_document_ids[:24]
                 partial = True
+                post_alias_non_alias_partial = True
                 case_material_reasons.add("case_observation_limit")
 
             case_target_identity = _baseline_hint_identity(baseline_entry)
@@ -2418,11 +2433,13 @@ class CharacterConsistencyStage:
                         successful_model_calls += 1
                     elif review.diagnostics.outcome in {"degraded", "skipped"}:
                         partial = True
+                        post_alias_non_alias_partial = True
                         reason_counts[
                             f"review_{review.diagnostics.reason}"
                         ] += 1
                 else:
                     partial = True
+                    post_alias_non_alias_partial = True
                     reason_counts["stage_token_budget"] += 1
 
             review_for_promotion = review
@@ -2436,6 +2453,7 @@ class CharacterConsistencyStage:
                 # frozen B/C table must not become a formal issue or silently
                 # fall back to arbitrary first evidence rows.
                 partial = True
+                post_alias_non_alias_partial = True
                 reason_counts["review_citation_binding_invalid"] += 1
                 review_for_promotion = CharacterReviewResult(
                     diagnostics=review.diagnostics.model_copy(
@@ -2498,11 +2516,13 @@ class CharacterConsistencyStage:
                         or scoped_review_clue
                     ) and evidence_pair_reason is None,
                     promote_reason=evidence_pair_reason or promoted.reason,
+                    frozen_by_document=frozen_by_document,
                 )
             )
             if promoted.outcome == "unverifiable":
                 drift_unverifiable += 1
                 partial = True
+                post_alias_non_alias_partial = True
                 reason_counts[f"drift_{promoted.reason}"] += 1
             if promoted.outcome == "no_issue":
                 drift_no_issue += 1
@@ -2519,6 +2539,7 @@ class CharacterConsistencyStage:
                 reason_counts["review_clue_formal_threshold_not_met"] += 1
             if evidence_pair_reason is not None:
                 partial = True
+                post_alias_non_alias_partial = True
                 reason_counts[evidence_pair_reason] += 1
                 continue
             finding = _to_issue(
@@ -2538,6 +2559,7 @@ class CharacterConsistencyStage:
                         else promoted.outcome
                     )
                 ),
+                frozen_by_document=frozen_by_document,
             )
             if promoted.outcome == "conflict":
                 issues.append(finding)
@@ -2546,8 +2568,41 @@ class CharacterConsistencyStage:
 
         if len(review_baselines) > settings.character_consistency_max_candidates_per_run:
             partial = True
+            post_alias_non_alias_partial = True
             reason_counts["baseline_limit"] += len(review_baselines) - (
                 settings.character_consistency_max_candidates_per_run
+            )
+
+        # A stage-wide partial remains true.  A separate, source-bound record
+        # describes whether one confirmed comparison was completely processed;
+        # consumers must not manufacture this from old material_coverage alone.
+        baseline_by_digest = {
+            hashlib.sha256(entry[0].candidate_id.encode("utf-8")).hexdigest(): entry
+            for entry in review_baselines
+        }
+        for trace in case_trace:
+            entry = baseline_by_digest.get(trace.get("confirmed_candidate_id_sha256"))
+            if entry is None:
+                continue
+            trace["target_coverage"] = _target_coverage_certificate(
+                trace,
+                baseline=entry[1],
+                unresolved_alias_observations=tuple(unresolved_alias_observations),
+                formal_signals=signals,
+                frozen_by_document=frozen_by_document,
+                target_aliases=aliases_by_character.get(_key(entry[3]), ()),
+                processing={
+                    "planned_chunks": len(planned_chunks),
+                    "processed_chunks": processed_chunks,
+                    "model_completed_chunks": model_completed_chunks,
+                    "model_incomplete_chunks": len(planned_chunks) - model_completed_chunks,
+                    "model_uncalled_chunks": len(planned_chunks) - model_called_chunks,
+                },
+                pre_alias_partial=partial_before_alias_resolution,
+                baseline_limit=bool(reason_counts["baseline_limit"]),
+                post_alias_non_alias_partial=(
+                    post_alias_non_alias_partial or explanation_stage_partial
+                ),
             )
 
         stage_partial = partial or explanation_stage_partial
@@ -5832,6 +5887,233 @@ def _explicit_medical_exception(line: str, *, character: str) -> bool:
     return _MEDICAL_NONFACTUAL.search(relevant) is None
 
 
+def _frozen_source_ref(
+    span: EvidenceSpan, frozen_by_document: dict[str, _FrozenDocument],
+) -> dict[str, Any] | None:
+    """Bind a diagnostic reference to exact, immutable source bytes."""
+    source = frozen_by_document.get(span.document_id)
+    if (
+        source is None
+        or source.document.name != span.document_name
+        or sum(row.document.name == span.document_name for row in frozen_by_document.values()) != 1
+        or _safe_trace_document_name(span.document_name) != span.document_name
+        or type(span.line_start) is not int
+        or type(span.line_end) is not int
+        or not 1 <= span.line_start <= span.line_end <= _MAX_CASE_TRACE_LINE
+        or type(source.document_version) is not int
+        or source.document_version < 1
+        or hashlib.sha256(source.document.content.encode("utf-8")).hexdigest()
+        != source.content_sha256
+    ):
+        return None
+    lines = source.document.content.splitlines()
+    if span.line_end > len(lines):
+        return None
+    text = "\n".join(lines[span.line_start - 1:span.line_end])
+    if not text.strip() or text != span.text:
+        return None
+    return {
+        "document_name": span.document_name,
+        "document_version": source.document_version,
+        "content_sha256": source.content_sha256,
+        "line_start": span.line_start,
+        "line_end": span.line_end,
+        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
+def _server_evidence_pair_binding(
+    prepared: PreparedCharacterDrift,
+    *,
+    candidate_id: str,
+    frozen_by_document: dict[str, _FrozenDocument],
+) -> dict[str, Any] | None:
+    """Describe a server-selected clue; this never certifies model review."""
+    try:
+        if str(UUID(candidate_id)) != candidate_id:
+            return None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if not prepared.case.baseline.evidence or not prepared.matching_observations:
+        return None
+    spans = (
+        prepared.case.baseline.evidence[0],
+        prepared.matching_observations[0].evidence,
+    )
+    current_source = frozen_by_document.get(spans[1].document_id)
+    if current_source is None or current_source.source_kind != "draft":
+        return None
+    if _character_evidence_identity(spans[0]) == _character_evidence_identity(spans[1]):
+        return None
+    refs = [_frozen_source_ref(span, frozen_by_document) for span in spans]
+    if any(ref is None for ref in refs):
+        return None
+    return {
+        "schema_version": "character-server-evidence-pair-v1",
+        "confirmed_candidate_id_sha256": hashlib.sha256(candidate_id.encode("utf-8")).hexdigest(),
+        "report_class": "review_clue",
+        "evidence_refs": [
+            {"evidence_index": index, "role": role, **ref}
+            for index, (role, ref) in enumerate(zip(("B", "C"), refs))
+        ],
+    }
+
+
+def _alias_disposition_for_target(
+    baseline: ConfirmedTraitSnapshot,
+    observations: tuple[tuple[CharacterSignal, tuple[str, ...]], ...],
+    *,
+    formal_signals: tuple[CharacterSignal, ...],
+    frozen_by_document: dict[str, _FrozenDocument],
+    target_aliases: tuple[str, ...],
+) -> dict[str, Any]:
+    """Require an independently frozen identity and source actor binding.
+
+    An unconfirmed nickname or merely different model-authored name is not
+    proof of another actor. Formal accepted signals can establish identity
+    without requiring every supporting character's trait to be confirmed.
+    """
+    target_keys = {_key(baseline.character), *(_key(v) for v in target_aliases)}
+    formal_sources = [source.document for source in frozen_by_document.values()
+                      if source.source_kind == "formal_character_profile"
+                      and source.resolution_state == "confirmed"
+                      and source.authority_tier in {"core_canon", "formal_record"}]
+    aliases, _, alias_warnings = build_alias_map(formal_sources)
+    alias_keys = {_key(alias): _key(owner) for alias, owner in aliases.items()}
+    target_keys.update(alias for alias, owner in alias_keys.items() if owner in target_keys)
+    identities: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for signal in formal_signals:
+        source = frozen_by_document.get(signal.evidence.document_id)
+        if (
+            signal.source_kind != "formal_character_profile"
+            or source is None
+            or source.source_kind != "formal_character_profile"
+            or source.resolution_state != "confirmed"
+            or source.authority_tier not in {"core_canon", "formal_record"}
+            or signal.source_run_input_id != source.input_id
+            or signal.support_id is None
+            or signal.scope_relation not in {"local", "same_actor_continuation", "labelled_elaboration"}
+            or is_unsafe_target_actor_literal(signal.character)
+        ):
+            continue
+        ref = _frozen_source_ref(signal.evidence, frozen_by_document)
+        if ref is not None:
+            actor = alias_keys.get(_key(signal.character), _key(signal.character))
+            identities[actor].append(ref)
+    counts: dict[str, Any] = {
+        "total": len(observations), "proven_outside_target": 0,
+        "possibly_target": 0, "unknown": 0, "outside_proofs": [],
+    }
+    for index, (signal, possible_keys) in enumerate(observations):
+        actor = alias_keys.get(_key(signal.character), _key(signal.character))
+        if actor in target_keys or any(_key(key) in target_keys for key in possible_keys):
+            counts["possibly_target"] += 1
+            continue
+        ref = _frozen_source_ref(signal.evidence, frozen_by_document)
+        if (
+            index >= _MAX_ACCEPTED_DRAFT_OBSERVATION_REFS
+            or alias_warnings
+            or possible_keys
+            or is_unsafe_target_actor_literal(signal.character)
+            or not identities.get(actor)
+            or ref is None
+        ):
+            counts["unknown"] += 1
+            continue
+        try:
+            # Reuse the established actor validator rather than inventing a
+            # weaker name-presence check for the coverage exception.
+            record = _RawCharacterSignal(
+                character=signal.character, dimension=signal.dimension,
+                trait_key=signal.trait_key, statement=signal.statement,
+                polarity=signal.polarity, stability=signal.stability,
+                observation_kind=signal.observation_kind, context=signal.context,
+                key_object=signal.key_object, evidence=signal.evidence.text,
+                source_line_start=signal.evidence.line_start,
+                source_line_end=signal.evidence.line_end,
+            )
+            actor_bound = _character_attribution_supported(
+                record, signal.evidence.text, source_kind="draft"
+            ) and _statement_supported(record, signal.evidence.text, skip_lexical_polarity=True)
+        except (TypeError, ValueError):
+            actor_bound = False
+        if not actor_bound:
+            counts["unknown"] += 1
+            continue
+        counts["proven_outside_target"] += 1
+        counts["outside_proofs"].append({
+            "proof_kind": "formal_actor_and_draft_binding_v1",
+            "observation_id_sha256": hashlib.sha256(signal.id.encode("utf-8")).hexdigest(),
+            "actor_key": _safe_trace_identifier(actor, max_chars=64),
+            "source_refs": [identities[actor][0], ref],
+        })
+    return counts
+
+
+def _target_coverage_certificate(
+    trace: dict[str, Any],
+    *,
+    baseline: ConfirmedTraitSnapshot,
+    unresolved_alias_observations: tuple[tuple[CharacterSignal, tuple[str, ...]], ...],
+    formal_signals: tuple[CharacterSignal, ...],
+    frozen_by_document: dict[str, _FrozenDocument],
+    target_aliases: tuple[str, ...],
+    processing: dict[str, int],
+    pre_alias_partial: bool,
+    baseline_limit: bool,
+    post_alias_non_alias_partial: bool = False,
+) -> dict[str, Any]:
+    alias = _alias_disposition_for_target(
+        baseline, unresolved_alias_observations, formal_signals=formal_signals,
+        frozen_by_document=frozen_by_document, target_aliases=target_aliases,
+    )
+    blockers: set[str] = set()
+    if pre_alias_partial:
+        blockers.add("pre_alias_processing_gap")
+    if post_alias_non_alias_partial:
+        blockers.add("post_alias_processing_gap")
+    if baseline_limit:
+        blockers.add("baseline_limit")
+    planned = processing["planned_chunks"]
+    if (planned <= 0 or processing["processed_chunks"] != planned
+            or processing["model_completed_chunks"] != planned
+            or processing["model_incomplete_chunks"] != 0
+            or processing["model_uncalled_chunks"] != 0):
+        blockers.add("primary_processing_incomplete")
+    if trace.get("material_coverage") != "complete" or trace.get("material_coverage_reasons"):
+        blockers.add("case_material_incomplete")
+    if trace.get("explanation_coverage") != "complete":
+        blockers.add("case_explanation_incomplete")
+    if not trace.get("matched_observation_count") or trace.get("prepare_reason") == "no_matching_observation":
+        blockers.add("no_matching_observation")
+    if trace.get("matched_observation_refs_truncated") is not False:
+        blockers.add("observation_refs_incomplete")
+    if trace.get("citation_refs_incomplete") is not False:
+        blockers.add("citation_refs_incomplete")
+    if trace.get("review_required") and trace.get("review_outcome") != "completed":
+        blockers.add("required_review_incomplete")
+    if trace.get("review_outcome") in {"degraded", "partial", "skipped"}:
+        blockers.add("review_processing_incomplete")
+    if trace.get("promote_reason", "").startswith("drift_evidence_pair"):
+        blockers.add("evidence_pair_incomplete")
+    if trace.get("confirmed_candidate_id_sha256") is None:
+        blockers.add("target_identity_unavailable")
+    if trace.get("final_outcome") not in {"conflict", "needs_confirmation", "unverifiable", "no_issue"}:
+        blockers.add("case_outcome_unavailable")
+    if trace.get("final_outcome") == "unverifiable":
+        blockers.add("case_outcome_unverifiable")
+    return {
+        "schema_version": "character-target-coverage-v1",
+        **{key: trace.get(key) for key in (
+            "confirmed_candidate_id_sha256", "character_key", "dimension", "comparison_key",
+            "material_coverage", "explanation_coverage", "matched_observation_count",
+        )},
+        "status": "partial" if blockers or alias["possibly_target"] or alias["unknown"] else "complete",
+        "processing": dict(processing), "alias_disposition": alias,
+        "non_alias_blockers": sorted(blockers),
+    }
+
+
 def _to_issue(
     *,
     promoted,
@@ -5839,6 +6121,7 @@ def _to_issue(
     review: CharacterReviewResult | None,
     confirmed_candidate_id: str,
     judgement: str,
+    frozen_by_document: dict[str, _FrozenDocument] | None = None,
 ) -> ConsistencyIssue:
     baseline_spans = list(prepared.case.baseline.evidence)
     current_spans = [row.evidence for row in prepared.matching_observations]
@@ -5919,6 +6202,13 @@ def _to_issue(
     confidence = 0.92 if conflict else (
         0.68 if promoted.confidence_band == "medium" else 0.52
     )
+    server_pair = (
+        _server_evidence_pair_binding(
+            prepared, candidate_id=confirmed_candidate_id,
+            frozen_by_document=frozen_by_document or {},
+        )
+        if evidence_binding == "server_evidence_pair_v1" and not conflict else None
+    )
     return ConsistencyIssue(
         category=IssueCategory.character_drift,
         severity=severity,
@@ -5968,6 +6258,7 @@ def _to_issue(
             "final_outcome": promoted.outcome,
             "review_reason": promoted.reason,
             "evidence_binding": evidence_binding,
+            **({"server_evidence_pair": server_pair} if server_pair is not None else {}),
             **(
                 {"review_citation_refs": list(cited_refs)}
                 if cited_refs else {}
@@ -6681,6 +6972,7 @@ def _safe_case_trace(
     final_outcome: str,
     visible: bool,
     promote_reason: str,
+    frozen_by_document: dict[str, _FrozenDocument] | None = None,
 ) -> dict[str, Any]:
     safe_material_coverage = (
         material_coverage
@@ -6768,6 +7060,7 @@ def _safe_case_trace(
             baseline.trait_key,
         )
     candidate_id_sha256 = None
+    candidate_id: str | None = None
     if baseline_entry is not None:
         candidate_id = getattr(baseline_entry[0], "candidate_id", None)
         try:
@@ -6781,6 +7074,18 @@ def _safe_case_trace(
                 ).hexdigest()
         except ValueError:
             pass
+    server_pair = None
+    if (
+        prepared is not None and candidate_id_sha256 is not None
+        and visible and final_outcome in {"needs_confirmation", "unverifiable"}
+        and not promote_reason.startswith("drift_evidence_pair")
+        and not _review_has_exact_citation_binding(prepared, review)
+        and not (review is not None and review.diagnostics.outcome == "completed")
+    ):
+        server_pair = _server_evidence_pair_binding(
+            prepared, candidate_id=candidate_id,
+            frozen_by_document=frozen_by_document or {},
+        )
     return {
         "character_key": _safe_trace_identifier(character_key, max_chars=64),
         "dimension": baseline.dimension,
@@ -6826,10 +7131,12 @@ def _safe_case_trace(
         "review_outcome": (
             review.diagnostics.outcome if review is not None else "not_run"
         ),
+        "review_required": prepared.reviewer_eligible if prepared is not None else None,
         "review_verdict": decision.verdict if decision is not None else None,
         "citation_roles": roles,
         "citation_refs": citation_refs,
         "citation_refs_incomplete": citation_refs_incomplete,
+        **({"server_evidence_pair": server_pair} if server_pair is not None else {}),
         **(
             {"event_independence": decision.event_independence}
             if decision is not None

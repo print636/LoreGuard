@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from scripts.ooc_eval_contract import (
     AssessmentPolicy,
@@ -78,7 +78,17 @@ class RuntimeCaseSnapshot(StrictModel):
     report_evidence: tuple[RuntimeEvidenceRef, ...] = Field(
         default=(), max_length=10_000
     )
+    # New server-selected clue evidence is not a model review or an event
+    # certificate.  None preserves the existing reviewed/legacy projection.
+    evidence_binding: Literal["server_evidence_pair_v1"] | None = None
     stage_funnel: StageFunnel
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_snapshot_shape(self, handler):
+        value = handler(self)
+        if self.evidence_binding is None:
+            value.pop("evidence_binding", None)
+        return value
 
 
 class SealedPredictionArtifact(StrictModel):
@@ -197,6 +207,16 @@ def project_case_prediction(
         and snapshot.trace_count == 1
     )
     if not complete:
+        return _unassessed(snapshot, assessment_policy)
+
+    if snapshot.evidence_binding == "server_evidence_pair_v1" and not (
+        snapshot.final_outcome in {"needs_confirmation", "unverifiable"}
+        and snapshot.formal_issue_count == 0
+        and snapshot.review_clue_count == 1
+        and snapshot.provisional_clue_count == 0
+        and tuple(ref.role for ref in snapshot.citations) == ("B", "C")
+        and all(ref.event_group_id is None for ref in snapshot.citations)
+    ):
         return _unassessed(snapshot, assessment_policy)
 
     surfaced = snapshot.final_outcome in {
