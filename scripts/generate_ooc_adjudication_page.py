@@ -306,7 +306,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>LoreGuard OOC 离线仲裁台</title>
+  <title>LoreGuard 标注结果复核</title>
   <style>
     :root {
       --deep: #090716; --page: #0d0a1e; --surface: #1d1739;
@@ -345,6 +345,11 @@ _HTML_TEMPLATE = r'''<!doctype html>
     .freeze-strip { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px 20px; padding: 11px clamp(16px,3vw,40px); color: var(--secondary); background: #15102c; border-bottom: 1px solid var(--border); font-size: 13px; }
     .freeze-strip strong { color: var(--success); }
     .binding { overflow-wrap: anywhere; font-family: "Cascadia Code", Consolas, monospace; }
+    .technical-details { min-width: 0; margin: 10px 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--secondary); font-size: 13px; overflow-wrap: anywhere; }
+    .technical-details summary { min-height: 30px; cursor: pointer; font-weight: 650; }
+    .technical-details p { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .review-summary { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0; }
+    .review-summary span { display: inline-block; }
     .freeze-binding { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
     .error-summary { width: min(1540px,calc(100% - 32px)); margin: 18px auto 0; padding: 16px 20px; background: rgba(255,127,173,.12); border: 1px solid rgba(255,127,173,.72); border-radius: 12px; }
     .error-summary[hidden], [hidden] { display: none !important; }
@@ -361,6 +366,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
     .case-button[aria-current="true"] { color: var(--text); background: var(--raised); border-color: var(--lavender); }
     .case-number { color: var(--lavender); font-variant-numeric: tabular-nums; }
     .case-state { color: var(--muted); font-size: 12px; }
+    .case-category { display: block; margin-top: 4px; color: var(--cyan); font-size: 12px; font-weight: 500; }
     .case-mobile { display: none; padding: 12px 16px; }
     .case-mobile label { display: block; margin-bottom: 6px; font-weight: 650; }
     .case-mobile select { width: 100%; padding: 8px 10px; }
@@ -417,6 +423,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
     .review-note { padding: 11px; background: var(--field); border: 1px solid var(--border); border-radius: 8px; }
     .review-note h4 { margin: 0 0 6px; color: var(--lavender); font-size: 13px; }
     .review-note p { margin: 0; color: var(--secondary); line-height: 1.65; white-space: pre-wrap; }
+    .comparison > h3, .comparison > .helper, .comparison > .technical-details { margin-inline: 16px; }
+    .comparison > h3 { margin-top: 16px; margin-bottom: 8px; }
     .adjudication { padding: 18px; }
     .adjudication h3 { margin: 0 0 5px; }
     .adjudication > p { margin: 0 0 16px; color: var(--secondary); font-size: 13px; }
@@ -435,6 +443,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
     .radio-card, .target-check { display: flex; align-items: flex-start; gap: 8px; min-height: 44px; padding: 9px 10px; background: var(--field); border: 1px solid var(--border-strong); border-radius: 8px; }
     .radio-card:has(input:checked), .target-check:has(input:checked) { border-color: var(--lavender); background: var(--raised); }
     .radio-card input, .target-check input { margin-top: 4px; accent-color: var(--lavender); }
+    .radio-card > span { min-width: 0; }
+    .radio-card .helper { display: block; }
     .structure-empty { padding: 12px; color: var(--muted); background: var(--field); border-radius: 8px; }
     .structure-row { margin-bottom: 12px; padding: 12px; background: var(--field); border: 1px solid var(--border); border-radius: 10px; }
     .structure-row h5 { margin: 0 0 9px; font-size: 14px; overflow-wrap: anywhere; }
@@ -477,31 +487,34 @@ _HTML_TEMPLATE = r'''<!doctype html>
   </style>
 </head>
 <body>
-  <a class="skip-link" href="#main-content">跳到当前仲裁案例</a>
+  <a class="skip-link" href="#main-content">跳到当前复核题目</a>
   <header class="app-header">
-    <div class="brand"><h1>LoreGuard OOC 离线仲裁台</h1><p>先对照两份已冻结人工提交，再明确形成最终裁决。</p></div>
-    <div class="toolbar" aria-label="仲裁文件操作">
-      <button id="save-draft" type="button">保存本地草稿</button>
-      <button id="import-trigger" type="button">导入本页锁定 JSON</button>
-      <input class="file-input" id="import-file" type="file" accept="application/json,.json" aria-label="选择本页生成的锁定仲裁 JSON">
-      <button class="danger" id="clear-draft" type="button">清除本地草稿</button>
-      <button class="lock" id="download-locked" type="button">校验并下载锁定 JSON</button>
+    <div class="brand"><h1>LoreGuard 标注结果复核</h1><p>对照两位标注者的判断和原文，确认这批题目的最终结果。</p></div>
+    <div class="toolbar" aria-label="复核文件操作">
+      <button id="save-draft" type="button">保存进度</button>
+      <button id="import-trigger" type="button">继续已下载的复核结果</button>
+      <input class="file-input" id="import-file" type="file" accept="application/json,.json" aria-label="选择本页下载的复核结果文件">
+      <button class="danger" id="clear-draft" type="button">清除本机进度</button>
+      <button class="lock" id="download-locked" type="button">完成复核并下载结果</button>
       <button id="unlock-editing" type="button" hidden>继续修订</button>
     </div>
   </header>
   <div class="freeze-strip">
-    <div><strong>双份提交已冻结</strong>　此页未载入系统预测或私有答案，也不会联网。</div>
-    <div class="binding" id="binding-summary"></div>
-    <div class="binding freeze-binding" id="freeze-summary"></div>
+    <div><strong>两份原始提交已保留</strong>　此页没有模型答案，也不会联网。随时可保存进度，不必一次做完。</div>
+    <p class="review-summary" id="review-summary" aria-label="两人判断的比较概况"></p>
+    <details class="technical-details freeze-binding"><summary>文件核对信息（通常不用看）</summary>
+      <div class="binding" id="binding-summary"></div>
+      <div class="binding" id="freeze-summary"></div>
+    </details>
   </div>
   <section class="error-summary" id="error-summary" role="alert" tabindex="-1" hidden>
-    <h2>锁定前还需修正</h2><ul id="error-list"></ul>
+    <h2>完成前还有这些内容需要确认</h2><ul id="error-list"></ul>
   </section>
   <main class="workspace" id="main-content" tabindex="-1">
-    <nav class="case-rail" aria-label="仲裁案例导航">
-      <div class="rail-head"><h2>案例</h2><p id="progress-label"></p></div>
+    <nav class="case-rail" aria-label="复核题目导航">
+      <div class="rail-head"><h2>题目</h2><p id="progress-label"></p></div>
       <div class="case-list" id="case-list"></div>
-      <div class="case-mobile"><label for="case-select">当前案例</label><select id="case-select"></select></div>
+      <div class="case-mobile"><label for="case-select">选择要复核的题目</label><select id="case-select"></select></div>
     </nav>
     <article class="case-work" id="case-work"></article>
   </main>
@@ -512,10 +525,10 @@ _HTML_TEMPLATE = r'''<!doctype html>
     "use strict";
 
     const DATA = JSON.parse(document.getElementById("adjudication-data").textContent);
-    const ROLES = [["", "不采用"], ["B", "B · 稳定基线"], ["C", "C · 当前行为"], ["G", "G · 已发生成长"], ["X", "X · 有效例外"], ["P", "P · 可能解释"]];
+    const ROLES = [["", "不采用"], ["B", "原设定依据"], ["C", "新稿表现"], ["G", "已发生成长"], ["X", "当前有效的特殊状态"], ["P", "尚未确认的解释线索"]];
     const DIMENSIONS = [["core_trait", "核心性格"], ["stable_preference", "长期偏好"], ["speech_pattern", "说话方式"], ["value_boundary", "价值观／行为边界"], ["relationship_attitude", "关系态度"], ["motivation_goal", "长期动机／目标"]];
-    const OUTCOMES = [["conflict", "conflict · 正式冲突"], ["no_issue", "no_issue · 无问题"], ["indeterminate", "indeterminate · 待复核"]];
-    const SURFACES = [["formal_issue", "formal_issue · 正式问题"], ["none", "none · 不展示"], ["review_clue", "review_clue · 复核线索"]];
+    const OUTCOMES = [["conflict", "证据充分，存在冲突"], ["no_issue", "没有冲突"], ["indeterminate", "尚不能确定，保留待复核"]];
+    const SURFACES = [["formal_issue", "正式问题"], ["none", "不列为问题或线索"], ["review_clue", "待复核线索"]];
     const LEVELS = { L0: { outcome: "no_issue", surface: "none" }, L1: { outcome: "indeterminate", surface: "review_clue" }, L2: { outcome: "indeterminate", surface: "review_clue" }, L3: { outcome: "conflict", surface: "formal_issue" } };
     const DIRECTIONAL_RELATIONS = DATA.manual_version === "ooc-manual-v4-relations" && DATA.relation_policy === "directional-evidence-v1";
     const SINGLE_CLEAR_EVENT = ["ooc-manual-v3-event", "ooc-manual-v4-relations"].includes(DATA.manual_version) && DATA.assessment_policy === "single-clear-event-v3";
@@ -528,11 +541,11 @@ _HTML_TEMPLATE = r'''<!doctype html>
     if (DIRECTIONAL_RELATIONS) CASE_KEYS.push("relation_policy");
     const BUNDLE_KEYS = ["schema_version", "dataset_id", "public_input_sha256", "reviewer_ids", "annotation_sha256", "consensus_confirmed_by", "cases"];
     const AGREEMENT_FIELDS = [
-      ["dimension", "维度", "dimension_agrees"], ["finalOutcome", "结果", "outcome_agrees"],
-      ["finalSurface", "展示面", "surface_agrees"], ["conflictLevel", "冲突等级", "conflict_level_agrees"],
-      ["materialCoverage", "材料覆盖", "material_coverage_agrees"], ["evidence", "证据角色", "evidence_agrees"],
-      ["eventGroups", "C 事件组", "event_groups_agree"], ["explanations", "解释绑定", "explanation_links_agree"],
-      ["phenomena", "现象标签", "phenomena_agree"], ["reasonCodes", "原因码", "reason_codes_agree"]
+      ["dimension", "这题检查的特点", "dimension_agrees"], ["finalOutcome", "最终判断", "outcome_agrees"],
+      ["finalSurface", "应怎样呈现", "surface_agrees"], ["conflictLevel", "判断的确定程度", "conflict_level_agrees"],
+      ["materialCoverage", "材料是否足够", "material_coverage_agrees"], ["evidence", "采用的原文及用途", "evidence_agrees"],
+      ["eventGroups", "哪些片段属于同一件事", "event_groups_agree"], ["explanations", "成长或状态与表现的关系", "explanation_links_agree"],
+      ["phenomena", "观察到的现象", "phenomena_agree"], ["reasonCodes", "判断理由", "reason_codes_agree"]
     ];
     const ui = {
       work: document.getElementById("case-work"), caseList: document.getElementById("case-list"),
@@ -564,9 +577,6 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function element(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
     function exactKeys(value, keys) {
       if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-      // The legacy import validator keeps its original four link keys; the
-      // explicit v4 policy requires the direction key as well, never guesses it.
-      if (DIRECTIONAL_RELATIONS && keys.join(",") === "support_evidence_id,applicable_current_ids,causal_relation,temporal_relation") keys = LINK_KEYS;
       const actual = Object.keys(value).sort(), expected = [...keys].sort();
       return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
     }
@@ -581,9 +591,23 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function reviewerRole(row, evidenceId) { return row.evidence.find(item => item.evidence_id === evidenceId)?.role || "—"; }
     function caseStarted(row) { return Boolean(row.source || row.finalOutcome || row.finalSurface || row.conflictLevel || row.resolutionNote.trim() || Object.values(row.evidenceRoles).some(Boolean) || Object.values(row.forbidden).some(Boolean)); }
     function caseApparentlyComplete(row) { return Boolean(row.finalOutcome && row.finalSurface && row.conflictLevel && row.materialCoverage && parseTags(row.phenomena).length && parseTags(row.reasonCodes).length && row.resolutionMode && row.resolutionNote.trim()); }
-    function formatEvidence(caseIndex, rows) { const meta = evidenceMeta(caseIndex); return rows.length ? rows.map(item => { const place = meta.get(item.evidence_id); return `${item.role} · ${place ? `${place.path} 第 ${place.lineNumber} 行` : item.evidence_id}`; }).join("\n") : "未采用"; }
-    function formatGroups(caseIndex, groups) { const meta = evidenceMeta(caseIndex); return groups.length ? groups.map(group => `${group.event_group_id}: ${group.evidence_ids.map(id => meta.get(id) ? `第 ${meta.get(id).lineNumber} 行` : id).join("、")}`).join("\n") : "无"; }
-    function formatLinks(caseIndex, links) { const meta = evidenceMeta(caseIndex); return links.length ? links.map(link => { const source = meta.get(link.support_evidence_id); const targets = link.applicable_current_ids.map(id => meta.get(id) ? `第 ${meta.get(id).lineNumber} 行` : id).join("、"); const direction = DIRECTIONAL_RELATIONS ? `${RELATION_OPTIONS.find(([value]) => value === link.relation_direction)?.[1] || "未知关系（需核对）"}；` : ""; return `${source ? `第 ${source.lineNumber} 行` : link.support_evidence_id} → ${targets}；${direction}${link.causal_relation}/${link.temporal_relation}`; }).join("\n") : "无"; }
+    function optionLabel(options, value, fallback = "需核对") { return options.find(([key]) => key === value)?.[1] || fallback; }
+    function documentName(caseIndex, documentId) {
+      const index = DATA.cases[caseIndex].documents.findIndex(row => row.document_id === documentId), row = DATA.cases[caseIndex].documents[index];
+      if (!row) return "来源材料待核对";
+      const type = row.is_target ? "待审新稿" : row.document_role === "character_profile" ? "角色设定" : row.document_role === "canon" ? "故事设定" : row.publication_status === "published" ? "已发布历史" : "已有剧情";
+      return `材料 ${index + 1}：${type}`;
+    }
+    function evidenceLocation(caseIndex, evidenceId) { const info = evidenceMeta(caseIndex).get(evidenceId); return info ? `${documentName(caseIndex, info.documentId)} 第 ${info.lineNumber} 行` : "原文位置待核对"; }
+    function formatEvidence(caseIndex, rows) { return rows.length ? rows.map(item => `${optionLabel(ROLES, item.role)} · ${evidenceLocation(caseIndex, item.evidence_id)}`).join("\n") : "未采用"; }
+    function formatGroups(caseIndex, groups) { return groups.length ? groups.map((group, index) => `第 ${index + 1} 件事：${group.evidence_ids.map(id => evidenceLocation(caseIndex, id)).join("、")}`).join("\n") : "未分组"; }
+    function formatLinks(caseIndex, links) {
+      const causalLabels = { explicit: "原文明说", bounded: "有上下文依据", ambiguous: "尚不确定" }, temporalLabels = { before: "在表现之前", active_during: "表现发生时有效", after: "在表现之后", unknown: "时间不明" };
+      return links.length ? links.map(link => {
+        const direction = DIRECTIONAL_RELATIONS ? `${optionLabel(RELATION_OPTIONS, link.relation_direction, "未知关系（需核对）")}；` : "";
+        return `${evidenceLocation(caseIndex, link.support_evidence_id)} → ${link.applicable_current_ids.map(id => evidenceLocation(caseIndex, id)).join("、")}；${direction}${causalLabels[link.causal_relation] || "依据待核对"}，${temporalLabels[link.temporal_relation] || "时间待核对"}`;
+      }).join("\n") : "未建立关系";
+    }
     function restoreLinks(target, links) {
       links.forEach(link => {
         if (!DIRECTIONAL_RELATIONS) { target[link.support_evidence_id] = { applicableCurrentIds: [...link.applicable_current_ids], causalRelation: link.causal_relation, temporalRelation: link.temporal_relation }; return; }
@@ -611,12 +635,18 @@ _HTML_TEMPLATE = r'''<!doctype html>
       return links;
     }
     function relationBlocksEvent(link, evidence) { return !DIRECTIONAL_RELATIONS || evidence.find(row => row.evidence_id === link.support_evidence_id)?.role === "P" || link.relation_direction !== "opposes"; }
-    function displayValue(caseIndex, field, row) { if (field === "dimension") return row.dimension; if (field === "finalOutcome") return row.outcome; if (field === "finalSurface") return row.surface; if (field === "conflictLevel") return row.conflict_level; if (field === "materialCoverage") return row.material_coverage; if (field === "evidence") return formatEvidence(caseIndex, row.evidence); if (field === "eventGroups") return formatGroups(caseIndex, row.independent_event_groups); if (field === "explanations") return formatLinks(caseIndex, row.explanation_links); if (field === "phenomena") return row.phenomena.join("、"); if (field === "reasonCodes") return row.reason_codes.join("、"); return ""; }
+    function displayValue(caseIndex, field, row) { if (field === "dimension") return optionLabel(DIMENSIONS, row.dimension); if (field === "finalOutcome") return optionLabel(OUTCOMES, row.outcome); if (field === "finalSurface") return optionLabel(SURFACES, row.surface); if (field === "conflictLevel") return ({ L0: "没有冲突", L1: "轻度疑点，待复核", L2: "疑点较明显，仍待复核", L3: "证据充分，存在冲突" })[row.conflict_level] || "待核对"; if (field === "materialCoverage") return ({complete:"足够判断",partial:"部分缺失",missing:"缺少关键材料"})[row.material_coverage] || "待核对"; if (field === "evidence") return formatEvidence(caseIndex, row.evidence); if (field === "eventGroups") return formatGroups(caseIndex, row.independent_event_groups); if (field === "explanations") return formatLinks(caseIndex, row.explanation_links); if (field === "phenomena") return row.phenomena.map(readableTag).join("、"); if (field === "reasonCodes") return row.reason_codes.map(readableTag).join("、"); return ""; }
+    function readableTag(value) { const labels = { core_trait_reversal: "核心性格出现相反表现", possible_reversal: "可能出现反向表现", two_independent_events: "两次独立事件可供核对", single_current_event: "仅有一次当前表现", single_clear_event: "单次明确冲突", no_opposition: "没有相反表现", growth_explains: "成长能解释变化" }; return labels[value] || (/[\u3400-\u9fff]/.test(value) ? value : "其他记录（展开原始记录核对）"); }
+    function differenceKind(caseRow) { if (!caseRow.agreement.outcome_agrees || !caseRow.agreement.surface_agrees) return "结论不同"; return AGREEMENT_FIELDS.some(([, , flag]) => !caseRow.agreement[flag]) ? "依据不同" : "全部一致"; }
 
     function updateNavigation() {
       ui.caseList.textContent = ""; ui.caseSelect.textContent = ""; let complete = 0;
-      DATA.cases.forEach((caseRow, index) => { const row = state.cases[index]; const status = caseApparentlyComplete(row) ? "已填写" : caseStarted(row) ? "进行中" : "未开始"; if (status === "已填写") complete += 1; const button = element("button", "case-button"); button.type = "button"; button.setAttribute("aria-current", index === state.activeCase ? "true" : "false"); button.title = caseRow.case_id; button.append(element("span", "case-number", String(index + 1).padStart(2, "0")), element("span", "", `案例 ${index + 1}`), element("span", "case-state", status)); button.addEventListener("click", () => switchCase(index)); ui.caseList.append(button); const option = element("option", "", `案例 ${index + 1} · ${status}`); option.value = String(index); option.selected = index === state.activeCase; ui.caseSelect.append(option); });
-      ui.progress.textContent = `${complete} / ${DATA.cases.length} 个案例已填写主要字段`;
+      const counts = { "结论不同": 0, "依据不同": 0, "全部一致": 0 };
+      DATA.cases.forEach((caseRow, index) => { const row = state.cases[index], category = differenceKind(caseRow); counts[category] += 1; const status = caseApparentlyComplete(row) ? "已填写" : caseStarted(row) ? "进行中" : "未开始"; if (status === "已填写") complete += 1; const button = element("button", "case-button"), copy = element("span", "", `第 ${index + 1} 题`); copy.append(element("span", "case-category", category)); button.type = "button"; button.setAttribute("aria-current", index === state.activeCase ? "true" : "false"); button.append(element("span", "case-number", String(index + 1).padStart(2, "0")), copy, element("span", "case-state", status)); button.addEventListener("click", () => switchCase(index)); ui.caseList.append(button); const option = element("option", "", `第 ${index + 1} 题 · ${category} · ${status}`); option.value = String(index); option.selected = index === state.activeCase; ui.caseSelect.append(option); });
+      ui.progress.textContent = `${complete} / ${DATA.cases.length} 题已填写主要内容`;
+      const summary = document.getElementById("review-summary"); summary.textContent = "";
+      Object.entries(counts).forEach(([label, count]) => summary.append(element("span", "", `${label} ${count} 题`)));
+      summary.append(element("span", "", `填写进度 ${complete} / ${DATA.cases.length}；结论相同也可能有依据差异。`));
     }
     function switchCase(index, focus = true) { if (!Number.isInteger(index) || index < 0 || index >= DATA.cases.length) return; state.activeCase = index; updateNavigation(); renderCase(); scheduleDraft(false); if (focus) document.getElementById("case-heading")?.focus(); }
 
@@ -656,16 +686,16 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function renderEvidence(caseIndex) {
       const caseRow = DATA.cases[caseIndex], caseState = state.cases[caseIndex], host = element("div");
       caseRow.documents.forEach((documentRow, documentIndex) => {
-        const panel = element("section", "panel"), head = element("header", "panel-head"), title = element("h3", "", documentRow.path);
+        const originalTitle = documentRow.lines.find(line => /^\s{0,3}#{1,6}\s+\S/.test(line.text));
+        const panel = element("section", "panel"), head = element("header", "panel-head"), title = element("h3", "", `${documentName(caseIndex, documentRow.document_id)}${originalTitle ? ` · ${originalTitle.text.replace(/^\s{0,3}#{1,6}\s+/, "")}` : ""}`);
         panel.dataset.target = String(documentRow.is_target);
         panel.dataset.selectorSource = String(documentRow.is_selector_source);
         title.id = `document-${caseIndex}-${documentIndex}`;
         panel.setAttribute("aria-labelledby", title.id);
-        head.append(
-          title,
-          element("p", "", `冻结文档 v${documentRow.version} · ${documentRow.sha256}`),
-          element("p", "", `${documentRow.phase === "target" ? "目标文档" : "基线文档"} · ${documentRow.document_role} · ${documentRow.story_scope} · ${documentRow.resolution_state}/${documentRow.publication_status} · 导入序 ${documentRow.import_order}`)
-        );
+        head.append(title, element("p", "", `保留版本 ${documentRow.version} · ${documentRow.is_target ? "这次要检查的新内容" : "用来对照新稿的已有材料"}`));
+        const documentDetails = element("details", "technical-details");
+        documentDetails.append(element("summary", "", "文档核对信息（通常不用看）"), element("p", "binding", `${documentRow.path} · v${documentRow.version} · ${documentRow.sha256}`), element("p", "binding", `${documentRow.phase} · ${documentRow.document_role} · ${documentRow.story_scope} · ${documentRow.resolution_state}/${documentRow.publication_status} · 导入序 ${documentRow.import_order}`));
+        head.append(documentDetails);
         panel.append(head);
         const lines = element("div", "document-lines");
         documentRow.lines.forEach(line => {
@@ -678,13 +708,13 @@ _HTML_TEMPLATE = r'''<!doctype html>
           row.dataset.selector = String(isSelector);
           row.append(element("span", "line-no", String(line.line_number)), element("p", "line-copy", line.text));
           const badges = element("div", "evidence-meta");
-          badges.append(element("span", "role-chip", `A：${reviewerRole(caseRow.reviewer_a, evidenceId)}`), element("span", "role-chip", `B：${reviewerRole(caseRow.reviewer_b, evidenceId)}`));
-          if (isSelector) badges.append(element("span", "role-chip", "作者 selector"));
+          badges.append(element("span", "role-chip", `A：${optionLabel(ROLES, reviewerRole(caseRow.reviewer_a, evidenceId), "未采用")}`), element("span", "role-chip", `B：${optionLabel(ROLES, reviewerRole(caseRow.reviewer_b, evidenceId), "未采用")}`));
+          if (isSelector) badges.append(element("span", "role-chip", "作者指定的原设定"));
           row.append(badges);
           const controls = element("div", "evidence-controls"), role = element("select");
           role.id = `evidence-${caseIndex}-${documentIndex}-${line.line_number}`;
           ROLES.forEach(([value, label]) => { const option = element("option", "", label); option.value = value; option.selected = value === (caseState.evidenceRoles[evidenceId] || ""); option.disabled = !roleAllowed(caseIndex, evidenceId, value); role.append(option); });
-          role.setAttribute("aria-label", `${documentRow.path} 第 ${line.line_number} 行最终必要证据角色`);
+          role.setAttribute("aria-label", `${documentName(caseIndex, documentRow.document_id)} 第 ${line.line_number} 行最终必要证据角色`);
           role.disabled = state.locked;
           role.addEventListener("keydown", event => {
             const key = event.key.toUpperCase();
@@ -720,7 +750,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
             renderCase();
             scheduleDraft();
           });
-          forbiddenLabel.append(forbidden, element("span", "", "标为禁止证据"));
+          forbiddenLabel.append(forbidden, element("span", "", "此段不能作依据"));
           controls.append(role, forbiddenLabel);
           row.append(controls);
           lines.append(row);
@@ -733,9 +763,12 @@ _HTML_TEMPLATE = r'''<!doctype html>
 
     function renderComparison(caseIndex) {
       const caseRow = DATA.cases[caseIndex], panel = element("section", "panel comparison");
-      const actions = element("div", "comparison-actions"), left = element("button", "", `以 A · ${DATA.reviewers[0].reviewer_id} 为起点`), right = element("button", "", `以 B · ${DATA.reviewers[1].reviewer_id} 为起点`), agreed = element("button", "", "填入全部一致项"); [left, right, agreed].forEach(button => { button.type = "button"; button.disabled = state.locked; }); left.addEventListener("click", () => copyReviewer(caseIndex, "A")); right.addEventListener("click", () => copyReviewer(caseIndex, "B")); agreed.addEventListener("click", () => adoptAgreed(caseIndex)); actions.append(left, right, agreed); panel.append(actions);
+      panel.append(element("h3", "", "对照两位标注者的判断"), element("p", "helper", "先看原文，再选一份判断作为起点或采纳一致项；可以继续修改，不会自动定案。"));
+      const actions = element("div", "comparison-actions"), left = element("button", "", "以 A 的判断为起点"), right = element("button", "", "以 B 的判断为起点"), agreed = element("button", "", "填入全部一致项"); [left, right, agreed].forEach(button => { button.type = "button"; button.disabled = state.locked; }); left.addEventListener("click", () => copyReviewer(caseIndex, "A")); right.addEventListener("click", () => copyReviewer(caseIndex, "B")); agreed.addEventListener("click", () => adoptAgreed(caseIndex)); actions.append(left, right, agreed); panel.append(actions);
       AGREEMENT_FIELDS.forEach(([field, label, flag]) => { const agrees = caseRow.agreement[flag], row = element("div", `compare-row ${agrees ? "agrees" : "disagrees"}`), labelCell = element("div", "compare-label", label); labelCell.append(element("small", "", agrees ? "一致" : "有分歧")); if (agrees) { const adopt = element("button", "adopt-one", "采纳一致值"); adopt.type = "button"; adopt.disabled = state.locked; adopt.addEventListener("click", () => adoptAgreed(caseIndex, field)); labelCell.append(adopt); } const a = element("div", "compare-value"), b = element("div", "compare-value"); a.append(element("strong", "", "标注者 A"), document.createTextNode(displayValue(caseIndex, field, caseRow.reviewer_a))); b.append(element("strong", "", "标注者 B"), document.createTextNode(displayValue(caseIndex, field, caseRow.reviewer_b))); row.append(labelCell, a, b); panel.append(row); });
-      const notes = element("div", "review-notes"); [["A", caseRow.reviewer_a], ["B", caseRow.reviewer_b]].forEach(([side, source]) => { const note = element("article", "review-note"); note.append(element("h4", "", `标注者 ${side} 的人工说明`), element("p", "", source.review_note)); notes.append(note); }); panel.append(notes); return panel;
+      const notes = element("div", "review-notes"); [["A", caseRow.reviewer_a], ["B", caseRow.reviewer_b]].forEach(([side, source]) => { const note = element("article", "review-note"); note.append(element("h4", "", `标注者 ${side} 的补充说明`), element("p", "", source.review_note || "未另写说明")); notes.append(note); }); panel.append(notes);
+      const raw = element("details", "technical-details"); raw.append(element("summary", "", "查看两份原始记录（排错时使用）"), element("p", "binding", JSON.stringify({ A: caseRow.reviewer_a, B: caseRow.reviewer_b }, null, 2))); panel.append(raw);
+      return panel;
     }
 
     function renderDirectionalStructures(caseIndex, host) {
@@ -746,7 +779,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
         const wrap = element("div", "structure-row"), info = meta.get(id);
         wrap.append(element("p", "evidence-excerpt", info.text));
         const options = [["", "请选择属于哪件事"], ...currents.map((_, i) => [`event-${i + 1}`, `第 ${i + 1} 件事`])];
-        Object.values(row.eventGroups).forEach(value => { if (value && !options.some(([id]) => id === value)) options.push([value, `已记录的事情：${value}`]); });
+        [...new Set(Object.values(row.eventGroups).filter(Boolean))].forEach((value, i) => { if (!options.some(([id]) => id === value)) options.push([value, `已记录的第 ${i + 1} 件事`]); });
         const input = makeSelect(options, row.eventGroups[id] || "");
         input.disabled = state.locked;
         input.addEventListener("change", () => { row.eventGroups[id] = input.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
@@ -802,8 +835,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
 
     function renderAdjudication(caseIndex) {
       const row = state.cases[caseIndex], caseRow = DATA.cases[caseIndex], panel = element("section", "panel adjudication");
-      panel.append(element("h3", "", "最终人工裁决"), element("p", "", "快速采纳只填入字段，不会自动定案；请检查证据并完成说明。"));
-      const locked = element("div", "locked-banner", "此工作副本已锁定。继续修订会生成新文件，不会改变已下载 JSON。");
+      panel.append(element("h3", "", "确认这题的最终结果"), element("p", "", "以 A 或 B 为起点后，原有判断理由和选择会保留，不用重抄；仍须核对原文、处理分歧并简述取舍。"));
+      const locked = element("div", "locked-banner", "此份结果已下载。继续修订会生成新文件，不会改变已下载的文件。");
       locked.hidden = !state.locked;
       panel.append(locked);
       const errors = element("div", "case-errors");
@@ -815,23 +848,23 @@ _HTML_TEMPLATE = r'''<!doctype html>
       fields.disabled = state.locked;
 
       const labels = element("section", "form-section");
-      labels.append(element("h4", "", "最终标签"));
-      const dimensionField = element("div", "field"), dimensionLabel = element("div", "field-label", "OOC 维度 · 已冻结"), dimension = element("div", "derived-result", `${DIMENSIONS.find(([value]) => value === caseRow.dimension)?.[1] || caseRow.dimension}（${caseRow.dimension}）`);
+      labels.append(element("h4", "", "最终判断"));
+      const dimensionField = element("div", "field"), dimensionLabel = element("div", "field-label", "这题检查的特点"), dimension = element("div", "derived-result", optionLabel(DIMENSIONS, caseRow.dimension));
       dimension.id = `dimension-${caseIndex}`;
       dimension.tabIndex = -1;
-      dimensionField.append(dimensionLabel, dimension, element("p", "helper", "维度由作者冻结的 trait_type 映射，仲裁者不能改选。"));
+      dimensionField.append(dimensionLabel, dimension, element("p", "helper", "由本题材料确定，这里不用重新选择。"));
       labels.append(dimensionField);
-      const labelGrid = element("div", "form-grid"), outcome = makeSelect([["","请选择结果"], ...OUTCOMES], row.finalOutcome), surface = makeSelect([["","请选择展示面"], ...SURFACES], row.finalSurface);
+      const labelGrid = element("div", "form-grid"), outcome = makeSelect([["","请选择结论"], ...OUTCOMES], row.finalOutcome), surface = makeSelect([["","请选择呈现方式"], ...SURFACES], row.finalSurface);
       outcome.addEventListener("change", () => { row.finalOutcome = outcome.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
       surface.addEventListener("change", () => { row.finalSurface = surface.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
-      labelGrid.append(formField("最终 outcome *", outcome, "必须与 L0–L3 对应。", `outcome-${caseIndex}`), formField("最终 surface *", surface, "必须与 outcome 对应。", `surface-${caseIndex}`));
+      labelGrid.append(formField("最终结论 *", outcome, "与下方确定程度保持一致。", `outcome-${caseIndex}`), formField("报告中如何展示 *", surface, "有充分证据才列正式问题，尚未确定则列待复核线索。", `surface-${caseIndex}`));
       labels.append(labelGrid);
-      const level = makeSelect([["","请选择等级"],["L0","L0 · 无问题"],["L1","L1 · 轻度待复核"],["L2","L2 · 明确待复核"],["L3","L3 · 正式冲突"]], row.conflictLevel);
+      const level = makeSelect([["","请选择确定程度"],["L0","没有冲突"],["L1","轻度疑点，待复核"],["L2","疑点较明显，仍待复核"],["L3","证据充分，存在冲突"]], row.conflictLevel);
       level.addEventListener("change", () => { row.conflictLevel = level.value; clearFormalConfirmation(caseIndex); const confirmation = document.getElementById(`formal-confirmation-${caseIndex}`); if (confirmation) confirmation.hidden = level.value !== "L3"; scheduleDraft(); });
       const coverage = makeSelect([["complete","完整"],["partial","部分缺失"],["missing","关键材料缺失"]], row.materialCoverage);
       coverage.addEventListener("change", () => { row.materialCoverage = coverage.value; clearFormalConfirmation(caseIndex); scheduleDraft(); });
       const secondGrid = element("div", "form-grid");
-      secondGrid.append(formField("冲突等级 *", level, SINGLE_CLEAR_EVENT ? "一次明确、同范围且无适用解释的反向事件也可为 L3；仍需原设定、表现证据与人工核对，歧义只能保留为线索。" : "L3 需要 B、两条 C 和两个独立事件组。", `level-${caseIndex}`), formField("材料覆盖 *", coverage, "不完整时只能为 L1 或 L2。", `coverage-${caseIndex}`));
+      secondGrid.append(formField("判断的确定程度 *", level, SINGLE_CLEAR_EVENT ? "一次明确、同范围且无适用解释的反向事件也可判冲突；仍需核对原设定与表现证据，有歧义则保留线索。" : "正式冲突需要原设定和至少两次独立事件的表现证据。", `level-${caseIndex}`), formField("材料是否足够 *", coverage, "材料不完整时只能保留为待复核。", `coverage-${caseIndex}`));
       labels.append(secondGrid);
       fields.append(labels);
 
@@ -857,7 +890,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
       fields.append(structures);
 
       const codes = element("section", "form-section");
-      codes.append(element("h4", "", "标签、模式与说明"));
+      codes.append(element("h4", "", "判断理由与确认方式"));
       const phenomena = document.createElement("textarea");
       phenomena.value = row.phenomena;
       phenomena.maxLength = 6500;
@@ -866,30 +899,32 @@ _HTML_TEMPLATE = r'''<!doctype html>
       reasons.value = row.reasonCodes;
       reasons.maxLength = 6500;
       reasons.addEventListener("input", () => { row.reasonCodes = reasons.value; scheduleDraft(); });
-      codes.append(formField("现象标签 *", phenomena, "每行或逗号分隔；1–64 个，每个不超过 100 字符。", `phenomena-${caseIndex}`), formField("原因码 *", reasons, "使用中性、可复核短语。", `reasons-${caseIndex}`));
+      const tags = element("details", "technical-details");
+      tags.append(element("summary", "", "调整观察与理由（从 A／B 采用后通常不用重填）"), formField("观察到的现象 *", phenomena, "保留所采纳的内容即可；如有调整，每行写一个短语。", `phenomena-${caseIndex}`), formField("判断理由 *", reasons, "保留所采纳的内容即可，或改为能从原文核对的短语。", `reasons-${caseIndex}`));
+      codes.append(tags);
       const mode = radioGroup(`mode-${caseIndex}`, [
         ["reviewer_consensus","两位标注者共识","本案例最终结论由 A、B 共同确认。",false],
-        ["third_human","第三人裁决",DATA.third_human_id ? `第三人：${DATA.third_human_id}；第三人需在下方主动确认身份与系统预测盲法。` : "生成页面时未绑定第三人。",!DATA.third_human_id]
+        ["third_human","第三人复核",DATA.third_human_id ? "由未参与前两份独立标注的真人复核，且复核时未看模型答案。" : "本页未安排第三位复核者。",!DATA.third_human_id]
       ], row.resolutionMode);
       mode.id = `mode-${caseIndex}`;
       mode.addEventListener("change", event => { if (event.target instanceof HTMLInputElement) { row.resolutionMode = event.target.value; scheduleDraft(); } });
       const modeField = element("div", "field");
-      modeField.append(element("div", "field-label", "裁决模式 *"), mode);
+      modeField.append(element("div", "field-label", "由谁确认这一题 *"), mode);
       codes.append(modeField);
       const note = document.createElement("textarea");
       note.value = row.resolutionNote;
       note.maxLength = 8000;
       note.addEventListener("input", () => { row.resolutionNote = note.value; updateNavigation(); scheduleDraft(); });
-      codes.append(formField("裁决说明 *", note, "说明采用或否决了哪些证据、如何处理分歧；第三人裁决还要说明第三人复核流程；1–8000 字符。", `note-${caseIndex}`));
+      codes.append(formField("简述这题如何定下结论 *", note, "可简写：采用谁的判断，以及为什么；如有证据取舍，请说明。第三人复核时，也简述自己核对了哪些材料。", `note-${caseIndex}`));
       fields.append(codes);
 
       const confirmations = element("section", "confirmation-panel");
       confirmations.id = "final-confirmations";
       confirmations.tabIndex = -1;
-      confirmations.append(element("h4", "", "锁定前最终确认"), element("p", "helper", "页面不会默认勾选。按当前协议，即使部分案例由第三人裁决，A、B 仍须确认整份最终仲裁稿。"));
+      confirmations.append(element("h4", "", "完成前最后确认"), element("p", "helper", "全部题目核对完后再确认；包括两人原先一致的题目。即使由第三人复核，A、B 仍须查看并确认整份最终结果。请由对应本人确认，不要代勾。"));
       [
-        ["reviewerA", `标注者 A（${DATA.reviewers[0].reviewer_id}）已查看并确认最终仲裁稿。`],
-        ["reviewerB", `标注者 B（${DATA.reviewers[1].reviewer_id}）已查看并确认最终仲裁稿。`]
+        ["reviewerA", "标注者 A 已查看并确认整份最终结果。"],
+        ["reviewerB", "标注者 B 已查看并确认整份最终结果。"]
       ].forEach(([key, copy]) => {
         const label = element("label", "target-check"), checkbox = document.createElement("input");
         checkbox.type = "checkbox";
@@ -900,8 +935,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
       });
       if (DATA.third_human_id) {
         [
-          ["thirdHuman", `第三人（${DATA.third_human_id}）确认由本人完成人工裁决。`],
-          ["thirdHumanBlind", `第三人（${DATA.third_human_id}）确认裁决期间未查看系统／模型预测。`]
+          ["thirdHuman", "第三位复核者确认：这份人工复核由本人完成。"],
+          ["thirdHumanBlind", "第三位复核者确认：复核期间未查看系统或模型答案。"]
         ].forEach(([key, copy]) => {
           const label = element("label", "target-check"), checkbox = document.createElement("input");
           checkbox.type = "checkbox";
@@ -919,30 +954,31 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function renderCase() {
       const caseIndex = state.activeCase, caseRow = DATA.cases[caseIndex];
       ui.work.textContent = "";
-      const intro = element("header", "case-intro"), heading = element("h2", "", `案例 ${caseIndex + 1} · 双人仲裁`);
+      const intro = element("header", "case-intro"), heading = element("h2", "", `第 ${caseIndex + 1} 题 · ${differenceKind(caseRow)}`);
       heading.id = "case-heading";
       heading.tabIndex = -1;
       const diffCount = AGREEMENT_FIELDS.filter(([, , flag]) => !caseRow.agreement[flag]).length;
-      intro.append(heading, element("p", "", `案例 ID：${caseRow.case_id}`), element("p", "", `轴快照：${caseRow.axis.axis_id} · v${caseRow.axis.version}`), element("p", "", `${diffCount} / ${AGREEMENT_FIELDS.length} 个协议比较字段存在分歧`));
+      intro.append(heading, element("p", "", differenceKind(caseRow) === "结论不同" ? "两人对是否存在问题的判断不同，请先结合原文确认结论，再核对采用的依据。" : differenceKind(caseRow) === "依据不同" ? "两人的最终结论相同，但采用的依据或判断理由不同，仍需复核。" : "两人的结论和本页比较的依据均一致，仍请核对并确认最终结果。"));
+      const technical = element("details", "technical-details");
+      technical.append(element("summary", "", "本题核对信息与快捷键（通常不用看）"), element("p", "binding", `案例 ID：${caseRow.case_id}\n轴快照：${caseRow.axis.axis_id} · v${caseRow.axis.version}\n${diffCount} / ${AGREEMENT_FIELDS.length} 个比较字段存在分歧\nselector：${JSON.stringify(caseRow.candidate_selector)}\n轴向对齐：${caseRow.author_axis?.axis_alignment || "未额外提供"}`), element("p", "", "原文用途可按 B（原设定）、C（新稿）、G（成长）、X（特殊状态）、P（可能线索）选择；Alt + ↑/↓ 切题，Ctrl + S 保存进度。"));
       const context = element("section", "target-context");
-      context.append(element("h3", "", "本案例的作者冻结目标"));
+      context.append(element("h3", "", "这题要核对什么？"));
       const contextGrid = element("dl", "context-grid"), addContext = (label, value, wide = false) => { const item = element("div", `context-item${wide ? " wide" : ""}`); item.append(element("dt", "", label), element("dd", "", value)); contextGrid.append(item); };
       const selectorDocument = caseRow.documents.find(row => row.document_id === caseRow.candidate_selector.source_document_id);
       addContext("目标角色", caseRow.candidate_selector.character_key);
-      addContext("锁定维度", `${caseRow.candidate_selector.trait_type} → ${caseRow.dimension}`);
-      addContext("基线 selector", `${selectorDocument?.path || caseRow.candidate_selector.source_document_id} · 第 ${caseRow.candidate_selector.source_line_start}–${caseRow.candidate_selector.source_line_end} 行`);
-      addContext("selector 属性", `${caseRow.candidate_selector.origin} / ${caseRow.candidate_selector.polarity} / ${caseRow.candidate_selector.stability}`);
+      addContext("检查的特点", optionLabel(DIMENSIONS, caseRow.dimension));
+      addContext("原设定位置", `${documentName(caseIndex, caseRow.candidate_selector.source_document_id)} · 第 ${caseRow.candidate_selector.source_line_start}–${caseRow.candidate_selector.source_line_end} 行`);
+      addContext("原设定原文", selectorDocument ? selectorDocument.lines.filter(line => caseRow.candidate_selector.source_line_start <= line.line_number && line.line_number <= caseRow.candidate_selector.source_line_end).map(line => line.text).join("\n") : "原文位置待核对", true);
       if (caseRow.author_axis) {
-        addContext("作者语义轴", caseRow.author_axis.display_name, true);
+        addContext("对照的特点", caseRow.author_axis.display_name, true);
         addContext("定义", caseRow.author_axis.definition, true);
-        addContext("正向命题", caseRow.author_axis.positive_proposition, true);
+        addContext("这项特点的含义", caseRow.author_axis.positive_proposition, true);
         addContext("适用范围", caseRow.author_axis.applicability_scope, true);
-        addContext("轴向对齐", caseRow.author_axis.axis_alignment);
       } else {
-        addContext("作者语义轴", "未额外提供；按冻结 selector 的稳定特征判断。", true);
+        addContext("比较说明", "没有额外说明，请按原设定中这项特点判断。", true);
       }
       context.append(contextGrid);
-      intro.append(context, element("p", "shortcut", "证据角色可直接按 B、C、G、X、P；Alt + ↑/↓ 切换案例，Ctrl + S 保存草稿。"));
+      intro.append(context, element("p", "shortcut", "连续阅读材料后，再与两人的判断对照。原先一致的题目也需最终核对；随时可以保存进度。"), technical);
       ui.work.append(intro);
       const grid = element("div", "case-grid"), left = element("div"), right = element("div");
       left.append(renderEvidence(caseIndex));
@@ -973,12 +1009,12 @@ _HTML_TEMPLATE = r'''<!doctype html>
     function validateCase(caseIndex) {
       const row = buildCase(caseIndex), errors = [], add = (field, message) => errors.push({ caseIndex, field, message });
       if (row.dimension !== DATA.cases[caseIndex].dimension) add(`dimension-${caseIndex}`, "维度与作者冻结目标不一致。 ");
-      if (!LEVELS[row.conflict_level]) add(`level-${caseIndex}`, "请选择 L0–L3。 ");
-      if (!["conflict","no_issue","indeterminate"].includes(row.final_outcome)) add(`outcome-${caseIndex}`, "请选择最终 outcome。 ");
-      if (!["formal_issue","none","review_clue"].includes(row.final_surface)) add(`surface-${caseIndex}`, "请选择最终 surface。 ");
-      if (LEVELS[row.conflict_level] && (LEVELS[row.conflict_level].outcome !== row.final_outcome || LEVELS[row.conflict_level].surface !== row.final_surface)) add(`level-${caseIndex}`, "outcome、surface 与冲突等级不符合协议对应关系。 ");
+      if (!LEVELS[row.conflict_level]) add(`level-${caseIndex}`, "请选择判断的确定程度。 ");
+      if (!["conflict","no_issue","indeterminate"].includes(row.final_outcome)) add(`outcome-${caseIndex}`, "请选择最终结论。 ");
+      if (!["formal_issue","none","review_clue"].includes(row.final_surface)) add(`surface-${caseIndex}`, "请选择报告中如何展示。 ");
+      if (LEVELS[row.conflict_level] && (LEVELS[row.conflict_level].outcome !== row.final_outcome || LEVELS[row.conflict_level].surface !== row.final_surface)) add(`level-${caseIndex}`, "最终结论、呈现方式与确定程度不一致，请核对这三项选择。 ");
       if (!["complete","partial","missing"].includes(row.material_coverage)) add(`coverage-${caseIndex}`, "请选择材料覆盖。 ");
-      if (row.material_coverage !== "complete" && row.final_outcome !== "indeterminate") add(`coverage-${caseIndex}`, "材料不完整时 outcome 必须为 indeterminate。 ");
+      if (row.material_coverage !== "complete" && row.final_outcome !== "indeterminate") add(`coverage-${caseIndex}`, "材料不完整时，只能选择尚不能确定、保留待复核。 ");
       const roles = role => row.required_evidence.filter(item => item.role === role).map(item => item.evidence_id), b = roles("B"), c = roles("C"), g = roles("G"), x = roles("X"), p = roles("P");
       row.required_evidence.forEach(item => { if (!roleAllowed(caseIndex, item.evidence_id, item.role)) add("evidence-final", "证据来源不符合冻结约束：B 仅限 selector，C 仅限目标文档，G 仅限基线文档。 "); });
       if (row.conflict_level === "L3") {
@@ -1016,8 +1052,8 @@ _HTML_TEMPLATE = r'''<!doctype html>
           link.applicable_current_ids.forEach(id => { const key = JSON.stringify([link.support_evidence_id, id]); if (relationPairs.has(key)) add("structures", "同一材料对同一表现只能记录一种关系。 "); relationPairs.add(key); });
         } else if ((role === "G" || role === "X") && link.causal_relation === "ambiguous") add("structures", "含糊支持必须标为 P。 ");
       });
-      if (!row.phenomena.length || row.phenomena.length > 64 || row.phenomena.some(value => value.length > 100)) add(`phenomena-${caseIndex}`, "现象标签需为 1–64 个非空值，每个不超过 100 字符。 ");
-      if (!row.reason_codes.length || row.reason_codes.length > 64 || row.reason_codes.some(value => value.length > 100)) add(`reasons-${caseIndex}`, "原因码需为 1–64 个非空值，每个不超过 100 字符。 ");
+      if (!row.phenomena.length || row.phenomena.length > 64 || row.phenomena.some(value => value.length > 100)) add(`phenomena-${caseIndex}`, "请保留或填写观察到的现象；可先采用 A／B 的判断，每个短语不超过 100 字。 ");
+      if (!row.reason_codes.length || row.reason_codes.length > 64 || row.reason_codes.some(value => value.length > 100)) add(`reasons-${caseIndex}`, "请保留或填写判断理由；可先采用 A／B 的判断，每个短语不超过 100 字。 ");
       if (!["reviewer_consensus","third_human"].includes(row.resolution_mode)) add(`mode-${caseIndex}`, "请选择裁决模式。 ");
       if (row.resolution_mode === "third_human" && !DATA.third_human_id) add(`mode-${caseIndex}`, "第三人模式需要生成时冻结第三人 ID。 ");
       if (row.resolution_mode === "third_human" && (!state.confirmations.thirdHuman || !state.confirmations.thirdHumanBlind)) add("final-confirmations", "第三人裁决需要第三人主动确认本人裁决与系统预测盲法。 ");
@@ -1025,7 +1061,12 @@ _HTML_TEMPLATE = r'''<!doctype html>
       return errors;
     }
     function validateAll() { const errors = DATA.cases.flatMap((_, index) => validateCase(index)); if (!state.confirmations.reviewerA) errors.push({ caseIndex: state.activeCase, field: "final-confirmations", message: "请由标注者 A 主动确认最终仲裁稿。 " }); if (!state.confirmations.reviewerB) errors.push({ caseIndex: state.activeCase, field: "final-confirmations", message: "请由标注者 B 主动确认最终仲裁稿。 " }); return errors; }
-    function showErrors(errors) { ui.errorList.textContent = ""; errors.forEach(error => { const item = element("li"), button = element("button", "", `案例 ${error.caseIndex + 1}：${error.message.trim()}`); button.type = "button"; button.addEventListener("click", () => { switchCase(error.caseIndex, false); window.setTimeout(() => document.getElementById(error.field)?.focus(), 0); }); item.append(button); ui.errorList.append(item); }); ui.errorSummary.hidden = !errors.length; const local = errors.filter(error => error.caseIndex === state.activeCase), host = document.getElementById("case-errors"); if (host) { host.textContent = ""; host.hidden = !local.length; if (local.length) { host.append(element("strong", "", "本案例还需修正")); const list = element("ul"); local.forEach(error => list.append(element("li", "", error.message.trim()))); host.append(list); } } if (errors.length) ui.errorSummary.focus(); }
+    function focusField(fieldId) {
+      const control = document.getElementById(fieldId);
+      for (let parent = control?.parentElement; parent; parent = parent.parentElement) if (parent.tagName === "DETAILS") parent.open = true;
+      control?.focus();
+    }
+    function showErrors(errors) { ui.errorList.textContent = ""; errors.forEach(error => { const item = element("li"), button = element("button", "", `第 ${error.caseIndex + 1} 题：${error.message.trim()}`); button.type = "button"; button.addEventListener("click", () => { switchCase(error.caseIndex, false); window.setTimeout(() => focusField(error.field), 0); }); item.append(button); ui.errorList.append(item); }); ui.errorSummary.hidden = !errors.length; const local = errors.filter(error => error.caseIndex === state.activeCase), host = document.getElementById("case-errors"); if (host) { host.textContent = ""; host.hidden = !local.length; if (local.length) { host.append(element("strong", "", "这题还需要确认")); const list = element("ul"); local.forEach(error => list.append(element("li", "", error.message.trim()))); host.append(list); } } if (errors.length) ui.errorSummary.focus(); }
 
     function saveDraft(silent = false) { if (state.locked) return; try { localStorage.setItem(draftKey, JSON.stringify({ draft_version: 1, public_input_sha256: DATA.public_input_sha256, author_setup_sha256: DATA.author_setup_sha256, execution_freeze_sha256: DATA.execution_freeze_sha256, manual_version: DATA.manual_version, reviewer_ids: DATA.reviewers.map(row => row.reviewer_id), annotation_sha256: DATA.reviewers.map(row => row.annotation_sha256), third_human_id: DATA.third_human_id, active_case: state.activeCase, confirmations: state.confirmations, cases: state.cases })); if (!silent) announce("本地草稿已保存。数据没有离开此浏览器。 "); } catch (_) { if (!silent) announce("浏览器拒绝本地存储。请尽快下载锁定 JSON。 "); } }
     function invalidateFinalConfirmations() { if (!Object.values(state.confirmations).some(Boolean)) return; state.confirmations = blankConfirmations(); document.querySelectorAll('#final-confirmations input[type="checkbox"]').forEach(input => { input.checked = false; }); announce("仲裁内容已修改，最终确认已撤回；锁定前请 A、B 重新确认。 "); }
@@ -1077,9 +1118,30 @@ _HTML_TEMPLATE = r'''<!doctype html>
       if (Object.entries(next.evidenceRoles).some(([id, role]) => !roleAllowed(caseIndex, id, role))) throw new Error("导入文件的 B/C/G 来源不符合作者冻结目标。 ");
       return next;
     }
-    function validateImported(bundle) { if (!exactKeys(bundle, BUNDLE_KEYS)) throw new Error("导入文件不是当前 AdjudicationBundle 结构。 "); const reviewerIds = DATA.reviewers.map(row => row.reviewer_id), digests = DATA.reviewers.map(row => row.annotation_sha256); if (bundle.schema_version !== DATA.adjudication_schema_version || bundle.dataset_id !== DATA.dataset_id || bundle.public_input_sha256 !== DATA.public_input_sha256 || !deepEqual(bundle.reviewer_ids, reviewerIds) || !deepEqual(bundle.annotation_sha256, digests) || !deepEqual(bundle.consensus_confirmed_by, reviewerIds) || !Array.isArray(bundle.cases)) throw new Error("导入文件与当前公开数据或两份冻结提交不一致。 "); const byCase = new Map(); bundle.cases.forEach(row => { if (!exactKeys(row, CASE_KEYS) || byCase.has(row.case_id)) throw new Error("导入文件含重复案例或未知字段。 "); if (!Array.isArray(row.required_evidence) || !row.required_evidence.every(item => exactKeys(item, ["evidence_id","role"]))) throw new Error("导入文件的必要证据结构无效。 "); if (!Array.isArray(row.forbidden_evidence_ids) || !Array.isArray(row.independent_event_groups) || !row.independent_event_groups.every(item => exactKeys(item, ["event_group_id","evidence_ids"])) || !Array.isArray(row.explanation_links) || !row.explanation_links.every(item => exactKeys(item, ["support_evidence_id","applicable_current_ids","causal_relation","temporal_relation"])) || !Array.isArray(row.phenomena) || !Array.isArray(row.reason_codes)) throw new Error("导入文件的案例结构无效。 "); byCase.set(row.case_id, row); }); if (byCase.size !== DATA.cases.length || DATA.cases.some(row => !byCase.has(row.case_id))) throw new Error("导入文件没有完整覆盖公开案例。 "); const next = DATA.cases.map((caseRow, index) => stateFromLocked(index, byCase.get(caseRow.case_id))), previous = state.cases, previousConfirmations = state.confirmations; state.cases = next; const hasThird = bundle.cases.some(row => row.resolution_mode === "third_human"); state.confirmations = { reviewerA: true, reviewerB: true, thirdHuman: hasThird, thirdHumanBlind: hasThird }; const errors = validateAll(); if (errors.length) { state.cases = previous; state.confirmations = previousConfirmations; throw new Error(`导入文件未通过协议校验：${errors[0].message.trim()}`); } const rebuilt = new Map(DATA.cases.map((caseRow, index) => [caseRow.case_id, buildCase(index)])); if (bundle.cases.some(row => !deepEqual(row, rebuilt.get(row.case_id)))) { state.cases = previous; state.confirmations = previousConfirmations; throw new Error("导入文件不能由本页无损还原；可能含重复值或非法类型。 "); } return next; }
+    function validateImported(bundle) {
+      if (!exactKeys(bundle, BUNDLE_KEYS)) throw new Error("这不是本页生成的完整复核结果文件。");
+      const reviewerIds = DATA.reviewers.map(row => row.reviewer_id), digests = DATA.reviewers.map(row => row.annotation_sha256);
+      if (bundle.schema_version !== DATA.adjudication_schema_version || bundle.dataset_id !== DATA.dataset_id || bundle.public_input_sha256 !== DATA.public_input_sha256 || !deepEqual(bundle.reviewer_ids, reviewerIds) || !deepEqual(bundle.annotation_sha256, digests) || !deepEqual(bundle.consensus_confirmed_by, reviewerIds) || !Array.isArray(bundle.cases)) throw new Error("该结果文件不属于本页这批材料或两份原始提交。");
+      const byCase = new Map();
+      bundle.cases.forEach(row => {
+        if (!exactKeys(row, CASE_KEYS) || byCase.has(row.case_id)) throw new Error("结果文件含重复题目或未知字段。");
+        if (!Array.isArray(row.required_evidence) || !row.required_evidence.every(item => exactKeys(item, ["evidence_id","role"]))) throw new Error("结果文件的原文依据格式不完整。");
+        if (!Array.isArray(row.forbidden_evidence_ids) || !Array.isArray(row.independent_event_groups) || !row.independent_event_groups.every(item => exactKeys(item, ["event_group_id","evidence_ids"])) || !Array.isArray(row.explanation_links) || !row.explanation_links.every(item => exactKeys(item, LINK_KEYS)) || !Array.isArray(row.phenomena) || !Array.isArray(row.reason_codes)) throw new Error("结果文件的事件或证据关系格式不完整。");
+        byCase.set(row.case_id, row);
+      });
+      if (byCase.size !== DATA.cases.length || DATA.cases.some(row => !byCase.has(row.case_id))) throw new Error("结果文件未包含这批材料的全部题目。");
+      const next = DATA.cases.map((caseRow, index) => stateFromLocked(index, byCase.get(caseRow.case_id))), previous = state.cases, previousConfirmations = state.confirmations;
+      state.cases = next;
+      const hasThird = bundle.cases.some(row => row.resolution_mode === "third_human");
+      state.confirmations = { reviewerA: true, reviewerB: true, thirdHuman: hasThird, thirdHumanBlind: hasThird };
+      const errors = validateAll();
+      if (errors.length) { state.cases = previous; state.confirmations = previousConfirmations; throw new Error(`结果文件未通过核对：${errors[0].message.trim()}`); }
+      const rebuilt = new Map(DATA.cases.map((caseRow, index) => [caseRow.case_id, buildCase(index)]));
+      if (bundle.cases.some(row => !deepEqual(row, rebuilt.get(row.case_id)))) { state.cases = previous; state.confirmations = previousConfirmations; throw new Error("无法完整还原该结果文件；可能含重复值或不支持的内容。"); }
+      return next;
+    }
 
-    function downloadLocked() { const errors = validateAll(); if (errors.length) { showErrors(errors); announce(`还有 ${errors.length} 项需要修正。`); return; } showErrors([]); const payload = JSON.stringify(buildBundle(), null, 2) + "\n", blob = new Blob([payload], { type: "application/json;charset=utf-8" }), url = URL.createObjectURL(blob), anchor = document.createElement("a"); anchor.href = url; anchor.download = `ooc-adjudication-${DATA.public_input_sha256.slice(0,12)}.locked.json`; document.body.append(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); state.locked = true; try { localStorage.removeItem(draftKey); } catch (_) {} renderCase(); announce("锁定仲裁 JSON 已下载；当前工作副本已锁定。 "); }
+    function downloadLocked() { const errors = validateAll(); if (errors.length) { showErrors(errors); announce(`还有 ${errors.length} 项需要确认，可先保存进度。`); return; } showErrors([]); const payload = JSON.stringify(buildBundle(), null, 2) + "\n", blob = new Blob([payload], { type: "application/json;charset=utf-8" }), url = URL.createObjectURL(blob), anchor = document.createElement("a"); anchor.href = url; anchor.download = `ooc-adjudication-${DATA.public_input_sha256.slice(0,12)}.locked.json`; document.body.append(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); state.locked = true; try { localStorage.removeItem(draftKey); } catch (_) {} renderCase(); announce("复核结果已下载，请把文件发回负责人。页面不会自动提交。"); }
 
     document.getElementById("binding-summary").textContent = `A ${DATA.reviewers[0].reviewer_id} · ${DATA.reviewers[0].annotation_sha256}　B ${DATA.reviewers[1].reviewer_id} · ${DATA.reviewers[1].annotation_sha256}`;
     document.getElementById("freeze-summary").textContent = `public ${DATA.public_input_sha256} · author setup ${DATA.author_setup_sha256} · execution freeze ${DATA.execution_freeze_sha256} · manual ${DATA.manual_version}`;
@@ -1089,7 +1151,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
     ui.download.addEventListener("click", downloadLocked);
     ui.unlock.addEventListener("click", () => { state.locked = false; renderCase(); saveDraft(true); announce("已进入修订状态；再次锁定会下载新文件。 "); });
     ui.caseSelect.addEventListener("change", () => switchCase(Number(ui.caseSelect.value)));
-    ui.importFile.addEventListener("change", async () => { const file = ui.importFile.files && ui.importFile.files[0]; ui.importFile.value = ""; if (!file) return; if (file.size > 8 * 1024 * 1024) { announce("导入文件超过 8 MiB，未载入。 "); return; } try { const bundle = JSON.parse(await file.text()); state.cases = validateImported(bundle); state.activeCase = 0; state.locked = true; showErrors([]); updateNavigation(); renderCase(); announce("已导入并锁定与当前双份提交绑定的仲裁 JSON。 "); } catch (error) { announce(error instanceof Error ? error.message : "导入文件无效。 "); } });
+    ui.importFile.addEventListener("change", async () => { const file = ui.importFile.files && ui.importFile.files[0]; ui.importFile.value = ""; if (!file) return; if (file.size > 8 * 1024 * 1024) { announce("结果文件过大，未载入。"); return; } try { const bundle = JSON.parse(await file.text()); state.cases = validateImported(bundle); state.activeCase = 0; state.locked = true; showErrors([]); updateNavigation(); renderCase(); announce("已载入这批材料的已完成复核结果；点击继续修订后可修改。"); } catch (error) { announce(error instanceof Error ? error.message : "结果文件无效。"); } });
     document.addEventListener("keydown", event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); saveDraft(false); } if (event.altKey && event.key === "ArrowDown") { event.preventDefault(); switchCase(Math.min(DATA.cases.length - 1, state.activeCase + 1)); } if (event.altKey && event.key === "ArrowUp") { event.preventDefault(); switchCase(Math.max(0, state.activeCase - 1)); } });
     const restored = loadDraft(); updateNavigation(); renderCase(); if (restored) announce("已恢复与当前双份提交绑定的本地草稿。 ");
   })();

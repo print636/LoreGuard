@@ -238,7 +238,7 @@ def test_javascript_targets_exact_adjudication_schema_and_active_confirmations(
     assert "DATA.author_setup_sha256" in javascript
     assert "DATA.execution_freeze_sha256" in javascript
     assert "consensus_confirmed_by" in javascript
-    assert "以 A ·" in javascript
+    assert "以 A 的判断为起点" in javascript
     assert "填入全部一致项" in javascript
     assert "不会自动定案" in javascript
 
@@ -332,7 +332,7 @@ const { pathToFileURL } = require("url");
   const browser=await chromium.launch({headless:true});
   const page=await browser.newPage({viewport:{width:1440,height:1000}});
   await page.goto(pathToFileURL(process.argv[2]).href);
-  await page.getByRole("button",{name:/以 A .* 为起点/}).click();
+  await page.getByRole("button",{name:"以 A 的判断为起点"}).click();
   if(await page.locator("#formal-confirm-0").isChecked()) throw new Error("adjudicator confirmation silently copied");
   await page.locator("#note-0").fill("两位真人复核一次明确事件，确认人物、范围及解释条件。");
   await page.locator("#download-locked").click();
@@ -398,7 +398,7 @@ def test_browser_v4_mixed_growth_directions_adjudication_roundtrips_and_keeps_go
     script = r'''
 const {chromium}=require(process.argv[1]);const {pathToFileURL}=require("node:url");
 (async()=>{const browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}});
-await page.goto(pathToFileURL(process.argv[2]).href);await page.getByRole("button",{name:/以 A .* 为起点/}).click();
+await page.goto(pathToFileURL(process.argv[2]).href);await page.getByRole("button",{name:"以 A 的判断为起点"}).click();
 if(await page.locator("#relation-0-0-0").inputValue()!=="explains"||await page.locator("#relation-0-0-1").inputValue()!=="opposes")throw new Error("mixed same-growth directions lost on copy");
 if(await page.locator("#formal-confirm-0").isChecked())throw new Error("reviewer confirmation copied");
 await page.locator("#note-0").fill("合成仲裁：分别核对同一成长对两件事情的不同方向，不依据片段数定案。");
@@ -408,7 +408,20 @@ await page.locator("#download-locked").click();if(!(await page.locator("#error-s
 await page.locator("#relation-0-0-1").selectOption("opposes");await page.locator("#formal-confirm-0").check();
 await page.locator('#final-confirmations input[type="checkbox"]').nth(0).check();await page.locator('#final-confirmations input[type="checkbox"]').nth(1).check();
 const promise=page.waitForEvent("download");await page.locator("#download-locked").click();await(await promise).saveAs(process.argv[3]);
-await page.locator("#unlock-editing").click();await page.locator("#import-file").setInputFiles(process.argv[3]);await page.waitForFunction(()=>document.querySelector("#relation-0-0-1")?.matches(":disabled")===true);
+await page.locator("#unlock-editing").click();
+const valid=JSON.parse(require("node:fs").readFileSync(process.argv[3],"utf8"));
+for(const invalid of ["unknown-direction","extra-field","missing-direction"]){
+ const payload=JSON.parse(JSON.stringify(valid));
+ if(invalid==="unknown-direction")payload.cases[0].explanation_links[0].relation_direction="invented";
+ if(invalid==="extra-field")payload.cases[0].explanation_links[0].unsupported_field="invented";
+ if(invalid==="missing-direction")delete payload.cases[0].explanation_links[0].relation_direction;
+ await page.locator("#status").evaluate(node=>{node.textContent="";});
+ await page.locator("#import-file").setInputFiles({name:"invalid.locked.json",mimeType:"application/json",buffer:Buffer.from(JSON.stringify(payload))});
+ await page.waitForFunction(()=>document.querySelector("#status").textContent.length>0);
+ if(await page.locator("#relation-0-0-1").isDisabled())throw new Error("invalid relation import locked working state");
+ if(await page.locator("#relation-0-0-0").inputValue()!=="explains"||await page.locator("#relation-0-0-1").inputValue()!=="opposes")throw new Error("invalid import changed relation state");
+}
+await page.locator("#import-file").setInputFiles(process.argv[3]);await page.waitForFunction(()=>document.querySelector("#relation-0-0-1")?.matches(":disabled")===true);
 if(await page.locator("#relation-0-0-0").inputValue()!=="explains"||await page.locator("#relation-0-0-1").inputValue()!=="opposes")throw new Error("directions lost after locked import");
 console.log("v4-adjudication-directions-ok");await browser.close();})().catch(e=>{console.error(e);process.exit(1)});
 '''
@@ -420,6 +433,72 @@ console.log("v4-adjudication-directions-ok");await browser.close();})().catch(e=
     gold = workflow._build_private_gold(public, left, right, adjudication)
     assert {link.relation_direction for link in adjudication.cases[0].explanation_links} == {"explains", "opposes"}
     assert {link.relation_direction for link in gold.cases[0].auxiliary_relations} == {"explains", "opposes"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None or not (page.REPO_ROOT / "frontend/node_modules/@playwright/test").exists(), reason="Playwright unavailable")
+def test_browser_readable_review_categories_and_mobile_layout_preserve_empty_decisions(tmp_path):
+    """Synthetic UI-only cases: no real annotation or private answer is read."""
+    from copy import deepcopy
+
+    public, root, setup, freeze = _relation_policy_fixture(tmp_path)
+    left = _directional_annotation(public, "reviewer-a")
+    right = _directional_annotation(public, "reviewer-b")
+    data = page.build_page_data(public, root, setup, freeze, left, right, third_human_id="reviewer-c", default_resolution_mode="third_human")
+    agreed = data["cases"][0]
+    outcome_diff = deepcopy(agreed)
+    outcome_diff["agreement"].update(outcome_agrees=False, surface_agrees=False)
+    basis_diff = deepcopy(agreed)
+    basis_diff["agreement"]["evidence_agrees"] = False
+    data["cases"] = [agreed, outcome_diff, basis_diff]
+    html_path = tmp_path / "readable-review-synthetic.html"
+    html_path.write_text(page.render_adjudication_page(data), encoding="utf-8")
+    script = r'''
+const {chromium}=require(process.argv[1]);const {pathToFileURL}=require("node:url");
+(async()=>{
+ const browser=await chromium.launch({headless:true});
+ const page=await browser.newPage({viewport:{width:375,height:1000}});
+ const errors=[],external=[];page.on("pageerror",error=>errors.push(String(error)));
+ page.on("request",request=>{if(/^https?:/.test(request.url()))external.push(request.url())});
+ await page.goto(pathToFileURL(process.argv[2]).href);
+ const summary=await page.locator("#review-summary").innerText();
+ for(const label of ["结论不同 1 题","依据不同 1 题","全部一致 1 题"])if(!summary.includes(label))throw new Error("review category counts missing");
+ const options=await page.locator("#case-select option").allTextContents();
+ for(const label of ["全部一致","结论不同","依据不同"])if(!options.some(value=>value.includes(label)))throw new Error("mobile category missing");
+ if(await page.locator("#outcome-0").inputValue()!=="")throw new Error("decision preselected");
+ if(await page.locator('#final-confirmations input:checked').count())throw new Error("human declaration preselected");
+ if(await page.locator('input[name="mode-0"]:checked').inputValue()!=="third_human")throw new Error("third human mode binding lost");
+ const text=await page.locator("body").innerText();
+ for(const value of ["00000000-0000", "最终 outcome", "最终 surface", "core_trait", "case_id", "trait_type"])
+  if(text.includes(value))throw new Error("technical value in main view: "+value);
+ const leaked=await page.evaluate(()=>{
+  const data=JSON.parse(document.querySelector("#adjudication-data").textContent),text=document.body.innerText;
+  return [data.public_input_sha256,data.cases[0].case_id,data.cases[0].documents[0].path].filter(value=>text.includes(value));
+ });if(leaked.length)throw new Error("raw binding visible by default");
+ if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth))throw new Error("375px horizontal overflow");
+ await page.screenshot({path:process.argv[3],fullPage:true});
+ await page.locator("#note-0").fill("尚未完成的合成复核进度，仅验证能保存。");
+ await page.getByRole("button",{name:"保存进度",exact:true}).click();await page.reload();
+ if(!(await page.locator("#note-0").inputValue()).includes("尚未完成"))throw new Error("incomplete draft not restored");
+ if(await page.locator("#outcome-0").inputValue()!=="")throw new Error("saving draft decided case");
+ await page.setViewportSize({width:1440,height:1000});
+ const categories=await page.locator(".case-category").allTextContents();
+ if(categories.join("|")!=="全部一致|结论不同|依据不同")throw new Error("desktop category labels mismatch");
+ await page.screenshot({path:process.argv[4],fullPage:true});
+ await page.locator("#download-locked").click();
+ await page.locator('#error-list button').filter({hasText:"第 1 题：请保留或填写观察到的现象"}).click();
+ await page.waitForFunction(()=>document.activeElement?.id==="phenomena-0");
+ if(!await page.locator("#phenomena-0").isVisible())throw new Error("error target remains hidden in collapsed details");
+ if(errors.length||external.length)throw new Error("browser errors or network requests");
+ console.log("readable-mobile-review-ok");await browser.close();
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+    result = subprocess.run([
+        shutil.which("node"), "-e", script,
+        str((page.REPO_ROOT / "frontend/node_modules/@playwright/test").resolve()),
+        str(html_path), str(tmp_path / "review-mobile-375.png"), str(tmp_path / "review-desktop-1440.png"),
+    ], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "readable-mobile-review-ok"
 
 
 def test_third_human_mode_uses_explicit_human_identity_and_blindness(tmp_path):
@@ -636,7 +715,7 @@ const { pathToFileURL } = require("url");
   await page.goto(pathToFileURL(process.argv[2]).href);
   if (await page.locator("#outcome-0").inputValue() !== "") throw new Error("case silently decided");
   if (await page.locator("#dimension-0").evaluate(node => node.tagName) === "SELECT") throw new Error("dimension is editable");
-  await page.getByRole("button", { name: /以 A .* 为起点/ }).click();
+  await page.getByRole("button", { name: "以 A 的判断为起点" }).click();
   const evidenceControls = page.locator('select[aria-label*="最终必要证据角色"]');
   await page.locator('.evidence-row').nth(1).locator('input[type="checkbox"]').check();
   await page.locator("#note-0").fill("两位标注者共同复核原文后，确认采用 A 的正式冲突结论。 ");
@@ -736,7 +815,7 @@ const { pathToFileURL } = require("url");
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   await page.goto(pathToFileURL(process.argv[2]).href);
-  await page.getByRole("button", { name: /以 A .* 为起点/ }).click();
+  await page.getByRole("button", { name: "以 A 的判断为起点" }).click();
   await page.locator('.evidence-row').nth(1).locator('input[type="checkbox"]').check();
   await page.locator("#note-0").fill("第三人 reviewer-c 独立复核原文并记录取舍；A、B 共同确认最终稿。 ");
   const confirmations = page.locator('#final-confirmations input[type="checkbox"]');
