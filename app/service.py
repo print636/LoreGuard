@@ -49,6 +49,7 @@ from .character_consistency_stage import (
     _safe_context_label,
     failed_character_consistency_stage,
 )
+from .character_observations import CharacterObservationRecorder
 from .character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from .character_history_semantic_review import HISTORY_REVIEW_SYSTEM_PROMPT
@@ -3220,6 +3221,7 @@ def execute_analysis(
                 settings, run
             )
             character_stage_result = None
+            character_stage = None
             character_review_clues = ()
             character_stage_db = CharacterConsistencyDatabase(
                 SessionLocal,
@@ -3239,7 +3241,7 @@ def execute_analysis(
             try:
                 if run is None:
                     raise ValueError("analysis run is unavailable")
-                character_stage_result = CharacterConsistencyStage(
+                character_stage = CharacterConsistencyStage(
                     settings=character_stage_settings,
                     provider=_CharacterConsistencyAccountingProvider(
                         character_stage_settings,
@@ -3248,7 +3250,10 @@ def execute_analysis(
                     checkpoint=lambda: _checkpoint(
                         run_id, token, heartbeat
                     ),
-                ).run(
+                    observation_recorder=CharacterObservationRecorder(),
+                    observation_applicable=run.batch_mode != "baseline_build",
+                )
+                character_stage_result = character_stage.run(
                     character_stage_db,
                     run_id=run_id,
                     project_id=run.project_id,
@@ -3266,6 +3271,15 @@ def execute_analysis(
                 raise
             except Exception:
                 character_stage_result = failed_character_consistency_stage()
+                character_stage_result.diagnostics["observation_recording"] = {
+                    "status": "failed",
+                    "reason_code": (
+                        "observation_recording_failed"
+                        if character_stage is not None
+                        and getattr(character_stage, "observation_recording_failed", False)
+                        else "character_stage_failed"
+                    ),
+                }
 
             tracked_character_usage = character_usage_tracker.safe_dict(
                 terminal_status="completed"

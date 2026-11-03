@@ -86,6 +86,10 @@ from .character_traits import (
     validate_character_trait_supersession,
 )
 from .character_trait_extraction import stable_trait_identity, trait_keys_compatible
+from .character_observations import (
+    CharacterObservationIntegrityError,
+    project_character_observations,
+)
 from .character_support_bindings import verify_stored_support_bindings
 from .character_consistency_stage import (
     CHARACTER_CONSISTENCY_CHECKER_VERSION,
@@ -6652,6 +6656,25 @@ def get_report_evidence_preview(
             raise HTTPException(
                 exc.status_code, exc.detail, headers=EVIDENCE_PREVIEW_NO_STORE_HEADERS,
             ) from None
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/character-observations")
+def get_character_observations(
+    run_id: str,
+    response: Response,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    with SessionLocal() as db:
+        run = _run_in_workspace(db, run_id, context.workspace_id)
+        if run is None:
+            raise HTTPException(404, "分析任务不存在", headers={"Cache-Control": "no-store"})
+        try:
+            return project_character_observations(db, run, offset=offset, limit=limit)
+        except CharacterObservationIntegrityError:
+            raise HTTPException(409, "角色观察快照完整性校验失败", headers={"Cache-Control": "no-store"}) from None
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/issues")

@@ -1018,6 +1018,43 @@ class AnalysisRunCharacterTraitInputRow(Base):
     payload_sha256: Mapped[str] = mapped_column(String(64))
 
 
+class CharacterObservationRecordingRow(Base):
+    """Coverage metadata for admitted draft observations, separate from findings."""
+
+    __tablename__ = "character_observation_recordings"
+    __table_args__ = (
+        CheckConstraint("status IN ('in_progress', 'complete', 'partial', 'failed', 'not_applicable')", name="ck_character_observation_recording_status"),
+        CheckConstraint("length(source_manifest_sha256) = 64", name="ck_character_observation_source_hash"),
+        CheckConstraint("length(baseline_manifest_sha256) = 64", name="ck_character_observation_baseline_hash"),
+    )
+    run_id: Mapped[str] = mapped_column(ForeignKey("analysis_runs.id", ondelete="CASCADE"), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    schema_version: Mapped[str] = mapped_column(String(48))
+    status: Mapped[str] = mapped_column(String(24), default="in_progress")
+    source_manifest_sha256: Mapped[str] = mapped_column(String(64))
+    baseline_manifest_sha256: Mapped[str] = mapped_column(String(64))
+    coverage: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class CharacterObservationRow(Base):
+    """Immutable validated business data; never an unreviewed model response."""
+
+    __tablename__ = "character_observations"
+    __table_args__ = (
+        UniqueConstraint("run_id", "ordinal", name="uq_character_observation_ordinal"),
+        CheckConstraint("ordinal >= 0", name="ck_character_observation_ordinal"),
+        CheckConstraint("length(payload_sha256) = 64", name="ck_character_observation_payload_hash"),
+    )
+    run_id: Mapped[str] = mapped_column(ForeignKey("character_observation_recordings.run_id", ondelete="CASCADE"), primary_key=True)
+    observation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_run_input_id: Mapped[str] = mapped_column(ForeignKey("analysis_run_inputs.id", ondelete="CASCADE"), index=True)
+    ordinal: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict] = mapped_column(JSON)
+    payload_sha256: Mapped[str] = mapped_column(String(64))
+
+
 class EmbeddingProfileRow(Base):
     """A versioned embedding-space identity; never stores credentials or URLs."""
 

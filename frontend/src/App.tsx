@@ -120,6 +120,7 @@ import {
   type DraftScope, type DraftWriteStatus, type FeedbackDraft,
 } from "./features/drafts/sessionDraftStorage";
 import RunHistoryPanel from "./features/run-history/RunHistoryPanel";
+import CharacterObservationsPanel from "./features/character-observations/CharacterObservationsPanel";
 import type { RunCatalogItem } from "./features/run-history/runHistoryModel";
 import TechnicalDetails from "./components/TechnicalDetails";
 import { issueSeverityLabel, reviewStatusLabel, reviewTimeLabel } from "./productLanguage";
@@ -3220,6 +3221,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   )}
                 </section>
               </section>
+              <CharacterObservationsPanel
+                identity={identity}
+                projectId={project}
+                runId={run}
+                runStatus={runInfo?.status || ""}
+                enabled={!projectLoading && !routeProblem && runInfo?.id === run && runInfo?.project_id === project && routedProjectId === project && routedRunId === run}
+              />
             </>
           )}
         </div>

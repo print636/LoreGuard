@@ -82,6 +82,13 @@ from .character_traits import (
     normalize_character_key,
     upsert_character_trait_candidate,
 )
+from .character_observations import (
+    CharacterObservationRecorder,
+    MatchReason,
+    ObservationMatchDecision,
+    ObservationRecordingCoverage,
+    ValidatedCharacterObservation,
+)
 from .character_support_bindings import TraitSupportRef
 from .chunking import chunk_character_profile_document, chunk_document
 from .config import Settings, get_settings
@@ -413,6 +420,141 @@ BaselineEntry = tuple[
 ]
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationMatchAssessment:
+    """The legacy tri-state identity result, with its actual decision path."""
+
+    result: bool | None
+    reason_code: MatchReason
+    match_method: str | None = None
+
+
+class _ObservationJournal:
+    """Keep admitted identities before aliases or comparison-time rewrites.
+
+    Only actual branches add decisions. Unvisited pairs remain explicitly
+    unevaluated, including when an exception interrupts the stage.
+    """
+
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.enabled = enabled
+        self.sources: dict[str, _FrozenDocument] = {}
+        self.baselines: dict[str, BaselineEntry] = {}
+        self.baseline_total = 0
+        self.excluded: dict[str, MatchReason] = {}
+        self.observations: dict[str, CharacterSignal] = {}
+        self.resolved: dict[str, str] = {}
+        self.decisions: dict[str, dict[str | None, ObservationMatchDecision]] = defaultdict(dict)
+        self.incomplete = False
+
+    def capture(self, signal: CharacterSignal) -> None:
+        if self.enabled and signal.source_kind == "draft":
+            self.observations.setdefault(signal.id, signal)
+
+    def exclude(self, entry: BaselineEntry, reason: MatchReason) -> None:
+        if self.enabled:
+            self.excluded.setdefault(entry[0].id, reason)
+
+    def decide(
+        self, observation: CharacterSignal, entry: BaselineEntry | None,
+        reason: MatchReason, *, status: str = "not_matched",
+        assessment: ObservationMatchAssessment | None = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        baseline_id = entry[0].id if entry is not None else None
+        self.decisions[observation.id][baseline_id] = ObservationMatchDecision(
+            baseline_input_id=baseline_id, status=status, reason_code=reason,
+            identity_match=assessment.result if assessment else None,
+            match_method=assessment.match_method if assessment else None,
+        )
+
+    def resolve(self, observation: CharacterSignal, keys: tuple[str, ...]) -> None:
+        if not self.enabled:
+            return
+        if len(keys) != 1:
+            reason: MatchReason = (
+                "ambiguous_character_alias" if keys else "unmatched_character_alias"
+            )
+            for entry in self.baselines.values():
+                if entry[0].id in self.excluded:
+                    continue
+                self.decide(observation, entry, reason, status="unresolved")
+            if not self.baselines:
+                self.decide(observation, None, reason, status="unresolved")
+            return
+        self.resolved[observation.id] = keys[0]
+        for entry in self.baselines.values():
+            if entry[0].id in self.excluded:
+                continue
+            if entry[3] != keys[0]:
+                self.decide(observation, entry, "character_mismatch")
+
+    def coverage(self) -> ObservationRecordingCoverage:
+        summarized = {
+            key: reason for key, reason in self.excluded.items()
+            if key not in self.baselines
+        }
+        return ObservationRecordingCoverage(
+            baseline_not_evaluated_count=max(
+                0, self.baseline_total - len(self.baselines) - len(summarized),
+            ),
+            excluded_baseline_counts=dict(Counter(summarized.values())),
+        )
+
+    def snapshots(self) -> tuple[ValidatedCharacterObservation, ...]:
+        result = []
+        for signal in self.observations.values():
+            decisions = dict(self.decisions[signal.id])
+            for baseline_id, entry in self.baselines.items():
+                if baseline_id not in decisions:
+                    reason = self.excluded.get(baseline_id, "baseline_not_evaluated")
+                    decisions[baseline_id] = ObservationMatchDecision(
+                        baseline_input_id=baseline_id,
+                        status="unresolved" if reason == "baseline_not_evaluated" else "not_matched",
+                        reason_code=reason,
+                    )
+            if not decisions:
+                decisions[None] = ObservationMatchDecision(
+                    status="unresolved", reason_code=(
+                        "baseline_not_evaluated" if self.baseline_total
+                        else "no_confirmed_baseline"
+                    ),
+                )
+            source = self.sources.get(signal.evidence.document_id)
+            if source is None:
+                raise ValueError("admitted observation frozen source is unavailable")
+            # The frozen source mapping is authoritative even for legacy signals
+            # whose optional source_run_input_id was never populated.
+            result.append(ValidatedCharacterObservation(
+                observation_id=signal.id, source_run_input_id=source.input_id,
+                character=signal.character,
+                resolved_character_key=self.resolved.get(signal.id),
+                dimension=signal.dimension, trait_key=signal.trait_key,
+                key_object=signal.key_object,
+                comparison_key=(
+                    None if signal.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS
+                    and not signal.key_object.strip()
+                    else stable_trait_identity(
+                        signal.dimension, signal.trait_key, signal.key_object,
+                    )
+                ),
+                statement=signal.statement, polarity=signal.polarity,
+                stability=signal.stability, observation_kind=signal.observation_kind,
+                context=signal.context, evidence=signal.evidence,
+                target_bound_target_digest=signal.target_bound_target_digest,
+                target_bound_target=(
+                    signal.target_bound_target
+                    if signal.target_bound_target is not None else None
+                ),
+                target_bound_target_ordinal=signal.target_bound_target_ordinal,
+                target_bound_object_relation=signal.target_bound_object_relation,
+                target_bound_object_basis_id=signal.target_bound_object_basis_id,
+                matches=tuple(decisions.values()),
+            ))
+        return tuple(result)
+
+
 @dataclass(slots=True)
 class _Usage:
     attempted_calls: int = 0
@@ -474,10 +616,15 @@ class CharacterConsistencyStage:
         settings: Settings | None = None,
         provider: _ChatProvider | None = None,
         checkpoint: Callable[[], None] | None = None,
+        observation_recorder: CharacterObservationRecorder | None = None,
+        observation_applicable: bool = True,
     ) -> None:
         self.settings = settings or get_settings()
         self.provider = provider
         self.checkpoint = checkpoint or (lambda: None)
+        self.observation_recorder = observation_recorder
+        self.observation_applicable = observation_applicable
+        self.observation_recording_failed = False
 
     def run(
         self,
@@ -488,6 +635,78 @@ class CharacterConsistencyStage:
         documents: list[DocumentInput],
         metadata: list[dict[str, Any]],
         remaining_run_tokens: int,
+    ) -> CharacterConsistencyStageResult:
+        recorder = self.observation_recorder
+        journal = _ObservationJournal(enabled=recorder is not None)
+        self.observation_recording_failed = False
+
+        def persist(status: str) -> None:
+            if recorder is None:
+                return
+            try:
+                # The service adapter owns this short, worker-fenced transaction.
+                with db.begin_nested():
+                    recorder.record(
+                        db, run_id=run_id, project_id=project_id,
+                        observations=journal.snapshots(),
+                    )
+                    recorder.finish(
+                        db, run_id=run_id, project_id=project_id, status=status,
+                        coverage=journal.coverage(),
+                    )
+            except Exception:
+                self.observation_recording_failed = True
+                raise
+
+        try:
+            if recorder is not None:
+                with db.begin_nested():
+                    recorder.begin(db, run_id=run_id, project_id=project_id)
+        except Exception:
+            self.observation_recording_failed = True
+            raise
+        try:
+            result = self._run(
+                db, run_id=run_id, project_id=project_id, documents=documents,
+                metadata=metadata, remaining_run_tokens=remaining_run_tokens,
+                observation_journal=journal,
+            )
+        except BaseException:
+            try:
+                persist("failed")
+            except Exception:
+                # Preserve the original stage exception, including cancellation.
+                pass
+            raise
+        status = (
+            "not_applicable" if not self.observation_applicable
+            or not self.settings.enable_character_consistency
+            else "partial" if journal.incomplete
+            or journal.coverage().baseline_not_evaluated_count
+            or journal.coverage().excluded_baseline_counts
+            or result.diagnostics.get("outcome")
+            in {"skipped", "degraded"} else "complete"
+        )
+        try:
+            persist(status)
+        except Exception:
+            # A rollback leaves the durable header in progress. Seal it failed
+            # where possible; service also exposes a fixed diagnostic on failure.
+            if recorder is not None:
+                try:
+                    with db.begin_nested():
+                        recorder.finish(db, run_id=run_id, project_id=project_id, status="failed")
+                except Exception:
+                    pass
+            raise
+        if recorder is not None:
+            result.diagnostics["observation_recording"] = {"status": status}
+        return result
+
+    def _run(
+        self, db, *, run_id: str, project_id: str,
+        documents: list[DocumentInput], metadata: list[dict[str, Any]],
+        remaining_run_tokens: int, observation_journal: _ObservationJournal,
     ) -> CharacterConsistencyStageResult:
         settings = self.settings
         if not settings.enable_character_consistency:
@@ -551,6 +770,7 @@ class CharacterConsistencyStage:
             metadata=metadata,
             reasons=reason_counts,
         )
+        observation_journal.sources = {row.document.id: row for row in frozen}
         eligible = [row for row in frozen if row.source_kind is not None]
         if not eligible:
             return CharacterConsistencyStageResult(
@@ -576,6 +796,13 @@ class CharacterConsistencyStage:
             project_id=project_id,
             reasons=reason_counts,
         )
+        if observation_journal.enabled:
+            observation_journal.baseline_total = len(baselines)
+            observation_journal.baselines = {
+                entry[0].id: entry for entry in baselines[
+                    :settings.character_consistency_max_candidates_per_run
+                ]
+            }
         # A pre-alignment confirmed axis is valid historical data, not a
         # corrupt snapshot.  It cannot be used for a new directional verdict.
         unaligned_axes = sum(
@@ -589,8 +816,13 @@ class CharacterConsistencyStage:
         # they cannot supply a directional verdict, an applicable one can
         # still shadow a lower-authority aligned peer on the same axis.
         authority_baselines, shadowed_baselines = _select_authoritative_baselines(
-            baselines
+            baselines, on_excluded=lambda entry: observation_journal.exclude(
+                entry, "lower_authority_baseline_shadowed"
+            ),
         )
+        for entry in authority_baselines:
+            if entry[1].approved_axis_identity is not None and not entry[1].axis_direction_verified:
+                observation_journal.exclude(entry, "author_alignment_required")
         baselines = [
             entry for entry in authority_baselines
             if entry[1].approved_axis_identity is None
@@ -598,6 +830,9 @@ class CharacterConsistencyStage:
         ]
         scoped_axis_review_disabled = 0
         if not settings.character_scoped_axis_drift_v1:
+            for entry in baselines:
+                if entry[1].approved_axis_identity is not None and entry[1].dimension in {"value", "behavior_boundary"}:
+                    observation_journal.exclude(entry, "scoped_axis_review_disabled")
             scoped_axis_review_disabled = sum(
                 entry[1].approved_axis_identity is not None
                 and entry[1].dimension in {"value", "behavior_boundary"}
@@ -613,7 +848,11 @@ class CharacterConsistencyStage:
                     scoped_axis_review_disabled
                 )
         review_baselines, duplicate_axis_baselines = (
-            _deduplicate_approved_review_baselines(baselines)
+            _deduplicate_approved_review_baselines(
+                baselines, on_excluded=lambda entry: observation_journal.exclude(
+                    entry, "equivalent_axis_collapsed"
+                ),
+            )
         )
         if duplicate_axis_baselines:
             reason_counts["equivalent_approved_axis_baseline_collapsed"] += (
@@ -621,6 +860,12 @@ class CharacterConsistencyStage:
             )
         if shadowed_baselines:
             reason_counts["lower_authority_baseline_shadowed"] += shadowed_baselines
+        if observation_journal.enabled:
+            observation_journal.baselines = {
+                entry[0].id: entry for entry in review_baselines[
+                    :settings.character_consistency_max_candidates_per_run
+                ]
+            }
         alias_map = _unique_alias_map(review_baselines, documents=frozen)
         aliases_by_character = _aliases_by_character(
             review_baselines, alias_map=alias_map, documents=frozen
@@ -1180,6 +1425,8 @@ class CharacterConsistencyStage:
                 ),
                 **baseline_coverage_kwargs,
             )
+            for signal in extraction.signals:
+                observation_journal.capture(signal)
             if baseline_coverage_enabled:
                 coverage = extraction.diagnostics.baseline_coverage_trace
                 if coverage is not None and coverage.attempted_calls > 0:
@@ -1422,6 +1669,8 @@ class CharacterConsistencyStage:
                         else {}
                     ),
                 )
+                for signal in targeted.signals:
+                    observation_journal.capture(signal)
                 record_draft_trace(
                     "targeted_recall", targeted,
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
@@ -1624,6 +1873,8 @@ class CharacterConsistencyStage:
                         else {}
                     ),
                 )
+                for signal in verification.signals:
+                    observation_journal.capture(signal)
                 record_draft_trace(
                     "targeted_verification", verification,
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
@@ -1842,6 +2093,7 @@ class CharacterConsistencyStage:
         for observation in draft_signals:
             alias = _key(observation.character)
             character_keys = alias_map.get(alias, ())
+            observation_journal.resolve(observation, character_keys)
             if len(character_keys) != 1:
                 ambiguous_aliases += 1
                 unresolved_alias_observations.append((observation, character_keys))
@@ -1887,6 +2139,9 @@ class CharacterConsistencyStage:
             tuple[str, str], tuple[tuple[EvidenceSpan, ...], bool]
         ] = {}
         case_trace: list[dict[str, Any]] = []
+        for entry in review_baselines[settings.character_consistency_max_candidates_per_run:]:
+            observation_journal.exclude(entry, "baseline_limit")
+            observation_journal.incomplete = True
         for baseline_row, baseline, baseline_scope, character_key in review_baselines[
             : settings.character_consistency_max_candidates_per_run
         ]:
@@ -1901,7 +2156,7 @@ class CharacterConsistencyStage:
             draft_ordinals: list[int] = []
             draft_document_ids: list[str] = []
             for observation in resolved_drafts.get(character_key, ()):
-                axis_match = _observation_matches_baseline(
+                assessment = _assess_observation_match(
                     baseline_entry,
                     observation,
                     approved_axis_binding=_trusted_axis_binding(
@@ -1910,6 +2165,13 @@ class CharacterConsistencyStage:
                         axis_bindings_by_line=axis_bindings_by_line,
                     ),
                 )
+                axis_match = assessment.result
+                if axis_match is not True:
+                    observation_journal.decide(
+                        observation, baseline_entry, assessment.reason_code,
+                        status="unresolved" if axis_match is None else "not_matched",
+                        assessment=assessment,
+                    )
                 if axis_match is None:
                     partial = True
                     post_alias_non_alias_partial = True
@@ -1925,6 +2187,10 @@ class CharacterConsistencyStage:
                         (observation.id, baseline.approved_axis_identity), set()
                     )
                     if len(axis_directions) != 1:
+                        observation_journal.decide(
+                            observation, baseline_entry, "axis_direction_ambiguous",
+                            status="unresolved", assessment=assessment,
+                        )
                         partial = True
                         post_alias_non_alias_partial = True
                         reason_counts["approved_axis_observation_direction_ambiguous"] += 1
@@ -1934,6 +2200,10 @@ class CharacterConsistencyStage:
                         continue
                 source = frozen_by_document.get(observation.evidence.document_id)
                 if source is None or source.scope is None:
+                    observation_journal.decide(
+                        observation, baseline_entry, "source_scope_unavailable",
+                        status="unresolved", assessment=assessment,
+                    )
                     drift_scope_skipped += 1
                     reason_counts["drift_scope_unknown"] += 1
                     case_material_reasons.add(
@@ -1947,17 +2217,29 @@ class CharacterConsistencyStage:
                     observation_context=observation.context,
                 ):
                     reason_counts["lower_authority_draft_scope_shadowed"] += 1
+                    observation_journal.decide(
+                        observation, baseline_entry, "lower_authority_shadowed",
+                        status="not_matched", assessment=assessment,
+                    )
                     continue
                 release_applicability = _trait_applies_to_release(
                     baseline, source.scope
                 )
                 if release_applicability is None:
+                    observation_journal.decide(
+                        observation, baseline_entry, "release_unknown",
+                        status="unresolved", assessment=assessment,
+                    )
                     partial = True
                     post_alias_non_alias_partial = True
                     reason_counts["drift_release_unknown"] += 1
                     case_material_reasons.add("case_release_unknown")
                     continue
                 if not release_applicability:
+                    observation_journal.decide(
+                        observation, baseline_entry, "release_inapplicable",
+                        status="not_matched", assessment=assessment,
+                    )
                     reason_counts["drift_release_inapplicable"] += 1
                     continue
                 relation = scope_relation(
@@ -1967,6 +2249,12 @@ class CharacterConsistencyStage:
                     second_resolution=source.resolution_state,
                 )
                 if relation != "compatible":
+                    observation_journal.decide(
+                        observation, baseline_entry,
+                        "scope_unknown" if relation == "unknown" else "scope_incompatible",
+                        status="unresolved" if relation == "unknown" else "not_matched",
+                        assessment=assessment,
+                    )
                     drift_scope_skipped += 1
                     reason_counts[f"drift_scope_{relation}"] += 1
                     if relation == "unknown":
@@ -1974,6 +2262,10 @@ class CharacterConsistencyStage:
                         post_alias_non_alias_partial = True
                         case_material_reasons.add("case_scope_unknown")
                     continue
+                observation_journal.decide(
+                    observation, baseline_entry, "matched", status="matched",
+                    assessment=assessment,
+                )
                 matches.append(
                     observation.model_copy(
                         update={
@@ -1993,6 +2285,14 @@ class CharacterConsistencyStage:
                 draft_ordinals.append(source.ordinal)
                 draft_document_ids.append(source.document.id)
             if len(matches) > 24:
+                for omitted in matches[24:]:
+                    previous = observation_journal.decisions.get(omitted.id, {}).get(baseline_row.id) if observation_journal.enabled else None
+                    if previous is not None:
+                        observation_journal.decide(
+                            omitted, baseline_entry, "observation_limit",
+                            assessment=ObservationMatchAssessment(previous.identity_match, "observation_limit", previous.match_method),
+                        )
+                observation_journal.incomplete = True
                 reason_counts["observation_limit"] += len(matches) - 24
                 matches = matches[:24]
                 axis_observation_polarities = axis_observation_polarities[:24]
@@ -2870,6 +3170,15 @@ class CharacterConsistencyStage:
             baseline_trace_enabled=settings.character_signal_baseline_trace_v1,
             baseline_trace_chunks=baseline_trace_chunks,
             baseline_trace_chunks_omitted_count=baseline_trace_chunks_omitted,
+        )
+        observation_journal.incomplete = observation_journal.incomplete or (
+            model_completed_chunks != len(planned_chunks)
+            or targeted_passes_completed != targeted_passes_scheduled
+            or bool(targeted_truncated_targets)
+            or bool(targeted_budget_exhausted_targets)
+            or bool(targeted_verification_budget_exhausted)
+            or bool(reason_counts["draft_preference_coverage_incomplete"])
+            or bool(reason_counts["invalid_confirmed_trait_snapshot"])
         )
         provisional_clues, provisional_truncated = _safe_provisional_draft_clues(
             provisional_draft_candidates, accepted_signals=signals
@@ -4176,17 +4485,31 @@ def _observation_matches_baseline(
     *,
     approved_axis_binding: tuple[str, int, str] | None = None,
 ) -> bool | None:
+    return _assess_observation_match(
+        entry, observation, approved_axis_binding=approved_axis_binding,
+    ).result
+
+
+def _assess_observation_match(
+    entry: BaselineEntry,
+    observation: CharacterSignal,
+    *,
+    approved_axis_binding: tuple[str, int, str] | None = None,
+) -> ObservationMatchAssessment:
     baseline = entry[1]
     if observation.dimension != baseline.dimension:
-        return False
+        return ObservationMatchAssessment(False, "dimension_mismatch")
     if baseline.approved_axis_identity is not None:
-        # This binding is populated only after a clean, validated, one-target
-        # recall call. A primary model key never creates approved identity.
-        return approved_axis_binding == baseline.approved_axis_identity
+        # Only validated server-owned recall creates an approved axis binding.
+        matched = approved_axis_binding == baseline.approved_axis_identity
+        return ObservationMatchAssessment(
+            matched, "matched" if matched else "approved_axis_binding_mismatch",
+            "approved_axis",
+        )
     if baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS:
         frozen_key = _frozen_comparison_identity(entry)
         if not frozen_key:
-            return None
+            return ObservationMatchAssessment(None, "comparison_identity_unavailable")
         if target_bound_signal_matches_frozen_baseline(
             observation,
             baseline_character=baseline.character,
@@ -4195,28 +4518,34 @@ def _observation_matches_baseline(
             baseline_comparison_key=frozen_key,
             baseline_polarity=baseline.polarity,
         ):
-            return True
+            return ObservationMatchAssessment(True, "matched", "target_bound")
         if (
             baseline.dimension != "preference"
             and stable_trait_identity(baseline.dimension, baseline.trait_key)
             != stable_trait_identity(observation.dimension, observation.trait_key)
         ):
-            return False
-        return bool(observation.key_object.strip()) and (
-            stable_trait_identity(
-                observation.dimension, observation.trait_key, observation.key_object
-            ) == frozen_key
-            or preference_modifier_bridge(
-                baseline_comparison_key=frozen_key,
-                baseline_polarity=baseline.polarity,
-                observation=observation,
-            )
-        )
-    return trait_keys_compatible(
+            return ObservationMatchAssessment(False, "trait_identity_mismatch")
+        if not observation.key_object.strip():
+            return ObservationMatchAssessment(False, "object_identity_unavailable")
+        if stable_trait_identity(
+            observation.dimension, observation.trait_key, observation.key_object
+        ) == frozen_key:
+            return ObservationMatchAssessment(True, "matched", "comparison_identity")
+        if preference_modifier_bridge(
+            baseline_comparison_key=frozen_key,
+            baseline_polarity=baseline.polarity,
+            observation=observation,
+        ):
+            return ObservationMatchAssessment(True, "matched", "preference_modifier")
+        return ObservationMatchAssessment(False, "comparison_mismatch")
+    matched = trait_keys_compatible(
         dimension=baseline.dimension,
         baseline_key=baseline.trait_key,
         observation_key=observation.trait_key,
         observation_object=observation.key_object,
+    )
+    return ObservationMatchAssessment(
+        matched, "matched" if matched else "trait_identity_mismatch", "trait_identity",
     )
 
 
@@ -4302,6 +4631,7 @@ def _target_hint_identity(
 
 def _deduplicate_approved_review_baselines(
     baselines: list[BaselineEntry],
+    *, on_excluded: Callable[[BaselineEntry], None] | None = None,
 ) -> tuple[list[BaselineEntry], int]:
     """Review one equivalent author axis once while retaining raw traits elsewhere.
 
@@ -4331,6 +4661,8 @@ def _deduplicate_approved_review_baselines(
             payload_sha256(scope.model_dump(mode="json")),
         )
         if identity in seen:
+            if on_excluded is not None:
+                on_excluded(entry)
             collapsed += 1
             continue
         seen.add(identity)
@@ -4393,6 +4725,7 @@ def _baseline_shadowed_at_scope(
 
 def _select_authoritative_baselines(
     baselines: list[BaselineEntry],
+    *, on_excluded: Callable[[BaselineEntry], None] | None = None,
 ) -> tuple[list[BaselineEntry], int]:
     """Keep the strongest applicable baseline on a character's trait axis.
 
@@ -4422,6 +4755,8 @@ def _select_authoritative_baselines(
             dominated = True
             break
         if dominated:
+            if on_excluded is not None:
+                on_excluded(entry)
             shadowed += 1
         else:
             selected.append(entry)
