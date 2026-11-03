@@ -1265,3 +1265,153 @@ def test_v4_relation_policy_cannot_be_injected_into_legacy_manual_or_public_bind
     assert "relation_policy" not in legacy.cases[0].model_dump()
     assert "relation_direction" not in workflow.ExplanationLink(
         support_evidence_id="g", applicable_current_ids=("c",), causal_relation="bounded", temporal_relation="before").model_dump()
+
+
+def test_string_cli_paths_validate_compare_seal_and_score_v4_synthetic_round(tmp_path, capsys):
+    """Exercise argparse's real string paths without models or private materials."""
+    from tests.test_generate_ooc_annotation_page import EVIDENCE_IDS, _relation_policy_fixture
+
+    public, bundle_root, setup, freeze = _relation_policy_fixture(tmp_path)
+    public_file = tmp_path / "cli-public.json"
+    setup_file = tmp_path / "cli-setup.json"
+    freeze_file = tmp_path / "cli-freeze.json"
+    for path, model in ((public_file, public), (setup_file, setup), (freeze_file, freeze)):
+        workflow._write_json(path, model)
+
+    row = _v4_row(
+        case_id=public.cases[0].case_id,
+        evidence=_evidence((EVIDENCE_IDS[0], "B"), (EVIDENCE_IDS[1], "G"),
+                           (EVIDENCE_IDS[2], "C"), (EVIDENCE_IDS[3], "C")),
+        independent_event_groups=[
+            {"event_group_id": "first", "evidence_ids": [EVIDENCE_IDS[2]]},
+            {"event_group_id": "second", "evidence_ids": [EVIDENCE_IDS[3]]},
+        ],
+        explanation_links=[_direction(EVIDENCE_IDS[1], EVIDENCE_IDS[2], "explains"),
+                           _direction(EVIDENCE_IDS[1], EVIDENCE_IDS[3], "opposes")],
+    )
+    left = workflow.ReviewerAnnotationBundle.model_validate_json(json.dumps({
+        "dataset_id": public.dataset_id,
+        "public_input_sha256": contract.canonical_sha256(public),
+        "reviewer_kind": "human", "reviewer_id": "synthetic-reviewer-a",
+        "manual_version": workflow.RELATION_MANUAL_VERSION,
+        "blinded_to_peer": True, "blinded_to_system_prediction": True,
+        "independence_declaration": True, "cases": [row],
+    }))
+    right = left.model_copy(update={"reviewer_id": "synthetic-reviewer-b"})
+    resolution = {key: value for key, value in row.items()
+                  if key not in {"outcome", "surface", "evidence", "confidence", "review_note"}}
+    resolution.update(final_outcome=row["outcome"], final_surface=row["surface"],
+                      required_evidence=row["evidence"], resolution_mode="reviewer_consensus",
+                      resolution_note="Synthetic CLI consensus; not an actual human answer.")
+    adjudication = workflow.AdjudicationBundle.model_validate_json(json.dumps({
+        "dataset_id": public.dataset_id,
+        "public_input_sha256": contract.canonical_sha256(public),
+        "reviewer_ids": [left.reviewer_id, right.reviewer_id],
+        "annotation_sha256": [contract.canonical_sha256(left), contract.canonical_sha256(right)],
+        "consensus_confirmed_by": [left.reviewer_id, right.reviewer_id],
+        "cases": [resolution],
+    }))
+    left_file, right_file = tmp_path / "left.locked.json", tmp_path / "right.locked.json"
+    adjudication_file = tmp_path / "adjudication.locked.json"
+    for path, model in ((left_file, left), (right_file, right), (adjudication_file, adjudication)):
+        workflow._write_json(path, model)
+    binding_args = ["--public", str(public_file), "--author-setup", str(setup_file),
+                    "--execution-freeze", str(freeze_file), "--bundle-root", str(bundle_root)]
+
+    assert workflow.main(["validate-annotation", *binding_args, "--annotation", str(left_file)]) == 0
+    assert json.loads(capsys.readouterr().out) == {"valid": True, "case_count": 1}
+    agreement_file = tmp_path / "cli-agreement.json"
+    assert workflow.main(["compare", *binding_args, "--left", str(left_file),
+                          "--right", str(right_file), "--output", str(agreement_file)]) == 0
+    assert json.loads(capsys.readouterr().out)["disagreement_count"] == 0
+
+    config = sealed_http.SealedHttpRunConfig(
+        base_url="http://127.0.0.1:8101",
+        isolation=sealed_http.IsolationExpectation(
+            eval_db_id="11111111-1111-4111-8111-111111111111",
+            database_path_sha256=SHA_A, instance_id_sha256=SHA_B,
+        ),
+        execution_id="22222222-2222-4222-8222-222222222222", repeat_id="synthetic-repeat-01",
+        expected_runtime_provenance_sha256=SHA_D,
+        expected_runner_source_sha256=sealed_http.current_runner_source_sha256(),
+        run_timeout_seconds=30.0, poll_interval_seconds=0.1,
+    )
+    config_file, key_file = tmp_path / "config.json", tmp_path / "hmac.key"
+    workflow._write_json(config_file, config)
+    key_file.write_bytes(bytes(range(64)))
+    gold_file, commitment_file = tmp_path / "private-gold.json", tmp_path / "commitment.json"
+    assert workflow.main([
+        "build-gold", *binding_args, "--run-config", str(config_file),
+        "--left", str(left_file), "--right", str(right_file),
+        "--adjudication", str(adjudication_file), "--hmac-key-file", str(key_file),
+        "--gold-output", str(gold_file), "--commitment-output", str(commitment_file),
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "case_count": 1, "gold_written": True, "commitment_written": True,
+    }
+    gold = contract.load_private_gold_file(gold_file)
+    assert gold.cases[0].required_evidence.C == (EVIDENCE_IDS[3],)
+    assert {link.relation_direction for link in gold.cases[0].auxiliary_relations} == {"explains", "opposes"}
+
+    references = (
+        sealed_prediction.RuntimeEvidenceRef(role="B", document_id=public.cases[0].documents[0].document_id,
+                                             line_start=1, line_end=1),
+        sealed_prediction.RuntimeEvidenceRef(role="C", document_id=public.cases[0].documents[1].document_id,
+                                             line_start=2, line_end=2, event_group_id="second"),
+    )
+    snapshot = sealed_prediction.RuntimeCaseSnapshot(
+        case_id=public.cases[0].case_id, stage_status="completed", material_coverage="complete",
+        explanation_coverage="complete", report_collections_complete=True, citation_refs_complete=True,
+        trace_count=1, final_outcome="conflict", formal_issue_count=1,
+        review_clue_count=0, provisional_clue_count=0, citations=references, report_evidence=references,
+        stage_funnel=contract.StageFunnel(input_candidates=1, retrieved_candidates=1,
+            grounded_candidates=1, adjudicated_candidates=1, surfaced_candidates=1),
+    )
+    artifact = sealed_prediction.build_prediction_artifact(
+        public, (snapshot,), run_id="synthetic-run", repeat_id=config.repeat_id,
+        author_setup_sha256=contract.canonical_sha256(setup),
+        execution_freeze_sha256=contract.canonical_sha256(freeze), runtime_provenance_sha256=SHA_D,
+    )
+    receipts = (sealed_http.ProjectReceipt(case_id=public.cases[0].case_id, project_id_sha256=SHA_A),)
+    report = sealed_http.SealedHttpRunReport(
+        phase="completed", dataset_id=public.dataset_id,
+        public_input_sha256=contract.canonical_sha256(public),
+        author_setup_sha256=contract.canonical_sha256(setup),
+        execution_freeze_sha256=contract.canonical_sha256(freeze), runtime_provenance_sha256=SHA_D,
+        run_config_sha256=contract.canonical_sha256(config), run_config=config,
+        runner_source_sha256=config.expected_runner_source_sha256, execution_id=config.execution_id,
+        project_set_sha256=sealed_http._project_set_sha(receipts), project_receipts=receipts,
+        independent_project_count=1, assessed_case_count=1, unassessed_case_count=0,
+        prediction_artifact=artifact,
+    )
+    report_file, score_file = tmp_path / "native-report.json", tmp_path / "score.json"
+    workflow._write_json(report_file, report)
+    assert workflow.main([
+        "score", *binding_args, "--run-config", str(config_file), "--gold", str(gold_file),
+        "--commitment", str(commitment_file), "--hmac-key-file", str(key_file),
+        "--sealed-run-report", str(report_file), "--output", str(score_file),
+    ]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["case_count"] == summary["repeat_count"] == 1
+    result = json.loads(score_file.read_text(encoding="utf-8"))
+    assert result["metrics"]["joint_accuracy"]["value"] == 1.0
+    assert result["metrics"]["coverage"]["value"] == 1.0
+    # One all-positive synthetic case cannot define negative specificity.
+    assert result["gate"]["failures"] == ["hard_negative_specificity:undefined"]
+
+
+@pytest.mark.parametrize("path", ["https://example.invalid/secret.json", r"\\server\secret.json", "//server/secret.json"])
+def test_string_local_reader_rejects_network_paths(path):
+    with pytest.raises(workflow.AnnotationWorkflowError, match="network_locations_are_forbidden"):
+        workflow._read_limited_local(path, limit=16)
+
+
+def test_string_local_reader_preserves_size_and_reparse_guards(tmp_path, monkeypatch):
+    path = tmp_path / "synthetic-limited.json"
+    path.write_bytes(b"12345")
+    assert workflow._read_limited_local(str(path), limit=5) == b"12345"
+    with pytest.raises(workflow.AnnotationWorkflowError, match="input_file_too_large"):
+        workflow._read_limited_local(str(path), limit=4)
+    monkeypatch.setattr(workflow, "_path_chain_has_reparse_point", lambda _: True)
+    with pytest.raises(workflow.AnnotationWorkflowError, match="reparse_point_paths_are_forbidden"):
+        workflow._read_limited_local(str(path), limit=5)

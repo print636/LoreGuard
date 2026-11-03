@@ -1235,10 +1235,13 @@ def _write_json(path: Path, value: Any) -> None:
         raise
 
 
-def _read_limited_local(path: Path, *, limit: int) -> bytes:
+def _read_limited_local(path: str | Path, *, limit: int) -> bytes:
     text_path = str(path)
     if "://" in text_path or text_path.startswith(("\\\\", "//")):
         raise AnnotationWorkflowError("network_locations_are_forbidden")
+    # argparse supplies strings; normalize once before the filesystem guards
+    # and reads so CLI and direct Path callers share the same validation.
+    path = Path(path)
     if _path_chain_has_reparse_point(path):
         raise AnnotationWorkflowError("reparse_point_paths_are_forbidden")
     try:
@@ -1253,13 +1256,13 @@ def _read_limited_local(path: Path, *, limit: int) -> bytes:
     return payload
 
 
-def _load_annotation(path: Path) -> ReviewerAnnotationBundle:
+def _load_annotation(path: str | Path) -> ReviewerAnnotationBundle:
     return ReviewerAnnotationBundle.model_validate_json(
         _read_limited_local(path, limit=contract.MAX_JSON_BYTES)
     )
 
 
-def _load_adjudication(path: Path) -> AdjudicationBundle:
+def _load_adjudication(path: str | Path) -> AdjudicationBundle:
     return AdjudicationBundle.model_validate_json(
         _read_limited_local(path, limit=contract.MAX_JSON_BYTES)
     )
