@@ -6746,7 +6746,10 @@ def test_event_identity_preflight_sizes_the_actual_reduced_second_pass_pair():
 
     review = CharacterConsistencyReviewer(
         provider,
-        settings=settings(character_drift_token_budget=3_600),
+        # Pin the historical two-call contract's original output reserve;
+        # the live single-event protocol has a larger default reserve.
+        settings=settings(character_drift_token_budget=3_600,
+                          character_drift_max_completion_tokens=1_000),
     ).review(prepared)
 
     # Full first-pass rows make C01/C02 look largest because their summaries

@@ -42,6 +42,9 @@ from scripts.run_character_consistency_live import (
     _safe_visible_issue,
 )
 from scripts.run_evidence_investigator_live import (
+    _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS,
+    _CHARACTER_BASELINE_COVERAGE_KEYS,
+    _safe_character_review_extensions,
     _CAPABILITY_KEYS,
     _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS,
     _CHARACTER_CONSISTENCY_LIMIT_KEYS,
@@ -822,6 +825,8 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
     limits = value.get("character_consistency_limits")
     if not all(isinstance(row, dict) for row in (build, provider, capabilities, limits)):
         return None
+    if _safe_character_review_extensions(limits) is None:
+        return None
     if set(build) != {"git_revision", "service_artifact_sha256"}:
         return None
     revision = build.get("git_revision")
@@ -896,6 +901,8 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
             | _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS
             | _CHARACTER_EXPLANATION_REVIEW_KEYS
             | _CHARACTER_OOC_PROTOCOL_KEYS
+            | _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS.keys()
+            | _CHARACTER_BASELINE_COVERAGE_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,

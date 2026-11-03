@@ -15,6 +15,9 @@ from sqlalchemy import select
 
 from .aliases import build_alias_map
 from .character_drift import (
+    CHARACTER_REVIEW_POLICY_VERSION,
+    CHARACTER_REVIEW_SCHEMA_VERSION,
+    CHARACTER_REVIEWED_EVENTS_SCHEMA_VERSION,
     CharacterConsistencyReviewer,
     CharacterDriftCase,
     CharacterReviewResult,
@@ -26,6 +29,7 @@ from .character_drift import (
     _validate_decision,
     prepare_character_drift,
     promote_character_drift,
+    validated_reviewed_events,
 )
 from .character_explanation_review import (
     ExplanationBaselineSummary,
@@ -94,7 +98,7 @@ from .narrative_context import (
 from .pipeline import DocumentInput
 
 
-CHARACTER_CONSISTENCY_CHECKER_VERSION = "character-consistency-stage-v4"
+CHARACTER_CONSISTENCY_CHECKER_VERSION = "character-consistency-stage-v5"
 PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY = "_provisional_draft_clues_v1"
 _SUGGESTION = "请核对是否存在尚未记录的成长、伪装或情境依据"
 _BRIDGE_PATTERN = re.compile(
@@ -830,6 +834,7 @@ class CharacterConsistencyStage:
         model_completed_chunks = 0
         completed_primary_chunks_by_document: Counter[str] = Counter()
         successful_model_calls = 0
+        baseline_recovery_attempted_documents: set[str] = set()
         signal_ignored_duplicates = 0
         targeted_eligible_targets = 0
         targeted_selected_targets = 0
@@ -1119,6 +1124,20 @@ class CharacterConsistencyStage:
                 )
                 if history_review_v1 else None
             )
+            baseline_coverage_enabled = (
+                scope_review_v1
+                and settings.character_signal_support_id_v4
+                and settings.character_signal_semantic_scope_v5
+            )
+            baseline_coverage_kwargs = (
+                {
+                    "baseline_coverage_recovery": True,
+                    "baseline_coverage_recovery_already_used": (
+                        source.document.id in baseline_recovery_attempted_documents
+                    ),
+                }
+                if baseline_coverage_enabled else {}
+            )
             extraction = CharacterSignalExtractor(
                 self.provider, settings=call_settings
             ).extract(
@@ -1140,7 +1159,18 @@ class CharacterConsistencyStage:
                     or draft_actor_review_v1
                     else None
                 ),
+                **baseline_coverage_kwargs,
             )
+            if baseline_coverage_enabled:
+                coverage = extraction.diagnostics.baseline_coverage_trace
+                if coverage is not None and coverage.attempted_calls > 0:
+                    baseline_recovery_attempted_documents.add(source.document.id)
+                if coverage is None or coverage.status not in {"covered", "audited"}:
+                    partial = True
+                    reason_counts[
+                        "baseline_coverage_unavailable" if coverage is None
+                        else f"baseline_coverage_{coverage.status}"
+                    ] += 1
             if (
                 source.source_kind == "draft"
                 and extraction.diagnostics.attempted_calls > 0
@@ -1830,6 +1860,7 @@ class CharacterConsistencyStage:
         explanation_review_required_cases = 0
         explanation_review_complete_cases = 0
         explanation_stage_partial = False
+        explanation_partial_candidate_ids: set[str] = set()
         case_material_complete_count = 0
         case_material_partial_count = 0
         case_material_partial_reason_counts: Counter[str] = Counter()
@@ -2104,7 +2135,9 @@ class CharacterConsistencyStage:
                     if baseline.approved_axis_identity is not None else ()
                 ),
             )
-            prepared = prepare_character_drift(case)
+            prepared = prepare_character_drift(
+                case, review_policy=CHARACTER_REVIEW_POLICY_VERSION
+            )
             if prepared.matching_observations:
                 explanation_review_required_cases += 1
                 if not settings.character_explanation_review_v1:
@@ -2408,8 +2441,17 @@ class CharacterConsistencyStage:
                         "explanation_coverage": explanation_coverage,
                     }
                 )
-                prepared = prepare_character_drift(case)
+                prepared = prepare_character_drift(
+                    case, review_policy=CHARACTER_REVIEW_POLICY_VERSION
+                )
             drift_considered += 1
+            if prepared.unreviewed_observation_count > 0:
+                partial = True
+                post_alias_non_alias_partial = True
+                reason_counts["review_observation_pool_incomplete"] += 1
+            if (prepared.matching_observations
+                    and prepared.case.explanation_coverage != "complete"):
+                explanation_partial_candidate_ids.add(baseline_row.candidate_id)
             review: CharacterReviewResult | None = None
             if prepared.reviewer_eligible:
                 remaining = stage_budget - usage.charged_tokens
@@ -2447,7 +2489,17 @@ class CharacterConsistencyStage:
                 review is not None
                 and review.diagnostics.outcome == "completed"
                 and review.decision is not None
-                and not _review_citation_binding_complete(prepared, review)
+                and (
+                    not _review_citation_binding_complete(prepared, review)
+                    or (
+                        prepared.review_policy == CHARACTER_REVIEW_POLICY_VERSION
+                        and _reviewed_events_receipt(
+                            prepared, review, candidate_id=baseline_row.candidate_id,
+                            comparison_key=_case_trace_comparison_key(baseline, baseline_entry),
+                            frozen_by_document=frozen_by_document,
+                        ) is None
+                    )
+                )
             ):
                 # A verdict whose handles cannot be projected back to the
                 # frozen B/C table must not become a formal issue or silently
@@ -2517,6 +2569,7 @@ class CharacterConsistencyStage:
                     ) and evidence_pair_reason is None,
                     promote_reason=evidence_pair_reason or promoted.reason,
                     frozen_by_document=frozen_by_document,
+                    target_observations=tuple(matches),
                 )
             )
             if promoted.outcome == "unverifiable":
@@ -2560,6 +2613,7 @@ class CharacterConsistencyStage:
                     )
                 ),
                 frozen_by_document=frozen_by_document,
+                comparison_key=_case_trace_comparison_key(baseline, baseline_entry),
             )
             if promoted.outcome == "conflict":
                 issues.append(finding)
@@ -2600,8 +2654,11 @@ class CharacterConsistencyStage:
                 },
                 pre_alias_partial=partial_before_alias_resolution,
                 baseline_limit=bool(reason_counts["baseline_limit"]),
-                post_alias_non_alias_partial=(
-                    post_alias_non_alias_partial or explanation_stage_partial
+                post_alias_non_alias_partial=post_alias_non_alias_partial,
+                explanation_processing_partial=explanation_stage_partial,
+                other_explanation_processing_partial=(
+                    bool(explanation_partial_candidate_ids - {entry[0].candidate_id})
+                    or explanation_stage_partial and not explanation_partial_candidate_ids
                 ),
             )
 
@@ -3173,7 +3230,12 @@ def _target_has_sufficient_recall_evidence(
     target: CharacterSignalTarget,
     observations: tuple[CharacterSignal, ...],
 ) -> bool:
-    """Mirror drift's threshold on evidence opposing this baseline only."""
+    """One grounded opposing observation is enough to request semantic review.
+
+    This is recall admission, not a conclusion that the action contradicts
+    the baseline. Actor/axis/object binding remains in _signal_matches_target;
+    actual conflict and explanations are decided by the versioned reviewer.
+    """
 
     matching = tuple(
         signal
@@ -3181,71 +3243,13 @@ def _target_has_sufficient_recall_evidence(
         if _signal_matches_target(signal, target)
         and signal.polarity == target.requested_polarity
     )
-    if not matching:
-        return False
-    if target.dimension == "preference":
-        if any(
-            signal.observation_kind
-            in {
-                "explicit_declaration",
-                "state_description",
-                "preference_expression",
-            }
-            for signal in matching
-        ):
-            return True
-        independent_preference_spans = {
-            (
-                signal.evidence.document_id,
-                signal.evidence.line_start,
-                signal.evidence.line_end,
-            )
-            for signal in matching
-            if signal.observation_kind
-            in {"action", "decision", "interaction", "dialogue", "speech_sample"}
+    return any(
+        signal.observation_kind in {
+            "explicit_declaration", "state_description", "preference_expression",
+            "action", "decision", "interaction", "dialogue", "speech_sample",
         }
-        return len(independent_preference_spans) >= 2
-    if target.dimension in {"relationship_attitude", "motivation_goal"}:
-        coordinate_distinct = {
-            (
-                signal.evidence.document_id,
-                signal.evidence.line_start,
-                signal.evidence.line_end,
-            ): signal
-            for signal in matching
-            if signal.observation_kind
-            in {
-                "explicit_declaration",
-                "state_description",
-                "action",
-                "decision",
-                "interaction",
-                "dialogue",
-                "speech_sample",
-            }
-        }
-        return len(coordinate_distinct) >= 2 and len(
-            {
-                _normalized_evidence_text(signal.evidence.text)
-                for signal in coordinate_distinct.values()
-            }
-        ) >= 2
-    if any(
-        signal.observation_kind in {"explicit_declaration", "state_description"}
         for signal in matching
-    ):
-        return True
-    independent_spans = {
-        (
-            signal.evidence.document_id,
-            signal.evidence.line_start,
-            signal.evidence.line_end,
-        )
-        for signal in matching
-        if signal.observation_kind
-        in {"action", "decision", "interaction", "dialogue", "speech_sample"}
-    }
-    return len(independent_spans) >= 2
+    )
 
 
 def _target_with_existing_evidence_ranges(
@@ -6050,6 +6054,122 @@ def _alias_disposition_for_target(
     return counts
 
 
+def _target_observation_pool(
+    observations: tuple[CharacterSignal, ...],
+    frozen_by_document: dict[str, _FrozenDocument],
+) -> dict[str, Any] | None:
+    """Record the full related pool before the bounded review selection."""
+    if not observations or len(observations) > 24:
+        return None
+    refs = []
+    for observation in observations:
+        source = frozen_by_document.get(observation.evidence.document_id)
+        ref = _frozen_source_ref(observation.evidence, frozen_by_document)
+        if (ref is None or source is None or source.source_kind != "draft"
+                or not source.input_id):
+            return None
+        refs.append({
+            **ref,
+            "observation_id_sha256": hashlib.sha256(observation.id.encode("utf-8")).hexdigest(),
+            "source_input_id_sha256": hashlib.sha256(source.input_id.encode("utf-8")).hexdigest(),
+        })
+    if len({ref["observation_id_sha256"] for ref in refs}) != len(refs):
+        return None
+    return {
+        "schema_version": "character-target-observation-pool-v1",
+        "observation_count": len(observations),
+        "observation_refs": sorted(refs, key=lambda ref: ref["observation_id_sha256"]),
+    }
+
+
+def _outside_scope_explanation_requirement(trace: dict[str, Any]) -> dict[str, str] | None:
+    """Only a complete, reviewed outside-comparison pool has no explanation debt.
+
+    This changes dependency, never the recorded explanation processing state.
+    Consumers still independently verify the frozen receipt and full pool.
+    """
+    receipt = trace.get("reviewed_events")
+    pool = trace.get("target_observation_pool")
+    if not (
+        trace.get("review_policy") == CHARACTER_REVIEW_POLICY_VERSION
+        and trace.get("review_outcome") == "completed"
+        and trace.get("review_verdict") == "explained"
+        and trace.get("final_outcome") == "no_issue"
+        and trace.get("unreviewed_observation_count", 0) == 0
+        and trace.get("material_coverage") == "complete"
+        and trace.get("material_coverage_reasons") == []
+        and trace.get("citation_refs_incomplete") is False
+        and trace.get("matched_observation_refs_truncated") is False
+        and type(receipt) is dict and type(pool) is dict
+        and receipt.get("schema_version") == CHARACTER_REVIEWED_EVENTS_SCHEMA_VERSION
+        and receipt.get("assessment_policy") == CHARACTER_REVIEW_POLICY_VERSION
+        and receipt.get("review_schema_version") == CHARACTER_REVIEW_SCHEMA_VERSION
+        and receipt.get("confirmed_candidate_id_sha256") == trace.get("confirmed_candidate_id_sha256")
+        and receipt.get("comparison_key") == trace.get("comparison_key")
+        and pool.get("schema_version") == "character-target-observation-pool-v1"
+        and type(pool.get("observation_count")) is int
+        and type(pool.get("observation_refs")) is list
+        and type(receipt.get("events")) is list
+        and type(receipt.get("evidence_refs")) is list
+    ):
+        return None
+    events, refs = receipt["events"], receipt["evidence_refs"]
+    if not events or any(type(row) is not dict for row in (*events, *refs)):
+        return None
+    current = [row for row in refs if row.get("role") == "C"]
+    pool_refs = pool["observation_refs"]
+    count = pool["observation_count"]
+    if not (0 < count <= 24 and count == len(current) == len(pool_refs)
+            and count == trace.get("matched_observation_count")
+            and len(trace.get("matched_observation_refs", ())) == count):
+        return None
+    members = []
+    for event in events:
+        handles = event.get("current_citations")
+        if (type(handles) is not list or not handles
+                or event.get("verdict") != "explained"
+                or not (
+                    event.get("actor_match") == "different"
+                    or event.get("trait_match") == "different"
+                    or event.get("actuality") == "non_actual"
+                    or event.get("object_match") == "different"
+                    or event.get("situation_match") == "different"
+                )):
+            return None
+        members.extend(handles)
+    handles = [row.get("handle") for row in current]
+    if (any(type(handle) is not str or re.fullmatch(r"C[0-9]{2}", handle) is None for handle in (*members, *handles))
+            or len(members) != count or len(set(members)) != count or set(members) != set(handles)):
+        return None
+    required_ref_keys = {
+        "document_name", "document_version", "content_sha256", "line_start", "line_end",
+        "text_sha256", "source_input_id_sha256", "observation_id_sha256",
+    }
+    if any(type(ref) is not dict or set(ref) != required_ref_keys for ref in pool_refs):
+        return None
+    if any(not required_ref_keys <= set(ref) for ref in current):
+        return None
+    selected_refs = [{key: ref[key] for key in required_ref_keys} for ref in current]
+    if any(type(ref.get("observation_id_sha256")) is not str for ref in selected_refs + pool_refs):
+        return None
+    if sorted(selected_refs, key=lambda ref: ref["observation_id_sha256"]) != pool_refs:
+        return None
+    if len({ref["observation_id_sha256"] for ref in pool_refs}) != count:
+        return None
+    by_handle = {ref["handle"]: ref for ref in current}
+    if any(event.get("event_group_id") != _reviewed_event_group_id(
+        receipt["confirmed_candidate_id_sha256"], receipt["comparison_key"],
+        [by_handle[handle] for handle in event["current_citations"]],
+    ) for event in events):
+        return None
+    return {
+        "schema_version": "character-explanation-requirement-v1",
+        "state": "not_required_by_scope",
+        "reviewed_events_sha256": payload_sha256(receipt),
+        "target_observation_pool_sha256": payload_sha256(pool),
+    }
+
+
 def _target_coverage_certificate(
     trace: dict[str, Any],
     *,
@@ -6062,16 +6182,23 @@ def _target_coverage_certificate(
     pre_alias_partial: bool,
     baseline_limit: bool,
     post_alias_non_alias_partial: bool = False,
+    explanation_processing_partial: bool = False,
+    other_explanation_processing_partial: bool = False,
 ) -> dict[str, Any]:
     alias = _alias_disposition_for_target(
         baseline, unresolved_alias_observations, formal_signals=formal_signals,
         frozen_by_document=frozen_by_document, target_aliases=target_aliases,
     )
     blockers: set[str] = set()
+    explanation_requirement = _outside_scope_explanation_requirement(trace)
     if pre_alias_partial:
         blockers.add("pre_alias_processing_gap")
-    if post_alias_non_alias_partial:
+    if (post_alias_non_alias_partial or (
+            explanation_requirement is None
+            and (explanation_processing_partial or other_explanation_processing_partial))):
         blockers.add("post_alias_processing_gap")
+    if explanation_requirement is not None and other_explanation_processing_partial:
+        blockers.add("other_case_explanation_incomplete")
     if baseline_limit:
         blockers.add("baseline_limit")
     planned = processing["planned_chunks"]
@@ -6082,12 +6209,14 @@ def _target_coverage_certificate(
         blockers.add("primary_processing_incomplete")
     if trace.get("material_coverage") != "complete" or trace.get("material_coverage_reasons"):
         blockers.add("case_material_incomplete")
-    if trace.get("explanation_coverage") != "complete":
+    if trace.get("explanation_coverage") != "complete" and explanation_requirement is None:
         blockers.add("case_explanation_incomplete")
     if not trace.get("matched_observation_count") or trace.get("prepare_reason") == "no_matching_observation":
         blockers.add("no_matching_observation")
     if trace.get("matched_observation_refs_truncated") is not False:
         blockers.add("observation_refs_incomplete")
+    if trace.get("unreviewed_observation_count", 0) != 0:
+        blockers.add("review_observation_pool_incomplete")
     if trace.get("citation_refs_incomplete") is not False:
         blockers.add("citation_refs_incomplete")
     if trace.get("review_required") and trace.get("review_outcome") != "completed":
@@ -6103,7 +6232,12 @@ def _target_coverage_certificate(
     if trace.get("final_outcome") == "unverifiable":
         blockers.add("case_outcome_unverifiable")
     return {
-        "schema_version": "character-target-coverage-v1",
+        "schema_version": (
+            "character-target-coverage-v2" if explanation_requirement is not None
+            else "character-target-coverage-v1"
+        ),
+        **({"explanation_requirement": explanation_requirement}
+           if explanation_requirement is not None else {}),
         **{key: trace.get(key) for key in (
             "confirmed_candidate_id_sha256", "character_key", "dimension", "comparison_key",
             "material_coverage", "explanation_coverage", "matched_observation_count",
@@ -6111,6 +6245,126 @@ def _target_coverage_certificate(
         "status": "partial" if blockers or alias["possibly_target"] or alias["unknown"] else "complete",
         "processing": dict(processing), "alias_disposition": alias,
         "non_alias_blockers": sorted(blockers),
+    }
+
+
+def _case_trace_comparison_key(
+    baseline: ConfirmedTraitSnapshot, baseline_entry: BaselineEntry | None = None,
+) -> str:
+    frozen_key = (
+        _frozen_comparison_identity(baseline_entry)
+        if baseline_entry is not None
+        and baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS
+        else ""
+    )
+    if baseline.approved_axis_identity is not None:
+        value = f"approved_axis:{baseline.approved_axis_id}:{baseline.approved_axis_version}"
+    elif frozen_key:
+        value = frozen_key
+    elif _CONTEXT_SECRET_OR_URL.search(baseline.trait_key):
+        value = "redacted_" + hashlib.sha256(baseline.trait_key.encode("utf-8")).hexdigest()[:16]
+    else:
+        value = stable_trait_identity(baseline.dimension, baseline.trait_key)
+    return _safe_trace_identifier(value, max_chars=128)
+
+
+def _reviewed_event_group_id(
+    candidate_sha256: str, comparison_key: str, members: list[dict[str, Any]],
+) -> str:
+    """Hash one reviewed group, never one arbitrary C fragment.
+
+    The canonical JSON object below is the wire algorithm. Members are exact
+    receipt evidence_refs sorted by handle; no verdict, explanation or caller
+    generated event number participates. JSON is UTF-8, sorted keys, no ASCII
+    escaping and separators (',', ':'). All fragments in a group share the id.
+    """
+    return payload_sha256({
+        "schema_version": CHARACTER_REVIEWED_EVENTS_SCHEMA_VERSION,
+        "confirmed_candidate_id_sha256": candidate_sha256,
+        "comparison_key": comparison_key,
+        "members": sorted(members, key=lambda row: row["handle"]),
+    })
+
+
+def _reviewed_events_receipt(
+    prepared: PreparedCharacterDrift,
+    review: CharacterReviewResult | None,
+    *,
+    candidate_id: str,
+    comparison_key: str,
+    frozen_by_document: dict[str, _FrozenDocument],
+) -> dict[str, Any] | None:
+    """Bind the actually cited whole events to model review and frozen bytes."""
+    events = validated_reviewed_events(prepared, review)
+    if not events or review is None or review.decision is None:
+        return None
+    try:
+        if str(UUID(candidate_id)) != candidate_id:
+            return None
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if prepared.case.baseline.id != f"ct_{candidate_id}" or not comparison_key:
+        return None
+    evidence, citation_refs = _review_cited_evidence(prepared, review)
+    if not evidence or not _review_citation_binding_complete(prepared, review):
+        return None
+    current = {
+        f"C{index:02d}": observation
+        for index, observation in enumerate(prepared.matching_observations, 1)
+    }
+    bound_refs = []
+    for ref in citation_refs:
+        span = evidence[ref["evidence_index"]]
+        source_ref = _frozen_source_ref(span, frozen_by_document)
+        source = frozen_by_document.get(span.document_id)
+        if source_ref is None or source is None or not source.input_id:
+            return None
+        row = {
+            **ref, **source_ref,
+            "source_input_id_sha256": hashlib.sha256(source.input_id.encode("utf-8")).hexdigest(),
+        }
+        if ref["role"] == "C":
+            observation = current.get(ref["handle"])
+            if (observation is None or source.source_kind != "draft"
+                    or _character_evidence_identity(observation.evidence)
+                    != _character_evidence_identity(span)):
+                return None
+            row["observation_id_sha256"] = hashlib.sha256(observation.id.encode("utf-8")).hexdigest()
+        bound_refs.append(row)
+    by_handle = {ref["handle"]: ref for ref in bound_refs}
+    cited_current = {handle for handle in by_handle if handle.startswith("C")}
+    selected = []
+    covered: set[str] = set()
+    candidate_hash = hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()
+    for event in events:
+        handles = set(event.current_citations)
+        if not handles & cited_current:
+            continue
+        # A model cannot cite only a convenient fragment of the same event.
+        if not handles <= cited_current or covered & handles:
+            return None
+        members = [by_handle[handle] for handle in event.current_citations]
+        selected.append({
+            "event_group_id": _reviewed_event_group_id(candidate_hash, comparison_key, members),
+            "current_citations": list(event.current_citations),
+            "verdict": event.verdict,
+            "actor_match": event.actor_match,
+            "trait_match": event.trait_match,
+            "actuality": event.actuality,
+            "object_match": event.object_match,
+            "situation_match": event.situation_match,
+        })
+        covered.update(handles)
+    if not selected or covered != cited_current:
+        return None
+    return {
+        "schema_version": CHARACTER_REVIEWED_EVENTS_SCHEMA_VERSION,
+        "assessment_policy": CHARACTER_REVIEW_POLICY_VERSION,
+        "review_schema_version": CHARACTER_REVIEW_SCHEMA_VERSION,
+        "confirmed_candidate_id_sha256": candidate_hash,
+        "comparison_key": comparison_key,
+        "events": selected,
+        "evidence_refs": bound_refs,
     }
 
 
@@ -6122,6 +6376,7 @@ def _to_issue(
     confirmed_candidate_id: str,
     judgement: str,
     frozen_by_document: dict[str, _FrozenDocument] | None = None,
+    comparison_key: str | None = None,
 ) -> ConsistencyIssue:
     baseline_spans = list(prepared.case.baseline.evidence)
     current_spans = [row.evidence for row in prepared.matching_observations]
@@ -6209,6 +6464,14 @@ def _to_issue(
         )
         if evidence_binding == "server_evidence_pair_v1" and not conflict else None
     )
+    reviewed_events = _reviewed_events_receipt(
+        prepared, review, candidate_id=confirmed_candidate_id,
+        comparison_key=comparison_key or _case_trace_comparison_key(prepared.case.baseline),
+        frozen_by_document=frozen_by_document or {},
+    ) if evidence_binding == "review_citations_v1" else None
+    if (completed_review and prepared.review_policy == CHARACTER_REVIEW_POLICY_VERSION
+            and reviewed_events is None):
+        raise ValueError("completed character review has no frozen reviewed-event receipt")
     return ConsistencyIssue(
         category=IssueCategory.character_drift,
         severity=severity,
@@ -6258,6 +6521,10 @@ def _to_issue(
             "final_outcome": promoted.outcome,
             "review_reason": promoted.reason,
             "evidence_binding": evidence_binding,
+            **({"unreviewed_observation_count": prepared.unreviewed_observation_count}
+               if prepared.unreviewed_observation_count > 0 else {}),
+            **({"review_policy": prepared.review_policy} if prepared.review_policy is not None else {}),
+            **({"reviewed_events": reviewed_events} if reviewed_events is not None else {}),
             **({"server_evidence_pair": server_pair} if server_pair is not None else {}),
             **(
                 {"review_citation_refs": list(cited_refs)}
@@ -6544,6 +6811,8 @@ def _review_citation_binding_complete(
         return False
     if not _citation_refs_have_distinct_pair(refs):
         return False
+    if prepared.review_policy is not None:
+        return bool(validated_reviewed_events(prepared, review))
     if review.decision.verdict == "explained" and not roles & {"G", "X"}:
         return False
     if prepared.reason == "two_independent_behaviors":
@@ -6973,6 +7242,7 @@ def _safe_case_trace(
     visible: bool,
     promote_reason: str,
     frozen_by_document: dict[str, _FrozenDocument] | None = None,
+    target_observations: tuple[CharacterSignal, ...] | None = None,
 ) -> dict[str, Any]:
     safe_material_coverage = (
         material_coverage
@@ -7033,32 +7303,7 @@ def _safe_case_trace(
         if decision is not None
         else []
     )
-    frozen_key = (
-        _frozen_comparison_identity(baseline_entry)
-        if baseline_entry is not None
-        and baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS
-        else ""
-    )
-    if baseline.approved_axis_identity is not None:
-        comparison_key = (
-            f"approved_axis:{baseline.approved_axis_id}:"
-            f"{baseline.approved_axis_version}"
-        )
-    elif frozen_key:
-        comparison_key = frozen_key
-    elif _CONTEXT_SECRET_OR_URL.search(baseline.trait_key):
-        # Legacy snapshots may lack a usable object axis. Preserve the old
-        # content-free fallback without exposing a suspicious trait label.
-        comparison_key = (
-            "redacted_"
-            + hashlib.sha256(baseline.trait_key.encode("utf-8")).hexdigest()[:16]
-        )
-    else:
-        # Non-object traits and legacy snapshots retain their prior trace key.
-        comparison_key = stable_trait_identity(
-            baseline.dimension,
-            baseline.trait_key,
-        )
+    comparison_key = _case_trace_comparison_key(baseline, baseline_entry)
     candidate_id_sha256 = None
     candidate_id: str | None = None
     if baseline_entry is not None:
@@ -7086,6 +7331,19 @@ def _safe_case_trace(
             prepared, candidate_id=candidate_id,
             frozen_by_document=frozen_by_document or {},
         )
+    reviewed_events = (
+        _reviewed_events_receipt(
+            prepared, review, candidate_id=candidate_id,
+            comparison_key=comparison_key,
+            frozen_by_document=frozen_by_document or {},
+        )
+        if prepared is not None and candidate_id_sha256 is not None else None
+    )
+    target_pool = (
+        _target_observation_pool(target_observations, frozen_by_document or {})
+        if prepared is not None and prepared.review_policy == CHARACTER_REVIEW_POLICY_VERSION
+        and target_observations is not None else None
+    )
     return {
         "character_key": _safe_trace_identifier(character_key, max_chars=64),
         "dimension": baseline.dimension,
@@ -7132,6 +7390,12 @@ def _safe_case_trace(
             review.diagnostics.outcome if review is not None else "not_run"
         ),
         "review_required": prepared.reviewer_eligible if prepared is not None else None,
+        **({"unreviewed_observation_count": prepared.unreviewed_observation_count}
+           if prepared is not None and prepared.unreviewed_observation_count > 0 else {}),
+        **({"review_policy": prepared.review_policy}
+           if prepared is not None and prepared.review_policy is not None else {}),
+        **({"reviewed_events": reviewed_events} if reviewed_events is not None else {}),
+        **({"target_observation_pool": target_pool} if target_pool is not None else {}),
         "review_verdict": decision.verdict if decision is not None else None,
         "citation_roles": roles,
         "citation_refs": citation_refs,

@@ -471,10 +471,10 @@ def test_runtime_provenance_is_content_free_and_records_effective_identity():
     assert result["character_consistency_limits"][
         "drift_provider_max_attempts"
     ] == 2
-    assert result["character_consistency_limits"]["drift_token_budget"] == 4_000
+    assert result["character_consistency_limits"]["drift_token_budget"] == 8_000
     assert result["character_consistency_limits"][
         "drift_provider_max_completion_tokens"
-    ] == 1_000
+    ] == 1_024
     assert result["character_consistency_limits"][
         "signal_total_deadline_seconds"
     ] == 60

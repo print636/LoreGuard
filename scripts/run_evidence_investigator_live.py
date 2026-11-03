@@ -334,10 +334,10 @@ _CHARACTER_CONSISTENCY_INTEGER_LIMIT_BOUNDS = {
     "drift_max_support_evidence": (0, 16),
     "drift_max_evidence_chars": (256, 16_000),
     "drift_token_budget": (256, 8_000),
-    "drift_max_completion_tokens": (64, 1_500),
+    "drift_max_completion_tokens": (64, 4_000),
     "drift_max_response_bytes": (1_024, 64_000),
     "drift_provider_max_attempts": (1, 4),
-    "drift_provider_max_completion_tokens": (1, 1_500),
+    "drift_provider_max_completion_tokens": (1, 4_000),
     "drift_provider_max_response_bytes": (1, 64_000),
     "per_run_token_budget": (0, MAX_SAFE_COUNTER),
     "daily_token_budget": (0, MAX_SAFE_COUNTER),
@@ -358,6 +358,49 @@ _CHARACTER_CONSISTENCY_LIMIT_KEYS = frozenset(
     }
 )
 _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY = "signal_full_line_echo_v2"
+_CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS = {
+    "checker_version": "character-consistency-stage-v5",
+    "drift_review_policy_version": "single-clear-event-v3",
+    "drift_review_prompt_version": "character-single-event-review-prompt-v1",
+    "drift_review_schema_version": "character-single-event-review-v1",
+    "reviewed_events_schema_version": "character-reviewed-events-v1",
+}
+_CHARACTER_BASELINE_COVERAGE_KEYS = frozenset({
+    "baseline_coverage_recovery_schema_version",
+    "baseline_coverage_recovery_prompt_sha256",
+    "baseline_coverage_recovery_prompt_version",
+})
+
+
+def _safe_character_review_extensions(value: object) -> dict[str, Any] | None:
+    """Validate optional version groups while preserving pre-extension runs."""
+    if type(value) is not dict:
+        return None
+    event_keys = set(value) & _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS.keys()
+    coverage_keys = set(value) & _CHARACTER_BASELINE_COVERAGE_KEYS
+    if event_keys not in (set(), set(_CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS)):
+        return None
+    if coverage_keys not in (set(), set(_CHARACTER_BASELINE_COVERAGE_KEYS)):
+        return None
+    if event_keys and any(value[key] != version for key, version in _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS.items()):
+        return None
+    if coverage_keys:
+        enabled = all(value.get(key) is True for key in (
+            "signal_support_id_v4", "signal_semantic_scope_v5", "signal_scope_review_v1",
+        ))
+        schema = value["baseline_coverage_recovery_schema_version"]
+        prompt_hash = value["baseline_coverage_recovery_prompt_sha256"]
+        prompt_version = value["baseline_coverage_recovery_prompt_version"]
+        if enabled:
+            if (schema != "character-baseline-coverage-v1" or type(prompt_hash) is not str
+                    or prompt_version != "character-baseline-coverage-prompt-v1"
+                    or re.fullmatch(r"[a-f0-9]{64}", prompt_hash) is None):
+                return None
+        elif schema is not None or prompt_hash is not None or prompt_version is not None:
+            return None
+    return {key: value[key] for key in event_keys | coverage_keys}
+
+
 _CHARACTER_SCOPED_AXIS_DRIFT_KEY = "scoped_axis_drift_v1"
 _CHARACTER_SIGNAL_CORE_SCOPE_KEY = "signal_core_scope_v3"
 _CHARACTER_SIGNAL_SUPPORT_ID_KEY = "signal_support_id_v4"
@@ -3374,8 +3417,18 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         set(character_limits) & _CHARACTER_OOC_PROTOCOL_KEYS
         if type(character_limits) is dict else set()
     )
+    single_event_keys = (
+        set(character_limits) & _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS.keys()
+        if type(character_limits) is dict else set()
+    )
+    baseline_coverage_keys = (
+        set(character_limits) & _CHARACTER_BASELINE_COVERAGE_KEYS
+        if type(character_limits) is dict else set()
+    )
     if (
         type(character_limits) is not dict
+        or single_event_keys not in (set(), set(_CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS))
+        or baseline_coverage_keys not in (set(), set(_CHARACTER_BASELINE_COVERAGE_KEYS))
         or draft_trace_keys not in (set(), set(_CHARACTER_SIGNAL_DRAFT_TRACE_KEYS))
         or draft_excerpt_repair_keys not in (
             set(), set(_CHARACTER_SIGNAL_DRAFT_EXCERPT_REPAIR_KEYS)
@@ -3409,6 +3462,8 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             | _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS
             | _CHARACTER_EXPLANATION_REVIEW_KEYS
             | _CHARACTER_OOC_PROTOCOL_KEYS
+            | _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS.keys()
+            | _CHARACTER_BASELINE_COVERAGE_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {
             _CHARACTER_CONSISTENCY_LIMIT_KEYS,
@@ -3482,6 +3537,10 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
     safe_character_limits: dict[str, Any] = {
         "sensitivity": character_limits["sensitivity"]
     }
+    review_extensions = _safe_character_review_extensions(character_limits)
+    if review_extensions is None:
+        return None
+    safe_character_limits.update(review_extensions)
     if ooc_protocol_keys:
         protocol_version = character_limits[_CHARACTER_OOC_PROTOCOL_KEY]
         supported_dimensions = character_limits[_CHARACTER_OOC_DIMENSIONS_KEY]

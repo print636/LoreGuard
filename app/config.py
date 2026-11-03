@@ -402,7 +402,7 @@ class Settings(BaseSettings):
         default=8_000, ge=256, le=16_000
     )
     character_drift_token_budget: int = Field(
-        default=4_000, ge=256, le=8_000
+        default=8_000, ge=256, le=8_000
     )
     character_drift_timeout_seconds: float = Field(
         default=30.0, gt=0, le=30.0
@@ -412,7 +412,7 @@ class Settings(BaseSettings):
         default=60.0, gt=0, le=60.0
     )
     character_drift_max_completion_tokens: int = Field(
-        default=1_000, ge=64, le=1_500
+        default=2_500, ge=64, le=4_000
     )
     character_drift_max_response_bytes: int = Field(
         default=32_000, ge=1_024, le=64_000

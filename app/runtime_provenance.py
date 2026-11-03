@@ -7,12 +7,21 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from .config import Settings
+from .character_drift import (
+    CHARACTER_REVIEW_POLICY_VERSION,
+    CHARACTER_REVIEW_PROMPT_VERSION,
+    CHARACTER_REVIEW_SCHEMA_VERSION,
+    CHARACTER_REVIEWED_EVENTS_SCHEMA_VERSION,
+)
 from .character_trait_extraction import (
     ASSERTION_INDEX_V1, DRAFT_SIGNAL_TRACE_V1,
     DRAFT_ACTOR_SIGNAL_PROMPT_V1, DRAFT_SOURCE_EXCERPT_REPAIR_V1,
     TARGET_BOUND_DRAFT_SIGNAL_PROMPT_V2,
     TARGET_BOUND_DRAFT_SIGNAL_PROMPT_V3,
     SUPPORT_TRACE_V1,
+    BASELINE_COVERAGE_SCHEMA_V1,
+    BASELINE_COVERAGE_SYSTEM_PROMPT_V1,
+    BASELINE_COVERAGE_PROMPT_VERSION,
 )
 from .character_scope_review import SCOPE_REVIEW_PROMPT_V4, SCOPE_REVIEW_SCHEMA_V2
 from .character_history_semantic_review import (
@@ -284,6 +293,11 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "embeddings": settings.enable_embeddings,
         },
         "character_consistency_limits": {
+            "checker_version": "character-consistency-stage-v5",
+            "drift_review_policy_version": CHARACTER_REVIEW_POLICY_VERSION,
+            "drift_review_prompt_version": CHARACTER_REVIEW_PROMPT_VERSION,
+            "drift_review_schema_version": CHARACTER_REVIEW_SCHEMA_VERSION,
+            "reviewed_events_schema_version": CHARACTER_REVIEWED_EVENTS_SCHEMA_VERSION,
             "ooc_protocol_version": CHARACTER_OOC_PROTOCOL_VERSION,
             "ooc_supported_dimensions": list(
                 CHARACTER_OOC_SUPPORTED_DIMENSIONS
@@ -308,6 +322,24 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "scoped_axis_drift_v1": settings.character_scoped_axis_drift_v1,
             "signal_core_scope_v3": settings.character_signal_core_scope_prompt_v3,
             "signal_support_id_v4": settings.character_signal_support_id_v4,
+            "baseline_coverage_recovery_schema_version": (
+                BASELINE_COVERAGE_SCHEMA_V1
+                if settings.character_signal_support_id_v4
+                and settings.character_signal_semantic_scope_v5
+                and settings.character_signal_scope_review_v1 else None
+            ),
+            "baseline_coverage_recovery_prompt_sha256": (
+                _fingerprint(BASELINE_COVERAGE_SYSTEM_PROMPT_V1)
+                if settings.character_signal_support_id_v4
+                and settings.character_signal_semantic_scope_v5
+                and settings.character_signal_scope_review_v1 else None
+            ),
+            "baseline_coverage_recovery_prompt_version": (
+                BASELINE_COVERAGE_PROMPT_VERSION
+                if settings.character_signal_support_id_v4
+                and settings.character_signal_semantic_scope_v5
+                and settings.character_signal_scope_review_v1 else None
+            ),
             "signal_semantic_scope_v5": settings.character_signal_semantic_scope_v5,
             "signal_semantic_scope_version": (
                 CHARACTER_SEMANTIC_SCOPE_PROTOCOL_V6

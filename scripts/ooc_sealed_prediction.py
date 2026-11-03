@@ -51,11 +51,33 @@ class RuntimeEvidenceRef(StrictModel):
         return self
 
 
+class RuntimeExplanationRequirement(StrictModel):
+    """Content-free receipt of the collector's verified V2 scope exception.
+
+    This is emitted only after checking the full frozen observation pool and
+    model receipt. It records a dependency decision, not completed explanation
+    processing, and is valid only for a fully reviewed no-issue result.
+    """
+
+    schema_version: Literal["character-explanation-requirement-v1"]
+    state: Literal["not_required_by_scope"]
+    reviewed_events_sha256: Sha256
+    target_observation_pool_sha256: Sha256
+    observation_count: int = Field(strict=True, ge=1, le=24)
+    event_group_ids: tuple[Sha256, ...] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def unique_groups(self):
+        if len(set(self.event_group_ids)) != len(self.event_group_ids):
+            raise ValueError("scope_requirement_duplicate_group")
+        return self
+
+
 class RuntimeCaseSnapshot(StrictModel):
     case_id: OpaqueId
     stage_status: Literal["completed", "partial", "failed"]
     material_coverage: Literal["complete", "partial", "unknown"]
-    explanation_coverage: Literal["complete", "partial", "unknown"]
+    explanation_coverage: Literal["complete", "partial", "unknown", "not_run"]
     report_collections_complete: bool
     citation_refs_complete: bool
     trace_count: int = Field(strict=True, ge=0, le=10_000)
@@ -81,6 +103,7 @@ class RuntimeCaseSnapshot(StrictModel):
     # New server-selected clue evidence is not a model review or an event
     # certificate.  None preserves the existing reviewed/legacy projection.
     evidence_binding: Literal["server_evidence_pair_v1"] | None = None
+    explanation_requirement: RuntimeExplanationRequirement | None = None
     stage_funnel: StageFunnel
 
     @model_serializer(mode="wrap")
@@ -88,6 +111,8 @@ class RuntimeCaseSnapshot(StrictModel):
         value = handler(self)
         if self.evidence_binding is None:
             value.pop("evidence_binding", None)
+        if self.explanation_requirement is None:
+            value.pop("explanation_requirement", None)
         return value
 
 
@@ -198,10 +223,26 @@ def project_case_prediction(
         raise PredictionProjectionError("unknown_public_assessment_policy")
     if snapshot.case_id != public_case.case_id:
         raise PredictionProjectionError("runtime_case_id_mismatch")
+    scope_proof = snapshot.explanation_requirement
+    current = [ref for ref in snapshot.citations if ref.role == "C"]
+    scope_not_required = bool(
+        scope_proof is not None
+        and assessment_policy == EVENT_ASSESSMENT_POLICY
+        and snapshot.final_outcome == "no_issue"
+        and not (snapshot.formal_issue_count or snapshot.review_clue_count or snapshot.provisional_clue_count)
+        and snapshot.evidence_binding is None and not snapshot.report_evidence
+        and scope_proof.observation_count == len(current)
+        and None not in {ref.event_group_id for ref in current}
+        and set(scope_proof.event_group_ids) == {ref.event_group_id for ref in current}
+        and any(ref.role == "B" for ref in snapshot.citations)
+        and all(ref.role != "P" for ref in snapshot.citations)
+    )
+    if scope_proof is not None and not scope_not_required:
+        return _unassessed(snapshot, assessment_policy)
     complete = bool(
         snapshot.stage_status == "completed"
         and snapshot.material_coverage == "complete"
-        and snapshot.explanation_coverage == "complete"
+        and (snapshot.explanation_coverage == "complete" or scope_not_required)
         and snapshot.report_collections_complete
         and snapshot.citation_refs_complete
         and snapshot.trace_count == 1

@@ -406,6 +406,18 @@ def test_alpha_runner_preflight_requires_strict_formal_support_binding_identity(
     else:
         limits["signal_support_segmenter_version"] = "assertion-index-v2"
 
+    if expected_code == "alpha_ooc_capabilities_unavailable":
+        # An active recovery identity cannot accompany a disabled support chain.
+        assert live_acceptance._safe_runtime_provenance(provenance) is None
+        # The producer publishes the complete recovery group as null when any
+        # of support v4, semantic scope v5, or scope review is disabled.
+        for key in (
+            "baseline_coverage_recovery_schema_version",
+            "baseline_coverage_recovery_prompt_sha256",
+            "baseline_coverage_recovery_prompt_version",
+        ):
+            limits[key] = None
+
     safe = live_acceptance._safe_runtime_provenance(provenance)
     if expected_code == "alpha_ooc_capabilities_unavailable":
         assert safe == provenance

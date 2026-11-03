@@ -40,6 +40,8 @@ from app.character_consistency_stage import (
     _trait_applies_to_release,
 )
 from app.character_drift import (
+    CHARACTER_REVIEW_POLICY_VERSION,
+    CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT,
     CHARACTER_REVIEW_SYSTEM_PROMPT,
     CharacterDriftCase,
     CharacterReviewDiagnostics,
@@ -113,6 +115,45 @@ class QueueProvider:
         value = self.responses.pop(0)
         if isinstance(value, Exception):
             raise value
+        if system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT:
+            # Explicit migration of these hand-authored legacy scenarios to
+            # the v5 wire contract. Production never accepts old responses.
+            # Tests for a missing/malformed policy use a dedicated provider.
+            payload = json.loads(value)
+            if "verdict" in payload and "policy_version" not in payload:
+                request = json.loads(user)
+                current = [row["id"] for row in request["evidence"] if row["id"].startswith("C")]
+                scoped = payload.get("scope_applicability", {})
+                scope_rows = {row["citation"]: row for row in scoped.get("observations", [])}
+                groups = [current] if scoped.get("independent_events") == "no" else [[label] for label in current]
+                events = []
+                cited = set(payload["citations"])
+                verdict = payload["verdict"]
+                for group in groups:
+                    rows = [scope_rows.get(label, {}) for label in group]
+                    situation = next((row["situation_match"] for row in rows if row.get("situation_match") != "same" and "situation_match" in row), "same")
+                    obj = next((row["object_match"] for row in rows if row.get("object_match") != "same" and "object_match" in row), "same")
+                    event_verdict = verdict if set(group) & cited else "needs_confirmation"
+                    if situation == "different" or obj == "different":
+                        event_verdict = "explained"
+                    elif situation == "unclear" or obj == "unclear":
+                        event_verdict = "needs_confirmation"
+                    events.append({
+                        "current_citations": group, "verdict": event_verdict,
+                        "explanation": payload["explanation"][:160],
+                        "actor_match": "same", "trait_match": "same", "actuality": "actual",
+                        "object_match": obj, "situation_match": situation,
+                    })
+                selected = [event for event in events if set(event["current_citations"]) & cited]
+                if selected and all(event["verdict"] == "explained" for event in selected):
+                    verdict = "explained"
+                elif any(event["verdict"] != "contradicts" for event in selected) and verdict == "contradicts":
+                    verdict = "needs_confirmation"
+                value = json.dumps({
+                    "policy_version": CHARACTER_REVIEW_POLICY_VERSION, "events": events,
+                    "verdict": verdict, "explanation": payload["explanation"],
+                    "citations": payload["citations"],
+                }, ensure_ascii=False)
         if system == EXPLANATION_REVIEW_SYSTEM_PROMPT:
             response_payload = json.loads(value)
             if set(response_payload) == {"items"}:
@@ -148,6 +189,36 @@ class CapturingQueueProvider(QueueProvider):
         if stage == "signal":
             self.completion_caps.append(settings.character_signal_max_completion_tokens)
         return self
+
+
+def _single_event_response(verdict: str, *, citations=("B01", "C01"),
+                           explanation="该次表现的具体情境尚不足以确定冲突。"):
+    return json.dumps({
+        "policy_version": CHARACTER_REVIEW_POLICY_VERSION,
+        "verdict": verdict, "explanation": explanation, "citations": list(citations),
+        "events": [{
+            "current_citations": [label for label in citations if label.startswith("C")],
+            "verdict": verdict, "explanation": explanation,
+            "actor_match": "same", "trait_match": "same", "actuality": "actual",
+            "object_match": "same", "situation_match": "same",
+        }],
+    }, ensure_ascii=False)
+
+
+def _assert_and_remove_observation_pool(trace, *, source, ranges):
+    pool = trace.pop("target_observation_pool")
+    assert pool["schema_version"] == "character-target-observation-pool-v1"
+    assert pool["observation_count"] == len(pool["observation_refs"]) == len(ranges)
+    assert {(row["line_start"], row["line_end"]) for row in pool["observation_refs"]} == set(ranges)
+    lines = source.splitlines()
+    for row in pool["observation_refs"]:
+        assert row["document_name"] == "draft.md"
+        assert row["document_version"] == 1
+        assert row["content_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+        quoted = "\n".join(lines[row["line_start"] - 1:row["line_end"]])
+        assert row["text_sha256"] == hashlib.sha256(quoted.encode()).hexdigest()
+        for name in ("observation_id_sha256", "source_input_id_sha256"):
+            assert len(row[name]) == 64 and set(row[name]) <= set("0123456789abcdef")
 
 
 @pytest.fixture(autouse=True)
@@ -281,6 +352,7 @@ def test_empty_first_targeted_pass_recovers_safe_adjacent_pronoun_in_verificatio
             _response(),
             _response(),
             _response(pronoun_record),
+            _single_event_response("needs_confirmation"),
         )
         result = _run_stage(
             _new_run(client, project["id"]),
@@ -1798,25 +1870,11 @@ def test_positive_state_does_not_suppress_targeted_recall_of_opposed_speech():
                     line=2,
                 ),
             ),
-            _response(),
-            _response(
-                _record(
-                    character="祁雾",
-                    evidence=second_line,
-                    polarity="negative",
-                    kind="speech_sample",
-                    dimension="speech_pattern",
-                    trait_key="concise_speech",
-                    line=3,
-                )
-            ),
             json.dumps(
                 {
                     "verdict": "needs_confirmation",
-                    "explanation": "两次反向说话表现需要进一步确认。",
-                    "citations": ["B01", "C01", "C02"],
-                    "event_independence": "yes",
-                    "independent_event_citations": ["C01", "C02"],
+                    "explanation": "这次反向说话表现的具体情境需要进一步确认。",
+                    "citations": ["B01", "C01"],
                 },
                 ensure_ascii=False,
             ),
@@ -1829,27 +1887,19 @@ def test_positive_state_does_not_suppress_targeted_recall_of_opposed_speech():
         )
 
         counts = result.diagnostics["counts"]
-        assert counts["targeted_pass_scheduled_count"] == 2
-        assert counts["targeted_signal_added_count"] == 1
-        assert counts["targeted_verification_scheduled_count"] == 1
-        assert counts["targeted_verification_completed_count"] == 1
-        assert counts["targeted_verification_signal_added_count"] == 1
-        assert counts["draft_observation_count"] == 3
+        # The already observed opposed event is sufficient for semantic review;
+        # a positive declaration neither erases it nor requires a second event.
+        assert counts["targeted_pass_scheduled_count"] == 0
+        assert counts["targeted_signal_added_count"] == 0
+        assert counts["targeted_verification_scheduled_count"] == 0
+        assert counts["draft_observation_count"] == 2
         assert result.diagnostics["outcome"] == "partial"
         assert result.diagnostics["explanation_coverage"] == "not_run"
         assert not result.issues
         assert len(result.review_clues) == 1
-        assert len(provider.calls) == 5
-        targeted_prompt = provider.calls[2][1]
-        assert '"requested_polarity":"negative"' in targeted_prompt
-        assert '"line_start":1,"line_end":1' in targeted_prompt
-        assert '"line_start":2,"line_end":2' not in targeted_prompt
-        assert '"baseline_polarity"' not in targeted_prompt
-        assert '"baseline_hint":"说话始终简短"' in targeted_prompt
-        verification_prompt = provider.calls[3][1]
-        assert "检索视图：candidate_lines_only" in verification_prompt
-        assert f"3: {second_line}" in verification_prompt
-        assert f"1: {first_line}" not in verification_prompt
+        assert len(provider.calls) == 3
+        assert provider.calls[2][0] == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
+        assert result.diagnostics["case_trace"][0]["matched_observation_count"] == 1
 
 
 def test_two_independent_primary_speech_samples_suppress_targeted_recall():
@@ -1985,7 +2035,7 @@ def test_unrelated_formal_package_failure_does_not_poison_complete_ooc_case():
     assert diagnostics["counts"]["case_material_partial_count"] == 0
     assert diagnostics["case_material_partial_reason_counts"] == {}
     assert diagnostics["case_trace"][0]["prepare_reason"] == (
-        "two_independent_behaviors"
+        "single_clear_event_review"
     )
     assert diagnostics["case_trace"][0]["promote_reason"] != (
         "material_coverage_incomplete"
@@ -2017,16 +2067,7 @@ def test_related_targeted_draft_package_failure_keeps_case_material_partial():
                     statement="说话始终简短",
                 )
             ),
-            _response(
-                _record(
-                    character="祁雾",
-                    evidence=action_line,
-                    polarity="negative",
-                    kind="speech_sample",
-                    dimension="speech_pattern",
-                    trait_key="concise_speech",
-                )
-            ),
+            _response(),  # No primary opposition: the targeted call is required.
             RuntimeError("related targeted provider failure"),
         )
 
@@ -2683,7 +2724,7 @@ def test_failed_explanation_search_keeps_model_conflict_as_review_clue():
     assert result.diagnostics["outcome"] == "partial"
     assert result.diagnostics["material_coverage"] == "complete"
     assert result.diagnostics["reason_counts"]["explanation_provider_error"] == 1
-    assert len(provider.calls) == 5
+    assert len(provider.calls) == 4
 
 
 def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
@@ -2779,7 +2820,13 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
             )
         assert len(candidates) == 1
         assert second_result.diagnostics["counts"]["persisted_reused"] == 1
-        assert second_result.diagnostics["case_trace"] == [
+        actual_trace = [dict(row) for row in second_result.diagnostics["case_trace"]]
+        _assert_and_remove_observation_pool(actual_trace[0], source="林澈明确说自己讨厌蜜瓜。", ranges=((1, 1),))
+        assert actual_trace[0].pop("review_policy") == CHARACTER_REVIEW_POLICY_VERSION
+        receipt = actual_trace[0].pop("reviewed_events")
+        assert receipt["confirmed_candidate_id_sha256"] == hashlib.sha256(candidate_id.encode()).hexdigest()
+        assert len(receipt["events"]) == 1
+        assert actual_trace == [
             {
                 "character_key": "林澈",
                 "dimension": "preference",
@@ -2799,7 +2846,7 @@ def test_run1_pending_confirm_run2_detects_explicit_preference_conflict():
                     ).hexdigest(),
                 }],
                 "matched_observation_refs_truncated": False,
-                "prepare_reason": "reported_opposed_preference",
+                "prepare_reason": "single_clear_event_review",
                 "material_coverage": "complete",
                 "material_coverage_reasons": [],
                 "explanation_coverage": "not_run",
@@ -2993,16 +3040,6 @@ def test_nonempty_preference_behavior_gets_one_excluding_verification_pass():
                     line=1,
                 )
             ),
-            _response(
-                _record(
-                    evidence=second_line,
-                    polarity="negative",
-                    kind="action",
-                    trait_key="melon_preference",
-                    statement="讨厌蜜瓜",
-                    line=2,
-                )
-            ),
             json.dumps(
                 {
                     "verdict": "contradicts",
@@ -3020,15 +3057,14 @@ def test_nonempty_preference_behavior_gets_one_excluding_verification_pass():
         )
 
         counts = result.diagnostics["counts"]
-        assert counts["targeted_pass_scheduled_count"] == 2
-        assert counts["targeted_verification_scheduled_count"] == 1
-        assert counts["targeted_verification_signal_added_count"] == 1
-        assert counts["draft_observation_count"] == 2
+        assert counts["targeted_pass_scheduled_count"] == 1
+        assert counts["targeted_verification_scheduled_count"] == 0
+        assert counts["targeted_signal_added_count"] == 1
+        assert counts["draft_observation_count"] == 1
         assert result.issues == ()
         assert len(result.review_clues) == 1
-        verification_prompt = provider.calls[3][1]
-        assert f"1: {first_line}" not in verification_prompt
-        assert f"2: {second_line}" in verification_prompt
+        assert len(provider.calls) == 4
+        assert provider.calls[3][0] == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
 
 
 def test_draft_extractor_receives_exact_confirmed_key_and_enters_drift_comparison():
@@ -3089,7 +3125,7 @@ def test_draft_extractor_receives_exact_confirmed_key_and_enters_drift_compariso
                     trait_key=exact_key,
                 )
             ),
-            _response(),
+            _single_event_response("needs_confirmation"),
         )
         result = _run_stage(
             _new_run(client, project["id"]),
@@ -3116,10 +3152,10 @@ def test_draft_extractor_receives_exact_confirmed_key_and_enters_drift_compariso
         assert context["confirmed_traits_coverage"]["state"] == "complete"
         assert "林澈总是先观察现场" not in draft_prompt
         counts = result.diagnostics["counts"]
-        assert counts["targeted_pass_scheduled_count"] == 1
-        assert counts["targeted_empty_pass_count"] == 1
-        assert counts["targeted_verification_first_empty_target_count"] == 1
-        assert counts["targeted_verification_no_candidate_target_count"] == 1
+        assert counts["targeted_pass_scheduled_count"] == 0
+        assert counts["targeted_empty_pass_count"] == 0
+        assert counts["targeted_verification_first_empty_target_count"] == 0
+        assert counts["targeted_verification_no_candidate_target_count"] == 0
         assert counts["targeted_verification_scheduled_count"] == 0
         assert counts["draft_observation_count"] == 1
         assert result.diagnostics["outcome"] == "partial"
@@ -3129,11 +3165,8 @@ def test_draft_extractor_receives_exact_confirmed_key_and_enters_drift_compariso
             "explanation_coverage"
         ] == "not_run"
         assert result.issues == ()
-        targeted_prompt = provider.calls[2][1]
-        assert '"requested_polarity":"negative"' in targeted_prompt
-        assert '"exclude_evidence_ranges":[{"line_start":1,"line_end":1}]' in targeted_prompt
-        assert '"baseline_polarity"' not in targeted_prompt
-        assert '"baseline_hint":"林澈总是先观察现场' in targeted_prompt
+        assert provider.calls[2][0] == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
+        assert exact_key in provider.calls[2][1]
 
 
 def test_primary_invalid_packages_fail_closed_and_mark_material_partial():
@@ -3429,6 +3462,7 @@ def test_zero_primary_observations_trigger_one_targeted_batch_and_recover_signal
                 targeted_valid,
             ),
             _response(targeted_valid),
+            _single_event_response("needs_confirmation"),
         )
 
         result = _run_stage(
@@ -3444,9 +3478,9 @@ def test_zero_primary_observations_trigger_one_targeted_batch_and_recover_signal
         assert counts["targeted_pass_completed_count"] == 1
         assert counts["targeted_signal_added_count"] == 1
         assert counts["targeted_record_ignored_duplicate_count"] == 0
-        assert counts["targeted_reviewer_reserve_tokens"] == 4_000
+        assert counts["targeted_reviewer_reserve_tokens"] == 8_000
         assert counts["draft_observation_count"] == 1
-        assert len(provider.calls) == 4
+        assert len(provider.calls) == 5
         assert sum("角色草稿覆盖复核器" in system for system, _ in provider.calls) == 2
         targeted_prompt = provider.calls[2][1]
         assert '"character":"祁雾"' in targeted_prompt
@@ -3591,6 +3625,7 @@ def test_targeted_pass_budget_rejection_is_partial_without_provider_call():
                 character_consistency_stage_token_budget=1_000,
                 character_signal_token_budget=1_000,
                 character_signal_max_completion_tokens=64,
+                character_drift_max_completion_tokens=64,
             )
 
         counts = result.diagnostics["counts"]
@@ -3707,6 +3742,7 @@ def test_focused_target_empty_does_not_suppress_another_legal_target():
             _response(),
             _response(recovered),
             _response(),
+            _single_event_response("needs_confirmation"),
         )
 
         result = _run_stage(
@@ -3922,6 +3958,7 @@ def test_primary_chunk_counters_distinguish_admission_skip_from_failed_call(fail
                     20_000 if failure else 1_000
                 ),
                 character_signal_max_completion_tokens=64,
+                character_drift_max_completion_tokens=64,
             )
 
     counts = result.diagnostics["counts"]
@@ -4294,6 +4331,7 @@ def test_single_personality_behavior_is_clue_and_two_behaviors_can_need_confirma
                         line=1,
                     )
                 ),
+                _single_event_response("needs_confirmation"),
             ),
         )
         assert not one.issues
@@ -4347,7 +4385,8 @@ def test_single_personality_behavior_is_clue_and_two_behaviors_can_need_confirma
         assert len(two.review_clues) == 1
         assert two.review_clues[0].severity.value == "medium"
         assert two.review_clues[0].metadata["judgement"] == "needs_confirmation"
-        assert two.review_clues[0].metadata["event_independence"] == "yes"
+        assert two.review_clues[0].metadata["review_policy"] == CHARACTER_REVIEW_POLICY_VERSION
+        assert len(two.review_clues[0].metadata["reviewed_events"]["events"]) == 2
         assert two.review_clues[0].metadata["evidence_binding"] == "review_citations_v1"
 
 
@@ -4403,13 +4442,13 @@ def test_provider_review_failure_keeps_bound_clue_and_partial_diagnostic():
     assert len(result.review_clues) == 1
     clue = result.review_clues[0]
     assert clue.metadata["final_outcome"] == "unverifiable"
-    assert clue.metadata["review_reason"] == "provider_error"
+    assert clue.metadata["review_reason"] == "single_event_review_unavailable"
     assert [span.document_name for span in clue.evidence[:2]] == [
         "profile.md", "draft.md",
     ]
     assert result.diagnostics["outcome"] == "partial"
     assert result.diagnostics["reason_counts"]["review_provider_error"] == 1
-    assert result.diagnostics["reason_counts"]["drift_provider_error"] == 1
+    assert result.diagnostics["reason_counts"]["drift_single_event_review_unavailable"] == 1
 
 
 def test_support_keyword_requires_affirmative_clause():
@@ -4782,9 +4821,9 @@ def test_api_stage_never_promotes_same_draft_medical_defense_to_support(
     captured_support: list[tuple[SupportEvidence, ...]] = []
     original_prepare = prepare_character_drift
 
-    def capture_prepare(case):
+    def capture_prepare(case, **kwargs):
         captured_support.append(case.support_evidence)
-        return original_prepare(case)
+        return original_prepare(case, **kwargs)
 
     monkeypatch.setattr(
         "app.character_consistency_stage.prepare_character_drift", capture_prepare
@@ -4794,6 +4833,7 @@ def test_api_stage_never_promotes_same_draft_medical_defense_to_support(
         lambda _self, _prepared: _trace_review(
             ("B01", "C01", "X01") if include_published_history else ("B01", "C01"),
             verdict="explained" if include_published_history else "needs_confirmation",
+            single_event=True,
         ),
     )
     with TestClient(app) as client:
@@ -4890,6 +4930,17 @@ def test_support_search_never_reuses_baseline_evidence_line():
 
 
 def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
+    class TraceCoverageProvider(QueueProvider):
+        def complete(self, system, user):
+            if system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT:
+                text = _single_event_response("needs_confirmation")
+            elif "角色草稿覆盖复核器" in system:
+                text = _response()  # No omitted opposed behavior in this scenario.
+            else:
+                return super().complete(system, user)
+            self.calls.append((system, user))
+            return SimpleNamespace(text=text, prompt_tokens=17, completion_tokens=9)
+
     profile_lines = [
         "机密原文甲：林澈从不主动与陌生人交谈。",
         "机密原文乙：苏弦喜欢蜜瓜。",
@@ -4958,7 +5009,7 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
 
         result = _run_stage(
             _new_run(client, project["id"]),
-            QueueProvider(
+            TraceCoverageProvider(
                 _response(*profile_records),
                 _response(
                     _record(
@@ -4993,9 +5044,15 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
             for candidate_id in confirmed_candidate_ids
         }
         lin_trace = dict(by_character["林澈"])
+        _assert_and_remove_observation_pool(lin_trace, source="\n".join(draft_lines), ranges=((1, 1),))
         assert lin_trace.pop("target_coverage")["status"] == "partial"
-        assert isinstance(lin_trace.pop("review_required"), bool)
+        assert lin_trace.pop("review_required") is True
         lin_trace.pop("server_evidence_pair", None)
+        assert lin_trace.pop("review_policy") == CHARACTER_REVIEW_POLICY_VERSION
+        receipt = lin_trace.pop("reviewed_events", None)
+        assert receipt is not None, (lin_trace, result.diagnostics["reason_counts"])
+        assert receipt["confirmed_candidate_id_sha256"] == lin_trace["confirmed_candidate_id_sha256"]
+        assert len(receipt["events"]) == 1
         assert lin_trace == {
             "character_key": "林澈",
             "dimension": "core_personality",
@@ -5013,19 +5070,22 @@ def test_case_trace_covers_every_bounded_baseline_without_source_text_leakage():
                 "key_object_sha256": None,
             }],
             "matched_observation_refs_truncated": False,
-            "material_coverage": "partial",
-            "material_coverage_reasons": ["targeted_package_incomplete"],
-            "prepare_reason": "single_behavior_is_not_drift",
+            "material_coverage": "complete",
+            "material_coverage_reasons": [],
+            "prepare_reason": "single_clear_event_review",
             "explanation_coverage": "not_run",
             "support_count": 0,
-            "review_outcome": "not_run",
-            "review_verdict": None,
-            "citation_roles": [],
-            "citation_refs": [],
+            "review_outcome": "completed",
+            "review_verdict": "needs_confirmation",
+            "citation_roles": ["B", "C"],
+            "citation_refs": [
+                {"handle": "B01", "role": "B", "document_name": "profiles.md", "line_start": 1, "line_end": 1},
+                {"handle": "C01", "role": "C", "document_name": "draft.md", "line_start": 1, "line_end": 1},
+            ],
             "citation_refs_incomplete": False,
             "final_outcome": "needs_confirmation",
             "visible": True,
-            "promote_reason": "single_behavior_is_not_drift",
+            "promote_reason": "model_needs_confirmation",
         }
         assert by_character["苏弦"]["prepare_reason"] == "no_opposition"
         assert by_character["苏弦"]["final_outcome"] == "no_issue"
@@ -5265,13 +5325,15 @@ def _citation_trace_case(
     )
 
 
-def _trace_review(citations: tuple[str, ...], *, verdict: str = "explained"):
+def _trace_review(citations: tuple[str, ...], *, verdict: str = "explained", single_event=False):
     return CharacterReviewResult(
-        decision=ModelDriftDecision(
+        decision=(ModelDriftDecision.model_validate_json(_single_event_response(
+            verdict, citations=citations, explanation="有足够的历史证据解释当前表现。",
+        )) if single_event else ModelDriftDecision(
             verdict=verdict,
             explanation="有足够的历史证据解释当前表现。",
             citations=citations,
-        ),
+        )),
         diagnostics=CharacterReviewDiagnostics(outcome="completed", reason="completed"),
     )
 
@@ -5593,7 +5655,7 @@ def test_character_issue_preserves_versioned_text_at_reused_document_coordinate(
 
 def test_explained_review_without_visible_issue_retains_frozen_growth_citation_ref():
     profile_line = "林澈喜欢蜜瓜。"
-    growth_line = "训练后林澈逐渐改变了待人方式。"
+    growth_line = "训练后林澈逐渐改变了对蜜瓜的偏好，变得讨厌蜜瓜。"
     draft_line = "林澈明确说自己讨厌蜜瓜。"
     with TestClient(app) as client:
         project = client.post(
@@ -5638,6 +5700,12 @@ def test_explained_review_without_visible_issue_retains_frozen_growth_citation_r
                     kind="preference_expression", trait_key="melon_preference",
                 )
             ),
+            json.dumps({"items": [{
+                "citation": "E01", "explanation_type": "growth_or_recovery",
+                "actuality": "actual", "actor_relation": "same", "axis_relation": "same",
+                "temporal_relation": "prior_or_active", "causal_relation": "explicit_causal",
+                "applicable_observation_citations": ["C01"],
+            }]}, ensure_ascii=False),
             json.dumps(
                 {
                     "verdict": "explained",
@@ -5647,7 +5715,8 @@ def test_explained_review_without_visible_issue_retains_frozen_growth_citation_r
                 ensure_ascii=False,
             ),
         )
-        result = _run_stage(_new_run(client, project["id"]), provider)
+        result = _run_stage(_new_run(client, project["id"]), provider,
+                            character_explanation_review_v1=True)
 
     assert result.issues == ()
     trace = result.diagnostics["case_trace"][0]
@@ -6389,10 +6458,13 @@ def _run_scoped_axis_stage(
     scoped_enabled: bool = True,
 ):
     definition = "家人遇险时是否保护家人"
+    candidate_id = str(uuid4())
     scope_text = "家人遇险时"
     proposition = "家人遇险时，林澈保护家人"
     baseline = ConfirmedTraitSnapshot.model_validate({
         **_confirmed_trait(dimension="value", trait_key="保护家人").model_dump(),
+        "id": f"ct_{candidate_id}",
+        "key_object": "家人",
         "statement": proposition,
         "evidence": [
             EvidenceSpan(
@@ -6420,17 +6492,18 @@ def _run_scoped_axis_stage(
         "axis_polarity": "positive",
     })
     entry = (
-        _snapshot_stub("scoped", "value:家人"), baseline,
+        _snapshot_stub(candidate_id, "value:家人"), baseline,
         NarrativeScopeV1(), "林澈",
     )
     entries = [entry]
     if duplicate_baseline:
         # One author axis can have two same-direction confirmed source labels.
         # They are still two frozen facts but one OOC comparison for this run.
+        peer_candidate_id = str(uuid4())
         entries.append((
-            _snapshot_stub("scoped-peer", "value:家人"),
+            _snapshot_stub(peer_candidate_id, "value:家人"),
             baseline.model_copy(update={
-                "id": "ct_scoped_peer", "trait_key": "守护家人",
+                "id": f"ct_{peer_candidate_id}", "trait_key": "守护家人",
             }),
             NarrativeScopeV1(), "林澈",
         ))
@@ -6462,24 +6535,24 @@ def _run_scoped_axis_stage(
         project = client.post(
             "/api/v1/projects", json={"name": f"适用情境反例-{uuid4().hex}"}
         ).json()
+        profile = _create_document(
+            client, project["id"], name="profile.md", role="character_profile",
+            content=proposition + "。",
+            narrative_context=_context(publication="published"),
+        )
+        entries = [
+            (snapshot, trait.model_copy(update={"evidence": (
+                trait.evidence[0].model_copy(update={"document_id": profile["id"]}),
+            )}), scope, character)
+            for snapshot, trait, scope, character in entries
+        ]
         _create_document(
             client, project["id"], name="draft.md", role="chapter",
             content="\n".join(source_lines),
             narrative_context=_context(publication="draft"),
         )
         run_id = _new_run(client, project["id"])
-        provider_responses = [_response(), _response(*observations), review]
-        if (
-            scoped_enabled
-            and len(source_lines) == 2
-            and situation_match == "same"
-            and independent_events == "yes"
-        ):
-            provider_responses.append(json.dumps({
-                "relation": "different_events",
-                "explanation": "两段原文明确描述两次不同事件。",
-                "citations": current_citations,
-            }, ensure_ascii=False))
+        provider_responses = [_response(), _response(), _response(*observations), review]
         provider = QueueProvider(*provider_responses)
         with patch.object(
             CharacterConsistencyStage, "_load_confirmed_traits", return_value=entries
@@ -6501,15 +6574,14 @@ def test_scoped_axis_different_situation_is_not_a_formal_issue():
     assert result.diagnostics["counts"]["drift_reviewed"] == 1
     assert result.diagnostics["counts"]["drift_no_issue"] == 1
     assert result.diagnostics["case_trace"][0]["promote_reason"] == (
-        "scoped_axis_outside_applicability"
+        "single_event_outside_comparison"
     )
-    assert result.diagnostics["case_trace"][0]["scoped_axis_review"] == {
-        "observations": [{
-            "citation": "C01", "object_match": "same",
-            "situation_match": "different",
-        }],
-        "independent_events": "not_applicable",
-    }
+    trace = result.diagnostics["case_trace"][0]
+    event = trace["reviewed_events"]["events"][0]
+    assert (event["current_citations"], event["object_match"], event["situation_match"]) == (["C01"], "same", "different")
+    assert trace["explanation_coverage"] == "not_run"
+    assert trace["target_coverage"]["schema_version"] == "character-target-coverage-v2"
+    assert trace["target_coverage"]["explanation_requirement"]["state"] == "not_required_by_scope"
 
 
 def test_scoped_axis_same_scope_two_actions_make_one_issue_for_two_confirmed_labels():
@@ -6530,11 +6602,9 @@ def test_scoped_axis_same_scope_two_actions_make_one_issue_for_two_confirmed_lab
     assert result.review_clues[0].metadata["review_reason"] == (
         "explanation_search_incomplete"
     )
-    assert result.review_clues[0].metadata["event_identity_verification"] == (
-        "different_events"
-    )
+    assert len(result.review_clues[0].metadata["reviewed_events"]["events"]) == 2
     assert result.review_clues[0].metadata["explanation_coverage"] == "not_run"
-    assert result.diagnostics["counts"]["drift_reviewed"] == 2
+    assert result.diagnostics["counts"]["drift_reviewed"] == 1
     assert result.diagnostics["reason_counts"][
         "equivalent_approved_axis_baseline_collapsed"
     ] == 1
@@ -6546,12 +6616,7 @@ def test_scoped_axis_same_scope_two_actions_make_one_issue_for_two_confirmed_lab
     assert result.diagnostics["case_trace"][0]["promote_reason"] == (
         "explanation_search_incomplete"
     )
-    assert result.diagnostics["case_trace"][0]["scoped_axis_review"][
-        "independent_events"
-    ] == "yes"
-    assert result.diagnostics["case_trace"][0][
-        "event_identity_verification"
-    ] == "different_events"
+    assert len(result.diagnostics["case_trace"][0]["reviewed_events"]["events"]) == 2
     assert len(provider.calls) == 4
 
 
@@ -6565,43 +6630,35 @@ def test_scoped_axis_same_event_repeated_on_two_lines_cannot_be_conflict():
     )
     assert result.issues == ()
     assert len(result.review_clues) == 1
-    assert result.review_clues[0].metadata["final_outcome"] == "unverifiable"
+    assert result.review_clues[0].metadata["final_outcome"] == "needs_confirmation"
     assert result.review_clues[0].metadata["review_reason"] == (
-        "scoped_axis_event_independence_unproven"
+        "explanation_search_incomplete"
     )
+    assert len(result.review_clues[0].metadata["reviewed_events"]["events"]) == 1
     assert result.diagnostics["outcome"] == "partial"
     assert result.diagnostics["case_trace"][0]["visible"] is True
     assert result.diagnostics["case_trace"][0]["promote_reason"] == (
-        "scoped_axis_event_independence_unproven"
+        "explanation_search_incomplete"
     )
 
 
 def test_scoped_axis_unclear_situation_is_review_clue_not_formal_issue():
-    # This legacy stage fixture used opaque non-UUID IDs. Bind a real-shaped
-    # frozen identity here so this test also exercises the new certificate.
-    candidate_id = str(uuid4())
-    original_trait, original_stub = _confirmed_trait, _snapshot_stub
-    with patch(__name__ + "._confirmed_trait", side_effect=lambda **kwargs:
-               original_trait(**kwargs).model_copy(update={"id":f"ct_{candidate_id}"})), patch(
-        __name__ + "._snapshot_stub", side_effect=lambda _candidate_id, comparison_key=None:
-        original_stub(candidate_id, comparison_key),
-    ):
-        result, _ = _run_scoped_axis_stage(
-            ("林澈抛下家人独自离开，但家人当时是否遇险未写明。",),
-            situation_match="unclear",
-        )
+    result, _ = _run_scoped_axis_stage(
+        ("林澈抛下家人独自离开，但家人当时是否遇险未写明。",),
+        situation_match="unclear",
+    )
     assert result.issues == ()
     assert len(result.review_clues) == 1
     clue = result.review_clues[0]
-    assert clue.metadata["final_outcome"] == "unverifiable"
-    assert clue.metadata["review_reason"] == "scoped_axis_applicability_unclear"
+    assert clue.metadata["final_outcome"] == "needs_confirmation"
+    assert clue.metadata["review_reason"] == "model_needs_confirmation"
     assert len(clue.evidence) >= 2
     assert clue.evidence[0].document_id != clue.evidence[1].document_id
     assert result.diagnostics["outcome"] == "partial"
     coverage = result.diagnostics["case_trace"][0]["target_coverage"]
     assert coverage["status"] == "partial"
     assert "post_alias_processing_gap" in coverage["non_alias_blockers"]
-    assert "case_outcome_unverifiable" in coverage["non_alias_blockers"]
+    assert "case_explanation_incomplete" in coverage["non_alias_blockers"]
 
 
 def test_scoped_axis_review_is_default_off_with_explicit_partial_coverage():
@@ -6613,7 +6670,7 @@ def test_scoped_axis_review_is_default_off_with_explicit_partial_coverage():
     assert result.diagnostics["outcome"] == "partial"
     assert result.diagnostics["reason_counts"]["scoped_axis_review_disabled"] == 1
     assert result.diagnostics["counts"]["drift_reviewed"] == 0
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
 
 
 def _snapshot_stub(candidate_id: str, comparison_key: str | None = None):
@@ -7035,7 +7092,7 @@ def test_major_ooc_stage_matches_same_axis_only_for_same_object(
     assert not _signal_matches_target(different, target)
     assert _observation_matches_baseline(entry, same) is True
     assert _observation_matches_baseline(entry, different) is False
-    assert not _target_has_sufficient_recall_evidence(target, (same,))
+    assert _target_has_sufficient_recall_evidence(target, (same,))
     assert _target_with_existing_evidence_ranges(
         target, (same,)
     ).existing_evidence_ranges == ((1, 1),)
@@ -7052,7 +7109,7 @@ def test_major_ooc_stage_matches_same_axis_only_for_same_object(
             ),
         }
     )
-    assert not _target_has_sufficient_recall_evidence(target, (same, copied))
+    assert _target_has_sufficient_recall_evidence(target, (same, copied))
     assert _target_with_existing_evidence_ranges(
         target, (same, copied)
     ).existing_evidence_ranges == ((1, 1), (2, 2))
@@ -7067,7 +7124,7 @@ def test_major_ooc_stage_matches_same_axis_only_for_same_object(
             ),
         }
     )
-    assert not _target_has_sufficient_recall_evidence(
+    assert _target_has_sufficient_recall_evidence(
         target, (same, same_coordinate)
     )
 

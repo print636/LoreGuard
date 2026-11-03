@@ -31,6 +31,7 @@ from scripts import ooc_eval_contract as contract
 from scripts.ooc_sealed_prediction import (
     RuntimeCaseSnapshot,
     RuntimeEvidenceRef,
+    RuntimeExplanationRequirement,
     SealedPredictionArtifact,
     build_prediction_artifact,
 )
@@ -907,6 +908,8 @@ def _draft_target_stage_complete(
     trace: Mapping[str, Any],
     setup_case: PublicAuthorSetupCase,
     candidate_id: str,
+    *,
+    explanation_requirement: RuntimeExplanationRequirement | None = None,
 ) -> bool:
     """Consume a server-certified target scope without changing global coverage.
 
@@ -930,9 +933,20 @@ def _draft_target_stage_complete(
         "model_incomplete_chunks", "model_uncalled_chunks",
     )
     alias_keys = ("total", "proven_outside_target", "possibly_target", "unknown")
+    scope_waived = bool(
+        cert.get("schema_version") == "character-target-coverage-v2"
+        and explanation_requirement is not None
+        and trace.get("final_outcome") == "no_issue"
+        and cert.get("explanation_requirement") == {
+            key: explanation_requirement.model_dump(mode="json")[key]
+            for key in ("schema_version", "state", "reviewed_events_sha256", "target_observation_pool_sha256")
+        }
+    )
     if not (
         run.get("status") == "completed"
-        and cert.get("schema_version") == "character-target-coverage-v1"
+        and ((cert.get("schema_version") == "character-target-coverage-v1"
+              and "explanation_requirement" not in cert and explanation_requirement is None)
+             or scope_waived)
         and cert.get("confirmed_candidate_id_sha256") == _candidate_hash(candidate_id)
         and cert.get("confirmed_candidate_id_sha256") == trace.get("confirmed_candidate_id_sha256")
         and cert.get("character_key") == trace.get("character_key") == setup_case.candidate_selector.character_key
@@ -942,7 +956,8 @@ def _draft_target_stage_complete(
         and cert["comparison_key"] == trace.get("comparison_key")
         and cert.get("status") == "complete"
         and cert.get("material_coverage") == trace.get("material_coverage") == "complete"
-        and cert.get("explanation_coverage") == trace.get("explanation_coverage") == "complete"
+        and cert.get("explanation_coverage") == trace.get("explanation_coverage")
+        and (trace.get("explanation_coverage") == "complete" or scope_waived)
         and type(cert.get("matched_observation_count")) is int
         and cert["matched_observation_count"] > 0
         and type(trace.get("matched_observation_count")) is int
@@ -984,6 +999,12 @@ def _draft_target_stage_complete(
         return False
     if _run_stage_complete(run, diagnostics):
         return aliases["total"] == 0
+    if scope_waived:
+        # Only the verified target's explanation dependency may be waived.
+        # Other processing/material/alias gaps remain checked above, including
+        # the producer's explicit other-case and post-alias blockers.
+        return bool(stage.get("outcome") in {"completed", "partial"}
+                    and stage.get("material_coverage") in {"complete", "partial"})
     return bool(
         stage.get("outcome") == "partial"
         and stage.get("material_coverage") == "partial"
@@ -1371,6 +1392,10 @@ def _strict_runtime_refs(
     *,
     assessment_policy: contract.AssessmentPolicy | None = None,
 ) -> tuple[RuntimeEvidenceRef, ...] | None:
+    # New model reviews require the frozen receipt consumer below. Even a
+    # malformed or unknown new marker must not regain legacy eligibility.
+    if "review_policy" in trace or "reviewed_events" in trace:
+        return None
     raw = trace.get("citation_refs")
     if trace.get("citation_refs_incomplete") is not False or type(raw) is not list:
         return None
@@ -1463,6 +1488,307 @@ def _strict_runtime_refs(
             )
         )
     return tuple(refs)
+
+
+def _strict_reviewed_event_refs(
+    public_case: contract.PublicInputCase,
+    setup_case: PublicAuthorSetupCase,
+    trace: Mapping[str, Any],
+    row: Mapping[str, Any] | None,
+    *,
+    source_documents: Mapping[str, str] | None,
+    runtime_document_ids: Mapping[str, str] | None,
+) -> tuple[RuntimeEvidenceRef, ...] | None:
+    """Consume actual server-bound model groups, never invent groups from C ids.
+
+    Source bytes, version, anchors, report upload identity and response order
+    are independently checked here. Input/signal UUID hashes are server-owned
+    bindings: their format is checked, not claimed to be independently derived.
+    """
+    policy = contract.EVENT_ASSESSMENT_POLICY
+    receipt = trace.get("reviewed_events")
+    raw_trace = trace.get("citation_refs")
+    if not (
+        trace.get("review_policy") == policy
+        and trace.get("review_outcome") == "completed"
+        and type(trace.get("review_verdict")) is str
+        and trace.get("review_verdict") in {
+            "contradicts", "explained", "needs_confirmation", "insufficient_evidence"
+        }
+        and trace.get("citation_refs_incomplete") is False
+        and type(raw_trace) is list and 2 <= len(raw_trace) <= 8
+        and type(receipt) is dict
+        and set(receipt) == {
+            "schema_version", "assessment_policy", "review_schema_version",
+            "confirmed_candidate_id_sha256", "comparison_key", "events", "evidence_refs",
+        }
+        and receipt.get("schema_version") == "character-reviewed-events-v1"
+        and receipt.get("assessment_policy") == policy
+        and receipt.get("review_schema_version") == "character-single-event-review-v1"
+        and receipt.get("confirmed_candidate_id_sha256") == trace.get("confirmed_candidate_id_sha256")
+        and type(receipt.get("confirmed_candidate_id_sha256")) is str
+        and re.fullmatch(r"[a-f0-9]{64}", receipt["confirmed_candidate_id_sha256"])
+        and type(receipt.get("comparison_key")) is str and bool(receipt["comparison_key"])
+        and receipt["comparison_key"] == trace.get("comparison_key")
+        and isinstance(source_documents, Mapping)
+        and isinstance(runtime_document_ids, Mapping)
+    ):
+        return None
+    raw = receipt.get("evidence_refs")
+    groups = receipt.get("events")
+    if (type(raw) is not list or len(raw) != len(raw_trace)
+            or type(groups) is not list or not 1 <= len(groups) <= 6):
+        return None
+    evidence = None
+    if row is not None:
+        metadata, evidence = row.get("metadata"), row.get("evidence")
+        if not (
+            type(metadata) is dict and metadata.get("review_policy") == policy
+            and metadata.get("reviewed_events") == receipt
+            and metadata.get("evidence_binding") == "review_citations_v1"
+            and metadata.get("final_outcome") == trace.get("final_outcome")
+            and _is_uuid4(metadata.get("confirmed_candidate_id"))
+            and _candidate_hash(metadata["confirmed_candidate_id"]) == receipt["confirmed_candidate_id_sha256"]
+            and type(evidence) is list and len(evidence) == len(raw)
+            and metadata.get("review_citation_refs") == [
+                {key: ref.get(key) for key in ("handle", "role", "evidence_index", "response_index")}
+                if type(ref) is dict else None for ref in raw
+            ]
+        ):
+            return None
+    documents = {f"{doc.document_id}.md": doc for doc in public_case.documents}
+    anchors = public_case.evidence_catalog
+    by_handle: dict[str, dict[str, Any]] = {}
+    refs: list[RuntimeEvidenceRef] = []
+    evidence_indexes: set[int] = set()
+    seen_coordinates: set[tuple[str, int, int]] = set()
+    keys = {"handle", "role", "evidence_index", "response_index", "document_name",
+            "document_version", "content_sha256", "line_start", "line_end", "text_sha256",
+            "source_input_id_sha256"}
+    for response_index, (ref, trace_ref) in enumerate(zip(raw, raw_trace)):
+        if type(ref) is not dict or type(trace_ref) is not dict:
+            return None
+        role, handle = ref.get("role"), ref.get("handle")
+        if (type(role) is not str or role not in {"B", "C", "G", "X", "P"}
+                or type(ref.get("document_name")) is not str):
+            return None
+        expected_keys = keys | ({"observation_id_sha256"} if role == "C" else set())
+        if set(ref) != expected_keys:
+            return None
+        document = documents.get(ref.get("document_name"))
+        start, end, index = ref.get("line_start"), ref.get("line_end"), ref.get("evidence_index")
+        if not (
+            type(handle) is str and re.fullmatch(r"[BCGXP][0-9]{2}", handle)
+            and handle[0] == role and handle not in by_handle
+            and document is not None
+            and type(start) is int and type(end) is int and 1 <= start <= end <= 10_000_000
+            and type(index) is int and 0 <= index < len(raw) and index not in evidence_indexes
+            and type(ref.get("response_index")) is int and ref["response_index"] == response_index
+            and type(ref.get("document_version")) is int and ref["document_version"] == document.version
+            and ref.get("content_sha256") == document.sha256
+            and type(ref.get("source_input_id_sha256")) is str
+            and re.fullmatch(r"[a-f0-9]{64}", ref["source_input_id_sha256"])
+            and trace_ref == {key: ref[key] for key in (
+                "handle", "role", "document_name", "line_start", "line_end"
+            )}
+            and _is_uuid4(runtime_document_ids.get(document.document_id))
+            and _runtime_ref_role_allowed(setup_case, role=role,
+                document_id=document.document_id, line_start=start, line_end=end)
+        ):
+            return None
+        contained = [a for a in anchors if a.document_id == document.document_id
+                     and start <= a.line_start <= a.line_end <= end]
+        if not contained or min(a.line_start for a in contained) != start or max(a.line_end for a in contained) != end:
+            return None
+        source = source_documents.get(document.document_id)
+        if type(source) is not str or hashlib.sha256(source.encode("utf-8")).hexdigest() != document.sha256:
+            return None
+        lines = source.splitlines()
+        if end > len(lines):
+            return None
+        text = "\n".join(lines[start - 1:end])
+        if not text.strip() or ref.get("text_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest():
+            return None
+        if evidence is not None:
+            item = evidence[index]
+            if not (
+                type(item) is dict and item.get("document_name") == ref["document_name"]
+                and item.get("document_id") == runtime_document_ids[document.document_id]
+                and type(item.get("line_start")) is int and item["line_start"] == start
+                and type(item.get("line_end")) is int and item["line_end"] == end
+                and item.get("text") == text
+            ):
+                return None
+        if role == "C":
+            observation_refs = trace.get("matched_observation_refs")
+            ordinal = int(handle[1:]) - 1
+            if not (
+                type(ref.get("observation_id_sha256")) is str
+                and re.fullmatch(r"[a-f0-9]{64}", ref["observation_id_sha256"])
+                and type(observation_refs) is list and 0 <= ordinal < len(observation_refs)
+                and type(observation_refs[ordinal]) is dict
+                and all(observation_refs[ordinal].get(key) == ref[key]
+                        for key in ("document_name", "line_start", "line_end"))
+            ):
+                return None
+        coordinate = (document.document_id, start, end)
+        if coordinate in seen_coordinates:
+            return None
+        seen_coordinates.add(coordinate)
+        evidence_indexes.add(index)
+        by_handle[handle] = ref
+        refs.append(RuntimeEvidenceRef(role=role, document_id=document.document_id,
+                                       line_start=start, line_end=end))
+    if "B" not in {ref.role for ref in refs}:
+        return None
+    current = {handle for handle, ref in by_handle.items() if ref["role"] == "C"}
+    group_by_handle: dict[str, str] = {}
+    seen_group_ids: set[str] = set()
+    event_keys = {"event_group_id", "current_citations", "verdict", "actor_match",
+                  "trait_match", "actuality", "object_match", "situation_match"}
+    for event in groups:
+        if type(event) is not dict or set(event) != event_keys:
+            return None
+        handles, group_id = event.get("current_citations"), event.get("event_group_id")
+        if not (
+            type(handles) is list and 1 <= len(handles) <= 6
+            and all(type(handle) is str and handle in current for handle in handles)
+            and len(set(handles)) == len(handles)
+            and not set(handles).intersection(group_by_handle)
+            and type(group_id) is str and re.fullmatch(r"[a-f0-9]{64}", group_id)
+            and group_id not in seen_group_ids
+            and all(type(event.get(key)) is str for key in (
+                "verdict", "actor_match", "trait_match", "actuality", "object_match", "situation_match"
+            ))
+            and event.get("verdict") in {"contradicts", "explained", "needs_confirmation", "insufficient_evidence"}
+            and event.get("actor_match") in {"same", "different", "unclear"}
+            and event.get("trait_match") in {"same", "different", "unclear"}
+            and event.get("actuality") in {"actual", "non_actual", "unclear"}
+            and event.get("object_match") in {"same", "different", "unclear", "not_applicable"}
+            and event.get("situation_match") in {"same", "different", "unclear", "not_applicable"}
+            and group_id == _canonical_value_sha({
+                "schema_version": receipt["schema_version"],
+                "confirmed_candidate_id_sha256": receipt["confirmed_candidate_id_sha256"],
+                "comparison_key": receipt["comparison_key"],
+                "members": sorted((by_handle[handle] for handle in handles), key=lambda item: item["handle"]),
+            })
+        ):
+            return None
+        outside = bool(
+            event["actor_match"] == "different" or event["trait_match"] == "different"
+            or event["actuality"] == "non_actual" or event["object_match"] == "different"
+            or event["situation_match"] == "different"
+        )
+        if (event["verdict"] == "contradicts" or (event["verdict"] == "explained" and not outside)) and not (
+            event["actor_match"] == event["trait_match"] == "same"
+            and event["actuality"] == "actual"
+            and event["object_match"] in {"same", "not_applicable"}
+            and event["situation_match"] in {"same", "not_applicable"}
+            and (setup_case.candidate_selector.trait_type not in {"relationship_attitude", "motivation_goal"}
+                 or event["object_match"] == "same")
+            and (setup_case.author_axis is None or setup_case.candidate_selector.trait_type != "value"
+                 or event["object_match"] == event["situation_match"] == "same")
+        ):
+            return None
+        if trace.get("final_outcome") == "conflict" and (
+            trace.get("review_verdict") != "contradicts" or event["verdict"] != "contradicts"
+        ):
+            return None
+        if trace.get("final_outcome") == "no_issue" and (
+            trace.get("review_verdict") != "explained"
+            or (event["verdict"] != "explained" and not outside)
+        ):
+            return None
+        group_by_handle.update({handle: group_id for handle in handles})
+        seen_group_ids.add(group_id)
+    if not current or set(group_by_handle) != current:
+        return None
+    if trace.get("final_outcome") == "no_issue" and (
+        type(trace.get("matched_observation_count")) is not int
+        or len(current) != trace["matched_observation_count"] or any(ref.role == "P" for ref in refs)
+        or type(trace.get("unreviewed_observation_count", 0)) is not int
+        or trace.get("unreviewed_observation_count", 0) != 0
+    ):
+        return None
+    if trace.get("final_outcome") == "no_issue" and any(
+        event["actor_match"] != "different" and event["trait_match"] != "different"
+        and event["actuality"] != "non_actual" and event["object_match"] != "different"
+        and event["situation_match"] != "different" for event in groups
+    ) and not any(ref.role in {"G", "X"} for ref in refs):
+        # An in-scope explained result still needs actual explanatory support.
+        # Per-event applicability is validated by the producer, not inferred
+        # here from source words or a model-authored explanation string.
+        return None
+    return tuple(ref.model_copy(update={"event_group_id": group_by_handle[raw[index]["handle"]]})
+                 if ref.role == "C" else ref for index, ref in enumerate(refs))
+
+
+def _verified_scope_explanation_requirement(
+    trace: Mapping[str, Any], refs: Sequence[RuntimeEvidenceRef],
+) -> RuntimeExplanationRequirement | None:
+    """Bind V2's dependency exception to the already source-verified receipt.
+
+    Called only after _strict_reviewed_event_refs. The complete related pool
+    must equal all reviewed C sources, not just a convenient bounded subset.
+    """
+    cert, receipt, pool = trace.get("target_coverage"), trace.get("reviewed_events"), trace.get("target_observation_pool")
+    if not (
+        type(cert) is dict and cert.get("schema_version") == "character-target-coverage-v2"
+        and trace.get("review_policy") == contract.EVENT_ASSESSMENT_POLICY
+        and trace.get("review_outcome") == "completed" and trace.get("review_verdict") == "explained"
+        and trace.get("final_outcome") == "no_issue"
+        and trace.get("explanation_coverage") in {"complete", "partial", "not_run"}
+        and trace.get("material_coverage") == "complete" and trace.get("material_coverage_reasons") == []
+        and trace.get("matched_observation_refs_truncated") is False
+        and type(trace.get("unreviewed_observation_count", 0)) is int
+        and trace.get("unreviewed_observation_count", 0) == 0
+        and type(receipt) is dict and type(pool) is dict
+        and set(pool) == {"schema_version", "observation_count", "observation_refs"}
+        and pool.get("schema_version") == "character-target-observation-pool-v1"
+        and type(pool.get("observation_count")) is int and 0 < pool["observation_count"] <= 24
+        and type(pool.get("observation_refs")) is list
+    ):
+        return None
+    requirement = cert.get("explanation_requirement")
+    if not (
+        type(requirement) is dict
+        and set(requirement) == {"schema_version", "state", "reviewed_events_sha256", "target_observation_pool_sha256"}
+        and requirement.get("schema_version") == "character-explanation-requirement-v1"
+        and requirement.get("state") == "not_required_by_scope"
+        and requirement.get("reviewed_events_sha256") == _canonical_value_sha(receipt)
+        and requirement.get("target_observation_pool_sha256") == _canonical_value_sha(pool)
+    ):
+        return None
+    current = [ref for ref in receipt["evidence_refs"] if ref["role"] == "C"]
+    keys = {"document_name", "document_version", "content_sha256", "line_start", "line_end",
+            "text_sha256", "source_input_id_sha256", "observation_id_sha256"}
+    pool_refs = pool["observation_refs"]
+    count = pool["observation_count"]
+    if not (
+        type(trace.get("matched_observation_count")) is int
+        and type(trace.get("matched_observation_refs")) is list
+        and count == len(current) == len(pool_refs) == trace["matched_observation_count"]
+        == len(trace["matched_observation_refs"]) == sum(ref.role == "C" for ref in refs)
+        and all(type(ref) is dict and set(ref) == keys for ref in pool_refs)
+        and all(type(ref.get("observation_id_sha256")) is str for ref in pool_refs)
+        and sorted(({key: ref[key] for key in keys} for ref in current),
+                   key=lambda ref: ref["observation_id_sha256"]) == pool_refs
+        and len({ref["observation_id_sha256"] for ref in pool_refs}) == count
+    ):
+        return None
+    events = receipt["events"]
+    if not all(
+        event["verdict"] == "explained" and (
+            event["actor_match"] == "different" or event["trait_match"] == "different"
+            or event["actuality"] == "non_actual" or event["object_match"] == "different"
+            or event["situation_match"] == "different"
+        ) for event in events
+    ):
+        return None
+    return RuntimeExplanationRequirement(
+        **requirement, observation_count=count,
+        event_group_ids=tuple(event["event_group_id"] for event in events),
+    )
 
 
 def _strict_server_pair_refs(
@@ -1772,8 +2098,24 @@ def _snapshot_from_reports(
             or "server_evidence_pair" in surfaced_row["metadata"]
         ))
     )
+    provenance = diagnostics.get("runtime_provenance")
+    limits = provenance.get("character_consistency_limits") if type(provenance) is dict else None
+    runtime_policy = limits.get("drift_review_policy_version") if type(limits) is dict else None
+    new_review = bool(
+        runtime_policy is not None
+        or "review_policy" in trace or "reviewed_events" in trace
+        or (surfaced_row is not None and (
+            "review_policy" in surfaced_row["metadata"] or "reviewed_events" in surfaced_row["metadata"]
+        ))
+    )
+    if runtime_policy is not None and runtime_policy != contract.EVENT_ASSESSMENT_POLICY:
+        return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
     if server_pair:
-        if surfaced_row is None or not metadata_matches:
+        if (surfaced_row is None or not metadata_matches or "reviewed_events" in trace
+                or "reviewed_events" in surfaced_row["metadata"]
+                or trace.get("review_outcome") == "completed"
+                or (new_review and (trace.get("review_policy") != contract.EVENT_ASSESSMENT_POLICY
+                    or surfaced_row["metadata"].get("review_policy") != contract.EVENT_ASSESSMENT_POLICY))):
             return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
         refs = _strict_server_pair_refs(
             public_case, setup_case, trace, surfaced_row,
@@ -1784,12 +2126,22 @@ def _snapshot_from_reports(
         report_evidence = refs
         reports_match = True
         evidence_binding = "server_evidence_pair_v1"
+    elif new_review:
+        refs = _strict_reviewed_event_refs(
+            public_case, setup_case, trace, surfaced_row,
+            source_documents=source_documents, runtime_document_ids=runtime_document_ids,
+        )
+        if refs is None:
+            return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
+        if surfaced_row is not None and metadata_matches:
+            report_evidence = refs
+            reports_match = True
     else:
         refs = _strict_runtime_refs(public_case, setup_case, trace, assessment_policy=assessment_policy)
         if refs is None:
             return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
 
-    if not server_pair and surfaced_row is not None and metadata_matches:
+    if not server_pair and not new_review and surfaced_row is not None and metadata_matches:
         raw_report_refs = _strict_report_evidence_refs(
             public_case,
             setup_case,
@@ -1803,7 +2155,16 @@ def _snapshot_from_reports(
                 reports_match = True
     if not metadata_matches:
         reports_match = False
-    stage_complete = _draft_target_stage_complete(public_case, run, diagnostics, trace, setup_case, candidate_id)
+    explanation_requirement = None
+    target_cert = trace.get("target_coverage")
+    if new_review and type(target_cert) is dict and target_cert.get("schema_version") == "character-target-coverage-v2":
+        explanation_requirement = _verified_scope_explanation_requirement(trace, refs)
+        if explanation_requirement is None:
+            return _unassessed_snapshot(public_case.case_id, funnel=funnel, stage_status="partial")
+    stage_complete = _draft_target_stage_complete(
+        public_case, run, diagnostics, trace, setup_case, candidate_id,
+        explanation_requirement=explanation_requirement,
+    )
     explanation = trace.get("explanation_coverage")
     material = trace.get("material_coverage")
     stage_status: Literal["completed", "partial", "failed"] = (
@@ -1811,7 +2172,8 @@ def _snapshot_from_reports(
     )
     material_value = material if material in {"complete", "partial"} else "unknown"
     explanation_value = (
-        explanation if explanation in {"complete", "partial"} else "unknown"
+        explanation if explanation in {"complete", "partial"}
+        or (explanation == "not_run" and explanation_requirement is not None) else "unknown"
     )
     surfaced = len(formal) + len(review) + len(provisional_items)
     safe_funnel = funnel.model_copy(
@@ -1832,6 +2194,7 @@ def _snapshot_from_reports(
         citations=refs,
         report_evidence=report_evidence,
         evidence_binding=evidence_binding,
+        explanation_requirement=explanation_requirement,
         stage_funnel=safe_funnel,
     )
 

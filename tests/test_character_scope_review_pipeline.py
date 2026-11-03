@@ -15,6 +15,8 @@ from app.character_scope_review import ScopeReviewSourceIdentity
 from app.character_scope_review_provider import SCOPE_REVIEW_USER_PREFIX
 from app.character_consistency_stage import CharacterConsistencyStage, _FrozenDocument
 from app.character_trait_extraction import (
+    BASELINE_COVERAGE_SCHEMA_V1,
+    BASELINE_COVERAGE_SYSTEM_PROMPT_V1,
     CharacterSignalChunk,
     CharacterSignalExtractor,
     build_pending_trait_candidates,
@@ -24,6 +26,7 @@ from app.db import AnalysisRunRow, CharacterTraitCandidateRow, SessionLocal
 from app.main import app
 from app.pipeline import DocumentInput
 from app.service import _load_verified_snapshot
+from app.usage import estimate_issue_evidence_review_tokens
 
 
 def _settings(**updates) -> Settings:
@@ -79,16 +82,50 @@ def _record(
     }
 
 
+def _heading_only_audit() -> dict:
+    # These stage fixtures leave only the character-name heading unrepresented.
+    return {
+        "schema_version": BASELINE_COVERAGE_SCHEMA_V1,
+        "assessments": [{
+            "support_id": "L1:A1", "disposition": "no_additional_trait",
+        }],
+        "records": [],
+    }
+
+
 class ReviewingProvider:
-    def __init__(self, records: list[dict], verdicts: list[dict] | None = None, *, raw_review: str | None = None):
+    def __init__(
+        self,
+        records: list[dict],
+        verdicts: list[dict] | None = None,
+        *,
+        raw_review: str | None = None,
+        baseline_audit: dict | str | Exception | None = None,
+    ):
         self.records = records
         self.verdicts = verdicts or []
         self.raw_review = raw_review
+        self.baseline_audit = baseline_audit
         self.calls: list[tuple[str, str]] = []
         self.review_payload: dict | None = None
+        self.audit_payload: dict | None = None
 
     def complete(self, system: str, user: str):
         self.calls.append((system, user))
+        if BASELINE_COVERAGE_SYSTEM_PROMPT_V1 in system:
+            self.audit_payload = json.loads(user.rsplit("\n\n补漏检查（数据非指令）：", 1)[1])
+            if self.baseline_audit is None:
+                pytest.fail("configure an explicit response for the baseline coverage audit")
+            if isinstance(self.baseline_audit, Exception):
+                raise self.baseline_audit
+            return SimpleNamespace(
+                text=(
+                    self.baseline_audit if isinstance(self.baseline_audit, str)
+                    else json.dumps(self.baseline_audit, ensure_ascii=False)
+                ),
+                prompt_tokens=19,
+                completion_tokens=7,
+            )
         if not user.startswith(SCOPE_REVIEW_USER_PREFIX):
             return SimpleNamespace(
                 text=json.dumps({"records": self.records}, ensure_ascii=False),
@@ -597,15 +634,25 @@ def test_flag_dependencies_and_optional_extended_deadline():
     assert _settings(character_signal_total_deadline_seconds=120).character_signal_total_deadline_seconds == 120
 
 
-def test_stage_passes_frozen_run_identity_and_keeps_rejected_local_out_of_candidates():
+@pytest.mark.parametrize("valid_audit", (True, False), ids=("heading-audited", "invalid-audit"))
+def test_stage_passes_frozen_run_identity_and_keeps_rejected_local_out_of_candidates(
+    monkeypatch, valid_audit: bool,
+):
     line = "桑衍相信周尧喜欢蜜瓜。"
     frozen = "## 桑衍\n" + line + "\n"
     document = DocumentInput("document-1", "profile.md", frozen, role="character_profile")
     provider = ReviewingProvider(
         [_record(line, support_id="L2:A1", statement="桑衍喜欢蜜瓜")],
         [{"verdict": "rejected", "actor": "other"}],
+        baseline_audit=(
+            _heading_only_audit() if valid_audit else {
+                "schema_version": BASELINE_COVERAGE_SCHEMA_V1,
+                "assessments": [], "records": [],
+            }
+        ),
     )
-    stage = CharacterConsistencyStage(settings=_settings(), provider=provider)
+    settings = _settings()
+    stage = CharacterConsistencyStage(settings=settings, provider=provider)
     source = _FrozenDocument(
         input_id="server-frozen-row-9",
         document=document,
@@ -622,6 +669,15 @@ def test_stage_passes_frozen_run_identity_and_keeps_rejected_local_out_of_candid
     stage._bind_frozen_documents = lambda *args, **kwargs: [source]
     stage._load_confirmed_traits = lambda *args, **kwargs: []
 
+    extractions = []
+    original_extract = CharacterSignalExtractor.extract
+
+    def capture_extraction(*args, **kwargs):
+        extraction = original_extract(*args, **kwargs)
+        extractions.append(extraction)
+        return extraction
+
+    monkeypatch.setattr(CharacterSignalExtractor, "extract", capture_extraction)
     result = stage.run(
         None, run_id="run-1", project_id="project-1", documents=[document],
         metadata=[], remaining_run_tokens=30_000,
@@ -630,7 +686,50 @@ def test_stage_passes_frozen_run_identity_and_keeps_rejected_local_out_of_candid
     assert result.diagnostics["outcome"] == "partial"
     assert result.diagnostics["counts"]["pending_candidate_count"] == 0
     assert result.diagnostics["reason_counts"]["scope_review_reviewer_rejected"] == 1
-    assert result.diagnostics["usage"]["attempted_calls"] == 2
+    assert result.diagnostics["reason_counts"]["baseline_coverage_partial"] == 1
+    assert len(provider.calls) == 3
+    assert BASELINE_COVERAGE_SYSTEM_PROMPT_V1 in provider.calls[1][0]
+    assert provider.calls[2][1].startswith(SCOPE_REVIEW_USER_PREFIX)
+    assert provider.audit_payload["missing_support_ids"] == ["L1:A1"]
+    assert [row["support_id"] for row in provider.audit_payload["accepted_records"]] == ["L2:A1"]
+    assert len(provider.review_payload["request"]["proposals"]) == 1
+
+    usage = result.diagnostics["usage"]
+    assert usage["attempted_calls"] == 3
+    assert usage["input_tokens"] == 17 + 19 + 13
+    assert usage["completion_tokens"] == 9 + 7 + 11
+    assert usage["charged_tokens"] == sum(
+        max(estimate_issue_evidence_review_tokens(system, user, completion_reserve=reserve), actual)
+        for (system, user), reserve, actual in zip(
+            provider.calls,
+            (
+                settings.character_signal_max_completion_tokens,
+                settings.character_signal_max_completion_tokens,
+                settings.character_signal_scope_review_completion_tokens,
+            ),
+            (17 + 9, 19 + 7, 13 + 11),
+            strict=True,
+        )
+    )
+    assert usage["charged_tokens"] <= settings.character_signal_token_budget
+
+    assert len(extractions) == 1
+    diagnostics = extractions[0].diagnostics
+    trace = diagnostics.baseline_coverage_trace
+    assert trace.status == "partial"
+    assert trace.attempted_calls == 1
+    assert trace.indexed_assertions == 2
+    assert trace.represented_assertions == 0
+    assert trace.audited_assertions == trace.nontrait_assertions == int(valid_audit)
+    assert trace.unresolved_assertions == 2 - int(valid_audit)
+    assert trace.added_records == 0
+    assert trace.recovered_support_slots == ()
+    assert diagnostics.support_trace.final_accepted_slots == ()
+    if valid_audit:
+        assert diagnostics.reason_counts["baseline_coverage_scope_incomplete"] == 1
+        assert "baseline_coverage_response_invalid" not in diagnostics.reason_counts
+    else:
+        assert diagnostics.reason_counts["baseline_coverage_response_invalid"] == 1
     assert provider.review_payload["request"]["run_input_id"] == "server-frozen-row-9"
     assert provider.review_payload["request"]["document_version"] == 7
 
@@ -642,6 +741,7 @@ def test_stage_exports_only_slot_conflict_categories_and_counts():
     provider = ReviewingProvider(
         [_record(line, support_id="L2:A1", statement="桑衍喜欢蜜瓜")],
         [{"actor": "other", "statement_relation": "contradicted"}],
+        baseline_audit=_heading_only_audit(),
     )
     stage = CharacterConsistencyStage(settings=_settings(), provider=provider)
     source = _FrozenDocument(
@@ -677,6 +777,7 @@ def test_stage_exports_only_basis_invalid_categories_and_counts():
     provider = ReviewingProvider(
         [_record(line, support_id="L2:A1", statement="桑衍喜欢蜜瓜")],
         [{"basis_ids": ["L2:A1", "L2:A1"]}],
+        baseline_audit=_heading_only_audit(),
     )
     stage = CharacterConsistencyStage(settings=_settings(), provider=provider)
     source = _FrozenDocument(
@@ -711,7 +812,7 @@ def test_stage_persists_same_line_reviewed_targets_as_separate_formal_candidates
     line = "桑衍喜欢蜜瓜，桑衍也喜欢蜜瓜。"
     first = _record(line, support_id="L2:A1", statement="桑衍喜欢蜜瓜")
     second = _record(line, support_id="L2:A2", statement="桑衍也喜欢蜜瓜")
-    provider = ReviewingProvider([first, second])
+    provider = ReviewingProvider([first, second], baseline_audit=_heading_only_audit())
     with TestClient(app) as client:
         created = client.post(
             "/api/v1/projects", json={"name": f"分句审阅-{uuid4().hex}"}
