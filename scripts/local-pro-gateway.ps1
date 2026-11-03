@@ -28,6 +28,7 @@ $taskAppPython = Join-Path $taskRepository '.venv\Scripts\python.exe'
 $taskAppData = Join-Path $taskRuntime 'loreguard-data'
 $taskExe = Join-Path $taskRuntime "bin\$taskVersion\cli-proxy-api.exe"
 $taskBaseUrl = 'http://127.0.0.1:8317/v1'
+. (Join-Path $PSScriptRoot 'local-pro-gateway-proxy.ps1')
 
 function Assert-NoReparsePath([string]$Path) {
     $taskWalk = [IO.Path]::GetFullPath($Path)
@@ -218,22 +219,42 @@ function Get-AuthSummary {
 
 function Start-OwnedProcess([string[]]$Arguments, [string]$StatePath, [string]$LogPrefix) {
     if ($null -ne (Get-OwnedProcess $StatePath)) { throw 'This gateway action is already running.' }
-    $taskProcess = Start-Process -FilePath $taskExe -ArgumentList $Arguments -WorkingDirectory $taskRuntime -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $taskLogDir "$LogPrefix.stdout.log") -RedirectStandardError (Join-Path $taskLogDir "$LogPrefix.stderr.log")
+    $taskProcess = Invoke-WithLocalGatewayProxy {
+        Start-Process -FilePath $taskExe -ArgumentList $Arguments -WorkingDirectory $taskRuntime -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $taskLogDir "$LogPrefix.stdout.log") -RedirectStandardError (Join-Path $taskLogDir "$LogPrefix.stderr.log")
+    }
     $taskState = @{ owner = $taskOwner; runtime = $taskRuntime; executable = $taskExe; pid = $taskProcess.Id; started_ticks = $taskProcess.StartTime.ToUniversalTime().Ticks }
     Write-PrivateText $StatePath ($taskState | ConvertTo-Json)
     return $taskProcess
 }
 
 function Invoke-LocalRequest([string]$Path, [bool]$Authenticated) {
-    $taskHeaders = @{}
-    if ($Authenticated) { $taskHeaders.Authorization = 'Bearer ' + (Get-Content -LiteralPath $taskKeyPath -Raw).Trim() }
+    if ($Path -ne '/models') { throw 'Only the fixed loopback model endpoint may be probed.' }
+    Add-Type -AssemblyName System.Net.Http
+    $taskHandler = New-Object System.Net.Http.HttpClientHandler
+    $taskHandler.UseProxy = $false
+    $taskHandler.AllowAutoRedirect = $false
+    $taskClient = New-Object System.Net.Http.HttpClient($taskHandler)
+    $taskClient.Timeout = [TimeSpan]::FromSeconds(5)
+    $taskClient.MaxResponseContentBufferSize = 1048576
+    $taskRequest = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, 'http://127.0.0.1:8317/v1/models')
+    $taskResponse = $null
     try {
-        $taskResponse = Invoke-WebRequest -UseBasicParsing -Uri ($taskBaseUrl + $Path) -Headers $taskHeaders -MaximumRedirection 0 -TimeoutSec 5
-        return @{ status = [int]$taskResponse.StatusCode; content = $taskResponse.Content }
+        if ($Authenticated) {
+            $taskRequest.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', (Get-Content -LiteralPath $taskKeyPath -Raw).Trim())
+        }
+        $taskResponse = $taskClient.SendAsync($taskRequest, [System.Net.Http.HttpCompletionOption]::ResponseContentRead).GetAwaiter().GetResult()
+        $taskContent = ''
+        if ($taskResponse.IsSuccessStatusCode) { $taskContent = $taskResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult() }
+        return @{ status = [int]$taskResponse.StatusCode; content = $taskContent }
     } catch {
-        if ($null -ne $_.Exception.Response) { return @{ status = [int]$_.Exception.Response.StatusCode; content = '' } }
         throw 'Loopback gateway is unavailable (details withheld to avoid leaking request headers).'
-    } finally { $taskHeaders.Clear() }
+    } finally {
+        $taskRequest.Headers.Authorization = $null
+        if ($null -ne $taskResponse) { $taskResponse.Dispose() }
+        $taskRequest.Dispose()
+        $taskClient.Dispose()
+        $taskHandler.Dispose()
+    }
 }
 
 if ($env:OS -ne 'Windows_NT' -or ![Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -notin @('AMD64', 'x86')) {
@@ -424,6 +445,7 @@ if ($Action -eq 'CodexLogin' -or $Action -eq 'SiwcBind') {
 }
 
 if ($Action -eq 'Models') {
+    $taskUpstreamProxy = Get-LocalGatewayProxy
     # The gateway catalog is a static/mixed routing view and registration is
     # asynchronous at startup. Ask the official account-specific SIWC catalog,
     # without returning tokens or reimplementing rotating-token refresh here.
@@ -442,7 +464,7 @@ if ($Action -eq 'Models') {
     Add-Type -AssemblyName System.Net.Http
     $taskHandler = New-Object System.Net.Http.HttpClientHandler
     $taskHandler.AllowAutoRedirect = $false
-    $taskHandler.UseProxy = $false
+    Set-LocalGatewayHttpProxy $taskHandler $taskUpstreamProxy
     $taskClient = New-Object System.Net.Http.HttpClient($taskHandler)
     $taskClient.Timeout = [TimeSpan]::FromSeconds(20)
     $taskClient.MaxResponseContentBufferSize = 1048576

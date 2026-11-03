@@ -42,6 +42,17 @@ class ProviderProbeTests(unittest.TestCase):
         return OpenAICompatibleProvider(settings, transport=httpx.MockTransport(handler),
             retry_policy=RetryPolicy(max_attempts=1), sleep=lambda _: None)
 
+    @staticmethod
+    def failing_provider(error):
+        class FailingProvider:
+            configured = True
+            settings = None
+
+            def complete(self, *_):
+                raise error
+
+        return FailingProvider()
+
     def test_probe_uses_production_json_contract(self):
         def handler(request):
             self.assertEqual({"type": "json_object"}, json.loads(request.content)["response_format"])
@@ -105,6 +116,111 @@ class ProviderProbeTests(unittest.TestCase):
         report, code = check_provider(self.provider(handler))
         self.assertEqual(1, code)
         self.assertEqual("UnexpectedJSON", report["error_type"])
+
+    def test_probe_reports_not_configured_without_calling_provider(self):
+        def forbidden_call(_):
+            self.fail("An unconfigured probe must not make a request")
+
+        provider = self.provider(forbidden_call)
+        provider.settings.enable_model_extraction = False
+        report, code = check_provider(provider)
+
+        self.assertEqual(2, code)
+        self.assertEqual("not_configured", report["category"])
+        self.assertIn("功能开关", report["hint"])
+        self.assertNotIn("unit-test-private-value", json.dumps(report))
+
+    def test_probe_preserves_safe_transport_failure_categories(self):
+        for exception, category in (
+            (httpx.ConnectError, "transport"),
+            (httpx.ConnectTimeout, "connect_timeout"),
+            (httpx.ReadTimeout, "read_timeout"),
+        ):
+            with self.subTest(category=category):
+                def handler(request):
+                    raise exception("unit-test-private-value", request=request)
+
+                report, code = check_provider(self.provider(handler))
+                self.assertEqual(1, code)
+                self.assertEqual(category, report["category"])
+                self.assertEqual("ProviderRetryExhausted", report["error_type"])
+                self.assertIn("hint", report)
+                self.assertNotIn("http_status", report)
+                self.assertNotIn("unit-test-private-value", json.dumps(report))
+
+    def test_probe_preserves_http_categories_without_guessing_service_cause(self):
+        for status, category in (
+            (401, "unauthorized"), (403, "forbidden"), (404, "nonretry_http"),
+            (429, "rate_limit"), (503, "upstream_5xx"),
+        ):
+            with self.subTest(status=status):
+                report, code = check_provider(self.provider(
+                    lambda _: httpx.Response(status, text="unit-test-private-value")
+                ))
+                self.assertEqual(1, code)
+                self.assertEqual(status, report["http_status"])
+                self.assertEqual(category, report["category"])
+                self.assertNotIn("unit-test-private-value", json.dumps(report))
+                if status == 503:
+                    self.assertIn("仅凭此状态不能认定", report["hint"])
+
+    def test_probe_prefers_structured_status_over_exception_message(self):
+        error = ProviderError(
+            "HTTP 401 unit-test-private-value", category="upstream_5xx", http_status=503
+        )
+        report, code = check_provider(self.failing_provider(error))
+
+        self.assertEqual(1, code)
+        self.assertEqual(503, report["http_status"])
+        self.assertEqual("upstream_5xx", report["category"])
+        self.assertNotIn("unit-test-private-value", json.dumps(report))
+
+    def test_probe_legacy_status_parsing_requires_standard_three_digit_code(self):
+        for message, expected in (
+            ("HTTP 403 unit-test-private-value", 403),
+            ("HTTP 4033 unit-test-private-value", None),
+            ("HTTP 403secret unit-test-private-value", None),
+            ("HTTP 099 unit-test-private-value", None),
+            ("HTTP 600 unit-test-private-value", None),
+            ("HTTP 99 unit-test-private-value", None),
+        ):
+            with self.subTest(expected=expected):
+                report, code = check_provider(self.failing_provider(ProviderError(message)))
+                self.assertEqual(1, code)
+                self.assertEqual(expected, report.get("http_status"))
+                self.assertNotIn("unit-test-private-value", json.dumps(report))
+
+    def test_probe_rejects_invalid_status_instead_of_parsing_message(self):
+        for status in (True, False, "unit-test-private-value", "401", 401.0,
+                       99, 600, -1, [401], {"unit-test-private-value": 401}):
+            with self.subTest(status_type=type(status).__name__):
+                report, code = check_provider(self.failing_provider(ProviderError(
+                    "HTTP 403 unit-test-private-value", http_status=status
+                )))
+                self.assertEqual(1, code)
+                self.assertNotIn("http_status", report)
+                self.assertNotIn("unit-test-private-value", json.dumps(report))
+
+    def test_probe_does_not_echo_unknown_categories_or_exception_subclass_names(self):
+        secret_error = type("unit-test-private-value", (ProviderError,), {})
+        for category in ("unit-test-private-value", None, ["transport"], {"transport": 1}):
+            report, code = check_provider(self.failing_provider(secret_error(
+                "unit-test-private-value", category=category
+            )))
+            self.assertEqual(1, code)
+            self.assertEqual("provider", report["category"])
+            self.assertEqual("ProviderError", report["error_type"])
+            self.assertNotIn("unit-test-private-value", json.dumps(report))
+
+    def test_probe_reports_response_contract_category_without_content(self):
+        for content, category in (("{", "content_json"), ("{}", "invalid_response")):
+            with self.subTest(category=category):
+                report, code = check_provider(self.provider(lambda _: httpx.Response(
+                    200, json={"choices": [{"message": {"content": content}}]}
+                )))
+                self.assertEqual(1, code)
+                self.assertEqual(category, report["category"])
+                self.assertIn("JSON", report["hint"])
 
 
 class ProviderHardeningTests(unittest.TestCase):
