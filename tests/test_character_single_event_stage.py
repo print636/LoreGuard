@@ -42,7 +42,7 @@ from app.character_trait_extraction import (
 )
 from app.character_scope_review import ScopeReviewSourceIdentity
 from app.config import Settings
-from app.main import app
+from app.main import app, write_limiter
 from app.runtime_provenance import safe_runtime_provenance
 from tests.test_character_consistency_stage import (
     QueueProvider, _confirmed_speech_project, _context, _create_document,
@@ -54,6 +54,16 @@ from tests.test_character_baseline_recovery import (
     RecoveryProvider, _record as formal_record, _audit,
 )
 from tests.test_character_scope_review_pipeline import _settings as extraction_settings
+
+
+@pytest.fixture(autouse=True)
+def _clear_write_rate_limiter():
+    # Isolate each case's write budget while retaining limits within the case.
+    write_limiter.events.clear()
+    try:
+        yield
+    finally:
+        write_limiter.events.clear()
 
 
 def _event(*handles, verdict="contradicts"):
