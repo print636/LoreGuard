@@ -212,7 +212,10 @@ TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10 = "character-target-bound-draft-review-prom
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 = "character-target-bound-draft-review-prompt-v11"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12 = "character-target-bound-draft-review-prompt-v12"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13 = "character-target-bound-draft-review-prompt-v13"
-_HABIT_ACTION_PROMPTS = {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13}
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14 = "character-target-bound-draft-review-prompt-v14"
+_HABIT_ACTION_PROMPTS = {
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
+}
 HABIT_CONTEXT_TARGET_VERSION = "character-habit-context-target-v1"
 HABIT_CONTEXT_TARGET_GUIDE = (
     "habit_contexts 是作者确认的习惯适用场景，用来识别正在比较的行为，不是新稿证据。"
@@ -1750,6 +1753,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
         "character-target-bound-draft-review-prompt-v11",
         "character-target-bound-draft-review-prompt-v12",
         "character-target-bound-draft-review-prompt-v13",
+        "character-target-bound-draft-review-prompt-v14",
     ] = (
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
     )
@@ -1779,8 +1783,13 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
         if self.prompt_version in _HABIT_ACTION_PROMPTS:
             if (
                 not self.target.habit_contexts or self.target.dimension != "contextual_behavior"
-                or (self.primary_claim is not None) != (self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13)
-                or self.primary_claim is not None and {"key_object", "include_previous_line"} & self.primary_claim.model_fields_set
+                or (self.primary_claim is None) != (self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12)
+                or self.primary_claim is not None and (
+                    self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13
+                    and {"key_object", "include_previous_line"} & self.primary_claim.model_fields_set
+                    or self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14
+                    and (not self.primary_claim.key_object or self.primary_claim.include_previous_line)
+                )
             ):
                 raise ValueError("target_bound_habit_claim_invalid")
         elif self.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11}:
@@ -2565,7 +2574,10 @@ def build_target_bound_draft_review_request(
         review_line_end=review_end,
     )
     if allow_habit_chain and protocol_version == "v4" and target.habit_contexts:
-        prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13 if primary_claim is not None else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12
+        if primary_claim is None:
+            prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12
+        else:
+            prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14 if primary_claim.key_object else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13
     elif primary_claim is not None:
         prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 if primary_claim.key_object else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10
     elif protocol_version == "v4":
@@ -2692,6 +2704,17 @@ def has_object_reference(text: str) -> bool:
     return bool(_OBJECT_REFERENCE.search(text))
 
 
+def literal_habit_action_names_object(statement: str, key_object: str, evidence: str) -> bool:
+    """A single literal action can use the ordinary extraction path."""
+    if "\n" in evidence or statement.count(key_object) != 1 or has_object_reference(statement):
+        return False
+    try:
+        line = _indexed_line(1, evidence)
+    except ValueError:
+        return False
+    return sum(_same_primary_statement(statement, clause.text) for clause in line.clauses) == 1
+
+
 def _competing_antecedent(text: str, quote: str) -> bool:
     # A coordination next to the offered noun phrase ("胶卷和另一张样片")
     # leaves multiple possible objects. An unrelated 和 elsewhere does not.
@@ -2714,6 +2737,9 @@ def valid_primary_object_grounding(
     if fact.text.count(obj.fact_quote) != 1:
         return False
     raw = request.primary_claim.key_object
+    habit = request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14
+    if habit and (obj.role != "event_object" or obj.referent_relation != "same"):
+        return False
     if obj.role == "axis_label" and raw != request.target.key_object:
         return False
     if obj.grounding == "explicit":
@@ -2724,6 +2750,10 @@ def valid_primary_object_grounding(
         if not _OBJECT_REFERENCE.fullmatch(obj.fact_quote) or not obj.antecedent_quote or not index:
             return False
         previous = clauses[index - 1]
+        if habit:
+            line = next(line for line in request.lines if line.line_number == fact.line_number)
+            if previous.line_number != fact.line_number or line.text[previous.end_offset:fact.start_offset].strip() not in {",", "，"}:
+                return False
         if (
             obj.antecedent_clause_id != previous.support_id or previous.text.count(obj.antecedent_quote) != 1
             or previous.line_number < fact.line_number - 1 or has_object_reference(obj.antecedent_quote)
@@ -2734,6 +2764,11 @@ def valid_primary_object_grounding(
         grounded = obj.antecedent_quote
     # Semantic aliases need a second independent judgment and a unique mention
     # in the very claim already found equivalent. Only the source words survive.
+    if (habit and raw not in grounded and not (obj.grounding == "unique_reference" and raw == obj.fact_quote)
+            and (grounded in raw or any(raw in c.text for c in clauses))):
+        # A named object elsewhere in this window cannot be treated as a
+        # paraphrase of this object; a shorter quote cannot substantiate an added qualifier.
+        return False
     equivalent_object = obj.referent_relation == "same" and request.primary_claim.statement.count(raw) == 1
     return obj.role == "axis_label" or raw == grounded or equivalent_object or (
         obj.grounding == "unique_reference" and raw == obj.fact_quote
@@ -3096,7 +3131,7 @@ def evaluate_target_bound_draft_review(
         elif "action_steps" in item.model_fields_set:
             return _uncertain_target_bound_review(request, "response_mismatch")
         claim_fields = {"claim_digest", "claim_relation"} & item.model_fields_set
-        object_review = request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11
+        object_review = request.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14}
         if (
             ("claim_object" in item.model_fields_set) != object_review
             or request.primary_claim is None and claim_fields

@@ -43,9 +43,14 @@ from .character_history_semantic_review import (
 )
 from .character_draft_actor_review import (
     HABIT_CONTEXT_TARGET_GUIDE,
+    MAX_DRAFT_ACTOR_REVIEW_ITEMS,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
     valid_habit_contexts,
     SCOPED_DRAFT_DIRECTION_GUIDE,
     has_object_reference,
+    literal_habit_action_names_object,
     valid_primary_object_grounding,
     DraftActorClauseIndex,
     PrimaryDraftClaim,
@@ -72,6 +77,7 @@ from .character_draft_actor_review import (
 from .character_draft_actor_review_provider import (
     DraftActorReviewBatchEntry,
     TargetBoundDraftReviewBatchEntry,
+    TargetBoundDraftReviewRun,
     run_draft_actor_review,
     run_target_bound_draft_review,
 )
@@ -3613,6 +3619,20 @@ def _validate_signal_package(
                 frozen_content=frozen_content,
             )
             assert signal is not None
+            if (
+                settings.character_target_bound_draft_review_v3 and record.dimension == "contextual_behavior"
+                and record.key_object.strip() and any(
+                    target.dimension == record.dimension and target.habit_contexts
+                    and record.character in _target_actor_literals(target)
+                    and record.polarity == target.requested_polarity
+                    and target.comparison_key == stable_trait_identity(record.dimension, record.trait_key)
+                    for target in targets or primary_value_targets
+                )
+                and not literal_habit_action_names_object(record.statement, record.key_object, signal.evidence.text)
+            ):
+                # A noun seen elsewhere in the raw evidence is not binding to this
+                # action. Its claim and affected object must be checked together.
+                raise ValueError("key_object_support")
             if any(_needs_primary_object_review(record, target) for target in primary_value_targets
                    if _primary_scoped_axis_matches(record, target)):
                 # Literal overlap can still assign "it" to the wrong member of a pair.
@@ -5250,7 +5270,7 @@ def _habit_claim_debts(
         if failure.record_index in separately_reviewed:
             gate("actor_review")
             continue
-        if not (failure.reason == "character_support"
+        if not (failure.reason in {"character_support", "key_object_support"}
                 or failure.statement_support_kind in {"lexical_polarity", "anchor_overlap"}
         ):
             # _SignalValidationFailure permits only closed, server-owned enums.
@@ -5261,8 +5281,11 @@ def _habit_claim_debts(
         if record.dimension != "contextual_behavior":
             gate("other_dimension")
             continue
-        if record.key_object.strip():
-            gate("object_present")
+        object_review = bool(record.key_object.strip())
+        if object_review and record.key_object not in record.evidence and record.statement.count(record.key_object) != 1:
+            # A source synonym is admissible only if the original claim itself
+            # unambiguously names the proposed object; never repair a detached label.
+            gate("object_unanchored")
             continue
         if record.stability not in {"temporary", "situational"}:
             gate("stability")
@@ -5276,8 +5299,8 @@ def _habit_claim_debts(
         try:
             # Hard source, quote, joint-subject and occurrence gates still
             # run. Only the rejected label/attribution can go to review.
-            signal = _bind_record(record, chunk, skip_draft_actor_attribution=True,
-                                  skip_lexical_polarity=True, defer_primary_anchor_overlap=True)
+            signal = _bind_record(record, chunk, skip_draft_actor_attribution=True, skip_lexical_polarity=True,
+                                  defer_primary_anchor_overlap=True, defer_primary_object=object_review)
         except _UnobservedDraftAction as exc:
             gate(f"preflight_{exc.kind}")
             continue
@@ -5316,9 +5339,11 @@ def _habit_claim_debts(
             gate("quote_mismatch" if proposals else "no_proposal")
             continue
         gate("eligible")
+        if object_review:
+            gate("object_selected")
         debts.append(_TargetBoundDraftDeferred(
             record_index=failure.record_index, record=record, preflight_signal=signal, index=index,
-            proposal=choices[0], alternatives=choices[1:], claim_review=True,
+            proposal=choices[0], alternatives=choices[1:], claim_review=True, object_review=object_review,
             target=target, target_ordinal=ordinal, failure_reason=failure.reason,
         ))
     return tuple(debts)
@@ -5872,6 +5897,7 @@ def _target_bound_signal_id(
     chunk: CharacterSignalChunk,
     target: CharacterSignalTarget,
     proposal: TargetBoundDraftReviewProposal,
+    habit_event_object: str = "",
 ) -> str:
     fields: tuple[str, ...] = (
         chunk.document_id,
@@ -5884,7 +5910,12 @@ def _target_bound_signal_id(
         target.trait_key,
         target.requested_polarity,
     )
-    if target.key_object.strip():
+    if habit_event_object:
+        # Two independently certified affected objects in one fact may have
+        # the same target and source text. Retain each exact grounded object.
+        identity = json.dumps(("habit_event_object", *fields, target.key_object, habit_event_object),
+                              ensure_ascii=False, separators=(",", ":"))
+    elif target.key_object.strip():
         normalized_object = _compact(
             unicodedata.normalize("NFKC", target.key_object)
         ).casefold()
@@ -5917,7 +5948,8 @@ def _primary_claim_identity(
         statement=row.record.statement, context=row.record.context, claim_digest=digest,
         **({
             "key_object": row.record.key_object,
-            "include_previous_line": row.index.line_start > chunk_start and has_object_reference(row.proposal.evidence),
+            "include_previous_line": (target.dimension != "contextual_behavior" and row.index.line_start > chunk_start
+                                      and has_object_reference(row.proposal.evidence)),
         } if object_review else {}),
     )
 
@@ -6001,7 +6033,9 @@ def _bind_target_bound_draft_certificate(
             expected_evidence = _frozen_line_evidence(frozen_content, evidence_start, proposal.line_end)
     signal = CharacterSignal(
         id=_target_bound_signal_id(
-            chunk=chunk, target=target, proposal=proposal
+            chunk=chunk, target=target, proposal=proposal,
+            habit_event_object=observed_object if expected_primary_claim and expected_primary_claim.key_object
+            and target.dimension == "contextual_behavior" else "",
         ),
         character=target.character,
         dimension=target.dimension,
@@ -6044,6 +6078,52 @@ def _bind_target_bound_draft_certificate(
     return signal
 
 
+def _run_target_bound_review_batches(
+    entries: tuple[TargetBoundDraftReviewBatchEntry, ...],
+    *,
+    provider: _ChatProvider,
+    settings: Settings,
+    token_budget: int,
+    remaining_deadline_seconds: float,
+    monotonic: Any,
+) -> list[tuple[tuple[TargetBoundDraftReviewBatchEntry, ...], TargetBoundDraftReviewRun | None]]:
+    # A discovery entry owns one source window. A claim entry owns all viable
+    # alternatives to that original record, which must be adjudicated together.
+    habit_protocols = {
+        TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12,
+        TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13,
+        TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
+    }
+    if sum(len(entry.request.proposals) for entry in entries) > MAX_DRAFT_ACTOR_REVIEW_ITEMS:
+        raise ValueError("target_bound_batch_too_large")
+    if all(entry.request.prompt_version in habit_protocols for entry in entries):
+        groups = [(entry,) for entry in entries]
+    else:
+        groups = [entries]  # Historical protocols retain the original batch bytes.
+    runs = []
+    deadline = monotonic() + remaining_deadline_seconds
+    for group in groups:
+        try:
+            run = run_target_bound_draft_review(
+                group,
+                provider=provider,
+                token_budget=token_budget,
+                completion_reserve=settings.character_draft_actor_review_completion_tokens,
+                timeout_seconds=settings.character_draft_actor_review_timeout_seconds,
+                remaining_deadline_seconds=deadline - monotonic(),
+                max_response_bytes=settings.character_draft_actor_review_max_response_bytes,
+                max_attempts=1,
+                monotonic=monotonic,
+            )
+        except (TypeError, ValueError, UnicodeError):
+            # A local request size/contract failure must not discard siblings.
+            runs.append((group, None))
+            continue
+        runs.append((group, run))
+        token_budget = max(0, token_budget - run.charged_tokens)
+    return runs
+
+
 def _review_target_bound_draft_candidates(
     *,
     chunk: CharacterSignalChunk,
@@ -6075,6 +6155,7 @@ def _review_target_bound_draft_candidates(
             TargetBoundDraftReviewProposal,
         ]
     ] = {}
+    indices_by_digest: dict[str, set[int]] = {}
     claim_review = primary_value_recovery and any(item.claim_review for item in deferred)
     object_review = primary_value_recovery and any(item.object_review for item in deferred)
     review_label = (
@@ -6100,7 +6181,8 @@ def _review_target_bound_draft_candidates(
                 for row in rows for proposal in (row.proposal, *row.alternatives)
             }.values())
             claim = _primary_claim_identity(rows[0], package_attempt, source_identity, review_target,
-                                            object_review=object_review, chunk_start=chunk.global_line_start) if claim_review else None
+                                            object_review=rows[0].object_review if review_label == "habit" else object_review,
+                                            chunk_start=chunk.global_line_start) if claim_review else None
             request = build_target_bound_draft_review_request(
                 index,
                 review_target,
@@ -6116,6 +6198,7 @@ def _review_target_bound_draft_candidates(
                 frozen_content=frozen_content, expected_primary_claim=claim,
             ))
             request_digest = target_bound_draft_review_request_digest(request)
+            indices_by_digest[request_digest] = {row.record_index for row in rows}
             for proposal in request.proposals:
                 source_fact = TargetBoundDraftProposal.model_validate(
                     proposal.model_dump(exclude={"proposal_id"}), strict=True
@@ -6126,20 +6209,9 @@ def _review_target_bound_draft_candidates(
                 candidate_by_key[(request_digest, proposal.proposal_id)] = (
                     matches[0], request, proposal
                 )
-        run = run_target_bound_draft_review(
-            tuple(entries),
-            provider=provider,
-            token_budget=token_budget,
-            completion_reserve=(
-                settings.character_draft_actor_review_completion_tokens
-            ),
-            timeout_seconds=settings.character_draft_actor_review_timeout_seconds,
-            remaining_deadline_seconds=remaining_deadline_seconds,
-            max_response_bytes=(
-                settings.character_draft_actor_review_max_response_bytes
-            ),
-            max_attempts=1,
-            monotonic=monotonic,
+        batches = _run_target_bound_review_batches(
+            tuple(entries), provider=provider, settings=settings, token_budget=token_budget,
+            remaining_deadline_seconds=remaining_deadline_seconds, monotonic=monotonic,
         )
     except (TypeError, ValueError, ValidationError, UnicodeError):
         return _TargetBoundDraftOutcome(
@@ -6153,26 +6225,33 @@ def _review_target_bound_draft_candidates(
     review_reasons: Counter[str] = Counter()
     slot_conflict_counts: Counter[TargetBoundSlotConflict] = Counter()
     failure_events: list[TargetBoundFailureEventV1] = []
-    if claim_review and run.attempted_calls:
-        review_reasons[f"{review_label}_claim_review_calls"] += run.attempted_calls
-    if object_review and run.attempted_calls:
-        review_reasons["primary_value_object_review_calls"] += run.attempted_calls
-    if run.failure_reason is not None:
-        review_reasons[f"target_bound_{run.failure_reason}"] += len(deferred)
-    if len(run.evaluation.evaluations) != len(entries):
-        unresolved.update(deferred_indices)
-        review_reasons["target_bound_response_mismatch"] += len(deferred)
-    else:
-        for entry, evaluation in zip(entries, run.evaluation.evaluations):
+    for batch, run in batches:
+        batch_indices = set().union(*(
+            indices_by_digest[target_bound_draft_review_request_digest(entry.request)] for entry in batch
+        ))
+        if run is None:
+            unresolved.update(batch_indices)
+            review_reasons["target_bound_request_invalid"] += len(batch_indices)
+            continue
+        if claim_review and run.attempted_calls:
+            review_reasons[f"{review_label}_claim_review_calls"] += run.attempted_calls
+        if object_review and run.attempted_calls and (
+            review_label != "habit" or batch[0].request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14
+        ):
+            review_reasons[f"{review_label}_object_review_calls"] += run.attempted_calls
+        if run.failure_reason is not None:
+            review_reasons[f"target_bound_{run.failure_reason}"] += len(batch_indices)
+        if len(run.evaluation.evaluations) != len(batch):
+            unresolved.update(batch_indices)
+            review_reasons["target_bound_response_mismatch"] += len(batch_indices)
+            continue
+        for entry, evaluation in zip(batch, run.evaluation.evaluations):
             request_digest = evaluation.request_digest
             if len(evaluation.decisions) != len(entry.request.proposals):
-                rows = tuple(
-                    row for row in deferred
-                    if row.index.line_start == entry.request.proposals[0].line_start
-                    and row.index.line_end == entry.request.proposals[0].line_end
-                )
-                unresolved.update(row.record_index for row in rows)
-                review_reasons["target_bound_response_mismatch"] += len(rows)
+                entry_digest = target_bound_draft_review_request_digest(entry.request)
+                affected = indices_by_digest[entry_digest]
+                unresolved.update(affected)
+                review_reasons["target_bound_response_mismatch"] += len(affected)
                 continue
             decisions = evaluation.decisions
             if entry.expected_primary_claim is not None and len(decisions) > 1:
@@ -6235,7 +6314,8 @@ def _review_target_bound_draft_candidates(
                         frozen_content=frozen_content,
                         expected_primary_claim=(_primary_claim_identity(
                             item, package_attempt, source_identity, request.target,
-                            object_review=object_review, chunk_start=chunk.global_line_start
+                            object_review=item.object_review if review_label == "habit" else object_review,
+                            chunk_start=chunk.global_line_start
                         ) if claim_review else None),
                     )
                 except (TypeError, ValueError, ValidationError, UnicodeError):
@@ -6255,10 +6335,14 @@ def _review_target_bound_draft_candidates(
     if claim_review and resolved:
         review_reasons[f"{review_label}_claim_review_supported"] += len(resolved)
     if object_review and resolved:
-        review_reasons["primary_value_object_review_supported"] += len(resolved)
+        count = (sum(row.object_review for row in deferred if row.record_index in resolved)
+                 if review_label == "habit" else len(resolved))
+        if count:
+            review_reasons[f"{review_label}_object_review_supported"] += count
     unresolved.update(deferred_indices - resolved - unresolved)
     if unresolved and not review_reasons:
         review_reasons["target_bound_response_mismatch"] += len(unresolved)
+    completed_runs = [run for _, run in batches if run is not None]
     return _TargetBoundDraftOutcome(
         signals=tuple(signals.values()),
         resolved_record_indices=frozenset(resolved),
@@ -6267,10 +6351,10 @@ def _review_target_bound_draft_candidates(
         reason_counts=tuple(sorted(review_reasons.items())),
         slot_conflict_counts=tuple(sorted(slot_conflict_counts.items())),
         failure_events=tuple(failure_events),
-        attempted_calls=run.attempted_calls,
-        prompt_tokens=run.prompt_tokens,
-        completion_tokens=run.completion_tokens,
-        charged_tokens=run.charged_tokens,
+        attempted_calls=sum(run.attempted_calls for run in completed_runs),
+        prompt_tokens=sum(run.prompt_tokens for run in completed_runs),
+        completion_tokens=sum(run.completion_tokens for run in completed_runs),
+        charged_tokens=sum(run.charged_tokens for run in completed_runs),
     )
 
 
@@ -6337,16 +6421,9 @@ def _review_target_bound_discoveries_v3(
                 candidate_by_key[(request_digest, proposal.proposal_id)] = (
                     request, proposal
                 )
-        run = run_target_bound_draft_review(
-            tuple(entries),
-            provider=provider,
-            token_budget=token_budget,
-            completion_reserve=settings.character_draft_actor_review_completion_tokens,
-            timeout_seconds=settings.character_draft_actor_review_timeout_seconds,
-            remaining_deadline_seconds=remaining_deadline_seconds,
-            max_response_bytes=settings.character_draft_actor_review_max_response_bytes,
-            max_attempts=1,
-            monotonic=monotonic,
+        batches = _run_target_bound_review_batches(
+            tuple(entries), provider=provider, settings=settings, token_budget=token_budget,
+            remaining_deadline_seconds=remaining_deadline_seconds, monotonic=monotonic,
         )
     except (TypeError, ValueError, ValidationError, UnicodeError):
         return _TargetBoundDraftOutcome(
@@ -6354,25 +6431,31 @@ def _review_target_bound_discoveries_v3(
             reason_counts=(("target_bound_request_invalid", len(discoveries)),),
         )
 
-    if dispatch_ranges is not None and run.attempted_calls:
-        dispatch_ranges.update(
-            (proposal.line_start, proposal.line_end)
-            for _, proposal in candidate_by_key.values()
-        )
     signals: dict[str, CharacterSignal] = {}
     unresolved = 0
     rejected = 0
     reasons: Counter[str] = Counter()
     slot_conflict_counts: Counter[TargetBoundSlotConflict] = Counter()
     failure_events: list[TargetBoundFailureEventV1] = []
-    if run.failure_reason is not None:
-        reasons[f"target_bound_{run.failure_reason}"] += len(discoveries)
     decisions_seen = 0
-    if len(run.evaluation.evaluations) != len(entries):
-        unresolved = len(discoveries)
-        reasons["target_bound_response_mismatch"] += len(discoveries)
-    else:
-        for entry, evaluation in zip(entries, run.evaluation.evaluations):
+    for batch, run in batches:
+        count = sum(len(entry.request.proposals) for entry in batch)
+        if run is None:
+            unresolved += count
+            reasons["target_bound_request_invalid"] += count
+            continue
+        if dispatch_ranges is not None and run.attempted_calls:
+            dispatch_ranges.update(
+                (proposal.line_start, proposal.line_end)
+                for entry in batch for proposal in entry.request.proposals
+            )
+        if run.failure_reason is not None:
+            reasons[f"target_bound_{run.failure_reason}"] += count
+        if len(run.evaluation.evaluations) != len(batch):
+            unresolved += count
+            reasons["target_bound_response_mismatch"] += count
+            continue
+        for entry, evaluation in zip(batch, run.evaluation.evaluations):
             if len(evaluation.decisions) != len(entry.request.proposals):
                 unresolved += len(entry.request.proposals)
                 reasons["target_bound_response_mismatch"] += len(
@@ -6421,6 +6504,7 @@ def _review_target_bound_discoveries_v3(
         missing = len(discoveries) - decisions_seen
         unresolved += missing
         reasons["target_bound_response_mismatch"] += missing
+    completed_runs = [run for _, run in batches if run is not None]
     return _TargetBoundDraftOutcome(
         signals=tuple(signals.values()),
         unresolved_discovery_count=unresolved,
@@ -6428,10 +6512,10 @@ def _review_target_bound_discoveries_v3(
         reason_counts=tuple(sorted(reasons.items())),
         slot_conflict_counts=tuple(sorted(slot_conflict_counts.items())),
         failure_events=tuple(failure_events),
-        attempted_calls=run.attempted_calls,
-        prompt_tokens=run.prompt_tokens,
-        completion_tokens=run.completion_tokens,
-        charged_tokens=run.charged_tokens,
+        attempted_calls=sum(run.attempted_calls for run in completed_runs),
+        prompt_tokens=sum(run.prompt_tokens for run in completed_runs),
+        completion_tokens=sum(run.completion_tokens for run in completed_runs),
+        charged_tokens=sum(run.charged_tokens for run in completed_runs),
     )
 
 

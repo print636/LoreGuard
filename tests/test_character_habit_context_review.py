@@ -10,6 +10,7 @@ from app.character_drift import (
 )
 from tests.test_character_runtime_provider_routing import _http_accounting, _response_http, _settings
 from tests.test_character_single_event_policy import event, payload, prepared, review, span
+from tests.test_habit_claim_recovery import HABIT, SOURCE, extract, record
 
 
 def habit(*texts, contexts=("封箱交接期间",), same_document=True):
@@ -66,6 +67,41 @@ def test_other_or_unclear_situation_does_not_become_habit_conflict(relation, quo
     result, _ = review(candidate, response)
     assert result.diagnostics.outcome == "completed"
     assert promote_character_drift(candidate, result).outcome == outcome
+
+
+def test_an_explicit_habit_object_must_be_compared_even_in_the_same_situation():
+    candidate = habit("沈遥把运箱交给司机，包里的练习卡没有贴号。")
+    baseline = candidate.case.baseline.model_copy(update={"key_object": "运箱"})
+    case = candidate.case.model_copy(update={"baseline": baseline})
+    candidate = prepare_character_drift(case, review_policy=CHARACTER_REVIEW_POLICY_VERSION)
+    checks = [check("C01", "same", "把运箱交给司机")]
+    unexamined, provider = review(candidate, payload(event("C01", object_match="not_applicable", context_checks=checks)))
+    request = provider.calls[0][1]
+    assert request["candidate"]["object_match_required"] is True
+    assert request["candidate"]["key_object"] == "运箱"
+    assert next(row for row in request["evidence"] if row["id"] == "B01")["key_object"] == "运箱"
+    assert unexamined.diagnostics.contract_failure == "comparison"
+
+    outside, _ = review(candidate, payload(event("C01", verdict="explained", object_match="different",
+                                                 context_checks=checks), verdict="explained"))
+    assert promote_character_drift(candidate, outside).outcome == "no_issue"
+
+
+def test_final_reviewer_receives_the_object_grounded_in_the_draft_action():
+    extracted, _ = extract([dict(record("廖辰把行李标签装入口袋"), key_object="行李标签")], False)
+    case = habit(SOURCE, contexts=HABIT.habit_contexts).case
+    baseline = case.baseline.model_copy(update={
+        "character": HABIT.character, "trait_key": HABIT.trait_key, "statement": HABIT.baseline_hint,
+        "evidence": (span(HABIT.baseline_hint, document="profile"),),
+    })
+    candidate = prepare_character_drift(
+        case.model_copy(update={"baseline": baseline, "observations": extracted.draft_observations}),
+        review_policy=CHARACTER_REVIEW_POLICY_VERSION,
+    )
+    _, provider = review(candidate, payload(event("C01", context_checks=[check("C01", "same", "接过客人的手提箱")])))
+    draft = next(row for row in provider.calls[0][1]["evidence"] if row["id"] == "C01")
+    assert draft["key_object"] == "行李牌"
+    assert draft["key_object"] in draft["text"]
 
 
 def test_one_in_scope_event_does_not_vouch_for_an_unrelated_observation():

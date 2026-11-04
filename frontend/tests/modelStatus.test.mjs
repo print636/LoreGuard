@@ -64,6 +64,30 @@ const targetSummary = {
   conflict: 1, no_issue: 1, no_matching_observation: 0, needs_review: 0, unprocessed: 0,
 };
 
+test('a verification timeout describes pending behavior without erasing other character decisions', () => {
+  const partial = {
+    ...completeCharacter, outcome: 'partial', material_coverage: 'partial',
+    reason_counts: { target_bound_provider_timeout: 5, targeted_pass_target_bound_provider_timeout: 5 },
+    counts: { ...completeCharacter.counts, draft_observation_count: 0, drift_considered: 0, drift_reviewed: 0 },
+    target_assessment_summary_v1: { ...targetSummary, total_targets: 1, conflict: 0, no_issue: 0, needs_review: 1 },
+  };
+  const status = describeCharacterReviewStage(partial);
+  assert.match(status.detail, /有些行为尚未核实/);
+  assert.match(status.emptyCaveat, /本次没有新稿行为进入角色主审/);
+  assert.doesNotMatch(status.detail, /5\s*次/);
+  for (const changed of [
+    { target_assessment_summary_v1: targetSummary },
+    { target_assessment_summary_v1: undefined }, { counts: completeCharacter.counts },
+    { counts: { ...partial.counts, drift_reviewed: 1 } },
+  ]) {
+    const fallback = describeCharacterReviewStage({ ...partial, ...changed });
+    assert.match(fallback.detail, /这些行为是否符合设定仍待核对/);
+    assert.doesNotMatch(fallback.emptyCaveat, /没有新稿行为进入角色主审/);
+  }
+  const legacy = describeCharacterReviewStage({ ...partial, reason_counts: {} });
+  assert.doesNotMatch(legacy.detail + legacy.emptyCaveat, /超时|没有新稿行为进入/);
+});
+
 test('combined review coverage needs actual target judgments as well as frozen material processing', () => {
   const judged = {
     ...completeCharacter, target_assessment_summary_v1: targetSummary,

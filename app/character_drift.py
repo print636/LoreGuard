@@ -1193,8 +1193,7 @@ class CharacterConsistencyReviewer:
                     "trait_key": candidate.case.baseline.trait_key,
                     **(
                         {"key_object": candidate.case.baseline.key_object}
-                        if candidate.case.baseline.dimension
-                        in _AXIS_AND_OBJECT_DIMENSIONS
+                        if _has_comparison_object(candidate.case.baseline)
                         else {}
                     ),
                     "baseline_statement": candidate.case.baseline.statement,
@@ -1204,9 +1203,7 @@ class CharacterConsistencyReviewer:
                         {
                             "unreviewed_observation_count": candidate.unreviewed_observation_count,
                             "baseline_contexts": candidate.case.baseline.contexts,
-                            "object_match_required": scoped_axis or (
-                                candidate.case.baseline.dimension in _AXIS_AND_OBJECT_DIMENSIONS
-                            ),
+                            "object_match_required": scoped_axis or _has_comparison_object(candidate.case.baseline),
                             "situation_match_required": (
                                 habit_context_review or scoped_axis or bool(candidate.case.baseline.contexts)
                             ),
@@ -2740,17 +2737,23 @@ def _evidence_rows(
             "B", index, "baseline", evidence, candidate.case.baseline.statement,
             key_object=(
                 candidate.case.baseline.key_object
-                if candidate.case.baseline.dimension
-                in _AXIS_AND_OBJECT_DIMENSIONS
+                if _has_comparison_object(candidate.case.baseline)
                 else None
             ),
         )
     for index, observation in enumerate(candidate.matching_observations, start=1):
+        grounded_habit_object = (
+            observation.dimension == "contextual_behavior"
+            and observation.target_bound_target is not None
+            and observation.target_bound_target.habit_contexts
+            and observation.key_object
+            and observation.key_object in observation.evidence.text
+        )
         append(
             "C", index, "current", observation.evidence, observation.statement,
             key_object=(
                 observation.key_object
-                if observation.dimension in _AXIS_AND_OBJECT_DIMENSIONS
+                if observation.dimension in _AXIS_AND_OBJECT_DIMENSIONS or grounded_habit_object
                 else None
             ),
         )
@@ -2897,6 +2900,12 @@ def _event_failure_category(exc: Exception) -> ReviewContractFailure:
     return "schema"
 
 
+def _has_comparison_object(baseline: ConfirmedTraitSnapshot) -> bool:
+    return baseline.dimension in _AXIS_AND_OBJECT_DIMENSIONS or (
+        baseline.dimension == "contextual_behavior" and bool(baseline.key_object.strip())
+    )
+
+
 def _validate_event_comparison_binding(
     candidate: PreparedCharacterDrift, event: ReviewedNarrativeEvent,
 ) -> None:
@@ -2912,9 +2921,7 @@ def _validate_event_comparison_binding(
         event.object_match != "same" or event.situation_match != "same"
     ):
         raise _InvalidEventDecision("comparison")
-    if candidate.case.baseline.dimension in _AXIS_AND_OBJECT_DIMENSIONS and (
-        event.object_match != "same"
-    ):
+    if _has_comparison_object(candidate.case.baseline) and event.object_match != "same":
         raise _InvalidEventDecision("comparison")
     if candidate.case.baseline.contexts and event.situation_match != "same":
         raise _InvalidEventDecision("comparison")

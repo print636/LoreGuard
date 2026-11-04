@@ -84,6 +84,9 @@ export type CharacterConsistencyDiagnostics = {
     model_completed_chunks?: number;
     model_uncalled_chunks?: number;
     model_incomplete_chunks?: number;
+    draft_observation_count?: number;
+    drift_considered?: number;
+    drift_reviewed?: number;
   };
   reason_counts?: Record<string, number>;
 };
@@ -683,6 +686,18 @@ function hasCharacterReason(diagnostics: CharacterConsistencyDiagnostics, ...key
     Number.isSafeInteger(reasons[key]) && reasons[key] > 0);
 }
 
+function characterVerificationTimeout(diagnostics: CharacterConsistencyDiagnostics): string {
+  if (!hasCharacterReason(diagnostics, 'target_bound_provider_timeout', 'targeted_pass_target_bound_provider_timeout')) return '';
+  const targets = targetCounts(diagnostics.target_assessment_summary_v1);
+  const counts = diagnostics.counts;
+  const noBehaviorReviewed = diagnostics.snapshot_bound === true && diagnostics.material_coverage === 'partial' &&
+    targets && targets.total_targets > 0 && targets.conflict === 0 && targets.no_issue === 0 &&
+    counts?.draft_observation_count === 0 && counts.drift_considered === 0 && counts.drift_reviewed === 0;
+  return '模型核对新稿行为时超时，有些行为尚未核实。' + (noBehaviorReviewed
+    ? '本次没有新稿行为进入角色主审，相关设定与新稿是否一致仍未判断。'
+    : '这些行为是否符合设定仍待核对。');
+}
+
 export function describeCharacterReviewStage(
   diagnostics?: CharacterConsistencyDiagnostics,
 ): ModelStatusView {
@@ -735,7 +750,8 @@ export function describeCharacterReviewStage(
         counts: chunks.text, emptyCaveat: unknownCaveat,
       };
     }
-    let explanation = `${reason || '部分角色审查未完成'}。请核对本次运行诊断后重新发起校验。`;
+    const timeout = characterVerificationTimeout(diagnostics);
+    let explanation = timeout ? '如需补查，可重新发起校验。' : `${reason || '部分角色审查未完成'}。请核对本次运行诊断后重新发起校验。`;
     if (hasCharacterReason(diagnostics, 'token_budget', 'stage_token_budget')) {
       explanation = '审查中发生 Token 预算门控；部分内容可能未调用模型。请核对预算后重新发起校验。';
     } else if (hasCharacterReason(diagnostics, 'upstream_5xx', 'targeted_pass_upstream_5xx')) {
@@ -747,9 +763,9 @@ export function describeCharacterReviewStage(
     }
     return {
       coverage: 'partial', label: '角色审查仅覆盖部分内容',
-      detail: `${explanation} 未覆盖内容不能视为没有问题。`,
+      detail: `${timeout}${explanation} 未覆盖内容不能视为没有问题。`,
       counts: chunks.text,
-      emptyCaveat: '角色审查仅部分完成，当前结果不能证明没有角色设定或行为漂移问题。',
+      emptyCaveat: timeout || '角色审查仅部分完成，当前结果不能证明没有角色设定或行为漂移问题。',
     };
   }
   if (['disabled', 'skipped', 'degraded'].includes(diagnostics.outcome)) {

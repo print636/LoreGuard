@@ -7,6 +7,7 @@ import pytest
 from app.character_draft_actor_review import TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4
 from app.character_draft_actor_review_provider import (
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14,
 )
 from app.character_trait_extraction import CharacterSignalChunk, CharacterSignalExtractor, CharacterSignalTarget
 from tests.test_character_target_bound_draft_review_v3 import _settings, _source
@@ -37,7 +38,8 @@ class ClaimProvider:
 
     def complete(self, system, user):
         prompt_tokens = 9
-        if system not in {TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13}:
+        if system not in {TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
+                          TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14}:
             self.generations += 1
             prompt_tokens = self.generation_tokens
             result = {"records": self.records}
@@ -62,6 +64,11 @@ class ClaimProvider:
                     )
                     if claim:
                         item.update(claim_digest=claim["claim_digest"], claim_relation="equivalent" if same else "different")
+                    if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14:
+                        item["claim_object"] = (dict(
+                            role="event_object", grounding="explicit", referent_relation="same", fact_quote="行李牌",
+                            antecedent_clause_id=None, antecedent_quote=None,
+                        ) if same else None)
                     if "action_path" in hint:
                         item["action_steps"] = [
                             dict(clause_id=step["clause_id"], quote=step["text"],
@@ -136,7 +143,7 @@ def test_independent_source_finds_action_but_leaves_wrong_original_partial(candi
     assert result.diagnostics.rejected_records == 1
     reasons = result.diagnostics.reason_counts
     assert reasons[f"habit_gate_{stage}_source_only"] == 1
-    assert reasons[f"habit_gate_{stage}_failure_key_object_support"] == 1
+    assert reasons[f"habit_gate_{stage}_object_unanchored"] == 1
     assert not any(reason.startswith("habit_claim_recovery") for reason in reasons)
     assert "PRIVATE" not in json.dumps(reasons)
 
@@ -165,3 +172,39 @@ def test_quoted_story_action_remains_unobserved_and_hard_gate_is_identified():
     result, provider = extract([dict(record(claim), evidence=text)], False, content=text)
     assert result.diagnostics.reason_counts["habit_gate_primary_preflight_quoted_only"] == provider.generations
     assert not provider.requests and not result.draft_observations
+
+
+@pytest.mark.parametrize("targeted", [True, False])
+@pytest.mark.parametrize("raw_object", ["行李牌", "行李标签"])
+def test_habit_object_review_retains_the_exact_affected_object_in_the_action(targeted, raw_object):
+    result, provider = extract([dict(record(f"廖辰把{raw_object}装入口袋"), key_object=raw_object)], targeted)
+    request, = provider.requests
+    assert request["prompt_version"].endswith("-v14") and request["primary_claim"]["key_object"] == raw_object
+    assert result.diagnostics.outcome == "completed"
+    assert result.diagnostics.reason_counts["habit_claim_recovery_supported"] == 1
+    observation, = result.draft_observations
+    assert observation.key_object == "行李牌" and "行李牌" in observation.statement
+    assert observation.evidence.text == SOURCE and observation.target_bound_target.habit_contexts == HABIT.habit_contexts
+
+
+def test_another_object_on_the_same_line_cannot_repay_the_raw_habit_claim():
+    result, provider = extract([dict(record("廖辰把手提箱装入口袋"), key_object="手提箱")], True)
+    request, = provider.requests
+    assert request["prompt_version"].endswith("-v14")
+    assert result.diagnostics.outcome == "partial" and not result.draft_observations
+    assert result.diagnostics.target_bound_slot_conflict_counts["object_span"]
+
+
+def test_object_from_a_second_event_cannot_bypass_claim_review_even_with_literal_statement():
+    text = "廖辰接过手提箱，廖辰把行李牌收进口袋。"
+    bad = dict(record("廖辰把行李牌收进口袋"), evidence=text, key_object="手提箱")
+    result, provider = extract([bad], False, content=text)
+    request, = provider.requests
+    assert request["prompt_version"].endswith("-v14")
+    assert result.diagnostics.rejected_records == 1 and not result.draft_observations
+
+
+def test_source_bound_object_is_one_observation_across_passes_and_claim_wording():
+    primary, _ = extract([dict(record("廖辰把行李标签装入口袋"), key_object="行李标签")], False)
+    targeted, _ = extract([dict(record("廖辰把行李牌装入口袋"), key_object="行李牌")], True)
+    assert primary.draft_observations[0].id == targeted.draft_observations[0].id

@@ -195,6 +195,7 @@ def test_scoped_draft_direction_reaches_only_enabled_purposes_and_is_metered(rev
 def test_habit_action_reviews_use_the_metered_target_reviewer_only_when_enabled(enabled):
     from app.character_draft_actor_review_provider import (
         TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
+        TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14,
     )
 
     settings = _settings(character_draft_actor_review_v1=True,
@@ -207,7 +208,8 @@ def test_habit_action_reviews_use_the_metered_target_reviewer_only_when_enabled(
         return _response_http("{}")
 
     accounting, usage = _http_accounting(settings, respond)
-    prompts = (TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13)
+    prompts = (TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
+               TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14)
     for system in prompts:
         if enabled:
             accounting.complete(system, "frozen observations")
