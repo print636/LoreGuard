@@ -42,6 +42,8 @@ from .character_history_semantic_review import (
     segment_history_line,
 )
 from .character_draft_actor_review import (
+    HABIT_CONTEXT_TARGET_GUIDE,
+    valid_habit_contexts,
     SCOPED_DRAFT_DIRECTION_GUIDE,
     has_object_reference,
     valid_primary_object_grounding,
@@ -756,6 +758,14 @@ class CharacterSignal(BaseModel):
         return self
 
 
+def habit_certificate_matches_contexts(signal: CharacterSignal, contexts: tuple[str, ...]) -> bool:
+    """Do not transfer a scoped certificate to a different author's situation."""
+    if signal.dimension != "contextual_behavior" or signal.target_bound_target_digest is None:
+        return True
+    target = signal.target_bound_target
+    return bool(target and contexts and target.habit_contexts == contexts)
+
+
 def target_bound_signal_matches_frozen_baseline(
     signal: CharacterSignal,
     *,
@@ -879,6 +889,7 @@ class CharacterSignalTarget(BaseModel):
         default=None, pattern=r"^[a-f0-9]{64}$"
     )
     requested_proposition_relation: Literal["supports", "contradicts"] | None = None
+    habit_contexts: tuple[str, ...] = Field(default=(), max_length=12)
     existing_evidence_ranges: tuple[tuple[int, int], ...] = Field(
         default=(), max_length=3
     )
@@ -905,6 +916,10 @@ class CharacterSignalTarget(BaseModel):
 
     @model_validator(mode="after")
     def validate_recall_direction_and_ranges(self) -> CharacterSignalTarget:
+        if self.habit_contexts and (
+            self.dimension != "contextual_behavior" or not valid_habit_contexts(self.habit_contexts)
+        ):
+            raise ValueError("target habit contexts are invalid")
         actor_keys: set[str] = set()
         for actor_index, actor in enumerate(
             (self.character, *self.authorized_aliases)
@@ -5628,6 +5643,7 @@ def _target_bound_review_target(
                 target.axis_positive_proposition_sha256
             ),
             "requested_proposition_relation": target.requested_proposition_relation,
+            "habit_contexts": target.habit_contexts,
         },
         strict=True,
     )
@@ -9767,6 +9783,7 @@ def _targeted_chunk_prompt(
             ),
             "requested_polarity": target.requested_polarity,
             "baseline_hint": target.baseline_hint,
+            **({"habit_contexts": target.habit_contexts} if target.habit_contexts else {}),
             **(
                 {"axis_definition": target.approved_axis_definition}
                 if target.approved_axis_definition is not None
@@ -9910,9 +9927,11 @@ def _targeted_chunk_prompt(
         > MAX_TARGETED_CHARACTER_SIGNAL_TARGET_PAYLOAD_BYTES
     ):
         raise ValueError("targeted character target payload exceeds hard limit")
+    habit_guide = HABIT_CONTEXT_TARGET_GUIDE + "\n" if any(target.habit_contexts for target in targets) else ""
     return (
         "服务端来源类型：draft\n"
         f"检索视图：{'candidate_lines_only' if candidate_evidence_ranges else 'full_chunk'}\n"
+        f"{habit_guide}"
         f"{pronoun_template_note}{same_subject_template_note}{actor_proposal_note}"
         f"候选证据范围：{serialized_candidate_ranges}\n"
         f"targets：{serialized_targets}\n"
@@ -9957,6 +9976,9 @@ def _matching_target(
                 in {"matches_target", "broader", "narrower", "not_applicable"}
             ):
                 return target
+            if target.dimension == "contextual_behavior":
+                # A frozen habit certificate must match the full target above.
+                continue
         scoped_axis = (
             target.dimension in _SCOPED_APPROVED_AXIS_DIMENSIONS
             and target.approved_axis_identity is not None

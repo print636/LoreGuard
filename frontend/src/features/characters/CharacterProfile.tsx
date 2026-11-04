@@ -96,6 +96,9 @@ export default function CharacterProfile({
                         <span>生效中</span>
                         <span>{profileOriginNames[item.origin]}</span>
                         <span>{item.evidence_count} 条证据</span>
+                        {item.dimension === "contextual_behavior" && item.contexts.map(context => (
+                          <span key={context}>适用情境：{context}</span>
+                        ))}
                         {item.key_object && <span>对象：{item.key_object}</span>}
                         {item.dimension === "core_personality" && (
                           <span>{item.approved_axis_id ? "已绑定比较标准" : "未绑定比较标准"}</span>

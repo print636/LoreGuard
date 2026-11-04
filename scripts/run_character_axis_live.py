@@ -42,6 +42,7 @@ from scripts.run_character_consistency_live import (
     _safe_visible_issue,
 )
 from scripts.run_evidence_investigator_live import (
+    _HABIT_CONTEXT_CONTRACT,
     _CHARACTER_REVIEW_MAX_GENERATIONS,
     _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS,
     _CHARACTER_BASELINE_COVERAGE_KEYS,
@@ -900,6 +901,7 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
             | _CHARACTER_EXPLANATION_REVIEW_KEYS
             | _CHARACTER_OOC_PROTOCOL_KEYS
             | _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS.keys()
+            | _HABIT_CONTEXT_CONTRACT.keys()
             | {_CHARACTER_REVIEW_MAX_GENERATIONS}
             | _CHARACTER_BASELINE_COVERAGE_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}

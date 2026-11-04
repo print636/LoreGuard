@@ -1,4 +1,5 @@
 import EvidenceList from "./EvidenceList";
+import { issueSeverityLabel } from "../../productLanguage";
 import {
   characterDriftReportPath,
   describeCoverage,
@@ -60,7 +61,7 @@ export default function CharacterDriftList({
               <article>
                 <header>
                   <div>
-                    <span>{issue.severity} · {Math.round(issue.confidence * 100)}%</span>
+                    <span>{issue.isSituationalPattern && "情境行为偏差 · "}{issueSeverityLabel(issue.severity)} · {Math.round(issue.confidence * 100)}%</span>
                     <strong>{feedbackStatusNames[issue.feedback_status]}</strong>
                   </div>
                   <h3>{issue.title}</h3>

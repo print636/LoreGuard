@@ -43,6 +43,7 @@ from .character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11,
     SCOPED_DRAFT_DIRECTION_GUIDE,
+    HABIT_CONTEXT_TARGET_GUIDE,
 )
 from .character_scope_review import ScopeReviewSourceIdentity
 from .provider import OpenAICompatibleProvider, ProviderError
@@ -392,6 +393,8 @@ def build_target_bound_draft_review_prompts(
             for request in requests
         ],
     }
+    if any(request.target.habit_contexts for request in requests):
+        user_data["habit_context_guide"] = HABIT_CONTEXT_TARGET_GUIDE
     if requests[0].schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4:
         system = {
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10,

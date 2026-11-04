@@ -366,6 +366,13 @@ _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS = {
     "reviewed_events_schema_version": "character-reviewed-events-v1",
 }
 _CHARACTER_REVIEW_MAX_GENERATIONS = "drift_review_max_generations"
+_HABIT_CONTEXT_CONTRACT = {
+    "habit_context_target_version": "character-habit-context-target-v1",
+    "habit_context_target_guide_sha256": "978336ef854c5c5d8cc6596d85ad2c29c5e84c6a0a97d9f0ac3b327464c2bb39",
+    "drift_habit_context_schema_version": "character-habit-context-review-v1",
+    "drift_habit_context_prompt_version": "character-habit-context-review-prompt-v1",
+    "drift_habit_context_prompt_sha256": "b675bc15bb0c21d1547019aee7fe2cbf7683de0f96ae4aba9becca24e89ae175",
+}
 _CHARACTER_BASELINE_COVERAGE_KEYS = frozenset({
     "baseline_coverage_recovery_schema_version",
     "baseline_coverage_recovery_prompt_sha256",
@@ -388,6 +395,9 @@ def _safe_character_review_extensions(value: object) -> dict[str, Any] | None:
         return None
     event_keys = set(value) & _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS.keys()
     coverage_keys = set(value) & _CHARACTER_BASELINE_COVERAGE_KEYS
+    habit_keys = value.keys() & _HABIT_CONTEXT_CONTRACT.keys()
+    if habit_keys and any(value.get(key) != expected for key, expected in _HABIT_CONTEXT_CONTRACT.items()):
+        return None
     if event_keys not in (set(), set(_CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS)):
         return None
     if coverage_keys not in (set(), set(_CHARACTER_BASELINE_COVERAGE_KEYS)):
@@ -420,7 +430,7 @@ def _safe_character_review_extensions(value: object) -> dict[str, Any] | None:
                 return None
         elif schema is not None or prompt_hash is not None or prompt_version is not None:
             return None
-    return {key: value[key] for key in event_keys | coverage_keys}
+    return {key: value[key] for key in event_keys | coverage_keys | habit_keys}
 
 
 _CHARACTER_SCOPED_AXIS_DRIFT_KEY = "scoped_axis_drift_v1"
@@ -3525,6 +3535,7 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             | _CHARACTER_EXPLANATION_REVIEW_KEYS
             | _CHARACTER_OOC_PROTOCOL_KEYS
             | _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS.keys()
+            | _HABIT_CONTEXT_CONTRACT.keys()
             | {_CHARACTER_REVIEW_MAX_GENERATIONS}
             | _CHARACTER_BASELINE_COVERAGE_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}

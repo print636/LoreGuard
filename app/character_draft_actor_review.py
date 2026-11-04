@@ -210,6 +210,35 @@ TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8 = (
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 = "character-target-bound-draft-review-prompt-v9"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10 = "character-target-bound-draft-review-prompt-v10"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 = "character-target-bound-draft-review-prompt-v11"
+HABIT_CONTEXT_TARGET_VERSION = "character-habit-context-target-v1"
+HABIT_CONTEXT_TARGET_GUIDE = (
+    "habit_contexts 是作者确认的习惯适用场景，用来识别正在比较的行为，不是新稿证据。"
+    "按草稿原文区分谁在何时、什么场合做了什么。场景可通过有依据的同义描述辨认，"
+    "不要求用词相同，也不要把设定中的场景抄进观察。若同一角色实际做了相反的事，"
+    "即使发生于不同场合或场景尚不清楚，也保留有证据的动作供主审比较。另一场合的动作、"
+    "他人的行为或未发生的设想不能替代这一动作。仅行为相似不足以断定设定适用。"
+)
+CONTEXT_SECRET_OR_URL = re.compile(
+    r"(?:[a-z][a-z0-9+.-]{1,15}://|www\.)|"
+    r"(?:api[_\s-]?key|base[_\s-]?url|authorization|bearer\s+|password|"
+    r"credential|private[_\s-]?key|(?:^|[^a-z0-9])sk-[a-z0-9]{8,}|\u5bc6\u94a5|\u5bc6\u7801)",
+    re.IGNORECASE,
+)
+
+
+def valid_habit_contexts(contexts: tuple[str, ...]) -> bool:
+    """A complete set of author scopes either travels together or is withheld."""
+    return (
+        0 < len(contexts) <= 12 and sum(map(len, contexts)) <= 320
+        and all(
+            value and value == value.strip() and len(value) <= 200
+            and not CONTEXT_SECRET_OR_URL.search(value)
+            and not any(unicodedata.category(c).startswith("C") or c in "\u2028\u2029" for c in value)
+            for value in contexts
+        )
+    )
+
+
 SCOPED_DRAFT_DIRECTION_VERSION = "character-scoped-draft-direction-v1"
 SCOPED_DRAFT_DIRECTION_GUIDE = (
     "\n\n对含 requested_proposition_relation 的目标，requested_polarity 是要返回的原始标签方向；"
@@ -1563,6 +1592,7 @@ class TargetBoundDraftReviewTarget(BaseModel):
         default=None, pattern=_SHA256
     )
     requested_proposition_relation: Literal["supports", "contradicts"] | None = None
+    habit_contexts: tuple[str, ...] = Field(default=(), max_length=12)
 
     @model_serializer(mode="wrap")
     def serialize_target(self, handler):
@@ -1570,10 +1600,16 @@ class TargetBoundDraftReviewTarget(BaseModel):
         if self.requested_proposition_relation is None:
             # Preserve the signed identity of historical targets and certificates.
             data.pop("requested_proposition_relation", None)
+        if not self.habit_contexts:
+            data.pop("habit_contexts", None)
         return data
 
     @model_validator(mode="after")
     def validate_server_target(self) -> "TargetBoundDraftReviewTarget":
+        if self.habit_contexts and (
+            self.dimension != "contextual_behavior" or not valid_habit_contexts(self.habit_contexts)
+        ):
+            raise ValueError("target_bound_habit_context_invalid")
         if not _target_actor_literals_are_safe(
             self.character, self.authorized_aliases
         ):

@@ -18,6 +18,7 @@ from .character_trait_extraction import (
     _SAFE_SIGNAL_PROVIDER_CATEGORIES,
     _bounded_provider,
     canonical_axis_object_key_object,
+    habit_certificate_matches_contexts,
     stable_trait_identity,
     target_bound_signal_matches_frozen_baseline,
     trait_keys_compatible,
@@ -86,6 +87,8 @@ CHARACTER_REVIEW_POLICY_VERSION = "single-clear-event-v3"
 CHARACTER_REVIEW_SCHEMA_VERSION = "character-single-event-review-v1"
 CHARACTER_REVIEW_PROMPT_VERSION = "character-single-event-review-prompt-v2"
 CHARACTER_REVIEWED_EVENTS_SCHEMA_VERSION = "character-reviewed-events-v1"
+CHARACTER_HABIT_CONTEXT_SCHEMA_VERSION = "character-habit-context-review-v1"
+CHARACTER_HABIT_CONTEXT_PROMPT_VERSION = "character-habit-context-review-prompt-v1"
 
 
 class ConfirmedTraitSnapshot(BaseModel):
@@ -399,6 +402,17 @@ class ScopedAxisApplicability(BaseModel):
     independent_events: Literal["yes", "no", "unclear", "not_applicable"]
 
 
+class HabitContextCheck(BaseModel):
+    """Applicability of one frozen current observation to a confirmed habit."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    citation: str = Field(pattern=r"^C[0-9]{2}$")
+    relation: Literal["same", "different", "unclear"]
+    quote: str = Field(max_length=96)
+    continues_from: str | None = Field(default=None, pattern=r"^C[0-9]{2}$")
+
+
 class ReviewedNarrativeEvent(BaseModel):
     """A model-reviewed event partition, never a server identity certificate."""
 
@@ -412,6 +426,9 @@ class ReviewedNarrativeEvent(BaseModel):
     actuality: Literal["actual", "non_actual", "unclear"]
     object_match: Literal["same", "different", "unclear", "not_applicable"]
     situation_match: Literal["same", "different", "unclear", "not_applicable"]
+    context_checks: tuple[HabitContextCheck, ...] | None = Field(
+        default=None, min_length=1, max_length=8, exclude=True,
+    )
 
 
 class ModelDriftDecision(BaseModel):
@@ -570,6 +587,12 @@ G (bridge) 和 X (exception) 仅是候选解释；须从其原文确认相关成
 顶层 contradicts 只引用决定结论的完整冲突组和基线，各选中事件 verdict 均须 contradicts；其他独立事件可仍存疑。材料或解释检索不完整时保留疑点。顶层 explained 必须引用全部 C，且每组都已被有效解释或被明确排除；必须引用 G/X，其适用范围并集须覆盖每个需解释的 C。全部事件明确排除时只需 B/C，无需 G/X。P 只能伴随 needs_confirmation 或 insufficient_evidence。仍不明确、材料缺失或必需引用超过上限时，如实保留疑点，不要编造证据。若输入含 contract_correction，请用相同证据重新按本格式完整作答，仍可保留疑点。"""
 
 
+CHARACTER_HABIT_CONTEXT_REVIEW_SYSTEM_PROMPT = CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT + """
+情境习惯审查扩展（character-habit-context-review-v1）：每个 event 必须额外提供 context_checks。对本组每个 C 独立填写一次 {"citation":"C01","relation":"same","quote":"该 C 原文中的短引文"}。比较作者已确认的 baseline_contexts 和 B 原文所限定的场合，与这个 C 实际发生的场合。根据具体动作或同义改述可判 same，明确是别的场合才判 different，无法确定、缺少已确认情境或仅是设想则判 unclear。不要要求新稿复用设定用词。quote 须逐字取自对应 C 的 text（最多96字），用以定位支持判断的动作、场景或承接线索；unclear 可给空串。不得把 summary 或另一场景的描写当作本条证据。
+同一事件紧邻的下一行明确延续前一条 C 的场景时，可在该行的检查中添加 continues_from 指向同组、同文稿、紧邻前一行且自己有直接场景证据的 C。仍须引用当前行支持实际承接的原句；相邻或主角相同本身不证明延续，换场时要分别审查。只给一次直接承接，不串联推测。事件的 situation_match 由组内检查决定：全部 same 才用 same，全部 different 才用 different，其余均用 unclear。整组情境未确定时不能声称组内行为违反习惯。不要把多个独立事件拼成一组，也不要为了定性而拆分同一事件。
+"""
+
+
 def _is_scoped_approved_axis(baseline: ConfirmedTraitSnapshot) -> bool:
     return (
         baseline.approved_axis_identity is not None
@@ -632,6 +655,7 @@ def _prepare_character_drift(
         for row in case.observations
         if row.character == baseline.character
         and row.dimension == baseline.dimension
+        and habit_certificate_matches_contexts(row, baseline.contexts)
         and (
             row.id in bound_ids
             and case.axis_observation_polarity(row.id) is not None
@@ -1113,6 +1137,7 @@ class CharacterConsistencyReviewer:
     def review(self, candidate: PreparedCharacterDrift) -> CharacterReviewResult:
         settings = self.settings
         single_event_policy = candidate.review_policy == CHARACTER_REVIEW_POLICY_VERSION
+        habit_context_review = single_event_policy and candidate.case.baseline.dimension == "contextual_behavior"
         scoped_axis = _is_scoped_approved_axis(candidate.case.baseline)
         multi_event_review = (
             candidate.reason == "two_independent_behaviors" and not scoped_axis
@@ -1124,7 +1149,10 @@ class CharacterConsistencyReviewer:
         if multi_event_review:
             system_prompt = CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT
         if single_event_policy:
-            system_prompt = CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
+            system_prompt = (
+                CHARACTER_HABIT_CONTEXT_REVIEW_SYSTEM_PROMPT
+                if habit_context_review else CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
+            )
         if not settings.enable_character_consistency:
             return _review_result("disabled", "feature_disabled")
         if not candidate.reviewer_eligible:
@@ -1142,7 +1170,8 @@ class CharacterConsistencyReviewer:
         if single_event_policy:
             # The output contract grows with the bounded C pool. An explicit
             # cap too small for the contract must fail before provider work.
-            completion_reserve = 384 + 320 * len(candidate.matching_observations)
+            per_observation = 352 if habit_context_review else 320
+            completion_reserve = 384 + per_observation * len(candidate.matching_observations)
             if completion_reserve > min(
                 settings.character_drift_max_completion_tokens,
                 settings.provider_max_completion_tokens or completion_reserve,
@@ -1178,7 +1207,13 @@ class CharacterConsistencyReviewer:
                             "object_match_required": scoped_axis or (
                                 candidate.case.baseline.dimension in _AXIS_AND_OBJECT_DIMENSIONS
                             ),
-                            "situation_match_required": scoped_axis or bool(candidate.case.baseline.contexts),
+                            "situation_match_required": (
+                                habit_context_review or scoped_axis or bool(candidate.case.baseline.contexts)
+                            ),
+                            **(
+                                {"habit_context_schema_version": CHARACTER_HABIT_CONTEXT_SCHEMA_VERSION}
+                                if habit_context_review else {}
+                            ),
                         }
                         if single_event_policy else {}
                     ),
@@ -2885,6 +2920,44 @@ def _validate_event_comparison_binding(
         raise _InvalidEventDecision("comparison")
 
 
+def _validate_habit_context_checks(
+    candidate: PreparedCharacterDrift, event: ReviewedNarrativeEvent,
+) -> None:
+    if candidate.case.baseline.dimension != "contextual_behavior":
+        if "context_checks" in event.model_fields_set:
+            raise _InvalidEventDecision("policy")
+        return
+    checks = event.context_checks or ()
+    by_handle = {row.citation: row for row in checks}
+    if len(by_handle) != len(checks) or set(by_handle) != set(event.current_citations):
+        raise _InvalidEventDecision("comparison")
+
+    evidence = {
+        handle: candidate.matching_observations[int(handle[1:]) - 1].evidence
+        for handle in by_handle
+    }
+    has_scope = any(text.strip() for text in candidate.case.baseline.contexts)
+    for row in checks:
+        span = evidence[row.citation]
+        if row.quote and (not any(char.isalnum() for char in row.quote) or row.quote not in span.text):
+            raise _InvalidEventDecision("comparison")
+        if row.relation != "unclear" and (not has_scope or not row.quote.strip()):
+            raise _InvalidEventDecision("comparison")
+        if row.continues_from is not None:
+            anchor = by_handle.get(row.continues_from)
+            if (anchor is None or anchor.continues_from is not None
+                    or row.relation == "unclear" or anchor.relation != row.relation):
+                raise _InvalidEventDecision("comparison")
+            prior = evidence[anchor.citation]
+            if prior.document_id != span.document_id or prior.line_end + 1 != span.line_start:
+                raise _InvalidEventDecision("comparison")
+
+    relations = {row.relation for row in checks}
+    group = next(iter(relations)) if len(relations) == 1 else "unclear"
+    if event.situation_match != group:
+        raise _InvalidEventDecision("comparison")
+
+
 def _validate_single_event_decision(
     candidate: PreparedCharacterDrift, decision: ModelDriftDecision,
     allowed: frozenset[str],
@@ -2910,6 +2983,7 @@ def _validate_single_event_decision(
         raise _InvalidEventDecision("citations")
     selected = []
     for event in decision.events:
+        _validate_habit_context_checks(candidate, event)
         labels = set(event.current_citations)
         if labels & cited_current:
             if not labels <= cited_current:

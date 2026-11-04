@@ -14,6 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from .aliases import build_alias_map
+from .character_draft_actor_review import (
+    CONTEXT_SECRET_OR_URL as _CONTEXT_SECRET_OR_URL,
+    valid_habit_contexts,
+)
 from .character_drift import (
     CHARACTER_REVIEW_POLICY_VERSION,
     CHARACTER_REVIEW_SCHEMA_VERSION,
@@ -47,6 +51,7 @@ from .character_scope_review import (
 )
 from .character_history_semantic_review import HistoryReviewSourceIdentity
 from .character_trait_extraction import (
+    habit_certificate_matches_contexts,
     MAX_CHARACTER_SIGNAL_BASELINE_HINT_CHARS,
     MAX_CHARACTER_SIGNAL_SERVER_CONTEXT_CHARS,
     MAX_TARGETED_CHARACTER_SIGNAL_CANDIDATE_LINES,
@@ -294,12 +299,6 @@ _OBJECT_BEARING_TRAIT_DIMENSIONS = frozenset(
     }
 )
 _CONTEXT_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-_CONTEXT_SECRET_OR_URL = re.compile(
-    r"(?:[a-z][a-z0-9+.-]{1,15}://|www\.)|"
-    r"(?:api[_\s-]?key|base[_\s-]?url|authorization|bearer\s+|password|"
-    r"credential|private[_\s-]?key|(?:^|[^a-z0-9])sk-[a-z0-9]{8,}|\u5bc6\u94a5|\u5bc6\u7801)",
-    re.IGNORECASE,
-)
 
 
 class _ChatProvider(Protocol):
@@ -4015,28 +4014,27 @@ def _safe_server_context(
             continue
         eligible_entries.append(entry)
 
-    # Contexts deliberately stay off the model boundary. If one comparison
-    # key has conflicting polarity, or different behavioral contexts, its
-    # first sorted row is not a safe extraction hint for this draft.
+    # For a contextual habit, an entire frozen context set belongs to one
+    # target. Do not select the first of two differently scoped baselines.
     hint_variants: dict[
         tuple[str, str, str, str],
         set[tuple[tuple[str, ...], str, tuple[str, str, str]]],
     ] = defaultdict(set)
-    unverified_object_keys: set[tuple[str, str, str, str]] = set()
+    unsafe_hint_keys: set[tuple[str, str, str, str]] = set()
     for entry in eligible_entries:
         _, baseline, _, character_key = entry
         identity = _baseline_hint_identity(entry)
         if baseline.dimension == "contextual_behavior":
-            contexts = tuple(
-                sorted(value.strip() for value in baseline.contexts if value.strip())
-            )
+            contexts = baseline.contexts
+            if not valid_habit_contexts(contexts):
+                unsafe_hint_keys.add(identity)
         else:
             contexts = ()
         if (
             baseline.dimension in _OBJECT_BEARING_TRAIT_DIMENSIONS
             and not _frozen_comparison_identity(entry)
         ):
-            unverified_object_keys.add(identity)
+            unsafe_hint_keys.add(identity)
         scoped_axis = (
             baseline.dimension in {"value", "behavior_boundary"}
             and baseline.approved_axis_identity is not None
@@ -4049,7 +4047,7 @@ def _safe_server_context(
                 baseline.axis_positive_proposition,
             ))
         ):
-            unverified_object_keys.add(identity)
+            unsafe_hint_keys.add(identity)
         hint_variants[identity].add((
             contexts,
             baseline.axis_polarity
@@ -4062,12 +4060,12 @@ def _safe_server_context(
         ))
     ambiguous_hint_keys = {
         identity for identity, variants in hint_variants.items() if len(variants) > 1
-    } | unverified_object_keys
+    } | unsafe_hint_keys
 
     applicable: list[
         tuple[
             str, str, str, str, str, str, str,
-            tuple[str, int, str] | None, str | None, dict[str, str],
+            tuple[str, int, str] | None, str | None, dict[str, Any],
         ]
     ] = []
     seen: set[tuple[str, str, str, str]] = set()
@@ -4140,6 +4138,8 @@ def _safe_server_context(
             }
             if scoped_axis else {}
         )
+        if baseline.dimension == "contextual_behavior":
+            scoped_fields["habit_contexts"] = baseline.contexts
         applicable.append(
             (*labels, key_object, _safe_baseline_hint(baseline.statement), axis_key,
              axis_definition, scoped_fields)
@@ -4563,6 +4563,8 @@ def _assess_observation_match(
     baseline = entry[1]
     if observation.dimension != baseline.dimension:
         return ObservationMatchAssessment(False, "dimension_mismatch")
+    if not habit_certificate_matches_contexts(observation, baseline.contexts):
+        return ObservationMatchAssessment(False, "comparison_mismatch")
     if baseline.approved_axis_identity is not None:
         # Only validated server-owned recall creates an approved axis binding.
         matched = approved_axis_binding == baseline.approved_axis_identity

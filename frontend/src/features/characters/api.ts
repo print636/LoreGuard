@@ -1,5 +1,6 @@
 import { apiJson, apiJsonIdempotent } from "../../api/client.ts";
 import { baselineEmptyReason, baselineEvidenceChecks } from "../workflow/baselineEmpty.ts";
+import { isSituationalPattern } from "../../productLanguage.ts";
 import type {
   CandidateDecisionIn,
   CandidateDecisionOut,
@@ -521,6 +522,7 @@ function normalizeProfileItem(value: unknown): CharacterProfileItem | null {
     revision: nullableInteger(source.revision),
     dimension,
     statement,
+    contexts: Array.from(new Set(stringList(source.contexts))),
     key_object: keyObject,
     approved_axis_id: approvedAxisId,
     approved_axis_version: approvedAxisVersion,
@@ -889,6 +891,7 @@ function normalizeDriftIssue(
     issue_id: issueId,
     run_id: runId,
     character_id: characterId,
+    ...(isSituationalPattern(metadata) && { isSituationalPattern: true }),
     title: text(source.title, "未命名角色漂移问题"),
     severity: text(source.severity, "unknown"),
     confidence: fraction(source.confidence),

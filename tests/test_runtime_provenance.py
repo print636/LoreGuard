@@ -860,6 +860,25 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
         assert axis_live._safe_character_runtime_provenance(malformed) is None, missing
 
 
+def test_habit_context_identity_is_complete_when_present_and_older_reports_are_readable():
+    provenance = safe_runtime_provenance(configured_settings())
+    limits = provenance["character_consistency_limits"]
+    identity = live_runner._HABIT_CONTEXT_CONTRACT
+    assert {key: limits[key] for key in identity} == identity
+    readers = (live_runner._safe_runtime_provenance, axis_live._safe_character_runtime_provenance)
+    for key, expected in identity.items():
+        for invalid in ("unrecognized", None):
+            limits[key] = invalid
+            assert all(read(provenance) is None for read in readers)
+        del limits[key]
+        assert all(read(provenance) is None for read in readers)
+        limits[key] = expected
+    assert all(read(provenance)["character_consistency_limits"] == limits for read in readers)
+    for key in identity:
+        del limits[key]
+    assert all(read(provenance)["character_consistency_limits"] == limits for read in readers)
+
+
 def test_runtime_provenance_marks_unversioned_build_without_inventing_revision():
     result = safe_runtime_provenance(
         configured_settings(loreguard_build_revision="")

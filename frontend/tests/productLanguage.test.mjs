@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { issueSeverityLabel, reviewRecordLabel, reviewStatusLabel, reviewTimeLabel } from '../src/productLanguage.ts';
+import { isSituationalPattern, issueSeverityLabel, reviewRecordLabel, reviewStatusLabel, reviewTimeLabel } from '../src/productLanguage.ts';
 
 test('review statuses use author-facing labels and never echo unknown system codes', () => {
   assert.equal(reviewStatusLabel('completed'), '审查完成');
@@ -20,4 +20,12 @@ test('issue severity is readable Chinese, including an honest unknown state', ()
   assert.equal(issueSeverityLabel('medium'), '一般');
   assert.equal(issueSeverityLabel('high'), '严重');
   assert.equal(issueSeverityLabel('unrecognized-code'), '程度待确认');
+});
+
+test('contextual labels require a known subtype and a compatible character dimension', () => {
+  assert.equal(isSituationalPattern({subtype: 'situational_pattern_deviation'}), true);
+  for (const metadata of [null, {}, {dimension: 'contextual_behavior'}, {subtype: 'future_kind'},
+    {subtype: 'situational_pattern_deviation', dimension: 'core_personality'}]) {
+    assert.equal(isSituationalPattern(metadata), false);
+  }
 });

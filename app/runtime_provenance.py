@@ -8,6 +8,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .config import Settings
 from .character_drift import (
+    CHARACTER_HABIT_CONTEXT_PROMPT_VERSION,
+    CHARACTER_HABIT_CONTEXT_REVIEW_SYSTEM_PROMPT,
+    CHARACTER_HABIT_CONTEXT_SCHEMA_VERSION,
     CHARACTER_REVIEW_POLICY_VERSION,
     CHARACTER_REVIEW_PROMPT_VERSION,
     CHARACTER_REVIEW_SCHEMA_VERSION,
@@ -32,6 +35,8 @@ from .character_history_semantic_review import (
 )
 from .character_draft_actor_review import (
     DRAFT_ACTOR_CLAUSE_INDEX_V1,
+    HABIT_CONTEXT_TARGET_GUIDE,
+    HABIT_CONTEXT_TARGET_VERSION,
     SCOPED_DRAFT_DIRECTION_VERSION,
     SCOPED_DRAFT_DIRECTION_GUIDE,
     DRAFT_ACTOR_REVIEW_BATCH_SCHEMA_V1,
@@ -305,6 +310,12 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "drift_review_max_generations": settings.character_drift_review_max_generations,
             "drift_review_schema_version": CHARACTER_REVIEW_SCHEMA_VERSION,
             "reviewed_events_schema_version": CHARACTER_REVIEWED_EVENTS_SCHEMA_VERSION,
+            # The build advertises these contracts even when no habit was reviewed.
+            "habit_context_target_version": HABIT_CONTEXT_TARGET_VERSION,
+            "habit_context_target_guide_sha256": _fingerprint(HABIT_CONTEXT_TARGET_GUIDE),
+            "drift_habit_context_schema_version": CHARACTER_HABIT_CONTEXT_SCHEMA_VERSION,
+            "drift_habit_context_prompt_version": CHARACTER_HABIT_CONTEXT_PROMPT_VERSION,
+            "drift_habit_context_prompt_sha256": _fingerprint(CHARACTER_HABIT_CONTEXT_REVIEW_SYSTEM_PROMPT),
             "ooc_protocol_version": CHARACTER_OOC_PROTOCOL_VERSION,
             "ooc_supported_dimensions": list(
                 CHARACTER_OOC_SUPPORTED_DIMENSIONS

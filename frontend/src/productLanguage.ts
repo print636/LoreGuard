@@ -20,3 +20,10 @@ export function reviewRecordLabel(position: number, createdAt: string): string {
 export function issueSeverityLabel(severity: string): string {
   return ({ low: "轻微", medium: "一般", high: "严重", critical: "严重" } as Record<string, string>)[severity] || "程度待确认";
 }
+
+export function isSituationalPattern(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+  const entry = metadata as Record<string, unknown>;
+  return entry.subtype === "situational_pattern_deviation" &&
+    (entry.dimension === undefined || entry.dimension === "contextual_behavior");
+}

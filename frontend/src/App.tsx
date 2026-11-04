@@ -122,7 +122,7 @@ import RunHistoryPanel from "./features/run-history/RunHistoryPanel";
 import CharacterObservationsPanel from "./features/character-observations/CharacterObservationsPanel";
 import type { RunCatalogItem } from "./features/run-history/runHistoryModel";
 import TechnicalDetails from "./components/TechnicalDetails";
-import { issueSeverityLabel, reviewStatusLabel, reviewTimeLabel } from "./productLanguage";
+import { isSituationalPattern, issueSeverityLabel, reviewStatusLabel, reviewTimeLabel } from "./productLanguage";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
 const RevisionReview = lazy(() => import("./components/RevisionReview"));
@@ -410,6 +410,12 @@ const categoryNames: Record<string, string> = {
   world_rule_conflict: "世界规则",
   character_drift: "角色漂移",
 };
+
+function issueCategoryLabel(issue: Issue): string {
+  return issue.category === "character_drift" && isSituationalPattern(issue.metadata)
+    ? "角色漂移 · 情境行为偏差"
+    : categoryNames[issue.category] || "其他类型（待核对）";
+}
 const clarificationCategoryNames: Record<string, string> = {
   scope_unknown: "适用范围未确定",
   missing_causal_bridge: "缺少因果衔接",
@@ -3008,7 +3014,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       </div>
                       <div>
                         <p className="tag">
-                          {categoryNames[issue.category] || "其他类型（待核对）"} ·{" "}
+                          {issueCategoryLabel(issue)} ·{" "}
                           {issueSeverityLabel(issue.severity)} ·{" "}
                           {(issue.confidence * 100).toFixed(0)}%
                         </p>
@@ -3159,7 +3165,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                             <li key={clue.id}>
                               <div className="provisionalClueMeta">
                                 <span>{clue.metadata.final_outcome === "needs_confirmation" ? "待作者确认" : "判断依据不足"}</span>
-                                <span>角色设定 / 表现</span>
+                                <span>{clue.isSituationalPattern ? "情境行为待核对" : "角色设定 / 表现"}</span>
                               </div>
                               <h4>{clue.title}</h4>
                               <p>{clue.explanation}</p>
@@ -3364,7 +3370,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     }}
                   >
                     <span>
-                      {categoryNames[issue.category] || "其他类型（待核对）"} ·{" "}
+                      {issueCategoryLabel(issue)} ·{" "}
                       {issueSeverityLabel(issue.severity)} · {(issue.confidence * 100).toFixed(0)}%
                     </span>
                     <b>{issue.title}</b>

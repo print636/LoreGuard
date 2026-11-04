@@ -54,6 +54,7 @@ export type CharacterProfileItem = {
   revision: number | null;
   dimension: CharacterDimension;
   statement: string;
+  contexts: string[];
   key_object: string | null;
   origin: "explicit_profile" | "confirmed_inference";
   approved_axis_id: string | null;
@@ -267,6 +268,7 @@ export type CandidateDecisionOut = {
 };
 
 export type DriftIssueSummary = {
+  isSituationalPattern?: boolean;
   issue_id: string;
   run_id: string;
   character_id: string;

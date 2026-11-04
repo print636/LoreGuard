@@ -6,13 +6,14 @@ test("a confirmed trait remains accessible after source retirement and can be ex
   let revision = 3;
   let conflictOnce = true;
   const trait = {
-    id: "trait-1", character_key: "林澈", trait_type: "preference",
-    trait_key: "食物偏好", value: "喜欢蜜瓜", origin: "explicit_setting",
+    id: "trait-1", character_key: "林澈", trait_type: "contextual_behavior",
+    trait_key: "清点物资", value: "先点清绳索再装船", origin: "explicit_setting",
+    contexts: ["夜间出航前"],
     source_run_id: "run-old", scope_sha256: "old-snapshot",
     review_state: "confirmed", revision: 3, model_coverage: "full",
     evidence: [{ document_id: "doc-retired", document_name: "旧设定.md", document_version: 1,
       document_role: "reference", publication_status: "retired", line_start: 1,
-      line_end: 1, text: "林澈喜欢蜜瓜。" }],
+      line_end: 1, text: "每当夜间出航，林澈总是先点清绳索再装船。" }],
   };
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
@@ -102,7 +103,8 @@ test("a confirmed trait remains accessible after source retirement and can be ex
 
   const profilePath = "/app/projects/project-1/characters?section=profile&page=1&character=%E6%9E%97%E6%BE%88";
   await page.goto(`${profilePath}&q=${encodeURIComponent("另一个角色")}`);
-  await expect(page.getByText("食物偏好：喜欢蜜瓜")).toBeVisible();
+  await expect(page.getByText("清点物资：先点清绳索再装船")).toBeVisible();
+  await expect(page.getByText("适用情境：夜间出航前")).toBeVisible();
   await expect(page.getByText("没有匹配的角色")).toBeVisible();
   await expect(page.getByText(/来源文档退役或改为参考资料，不会自动撤销/)).toBeVisible();
   await expect(page.getByRole("heading", { name: "已撤销记录" })).toBeVisible();
@@ -128,7 +130,7 @@ test("a confirmed trait remains accessible after source retirement and can be ex
   await page.getByRole("button", { name: "确认撤销特征" }).click();
   await expect(page.getByText(/特征已撤销，将不再参与之后新建的审查/)).toBeVisible();
   await expect(page.getByText("还没有生效的角色特征")).toBeVisible();
-  await expect(page.locator(".characterWithdrawnArchive").getByText("食物偏好：喜欢蜜瓜")).toBeVisible();
+  await expect(page.locator(".characterWithdrawnArchive").getByText("清点物资：先点清绳索再装船")).toBeVisible();
   await expect(page.locator(".characterWithdrawnArchive").getByText("已撤销", { exact: true })).toBeVisible();
   await expect(page.locator(".characterRosterList").getByText("1 已撤销")).toBeVisible();
   expect(postCount).toBe(2);

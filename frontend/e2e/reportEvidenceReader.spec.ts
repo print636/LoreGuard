@@ -40,13 +40,13 @@ function primaryIssue(activeRunId = runId) {
 const traitIssue = {
   id: traitIssueId, category: "character_drift", severity: "medium", confidence: 0.75,
   title: "角色档案与新稿表现需要核对", explanation: "正式问题仍需要作者核对原文。", suggestion: "核对档案与新稿上下文。",
-  evidence: [traitEvidence, draftEvidence()], metadata: {},
+  evidence: [traitEvidence, draftEvidence()], metadata: { dimension: "contextual_behavior", subtype: "situational_pattern_deviation" },
 };
 const reviewClue = {
   id: reviewClueId, report_class: "review_clue", category: "character_drift", severity: "low", confidence: 0.52,
   title: "一次不同表现仍待作者确认", explanation: "单次行为不能独立确认角色变化。", suggestion: "请对照前后原文。",
   evidence: [traitEvidence, draftEvidence()],
-  metadata: { final_outcome: "needs_confirmation", review_reason: "single_behavior_is_not_drift" },
+  metadata: { final_outcome: "needs_confirmation", review_reason: "single_behavior_is_not_drift", dimension: "contextual_behavior", subtype: "situational_pattern_deviation" },
 };
 const provisionalClue = {
   id: provisionalClueId, document_id: "draft-frozen-v1", document_version: 1, document_name: "北港新稿.md",
@@ -281,6 +281,7 @@ test("剧情策划核对旧特征来源与两类待复核证据，阅读不会�
   await openReport(page, state);
   const dialog = page.getByRole("dialog", { name: "分析时原文" });
   const traitTrigger = page.locator(`#issue-${traitIssueId}`).getByRole("button", { name: "查看分析时原文" }).first();
+  await expect(page.locator(`#issue-${traitIssueId} .tag`)).toContainText("角色漂移 · 情境行为偏差");
   await traitTrigger.click();
   await expect(dialog.locator(".evidenceReaderMetadata")).toContainText("冻结版本 v1");
   await expect(dialog.locator(".evidenceReaderMetadata")).toContainText("既有角色设定的冻结来源");
@@ -297,6 +298,8 @@ test("剧情策划核对旧特征来源与两类待复核证据，阅读不会�
   await dialog.getByRole("button", { name: "关闭阅读面板" }).click();
   const clues = page.getByRole("region", { name: /待复核线索/ });
   await expect(clues.getByRole("heading", { name: "待复核线索 2" })).toBeVisible();
+  await expect(clues.getByText("情境行为待核对")).toBeVisible();
+  await expect(clues.getByText("情境行为偏差")).toHaveCount(0);
   await expect(page.locator(".issues article")).toHaveCount(2);
   const reviewTrigger = clues.locator(".reviewClueList").getByRole("button", { name: "查看分析时原文" }).first();
   await reviewTrigger.click();

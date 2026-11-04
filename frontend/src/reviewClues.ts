@@ -1,7 +1,9 @@
 import { apiJson } from "./api/client.ts";
+import { isSituationalPattern } from "./productLanguage.ts";
 import type { Evidence } from "./types/visualization";
 
 export type ReviewClue = {
+  isSituationalPattern?: boolean;
   id: string;
   report_class: "review_clue";
   title: string;
@@ -113,6 +115,7 @@ export function normalizeReviewClueResult(payload: unknown): ReviewClueResult {
     return {
       id,
       report_class: "review_clue",
+      ...(isSituationalPattern(metadata) && { isSituationalPattern: true }),
       title: requiredText(clue.title, "title", 300),
       explanation: requiredText(clue.explanation, "explanation", 4_000),
       evidence,
