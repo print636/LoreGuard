@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Literal
 
@@ -12,6 +13,8 @@ from .character_consistency_stage import (
     project_provisional_draft_clues,
 )
 from .character_traits import TraitEvidenceInput
+from .character_draft_actor_review import valid_habit_contexts
+from .narrative_context import classify_character_source_kind, payload_sha256
 from .db import (
     AnalysisDiagnosticRow,
     AnalysisRunCharacterTraitInputRow,
@@ -29,7 +32,8 @@ from .service import (
 )
 
 
-EvidencePreviewKind = Literal["issue", "review_clue", "provisional_clue"]
+EvidencePreviewKind = Literal["issue", "review_clue", "provisional_clue", "habit_scope"]
+HABIT_SCOPE_REFS_KEY = "habit_scope_refs_v1"
 NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 NOT_FOUND_MESSAGE = "报告证据不存在"
 
@@ -147,12 +151,16 @@ def _confirmed_source(
     if not matches or len({span.model_dump_json() for span in matches}) != 1:
         _snapshot_unavailable()
     binding = matches[0]
+    return _confirmed_input(db, run, workspace_id, binding), binding
+
+
+def _confirmed_input(db, run: AnalysisRunRow, workspace_id: str, binding: TraitEvidenceInput):
     # Do not inspect a foreign input's body before proving its owning run.
     owned_run_id = db.scalar(select(AnalysisRunInputRow.run_id).where(
         AnalysisRunInputRow.id == binding.input_id,
     ))
     if owned_run_id is None:
-        return None, binding
+        return None
     source_run = db.scalar(
         select(AnalysisRunRow)
         .join(ProjectRow, ProjectRow.id == AnalysisRunRow.project_id)
@@ -169,13 +177,123 @@ def _confirmed_source(
         AnalysisRunInputRow.run_id == source_run.id,
     ))
     if source is None:
-        return None, binding
+        return None
     if (
         source.document_version != binding.document_version
         or source.content_sha256 != binding.content_sha256
     ):
         _snapshot_unavailable()
-    return source, binding
+    return source
+
+
+@dataclass
+class _HabitScopeNote:
+    public: dict
+    baseline: AnalysisRunInputRow
+    binding: TraitEvidenceInput
+    draft: AnalysisRunInputRow
+
+
+def _habit_scope_note(db, run, workspace_id, ref, draft_metadata) -> _HabitScopeNote | None:
+    if not isinstance(ref, dict) or not all(
+        isinstance(ref.get(key), str) and 0 < len(ref[key]) <= 64
+        for key in ("baseline_input_id", "candidate_id", "draft_input_id", "draft_document_id")
+    ):
+        return None
+    digest = payload_sha256({k: v for k, v in ref.items() if k != "ref_sha256"})
+    if ref.get("ref_sha256") != digest:
+        return None
+    trait = db.scalar(select(AnalysisRunCharacterTraitInputRow).where(
+        AnalysisRunCharacterTraitInputRow.id == ref["baseline_input_id"],
+        AnalysisRunCharacterTraitInputRow.run_id == run.id,
+        AnalysisRunCharacterTraitInputRow.project_id == run.project_id,
+        AnalysisRunCharacterTraitInputRow.candidate_id == ref["candidate_id"],
+    ))
+    if trait is None or trait.payload_sha256 != ref.get("baseline_payload_sha256"):
+        return None
+    payload = trait.payload  # _load_verified_snapshot verified the payload hash and confirmation ID.
+    conditions = payload.get("contexts")
+    character = payload.get("character_display_name")
+    evidence = payload.get("evidence")
+    if (
+        payload.get("trait_type") != "contextual_behavior"
+        or not isinstance(character, str) or not 1 <= len(character.strip()) <= 160
+        or not isinstance(conditions, list) or not all(isinstance(c, str) for c in conditions)
+        or not valid_habit_contexts(tuple(conditions))
+        or not isinstance(evidence, list) or not evidence
+        or payload.get("evidence_sha256") != payload_sha256(evidence)
+        or type(ref.get("baseline_evidence_index")) is not int or ref["baseline_evidence_index"] != 0
+    ):
+        return None
+    binding = TraitEvidenceInput.model_validate(evidence[0])
+    baseline = _confirmed_input(db, run, workspace_id, binding)
+    if baseline is None:
+        return None
+    baseline_reference = _reference(evidence[0])
+    _verified_lines(baseline, baseline_reference)
+    draft = db.scalar(select(AnalysisRunInputRow).where(
+        AnalysisRunInputRow.id == ref["draft_input_id"], AnalysisRunInputRow.run_id == run.id,
+        AnalysisRunInputRow.document_id == ref["draft_document_id"],
+    ))
+    if draft is None or draft.content_sha256 != ref.get("draft_content_sha256"):
+        return None
+    meta = draft_metadata.get(draft.document_id)
+    if meta is None or meta["batch_role"] != "target":
+        return None
+    narrative = meta["narrative_context"]
+    if classify_character_source_kind(
+        meta["document_role"], narrative.get("resolution_state"), narrative.get("publication_status")
+    ) != "draft":
+        return None
+    coordinates = ("line", "action_start", "action_end", "purpose_start", "purpose_end")
+    if not all(type(ref.get(k)) is int for k in coordinates):
+        return None
+    line_no, action_start, action_end, purpose_start, purpose_end = (ref[k] for k in coordinates)
+    lines = draft.content.splitlines()
+    if not 1 <= line_no <= len(lines):
+        return None
+    line = lines[line_no - 1]
+    if not (0 <= action_start <= purpose_start < purpose_end <= action_end <= len(line)):
+        return None
+    action, purpose = line[action_start:action_end], line[purpose_start:purpose_end]
+    if not action.strip() or not purpose.strip() or action == purpose:
+        return None
+    draft_reference = _reference({
+        "document_id": draft.document_id, "document_name": draft.document_name,
+        "line_start": line_no, "line_end": line_no, "text": line,
+    })
+    return _HabitScopeNote({
+        "id": "hs_" + digest, "character": character, "conditions": conditions,
+        "action": action, "purpose": purpose, "evidence": [baseline_reference, draft_reference],
+    }, baseline, binding, draft)
+
+
+def _habit_scope_notes(db, run, workspace_id) -> list[_HabitScopeNote]:
+    if run.status != "completed":
+        return []
+    refs = db.scalar(select(
+        AnalysisDiagnosticRow.payload[("character_consistency", HABIT_SCOPE_REFS_KEY)].as_json()
+    ).where(AnalysisDiagnosticRow.run_id == run.id))
+    if not isinstance(refs, list) or not 1 <= len(refs) <= 2:
+        return []
+    try:
+        _, metadata = _load_verified_snapshot(db, run.id)
+    except (RuntimeError, TypeError, ValueError, AttributeError):
+        return []
+    draft_metadata = {item["document_id"]: item for item in metadata}
+    notes = {}
+    for ref in refs:
+        try:
+            note = _habit_scope_note(db, run, workspace_id, ref, draft_metadata)
+        except (EvidencePreviewUnavailable, TypeError, ValueError):
+            continue
+        if note:
+            notes[note.public["id"]] = note
+    return list(notes.values())
+
+
+def project_habit_scope_notes(db, run, workspace_id: str) -> list[dict]:
+    return [note.public for note in _habit_scope_notes(db, run, workspace_id)]
 
 
 def _provisional_reference(db, run: AnalysisRunRow, item_id: str, evidence_index: int):
@@ -223,6 +341,13 @@ def build_report_evidence_preview(
     binding = None
     if kind == "provisional_clue":
         reference, source = _provisional_reference(db, run, item_id, evidence_index)
+    elif kind == "habit_scope":
+        note = next((n for n in _habit_scope_notes(db, run, workspace_id) if n.public["id"] == item_id), None)
+        if note is None or evidence_index not in (0, 1):
+            _not_found()
+        reference = note.public["evidence"][evidence_index]
+        source = note.baseline if evidence_index == 0 else note.draft
+        binding = note.binding if evidence_index == 0 else None
     else:
         row = db.scalar(select(IssueRow).where(
             IssueRow.run_id == run.id, IssueRow.id == item_id,

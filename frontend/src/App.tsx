@@ -79,7 +79,7 @@ import {
   provisionalClueDimensionLabel,
   type ProvisionalClue,
 } from "./provisionalClues";
-import { fetchReviewClues, type ReviewClue } from "./reviewClues";
+import { fetchReviewClues, type ReviewClueResult } from "./reviewClues";
 import {
   ApiError,
   apiFetch,
@@ -164,13 +164,9 @@ type ProvisionalClueState = {
   items: ProvisionalClue[];
   truncated: boolean;
 };
-type ReviewClueState = {
+type ReviewClueState = ReviewClueResult & {
   runId: string | null;
   status: "not_loaded" | "loading" | "ready" | "error";
-  items: ReviewClue[];
-  truncated: boolean;
-  unavailable_count: number;
-  scan_limited: boolean;
 };
 type RecordRow = RecordView;
 type Doc = {
@@ -1728,7 +1724,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
 
   function openEvidenceReader(kind: EvidenceKind, itemId: string, evidenceIndex: number, expected: Evidence, trigger: HTMLButtonElement, expectedVersion?: number) {
     if (!project || !run || projectLoading || routeProblem || runInfo?.id !== run || runInfo.project_id !== project || runInfo.status !== "completed") return;
-    if (kind === "review_clue" && (reviewClues.status !== "ready" || reviewClues.runId !== run)) return;
+    if ((kind === "review_clue" || kind === "habit_scope") && (reviewClues.status !== "ready" || reviewClues.runId !== run)) return;
     if (kind === "provisional_clue" && (provisionalClues.status !== "ready" || provisionalClues.runId !== run)) return;
     setEvidenceReaderSelection({
       scope: evidenceReaderScope, trigger,
@@ -3248,6 +3244,30 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   )}
                 </section>
               </section>
+              {reviewClues.status === "ready" && reviewClues.runId === run && reviewClues.habit_scope_notes?.length ? (
+                <section className="habitScopeNotes workspaceView" aria-labelledby="habit-scope-title">
+                  <div className="sectionHead"><h2 id="habit-scope-title">习惯的适用情境</h2></div>
+                  <p className="provisionalClueIntro">以下说明仅涉及所引段落，不计入正式问题或待复核线索。</p>
+                  <ul className="provisionalClueList">
+                    {reviewClues.habit_scope_notes.map(note => (
+                      <li key={note.id}>
+                        <h3>{note.character} · 这次动作不在习惯的适用情境内</h3>
+                        <p>已确认的适用情境：{note.conditions.join("、")}。</p>
+                        <p>新稿写的是“{note.action}”，其中“{note.purpose}”交代了这次动作的用途。</p>
+                        <div className="reviewClueEvidence">
+                          {note.evidence.map((span, index) => (
+                            <blockquote key={index}>
+                              <b>{index === 0 ? "已确认设定" : "本段新稿"} · {span.document_name} · 第 {span.line_start}{span.line_end !== span.line_start && `–${span.line_end}`} 行</b>
+                              <span>{span.text}</span>
+                              <button type="button" className="evidenceReaderTrigger" onClick={event => openEvidenceReader("habit_scope", note.id, index, span, event.currentTarget)}>查看分析时原文</button>
+                            </blockquote>
+                          ))}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
               <CharacterObservationsPanel
                 identity={identity}
                 projectId={project}

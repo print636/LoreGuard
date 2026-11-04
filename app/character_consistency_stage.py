@@ -35,6 +35,7 @@ from .character_drift import (
     promote_character_drift,
     validated_reviewed_events,
 )
+from .character_habit_scope_review import habit_scope_windows, review_habit_scope
 from .character_explanation_review import (
     ExplanationBaselineSummary,
     ExplanationCandidate,
@@ -2172,6 +2173,9 @@ class CharacterConsistencyStage:
         explanation_segment_cache: dict[
             tuple[str, str], tuple[tuple[EvidenceSpan, ...], bool]
         ] = {}
+        scope_chunk_ids = {id(chunk) for _, chunk in selected_chunks} if settings._character_habit_scope_review_v1 else set()
+        habit_scope_job = None
+        habit_scope_refs = []
         case_trace: list[dict[str, Any]] = []
         for entry in review_baselines[settings.character_consistency_max_candidates_per_run:]:
             observation_journal.exclude(entry, "baseline_limit")
@@ -2376,6 +2380,29 @@ class CharacterConsistencyStage:
                 if release_applicability is False or relation == "incompatible":
                     continue
                 relevant_draft_document_ids.add(source.document.id)
+                # Reserve at most one independent excerpt review for AFTER the
+                # normal cases. Its references cannot clear their evidence debt.
+                if (
+                    self.observation_applicable and settings._character_habit_scope_review_v1
+                    and habit_scope_job is None and baseline.dimension == "contextual_behavior"
+                    and release_applicability is True and relation == "compatible"
+                    and id(chunk) in scope_chunk_ids and source.input_id in draft_actor_sources
+                    and actor_guard_alias_map.get(_key(baseline.character)) == (character_key,)
+                    and len(baseline.evidence[0].text) <= 600
+                ):
+                    context_targets = server_contexts[source.document.id].targets
+                    target = next((t for t in context_targets if _target_hint_identity(t) == case_target_identity
+                                   and t.habit_contexts == baseline.contexts and t.baseline_hint == baseline.statement), None)
+                    if target is not None:
+                        excluded_lines = {
+                            n for obs in matches if obs.evidence.document_id == source.document.id
+                            for n in range(obs.evidence.line_start, obs.evidence.line_end + 1)
+                        }
+                        windows = habit_scope_windows(target, draft_actor_sources[source.input_id], source.document.content,
+                                                     start=chunk.global_line_start, chunk_text=chunk_content,
+                                                     excluded_lines=excluded_lines)
+                        if windows:
+                            habit_scope_job = (windows, baseline_entry, source)
                 if release_applicability is None:
                     case_material_reasons.add(
                         "case_relevant_draft_release_unknown"
@@ -3036,6 +3063,21 @@ class CharacterConsistencyStage:
         else:
             outcome = "partial" if stage_partial else "completed"
             reason_code = "bounded_partial" if stage_partial else "completed"
+        if habit_scope_job is not None:
+            self.checkpoint()
+            windows, (trait_row, trait, _, _), source = habit_scope_job
+            offsets, scope_diagnostics = review_habit_scope(
+                windows, trait, provider=self.provider, settings=settings, budget=stage_budget - usage.charged_tokens,
+            )
+            usage.add(scope_diagnostics)
+            reason_counts[f"habit_scope_{scope_diagnostics.reason}"] += 1
+            for positions in offsets:
+                ref = dict(candidate_id=trait_row.candidate_id, baseline_input_id=trait_row.id,
+                           baseline_payload_sha256=trait_row.payload_sha256, baseline_evidence_index=0,
+                           draft_input_id=source.input_id, draft_document_id=source.document.id,
+                           draft_content_sha256=source.content_sha256, **positions)
+                habit_scope_refs.append({**ref, "ref_sha256": payload_sha256(ref)})
+
         diagnostics = _diagnostics(
             outcome=outcome,
             reason_code=reason_code,
@@ -3210,6 +3252,8 @@ class CharacterConsistencyStage:
             baseline_trace_chunks=baseline_trace_chunks,
             baseline_trace_chunks_omitted_count=baseline_trace_chunks_omitted,
         )
+        if habit_scope_refs:
+            diagnostics["habit_scope_refs_v1"] = habit_scope_refs
         if settings.character_target_bound_draft_review_v3 and eligible_draft_count:
             diagnostics["targeted_verification_trace_v1"] = {
                 "schema_version": "targeted-verification-trace-v1",

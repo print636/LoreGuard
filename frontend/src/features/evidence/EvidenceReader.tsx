@@ -36,7 +36,8 @@ export default function EvidenceReader({ selection, trigger, onClose }: Props) {
   const current = isCurrentEvidenceRequest(reading.request, request) ? reading : null;
   const preview = current?.status === "ready" ? current.preview : null;
   const busy = !current || current.status === "loading";
-  const categoryLabel = selection.kind === "issue" ? "正式问题" : selection.kind === "review_clue" ? "待复核" : "未验证";
+  const categoryLabel = { issue: "正式问题", review_clue: "待复核", provisional_clue: "未验证", habit_scope: "情境说明" }[selection.kind];
+  const pending = selection.kind === "review_clue" || selection.kind === "provisional_clue";
   const headerSummary = preview
     ? `冻结 v${preview.source.document_version} · ${preview.source.provenance === "run_input" ? "本次输入" : "既有设定"} · ${categoryLabel}${preview.source.availability === "excerpt_only" ? " · 仅摘录" : ""}`
     : `${categoryLabel} · ${busy ? "来源读取中" : "来源未核验"}`;
@@ -106,15 +107,15 @@ export default function EvidenceReader({ selection, trigger, onClose }: Props) {
         <div>
           <h2 id="evidence-reader-title">分析时原文</h2>
           <p>{selection.expected.document_name}</p>
-          <p className={`evidenceReaderHeaderSummary ${selection.kind !== "issue" ? "pending" : ""}`}>{headerSummary}</p>
+          <p className={`evidenceReaderHeaderSummary ${pending ? "pending" : ""}`}>{headerSummary}</p>
         </div>
         <button type="button" autoFocus onClick={closeReader}>关闭阅读面板</button>
       </div>
       <p className="evidenceReaderBoundary" id="evidence-reader-boundary">阅读本次报告绑定的冻结来源。文稿后续修改不会替换这里的原文。</p>
       <div className="evidenceReaderReading" ref={readingRegion} tabIndex={0} role="region" aria-label="冻结原文阅读区" aria-busy={busy}>
-        <p className={`evidenceReaderKind ${selection.kind !== "issue" ? "pending" : ""}`}>
+        <p className={`evidenceReaderKind ${pending ? "pending" : ""}`}>
           <strong>{evidenceKindLabel(selection.kind)}</strong>
-          {selection.kind !== "issue" && <span>原文定位可核对，阅读不会改变线索或提案的审查结论。</span>}
+          {pending && <span>原文定位可核对，阅读不会改变线索或提案的审查结论。</span>}
         </p>
         <dl className="evidenceReaderMetadata">
           <div><dt>报告引用范围</dt><dd>{referenceRange(selection.expected)}</dd></div>

@@ -9,6 +9,7 @@ from sqlalchemy.exc import ArgumentError
 
 
 HABIT_SCENE_POLICY_V1 = "habit-scene-windows-v1"
+HABIT_SCOPE_POLICY_V1 = "habit-scope-review-v1"
 HABIT_SCENE_CALL_TIMEOUT_SECONDS = 60.0
 HABIT_SCENE_PACKAGE_DEADLINE_SECONDS = 180.0
 
@@ -270,6 +271,7 @@ class Settings(BaseSettings):
     # account run carrying the frozen policy can activate it on its stage copy.
     habit_scene_policy_available: ClassVar[bool] = False
     _character_habit_scene_scheduling_v1: bool = PrivateAttr(default=False)
+    _character_habit_scope_review_v1: bool = PrivateAttr(default=False)
     character_consistency_sensitivity: Literal[
         "conservative", "balanced", "exploratory"
     ] = "balanced"

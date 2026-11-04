@@ -520,7 +520,8 @@ body {
 .formalIssueIntro { max-width: 76ch; margin: 0 0 18px; color: var(--text-2); line-height: 1.7; }
 .mainCanvas .issues article,
 .mainCanvas .clarifications article { grid-template-columns: 54px minmax(0, 1fr); }
-.mainCanvas .provisionalClues {
+.mainCanvas .provisionalClues,
+.mainCanvas .habitScopeNotes {
   margin: 0 0 18px;
   padding: 24px;
   border: 1px solid var(--line);
@@ -549,6 +550,9 @@ body {
 .provisionalClueList blockquote { min-width: 0; margin: 0; padding: 13px 15px; color: var(--text-2); border-left: 3px solid var(--warning); background: var(--field); line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
 .provisionalClueList blockquote b { display: block; margin-bottom: 7px; color: var(--warning); font-size: 12px; }
 .provisionalClueList blockquote span { display: block; }
+.habitScopeNotes .provisionalClueList blockquote { border-color: var(--line-strong); }
+.habitScopeNotes .provisionalClueList blockquote b { color: var(--text); }
+.habitScopeNotes h3, .habitScopeNotes li { overflow-wrap: anywhere; }
 .reviewClueEvidence { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .reviewClueEvidence blockquote:nth-child(n + 3) { grid-column: 1 / -1; }
 .provisionalClueList + .provisionalClueNotice { margin-top: 14px; }
@@ -809,7 +813,7 @@ footer {
   .mainCanvas .visualization .graphCanvas { height: 420px; min-height: 420px; }
   .mainCanvas .clarifications,
   .mainCanvas .issues,
-  .mainCanvas .provisionalClues { padding: 14px; }
+  .mainCanvas .provisionalClues, .mainCanvas .habitScopeNotes { padding: 14px; }
   .reviewClueEvidence { grid-template-columns: minmax(0, 1fr); }
   .reviewClueEvidence blockquote:nth-child(n + 3) { grid-column: auto; }
   .mainCanvas .issues article,

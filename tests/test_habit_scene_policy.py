@@ -1,7 +1,7 @@
 """Only an opted-in author draft runs the longer scene checks."""
 import pytest
 
-from app.config import HABIT_SCENE_POLICY_V1, Settings
+from app.config import HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, Settings
 from app.db import AnalysisRunRow
 from app.service import (
     CharacterConsistencyUsageAccumulator, _CharacterConsistencyAccountingProvider,
@@ -62,3 +62,47 @@ def test_older_snapshots_and_ineligible_runs_cannot_use_the_new_fork(changes):
     accounting = _CharacterConsistencyAccountingProvider(stage, CharacterConsistencyUsageAccumulator())
     with pytest.raises(ValueError, match="disabled"):
         accounting.fork_for_habit_scene_review(**LIMITS)
+
+
+@pytest.mark.parametrize(("changes", "enabled"), [
+    ({}, False),  # Earlier scene scheduling policy, with no scope check frozen.
+    ({"habit_scope_policy": HABIT_SCOPE_POLICY_V1}, True),
+    ({"habit_scope_policy": HABIT_SCOPE_POLICY_V1, "character_review_enabled": False}, False),
+    ({"habit_scope_policy": "unknown"}, False),
+])
+def test_habit_scope_review_requires_its_own_frozen_version(changes, enabled):
+    base, stage = local_run(coverage_changes=changes)
+    assert stage._character_habit_scope_review_v1 is enabled
+    assert base._character_habit_scope_review_v1 is False
+
+
+def test_habit_scope_call_requires_explicit_consent_exact_purpose_and_one_attempt():
+    from types import SimpleNamespace
+    from app.character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
+
+    _, stage = local_run(coverage_changes={"habit_scope_policy": HABIT_SCOPE_POLICY_V1})
+    sent = []
+
+    class RecordingProvider:
+        def complete(self, system, user):
+            sent.append((system, user))
+            return SimpleNamespace(text="{}", prompt_tokens=9, completion_tokens=2)
+
+    usage = CharacterConsistencyUsageAccumulator()
+    provider = RecordingProvider()
+    accounting = _CharacterConsistencyAccountingProvider(stage, usage, signal_provider=provider, drift_provider=provider)
+    with pytest.raises(RuntimeError, match="bounded provider"):
+        accounting.complete(HABIT_SCOPE_SYSTEM_PROMPT, "{}")
+
+    def bounded(config):
+        limited = config.model_copy(update={"character_drift_max_attempts": 1, "character_drift_max_completion_tokens": 512})
+        return accounting.fork_for_character_consistency(settings=limited, stage="drift")
+    _, legacy = local_run()
+    with pytest.raises(RuntimeError, match="unsupported"):
+        bounded(legacy).complete(HABIT_SCOPE_SYSTEM_PROMPT, "{}")
+    with pytest.raises(RuntimeError, match="unsupported"):
+        bounded(stage).complete(HABIT_SCOPE_SYSTEM_PROMPT + "x", "{}")
+    assert not sent and usage.logical_calls == 0
+    bounded(stage).complete(HABIT_SCOPE_SYSTEM_PROMPT, "{}")
+    assert len(sent) == usage.logical_calls == 1
+    assert sent[0] == (HABIT_SCOPE_SYSTEM_PROMPT, "{}")

@@ -20,6 +20,16 @@ export type ReviewClueResult = {
   truncated: boolean;
   unavailable_count: number;
   scan_limited: boolean;
+  habit_scope_notes?: HabitScopeNote[];
+};
+
+type HabitScopeNote = {
+  id: string;
+  character: string;
+  conditions: string[];
+  action: string;
+  purpose: string;
+  evidence: [Evidence, Evidence];
 };
 
 const maximumClues = 64;
@@ -64,6 +74,34 @@ function evidenceSpan(value: unknown): Evidence {
     line_end: line_end as number,
     text: sourceText(source.text),
   };
+}
+
+function habitScopeNotes(value: unknown): HabitScopeNote[] {
+  if (!Array.isArray(value) || value.length > 2) return [];
+  const notes: HabitScopeNote[] = [];
+  for (const raw of value) {
+    const item = record(raw);
+    if (!item || typeof item.id !== "string" || !/^hs_[a-f0-9]{64}$/.test(item.id) ||
+        !Array.isArray(item.conditions) || !item.conditions.length || item.conditions.length > 12 ||
+        !Array.isArray(item.evidence) || item.evidence.length !== 2 ||
+        notes.some(note => note.id === item.id)) continue;
+    try {
+      const baseline = evidenceSpan(item.evidence[0]);
+      const draft = evidenceSpan(item.evidence[1]);
+      const action = sourceText(item.action);
+      const purpose = sourceText(item.purpose);
+      if (draft.line_start !== draft.line_end || !draft.text.includes(action) || !action.includes(purpose)) continue;
+      notes.push({
+        id: item.id, character: requiredText(item.character, "character", 320),
+        conditions: item.conditions.map(c => requiredText(c, "conditions", 400)),
+        action, purpose, evidence: [baseline, draft],
+      });
+    } catch {
+      // An unverifiable scene note cannot invalidate the independent review clues.
+      continue;
+    }
+  }
+  return notes;
 }
 
 export function normalizeReviewClueResult(payload: unknown): ReviewClueResult {
@@ -125,7 +163,9 @@ export function normalizeReviewClueResult(payload: unknown): ReviewClueResult {
       },
     };
   });
+  const scopeNotes = habitScopeNotes(source.habit_scope_notes);
   return {
+    ...(scopeNotes.length ? { habit_scope_notes: scopeNotes } : {}),
     items,
     truncated: source.truncated,
     unavailable_count: unavailableCount as number,

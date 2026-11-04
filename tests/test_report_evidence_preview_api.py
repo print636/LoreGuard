@@ -21,6 +21,7 @@ from app.db import (
     AnalysisDiagnosticRow,
     AnalysisRunCharacterTraitInputRow,
     AnalysisRunInputContextRow,
+    AnalysisRunInputNarrativeContextRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
     Base,
@@ -308,6 +309,77 @@ def test_report_categories_keep_their_existing_status_and_feedback_boundary(evid
         assert db.scalars(select(FeedbackRow)).all() == []
         assert db.get(CharacterTraitCandidateRow, state.candidate.id).review_state == "confirmed"
         assert db.get(AnalysisRunRow, state.run.id).status == "completed"
+
+
+def test_habit_scope_note_requires_both_owned_frozen_sources_and_bound_action(evidence_api):
+    state = evidence_api
+    report_url = f"/api/v1/analysis-runs/{state.run.id}/review-clues"
+    assert "habit_scope_notes" not in state.client.get(report_url).json()
+    action, purpose = "林澈用木柄抬起门栓", "抬起门栓"
+    line = f"  🕯{action}。"
+    conditions = ["登台演说前"]
+    with state.sessions() as db:
+        draft = db.get(AnalysisRunInputRow, state.frozen.id)
+        draft.content += line
+        draft.content_sha256 = _hash(draft.content)
+        baseline = db.get(AnalysisRunInputRow, state.original.id)
+        baseline.content = "林澈登台演说前总会手握木柄。"
+        baseline.content_sha256 = _hash(baseline.content)
+        evidence = [{
+            **_span(baseline, 1), "input_id": baseline.id,
+            "document_version": 1, "content_sha256": baseline.content_sha256,
+        }]
+        trait = db.get(AnalysisRunCharacterTraitInputRow, state.trait.id)
+        trait.payload = {**trait.payload, "trait_type": "contextual_behavior", "character_display_name": "林澈",
+                         "contexts": conditions, "evidence": evidence, "evidence_sha256": payload_sha256(evidence)}
+        trait.payload_sha256 = payload_sha256(trait.payload)
+        for row in (draft, state.replacement):
+            context = {"resolution_state": "confirmed", "publication_status": "draft"}
+            db.add(AnalysisRunInputNarrativeContextRow(
+                input_id=row.id, payload=context, payload_sha256=payload_sha256(context),
+            ))
+        ref = {
+            "baseline_input_id": trait.id, "candidate_id": trait.candidate_id,
+            "baseline_payload_sha256": trait.payload_sha256, "baseline_evidence_index": 0,
+            "draft_input_id": draft.id, "draft_document_id": draft.document_id,
+            "draft_content_sha256": draft.content_sha256, "line": len(draft.content.splitlines()),
+            "action_start": line.index(action), "action_end": line.index(action) + len(action),
+            "purpose_start": line.index(purpose), "purpose_end": line.index(purpose) + len(purpose),
+        }
+        diagnostic = db.get(AnalysisDiagnosticRow, state.run.id)
+        def publish_ref(ref):
+            diagnostic.payload = {"character_consistency": {"habit_scope_refs_v1": [ref]}}
+            db.commit()
+        publish_ref({**ref, "ref_sha256": payload_sha256(ref)})
+        with _read_only(state):
+            report = state.client.get(report_url)
+            assert report.headers["Cache-Control"] == "private, no-store"
+            note, = report.json()["habit_scope_notes"]
+            assert note["character"] == "林澈" and note["conditions"] == conditions
+            assert (note["action"], note["purpose"]) == (action, purpose)
+            assert [s["text"] for s in note["evidence"]] == [baseline.content, line]
+            assert note["id"] not in {item["id"] for item in report.json()["items"]}
+            public_diagnostics = state.client.get(f"/api/v1/analysis-runs/{state.run.id}/diagnostics")
+            assert public_diagnostics.json() == {"character_consistency": {}}
+        for i, source in enumerate((baseline, draft)):
+            preview = _get(state, kind="habit_scope", item=note["id"], evidence_index=i)
+            assert preview.json()["source"]["source_run_id"] == source.run_id
+            assert preview.json()["reference"]["text"] == note["evidence"][i]["text"]
+        assert _get(state, kind="habit_scope", item=note["id"], run=state.foreign_run).status_code == 404
+        # An in-bounds change to the original quote range loses its binding.
+        publish_ref({**ref, "action_start": 0, "ref_sha256": payload_sha256(ref)})
+        assert "habit_scope_notes" not in state.client.get(report_url).json()
+        # Even a hash-consistent reference must not follow a source into another workspace.
+        foreign = state.foreign
+        swapped = [{**_span(foreign, 1), "input_id": foreign.id, "document_version": 1,
+                    "content_sha256": foreign.content_sha256}]
+        trait.payload = {**trait.payload, "evidence": swapped, "evidence_sha256": payload_sha256(swapped)}
+        trait.payload_sha256 = payload_sha256(trait.payload)
+        rebound = {**ref, "baseline_payload_sha256": trait.payload_sha256}
+        publish_ref({**rebound, "ref_sha256": payload_sha256(rebound)})
+        response = state.client.get(report_url)
+        assert "habit_scope_notes" not in response.json() and foreign.content not in response.text
+        assert _get(state, kind="habit_scope", item="hs_" + payload_sha256(rebound)).status_code == 404
 
 
 @pytest.mark.parametrize("kind,item_name,index", [

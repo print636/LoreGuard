@@ -12,7 +12,7 @@ const reviewClueId = "71475dcc-1d0c-4dd2-a014-06941adf1bf3";
 const provisionalClueId = `pc_${"a".repeat(32)}`;
 const now = "2026-10-02T00:00:00Z";
 const screenshotFolder = `${process.env.LOREGUARD_E2E_SCREENSHOT_DIR ?? "../artifacts/playwright/screenshots"}/report-evidence-v1`;
-type EvidenceKind = "issue" | "review_clue" | "provisional_clue";
+type EvidenceKind = "issue" | "review_clue" | "provisional_clue" | "habit_scope";
 type Evidence = { document_id: string; document_name: string; line_start: number; line_end: number; text: string };
 
 function draftEvidence(activeRunId = runId): Evidence {
@@ -27,6 +27,15 @@ function draftEvidence(activeRunId = runId): Evidence {
 const traitEvidence: Evidence = {
   document_id: "profile-shared-id", document_name: "林澈档案.md", line_start: 8, line_end: 8,
   text: "旧特征来源V1：林澈面对陌生人时通常沉默寡言。",
+};
+
+const habitScopeNote = {
+  id: `hs_${"d".repeat(64)}`, character: "林澈", conditions: ["登台演说前"],
+  action: "林澈用木柄抬起门栓", purpose: "抬起门栓",
+  evidence: [
+    { ...traitEvidence, text: "林澈登台演说前总会手握木柄。" },
+    { ...draftEvidence(), text: "林澈用木柄抬起门栓。" },
+  ],
 };
 
 function primaryIssue(activeRunId = runId) {
@@ -100,8 +109,9 @@ function previewPayload(url: URL, activeRunId: string, state: MockState) {
   const itemId = url.searchParams.get("item_id") || "";
   const evidenceIndex = Number(url.searchParams.get("evidence_index") || 0);
   const traitSource = (kind === "issue" && itemId === traitIssueId && evidenceIndex === 0)
-    || (kind === "review_clue" && evidenceIndex === 0);
-  const evidence = traitSource ? traitEvidence : draftEvidence(activeRunId);
+    || ((kind === "review_clue" || kind === "habit_scope") && evidenceIndex === 0);
+  const evidence = kind === "habit_scope" ? habitScopeNote.evidence[evidenceIndex]
+    : traitSource ? traitEvidence : draftEvidence(activeRunId);
   const sourceRunId = traitSource ? baselineRunId : activeRunId;
   const lineCount = traitSource ? 24 : 300;
   const sourceLines = Array.from({ length: lineCount }, (_, index) =>
@@ -190,7 +200,8 @@ async function mockApi(page: Page, state: MockState) {
       else if (endpoint === "records") body = { records: [], warnings: [] };
       else if (endpoint === "diagnostics") body = {};
       else if (endpoint === "clarifications") body = [];
-      else if (endpoint === "review-clues") body = { items: activeRunId === runId ? [reviewClue] : [], truncated: false, unavailable_count: 0 };
+      else if (endpoint === "review-clues") body = { items: activeRunId === runId ? [reviewClue] : [], truncated: false, unavailable_count: 0,
+        ...(activeRunId === runId ? { habit_scope_notes: [habitScopeNote] } : {}) };
       else if (endpoint === "provisional-clues") body = { items: activeRunId === runId ? [provisionalClue] : [], truncated: false };
       else if (endpoint === "evidence-preview") {
         state.previews.push(url);
@@ -326,6 +337,30 @@ test("剧情策划核对旧特征来源与两类待复核证据，阅读不会�
   await expect(clues.getByRole("heading", { name: "待复核线索 2" })).toBeVisible();
   await expect(page.locator(".issues article")).toHaveCount(2);
   await expect(clues.getByRole("button", { name: /已接受|误报|已解决|导出/ })).toHaveCount(0);
+  assertReadingOnly(state);
+});
+
+test("作者能单独核对习惯的适用情境与本段用途，两侧引用不增加待复核或正式问题", async ({ page }) => {
+  const state = initialState();
+  await page.setViewportSize({ width: 375, height: 800 });
+  await openReport(page, state);
+  const scope = page.getByRole("region", { name: "习惯的适用情境" });
+  await expect(scope).toContainText("林澈 · 这次动作不在习惯的适用情境内");
+  await expect(scope).toContainText("登台演说前");
+  await expect(scope).toContainText("“抬起门栓”交代了这次动作的用途");
+  for (const [index, span] of habitScopeNote.evidence.entries()) {
+    const quote = scope.locator("blockquote").nth(index);
+    await expect(quote).toContainText(span.text);
+    await quote.getByRole("button", { name: "查看分析时原文" }).click();
+    const dialog = page.getByRole("dialog", { name: "分析时原文" });
+    await expect(dialog.locator(".evidenceReaderHeaderSummary")).toContainText("情境说明");
+    await expect(dialog.locator(".evidenceReaderLines .referenced")).toContainText(span.text);
+    expect(state.previews.at(-1)?.searchParams.get("kind")).toBe("habit_scope");
+    expect(state.previews.at(-1)?.searchParams.get("evidence_index")).toBe(String(index));
+    await dialog.press("Escape");
+  }
+  await expect(page.getByRole("heading", { name: "待复核线索 2" })).toBeVisible();
+  await expect(page.locator(".issues article")).toHaveCount(2);
   assertReadingOnly(state);
 });
 

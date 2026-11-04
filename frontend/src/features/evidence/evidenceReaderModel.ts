@@ -1,7 +1,7 @@
 import type { Evidence } from "../../types/visualization.ts";
 
 export const EVIDENCE_PAGE_SIZE = 120;
-export type EvidenceKind = "issue" | "review_clue" | "provisional_clue";
+export type EvidenceKind = "issue" | "review_clue" | "provisional_clue" | "habit_scope";
 export type EvidenceSelection = {
   projectId: string;
   runId: string;
@@ -31,6 +31,7 @@ export type EvidencePreview = {
 };
 
 export function evidenceKindLabel(kind: EvidenceKind): string {
+  if (kind === "habit_scope") return "习惯适用情境的引用";
   return kind === "issue" ? "正式一致性问题的引用" : kind === "review_clue" ? "角色审查线索的引用（待复核）" : "模型提案的引用（未验证）";
 }
 

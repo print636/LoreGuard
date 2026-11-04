@@ -23,7 +23,7 @@ from sqlalchemy.orm import load_only
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
-from .config import HABIT_SCENE_POLICY_V1, get_settings
+from .config import HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, get_settings
 from .auth import (
     AuthContext,
     ExactOriginMiddleware,
@@ -102,11 +102,13 @@ from .character_consistency_stage import (
 from .document_diff import build_document_diff
 from .document_preview import build_document_preview
 from .report_evidence_preview import (
+    HABIT_SCOPE_REFS_KEY,
     EvidencePreviewKind,
     EvidencePreviewUnavailable,
     NO_STORE_HEADERS as EVIDENCE_PREVIEW_NO_STORE_HEADERS,
     NOT_FOUND_MESSAGE as EVIDENCE_PREVIEW_NOT_FOUND_MESSAGE,
     build_report_evidence_preview,
+    project_habit_scope_notes,
 )
 from .docx_import import DocxImportError, extract_docx_text
 from .document_upload_receipts import (
@@ -857,6 +859,7 @@ def _review_batch_selection(
     }
     if settings.habit_scene_policy_available and payload.mode == "draft_review" and payload.character_review_enabled:
         coverage["habit_scene_policy"] = HABIT_SCENE_POLICY_V1
+        coverage["habit_scope_policy"] = HABIT_SCOPE_POLICY_V1
     return selected, roles, coverage
 
 
@@ -6890,7 +6893,8 @@ def get_review_clues(
     context: AuthContext = Depends(get_auth_context),
 ) -> dict:
     with SessionLocal() as db:
-        if not _run_in_workspace(db, run_id, context.workspace_id):
+        run = _run_in_workspace(db, run_id, context.workspace_id)
+        if run is None:
             raise HTTPException(404, "分析任务不存在")
         clue_filter = (
             IssueRow.run_id == run_id,
@@ -6941,7 +6945,9 @@ def get_review_clues(
             if len(items) < 64:
                 items.append(payload)
         response.headers["Cache-Control"] = "private, no-store"
+        scope_notes = project_habit_scope_notes(db, run, context.workspace_id)
         return {
+            **({"habit_scope_notes": scope_notes} if scope_notes else {}),
             "items": items,
             "truncated": valid_count > 64,
             "unavailable_count": unavailable_count,
@@ -7162,10 +7168,14 @@ def get_diagnostics(
 def _public_diagnostics_payload(payload: object) -> dict:
     if not isinstance(payload, dict):
         return {}
-    return {
+    public = {
         key: value for key, value in payload.items()
         if key != PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY
     }
+    stage = public.get("character_consistency")
+    if isinstance(stage, dict) and HABIT_SCOPE_REFS_KEY in stage:
+        public["character_consistency"] = {k: v for k, v in stage.items() if k != HABIT_SCOPE_REFS_KEY}
+    return public
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/provisional-clues")

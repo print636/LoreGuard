@@ -15,9 +15,10 @@ from sqlalchemy import and_, delete, exists, func, or_, select, update
 
 from .config import (
     HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS,
-    HABIT_SCENE_POLICY_V1, get_settings,
+    HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, get_settings,
 )
 from .account_provider import runtime_for_analysis_run
+from .character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
 from .db import (
     AnalysisDiagnosticRow,
     AnalysisRecordRow,
@@ -991,6 +992,11 @@ class _CharacterConsistencyAccountingProvider:
                 self.draft_actor_review_completion_reserve
                 or self.settings.character_draft_actor_review_completion_tokens
             )
+        elif system == HABIT_SCOPE_SYSTEM_PROMPT and self.settings._character_habit_scope_review_v1:
+            if self.settings.character_drift_max_completion_tokens > 512 or self.settings.character_drift_max_attempts != 1:
+                raise RuntimeError("habit scope review requires a bounded provider")
+            provider = self.drift_provider
+            completion_reserve = self.settings.character_drift_max_completion_tokens
         elif system in {
             CHARACTER_REVIEW_SYSTEM_PROMPT,
             CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
@@ -3164,6 +3170,9 @@ def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
         and run.requested_by_user_id and run.requested_by_user_id == settings.provider_runtime_user_id
         and coverage.get("character_review_enabled") is True and coverage.get("character_baseline_run_id")
         and not coverage.get("no_formal_context_expected") and coverage.get("habit_scene_policy") == HABIT_SCENE_POLICY_V1
+    )
+    stage._character_habit_scope_review_v1 = (
+        stage._character_habit_scene_scheduling_v1 and coverage.get("habit_scope_policy") == HABIT_SCOPE_POLICY_V1
     )
     return stage
 
