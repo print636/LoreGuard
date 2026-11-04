@@ -21,6 +21,7 @@ from pydantic import (
 )
 
 from .config import Settings, get_settings
+from .character_scope_failure import ScopeProviderFailureSeriesV1
 from .character_scope_review import (
     BasisInvalidSubtype,
     ScopeReviewClause,
@@ -1426,6 +1427,7 @@ class TargetBoundFailureEventV1(BaseModel):
 
 class CharacterSignalFailureDiagnosticsV1(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    scope_provider_failures: ScopeProviderFailureSeriesV1 | None = None
     statement_support_counts: dict[StatementSupportFailureKind, StrictInt] = Field(
         default_factory=dict
     )
@@ -1639,6 +1641,7 @@ class _ScopeReviewOutcome:
     slot_recovery_attempts: int = 0
     slot_recovery_succeeded: int = 0
     slot_recovery_failed: int = 0
+    scope_provider_failures: ScopeProviderFailureSeriesV1 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -4423,9 +4426,10 @@ def _failure_diagnostics_for_result(
         f"scope_review_slot_recovery_{kind}": getattr(scope_review, f"slot_recovery_{kind}", 0)
         for kind in ("attempts", "succeeded", "failed")
     }
-    if not counts and not target_events and not any(recovery.values()):
+    if not counts and not target_events and scope_review is None:
         return None
     return CharacterSignalFailureDiagnosticsV1(
+        scope_provider_failures=scope_review.scope_provider_failures if scope_review else None,
         statement_support_counts=dict(sorted(counts.items())),
         target_bound_events=tuple(target_events[:64]),
         target_bound_events_omitted=max(0, len(target_events) - 64),
@@ -6226,6 +6230,7 @@ def _review_clean_signals(
             prompt_tokens=run.prompt_tokens,
             completion_tokens=run.completion_tokens,
             charged_tokens=run.charged_tokens,
+            scope_provider_failures=getattr(run, "scope_provider_failures", None),
         )
     supported = tuple(
         signal.model_copy(update={"source_run_input_id": source_identity.run_input_id})
@@ -6262,6 +6267,7 @@ def _review_clean_signals(
         slot_recovery_attempts=getattr(run, "slot_recovery_attempts", 0),
         slot_recovery_succeeded=getattr(run, "slot_recovery_succeeded", 0),
         slot_recovery_failed=getattr(run, "slot_recovery_failed", 0),
+        scope_provider_failures=getattr(run, "scope_provider_failures", None),
     )
 
 

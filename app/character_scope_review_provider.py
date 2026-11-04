@@ -13,6 +13,12 @@ import time
 from dataclasses import dataclass, replace
 from typing import Callable, Literal, Protocol
 
+from .character_scope_failure import (
+    ScopeProviderFailureEventV1,
+    ScopeProviderFailureSeriesV1,
+    ScopeReviewContractFailure,
+    scope_provider_failure_event,
+)
 from .character_scope_review import (
     MAX_SCOPE_REVIEW_RESPONSE_BYTES,
     ScopeReviewDecision,
@@ -41,8 +47,6 @@ SCOPE_REVIEW_USER_PREFIX = "请审查以下服务端冻结请求 JSON：\n"
 MAX_SCOPE_REVIEW_REPORTED_TOKENS = 1_000_000
 MAX_SCOPE_REVIEW_CONTRACT_ATTEMPTS = 2
 SCOPE_REVIEW_CONTRACT_RECOVERY_V1 = "character-scope-review-contract-recovery-v1"
-
-ScopeReviewContractFailure = Literal["response_invalid", "response_mismatch", "slot_conflict"]
 
 ScopeReviewFailure = Literal[
     "source_mismatch",
@@ -76,6 +80,7 @@ class ScopeReviewRun:
     slot_recovery_attempts: int = 0
     slot_recovery_succeeded: int = 0
     slot_recovery_failed: int = 0
+    scope_provider_failures: ScopeProviderFailureSeriesV1 | None = None
 
 
 def build_scope_review_prompts(request: ScopeReviewRequest) -> tuple[str, str]:
@@ -294,11 +299,14 @@ def _bounded_provider(
 
 def _provider_failure(exc: Exception) -> ScopeReviewFailure:
     if isinstance(exc, ProviderError):
-        if exc.category in {"connect_timeout", "read_timeout", "deadline_exceeded"}:
+        category = getattr(exc, "category", None)
+        if type(category) is not str:
+            category = None
+        if category in {"connect_timeout", "read_timeout", "deadline_exceeded"}:
             return "provider_timeout"
-        if exc.category == "rate_limit" or exc.http_status == 429:
+        if category == "rate_limit" or getattr(exc, "http_status", None) == 429:
             return "provider_rate_limit"
-        if exc.category == "response_too_large":
+        if category == "response_too_large":
             return "response_too_large"
     return "provider_error"
 
@@ -406,6 +414,7 @@ def run_scope_review(
     def finish(
         evaluation: ScopeReviewEvaluation,
         failure_reason: ScopeReviewFailure | None,
+        provider_failure: ScopeProviderFailureEventV1 | None = None,
     ) -> ScopeReviewRun:
         recovery_succeeded = 0
         recovery_failed = 0
@@ -441,6 +450,9 @@ def run_scope_review(
             total_charged_tokens, failure_reason,
             initial_evaluation, slot_recovery_attempts,
             recovery_succeeded, recovery_failed,
+            scope_provider_failures=ScopeProviderFailureSeriesV1(
+                events=(provider_failure,) if provider_failure is not None else (),
+            ),
         )
 
     for contract_attempt in range(MAX_SCOPE_REVIEW_CONTRACT_ATTEMPTS):
@@ -476,8 +488,12 @@ def run_scope_review(
                 max_response_bytes=max_response_bytes,
                 max_attempts=max_attempts,
             )
-        except Exception:
-            return finish(_uncertain(request), "provider_error")
+        except Exception as exc:
+            event = scope_provider_failure_event(
+                exc, origin="limit_fork_failure", source_sha256=expected_source.content_sha256,
+                round_index=contract_attempt + 1, correction_reason=retry_reason,
+            )
+            return finish(_uncertain(request), "provider_error", event)
 
         attempted_calls += 1
         if initial_evaluation is not None:
@@ -494,7 +510,11 @@ def run_scope_review(
                 "provider_timeout" if call_elapsed > timeout_seconds else
                 _provider_failure(exc)
             )
-            return finish(_uncertain(request), failure)
+            event = scope_provider_failure_event(
+                exc, origin="complete_failure", source_sha256=expected_source.content_sha256,
+                round_index=contract_attempt + 1, correction_reason=retry_reason,
+            )
+            return finish(_uncertain(request), failure, event)
 
         tokens = _reported_tokens(response)
         if tokens is None:

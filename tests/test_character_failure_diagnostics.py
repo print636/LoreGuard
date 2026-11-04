@@ -9,8 +9,9 @@ import pytest
 from pydantic import ValidationError
 
 import app.character_trait_extraction as extraction
+from app.character_scope_failure import ScopeProviderFailureEventV1, ScopeProviderFailureSeriesV1
 from app.character_consistency_stage import (
-    _Usage, _diagnostics, _validated_failure_diagnostics_payload,
+    _Usage, _append_failure_diagnostic_chunk, _diagnostics, _validated_failure_diagnostics_payload,
 )
 from app.character_draft_actor_review import (
     TargetBoundDraftReviewBatchEvaluation,
@@ -242,7 +243,9 @@ def test_failure_projection_revalidates_closed_fields_and_preserves_legacy_shape
     base = dict(outcome="completed", reason_code="ok", usage=_Usage(), reasons=Counter())
     assert "failure_diagnostics_v1" not in _diagnostics(**base)
     safe = extraction.CharacterSignalFailureDiagnosticsV1(statement_support_counts={"anchor_overlap": 1})
-    assert _validated_failure_diagnostics_payload(safe)["statement_support_counts"] == {"anchor_overlap": 1}
+    legacy = _validated_failure_diagnostics_payload(safe)
+    assert legacy["statement_support_counts"] == {"anchor_overlap": 1}
+    assert legacy["scope_provider_failures"] is None
     assert _validated_failure_diagnostics_payload({"raw_response": CONTENT}) is None
     assert _validated_failure_diagnostics_payload(safe.model_copy(update={
         "statement_support_counts": {CONTENT: 1},
@@ -257,6 +260,42 @@ def test_failure_projection_revalidates_closed_fields_and_preserves_legacy_shape
         "diagnostics": _validated_failure_diagnostics_payload(safe),
     }], failure_diagnostic_chunks_omitted_count=2)
     assert exported["failure_diagnostics_v1"]["chunks_omitted_count"] == 2
+
+
+def test_corrupt_or_misbound_scope_series_keeps_independent_diagnostics():
+    source = _source().content_sha256
+    event = ScopeProviderFailureEventV1(
+        source_sha256=source, origin="complete_failure", category="transport",
+        round="initial", round_index=1, correction_reason=None, call_attempted=True,
+    )
+    series = ScopeProviderFailureSeriesV1(events=(event,))
+    original = extraction.CharacterSignalFailureDiagnosticsV1(
+        statement_support_counts={"anchor_overlap": 1}, scope_provider_failures=series,
+    )
+    for item in (event.model_copy(update={"category": CONTENT}),
+                 event.model_copy(update={"source_sha256": "a" * 64})):
+        contaminated = original.model_copy(update={
+            "scope_provider_failures": series.model_copy(update={"events": (item,)}),
+        })
+        exported = _validated_failure_diagnostics_payload(contaminated, expected_source_sha256=source)
+        assert exported["scope_provider_failures"] is None
+        assert exported["statement_support_counts"] == {"anchor_overlap": 1}
+        assert CONTENT not in json.dumps(exported, ensure_ascii=False)
+
+
+def test_stage_chunk_cap_retains_failures_and_counts_all_displaced_coverage():
+    chunks = []
+    unavailable = {"scope_provider_failures": None}
+    observed = {"scope_provider_failures": {"events": [], "omitted": 0}}
+    provider = {"scope_provider_failures": {"events": [{"category": "other"}], "omitted": 0}}
+    legacy = {"statement_support_counts": {"anchor_overlap": 1}}
+    inputs = [unavailable, *([observed] * 127), provider, legacy, observed]
+    omitted = sum(
+        _append_failure_diagnostic_chunk(chunks, {"stage_chunk_ordinal": i, "diagnostics": diagnostics})
+        for i, diagnostics in enumerate(inputs, 1)
+    )
+    assert omitted == 3
+    assert [row["stage_chunk_ordinal"] for row in chunks] == [*range(2, 128), 129, 130]
 
 
 def test_failure_event_limit_accounts_for_omitted_events():

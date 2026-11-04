@@ -1,6 +1,7 @@
 """Exercise the worker's real accounting/gateway boundary without a network."""
 from __future__ import annotations
 
+import hashlib
 import json
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -246,7 +247,7 @@ class _QuietHeartbeat:
         pass
 
 
-def _execute_service(run_id, settings, scripted, *, fail_audit=False):
+def _execute_service(run_id, settings, scripted, *, fail_purpose=None):
     """Keep worker, stage, accounting, gateway, and persistence real."""
     requests = []
 
@@ -255,8 +256,11 @@ def _execute_service(run_id, settings, scripted, *, fail_audit=False):
         requests.append(request)
         body = json.loads(request.content)
         system, user = (item["content"] for item in body["messages"])
-        if fail_audit and system.endswith(BASELINE_COVERAGE_SYSTEM_PROMPT_V1):
+        if fail_purpose == "audit" and system.endswith(BASELINE_COVERAGE_SYSTEM_PROMPT_V1):
             return httpx.Response(429, headers={"Retry-After": "0"})
+        if fail_purpose == "scope" and system == SCOPE_REVIEW_SYSTEM_PROMPT:
+            return httpx.Response(503, headers={"X-Request-ID": "private-scope-header"},
+                                  json={"error": {"message": "private-scope-body"}})
         result = scripted.complete(system, user)
         return _response_http(result.text, prompt=result.prompt_tokens, completion=result.completion_tokens)
 
@@ -282,8 +286,8 @@ def _execute_service(run_id, settings, scripted, *, fail_audit=False):
         return requests, diagnostic, run.prompt_tokens, run.completion_tokens
 
 
-@pytest.mark.parametrize("fail_audit", [False, True])
-def test_worker_recovery_reaches_real_accounting_then_scope_and_persists_usage(fail_audit):
+@pytest.mark.parametrize("fail_purpose", [None, "audit", "scope"])
+def test_worker_recovery_reaches_real_accounting_then_scope_and_persists_usage(fail_purpose):
     first, second = "林蔚长期喜欢枇杷。", "林蔚一贯说话简洁直接。"
     supplemental = _record(second, line=2, dimension="speech_pattern", trait_key="directness", key_object="")
     scripted = RecoveryProvider([_record(first)], _audit([supplemental]))
@@ -294,7 +298,11 @@ def test_worker_recovery_reaches_real_accounting_then_scope_and_persists_usage(f
         _create_document(client, project["id"], name="profile.md", role="character_profile",
                          content=first + "\n" + second, narrative_context=_context(publication="published"))
         run_id = _new_run(client, project["id"])
-        requests, diagnostic, prompt, completion = _execute_service(run_id, settings, scripted, fail_audit=fail_audit)
+        requests, diagnostic, prompt, completion = _execute_service(
+            run_id, settings, scripted, fail_purpose=fail_purpose,
+        )
+        response = client.get(f"/api/v1/analysis-runs/{run_id}/diagnostics")
+        assert response.status_code == 200
     assert len(requests) == 3
     systems = [json.loads(request.content)["messages"][0]["content"] for request in requests]
     assert systems == [_formal_system(settings),
@@ -302,15 +310,40 @@ def test_worker_recovery_reaches_real_accounting_then_scope_and_persists_usage(f
                        SCOPE_REVIEW_SYSTEM_PROMPT]
     stage = diagnostic["character_consistency"]
     assert "stage_failed" not in stage.get("reason_counts", {})
-    assert (stage["reason_counts"].get("baseline_coverage_partial", 0) > 0) == fail_audit
+    assert (stage["reason_counts"].get("baseline_coverage_partial", 0) > 0) == (fail_purpose is not None)
+    failure_payload = stage["failure_diagnostics_v1"]
+    assert response.json()["character_consistency"]["failure_diagnostics_v1"] == failure_payload
+    assert failure_payload["chunks_omitted_count"] == 0
+    chunk, = failure_payload["chunks"]
+    assert (chunk["phase"], chunk["stage_chunk_ordinal"]) == ("primary_extraction", 1)
+    series = chunk["diagnostics"]["scope_provider_failures"]
+    assert series["omitted"] == 0
+    if fail_purpose == "scope":
+        # Both proposals abstained on the same failed logical provider call.
+        assert stage["reason_counts"]["scope_review_provider_error"] == 2
+        assert stage["material_coverage"] == "partial"
+        assert stage["counts"]["signal_count"] == 0
+        event, = series["events"]
+        assert event["source_sha256"] == hashlib.sha256((first + "\n" + second).encode()).hexdigest()
+        assert (event["origin"], event["round"], event["round_index"]) == ("complete_failure", "initial", 1)
+        assert event["call_attempted"] is True and event["correction_reason"] is None
+        assert (event["category"], event["http_status"], event["attempt_no"]) == ("upstream_5xx", 503, 1)
+        attempt, = event["provider_attempts"]
+        assert (attempt["category"], attempt["http_status"], attempt["attempt_no"]) == ("upstream_5xx", 503, 1)
+        for canary in ("private-scope-header", "private-scope-body", "unit-runtime-placeholder"):
+            assert canary not in response.text and canary not in json.dumps(diagnostic)
+        projected = json.dumps(series, ensure_ascii=False)
+        assert all(value not in projected for value in (first, second, "profile.md", "mock.invalid"))
+    else:
+        assert series["events"] == []
     with SessionLocal() as db:
         candidates = db.scalars(select(CharacterTraitCandidateRow).where(CharacterTraitCandidateRow.source_run_id == run_id)).all()
-        assert len(candidates) == (1 if fail_audit else 2)
+        assert len(candidates) == {None: 2, "audit": 1, "scope": 0}[fail_purpose]
     ledger = diagnostic["usage_accounting"]
     assert ledger["scope"] == "character_consistency"
     assert ledger["logical_calls"] == stage["usage"]["attempted_calls"] == 3
     assert (prompt, completion) == (ledger["prompt_tokens"], ledger["completion_tokens"])
-    assert (prompt, completion) == ((30, 20) if fail_audit else (49, 27))
+    assert (prompt, completion) == {None: (49, 27), "audit": (30, 20), "scope": (36, 16)}[fail_purpose]
     expected_charge = sum(estimate_issue_evidence_review_tokens(
         body["messages"][0]["content"], body["messages"][1]["content"], completion_reserve=body["max_tokens"],
     ) for body in (json.loads(request.content) for request in requests))

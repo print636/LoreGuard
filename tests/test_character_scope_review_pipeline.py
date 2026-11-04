@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
@@ -12,7 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.character_scope_review import ScopeReviewSourceIdentity
-from app.character_scope_review_provider import SCOPE_REVIEW_USER_PREFIX
+from app.character_scope_review_provider import SCOPE_REVIEW_USER_PREFIX, run_scope_review
 from app.character_consistency_stage import CharacterConsistencyStage, _FrozenDocument
 from app.character_trait_extraction import (
     BASELINE_COVERAGE_SCHEMA_V1,
@@ -614,7 +615,8 @@ def test_structural_regeneration_finishes_before_single_batch_review():
     assert result.diagnostics.reason_counts == {"regenerated_from_schema_validation": 1}
 
 
-def test_provider_failure_charges_review_estimate_and_abstains():
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_provider_failure_charges_review_estimate_and_abstains(monkeypatch, mismatch):
     line = "桑衍喜欢蜜瓜。"
     record = _record(line, support_id="L2:A1", statement="桑衍喜欢蜜瓜")
 
@@ -625,12 +627,21 @@ def test_provider_failure_charges_review_estimate_and_abstains():
                 raise RuntimeError("review unavailable")
             return super().complete(system, user)
 
+    if mismatch:
+        def mismatched_review(*args, **kwargs):
+            run = run_scope_review(*args, **kwargs)
+            return replace(run, evaluation=run.evaluation.model_copy(update={"decisions": ()}))
+
+        monkeypatch.setattr("app.character_trait_extraction.run_scope_review", mismatched_review)
     result, provider = _extract(line, FailingReview([record]))
     assert len(provider.calls) == 2
     assert result.diagnostics.attempted_calls == 2
     assert result.diagnostics.outcome == "partial"
     assert result.signals == result.pending_candidates == ()
-    assert result.diagnostics.reason_counts == {"scope_review_provider_error": 1}
+    reason = "scope_review_response_mismatch" if mismatch else "scope_review_provider_error"
+    assert result.diagnostics.reason_counts == {reason: 1}
+    event, = result.diagnostics.failure_diagnostics.scope_provider_failures.events
+    assert (event.origin, event.category, event.call_attempted) == ("complete_failure", "other", True)
     assert result.diagnostics.charged_tokens > result.diagnostics.prompt_tokens + result.diagnostics.completion_tokens
 
 
@@ -777,6 +788,7 @@ def test_stage_preserves_slot_conflict_history_when_correction_budget_is_exhaust
     assert recovery["scope_review_slot_recovery_attempts"] == 0
     assert recovery["scope_review_slot_recovery_succeeded"] == 0
     assert recovery["scope_review_slot_recovery_failed"] == 1
+    assert recovery["scope_provider_failures"] == {"events": [], "omitted": 0}
     assert result.diagnostics["outcome"] == "partial"
     assert result.diagnostics["material_coverage"] == "partial"
     assert result.diagnostics["counts"]["signal_count"] == 0

@@ -22,7 +22,10 @@ from app.character_scope_review_provider import (
     run_scope_review,
 )
 from app.config import Settings
-from app.provider import OpenAICompatibleProvider, ProviderRetryExhausted, RetryPolicy
+from app.provider import (
+    OpenAICompatibleProvider, ProviderAttemptTelemetry, ProviderCallTelemetry,
+    ProviderRetryExhausted, RetryPolicy,
+)
 from app.usage import estimate_issue_evidence_review_tokens
 
 
@@ -163,6 +166,7 @@ def test_cross_clause_same_axis_different_words_can_be_supported():
 
     assert [decision.verdict for decision in result.evaluation.decisions] == ["supported"]
     assert result.failure_reason is None
+    assert result.scope_provider_failures.model_dump() == {"events": (), "omitted": 0}
     assert result.attempted_calls == 1
     assert result.charged_tokens == result.estimated_tokens
     assert (result.prompt_tokens, result.completion_tokens) == (7, 9)
@@ -307,6 +311,7 @@ def test_expired_deadline_prevents_call_and_has_no_charge():
 @pytest.mark.parametrize("error,reason", [
     (ProviderRetryExhausted("secret", category="read_timeout"), "provider_timeout"),
     (ProviderRetryExhausted("secret", category="rate_limit", http_status=429), "provider_rate_limit"),
+    (ProviderRetryExhausted("secret", category="credential_revoked"), "provider_error"),
     (RuntimeError("secret"), "provider_error"),
 ])
 def test_provider_failure_is_all_uncertain_and_charged_once(error, reason):
@@ -319,6 +324,51 @@ def test_provider_failure_is_all_uncertain_and_charged_once(error, reason):
     assert result.prompt_tokens == result.completion_tokens == 0
     assert all(item.verdict == "uncertain" for item in result.evaluation.decisions)
     assert "secret" not in repr(result)
+    event, = result.scope_provider_failures.events
+    assert (event.origin, event.round, event.round_index, event.call_attempted) == (
+        "complete_failure", "initial", 1, True,
+    )
+    assert event.purpose == "scope_review"
+    assert event.source_sha256 == source.content_sha256 and event.correction_reason is None
+    if isinstance(error, ProviderRetryExhausted):
+        assert event.category == error.category and event.http_status == error.http_status
+    else:
+        assert event.category == "other"
+        assert (event.http_status, event.attempt_no, event.elapsed_ms) == (None, None, None)
+    assert event.provider_attempts is None
+
+
+def test_scope_failure_projects_only_typed_bounded_provider_metrics():
+    request, source, frozen = _source_request()
+    canary = "SCOPE_DIAGNOSTIC_SECRET"
+    malformed = ProviderAttemptTelemetry.model_construct(
+        category=canary, input_chars=98765, request_id=canary,
+        attempt_no=True, http_status=600, elapsed_ms=10**12,
+    )
+    telemetry = ProviderCallTelemetry.model_construct(
+        category="upstream_5xx", input_chars=98765, elapsed_ms=7, attempt_no=4,
+        http_status=503, request_id=canary,
+        attempts=[malformed, malformed, malformed, malformed, malformed],
+    )
+    error = ProviderRetryExhausted(
+        canary, category=[canary], http_status=None, attempt_no=False, elapsed_ms=-1,
+        telemetry=telemetry,
+    )
+    result = _run(request, source, frozen, FakeProvider(error=error))
+    event, = result.scope_provider_failures.events
+    assert result.failure_reason == "provider_error"
+    assert (event.category, event.attempt_no, event.http_status, event.elapsed_ms) == (
+        "other", None, 503, None,
+    )
+    assert len(event.provider_attempts) == 4 and event.provider_attempts_omitted == 1
+    assert all(attempt.model_dump() == {
+        "category": "other", "http_status": None, "attempt_no": None, "elapsed_ms": None,
+    } for attempt in event.provider_attempts)
+    safe_json = event.model_dump_json()
+    assert all(secret not in safe_json for secret in (
+        canary, "request_id", "input_chars", "98765", request.lines[0].text,
+        request.proposals[0].character, source.document_id,
+    ))
 
 
 def test_elapsed_provider_timeout_overrides_otherwise_supported_reply():
@@ -553,7 +603,7 @@ def test_slot_regeneration_only_replaces_original_conflicts(verdict, overrides, 
     assert "expected_polarity" not in retry["validation_retry"]
 
 
-@pytest.mark.parametrize("failure", ("invalid", "mismatch", "timeout", "budget", "deadline"))
+@pytest.mark.parametrize("failure", ("invalid", "mismatch", "timeout", "budget", "deadline", "provider"))
 def test_slot_retry_failure_preserves_first_legal_items_and_bounds_calls(failure):
     request, source, frozen, first = _mixed_scope_batch()
     second = json.loads(json.dumps(first))
@@ -572,6 +622,8 @@ def test_slot_retry_failure_preserves_first_legal_items_and_bounds_calls(failure
 
     provider = Provider([
         _provider_response(json.dumps(first)),
+        ProviderRetryExhausted("sensitive", category="deadline_exceeded")
+        if failure == "provider" else
         _provider_response("{broken" if failure == "invalid" else json.dumps(second)),
         _provider_response(json.dumps(second)),
     ])
@@ -596,7 +648,15 @@ def test_slot_retry_failure_preserves_first_legal_items_and_bounds_calls(failure
     assert result.failure_reason == {
         "invalid": "response_invalid", "mismatch": "response_mismatch",
         "timeout": "provider_timeout", "budget": "token_budget", "deadline": "deadline",
+        "provider": "provider_timeout",
     }[failure]
+    if failure == "provider":
+        event, = result.scope_provider_failures.events
+        assert (event.category, event.round, event.round_index, event.correction_reason) == (
+            "deadline_exceeded", "contract_regeneration", 2, "slot_conflict",
+        )
+    else:
+        assert result.scope_provider_failures.events == ()
 
 
 def test_envelope_retry_then_slot_conflict_has_no_third_call():
@@ -759,6 +819,7 @@ def test_frozen_source_mismatch_never_calls_provider():
     assert result.failure_reason == "source_mismatch"
     assert result.evaluation.decisions[0].reason == "source_mismatch"
     assert result.attempted_calls == result.charged_tokens == 0
+    assert result.scope_provider_failures is None
     assert provider.calls == []
 
 
@@ -821,6 +882,12 @@ def test_native_provider_429_transport_retry_is_one_logical_charge():
     assert result.failure_reason == "provider_rate_limit"
     assert result.charged_tokens == result.estimated_tokens
     assert result.evaluation.decisions[0].verdict == "uncertain"
+    event, = result.scope_provider_failures.events
+    assert (event.category, event.attempt_no, event.http_status) == ("rate_limit", 2, 429)
+    assert [(a.category, a.attempt_no, a.http_status) for a in event.provider_attempts] == [
+        ("rate_limit", 1, 429), ("rate_limit", 2, 429),
+    ]
+    assert event.provider_attempts_omitted == 0
 
 
 def test_native_provider_does_not_raise_original_retry_limit():
@@ -920,7 +987,8 @@ def test_accounting_wrapper_fork_receives_dedicated_call_limits():
     assert result.attempted_calls == 1
 
 
-def test_invalid_wrapper_fork_stops_before_logical_call():
+@pytest.mark.parametrize("fork_error", [None, RuntimeError("scope_fork_secret")])
+def test_invalid_wrapper_fork_stops_before_logical_call(fork_error):
     request, source, frozen = _source_request()
 
     class Wrapper:
@@ -928,9 +996,17 @@ def test_invalid_wrapper_fork_stops_before_logical_call():
             raise AssertionError("must not call an unbounded wrapper")
 
         def fork_for_character_scope_review(self, **kwargs):
+            if fork_error is not None:
+                fork_error.category = "rate_limit"
+                fork_error.http_status = 429
+                raise fork_error
             return object()
 
     result = _run(request, source, frozen, Wrapper())
     assert result.failure_reason == "provider_error"
     assert result.attempted_calls == result.charged_tokens == 0
     assert result.evaluation.decisions[0].verdict == "uncertain"
+    event, = result.scope_provider_failures.events
+    assert (event.origin, event.call_attempted, event.category) == ("limit_fork_failure", False, "other")
+    assert (event.http_status, event.attempt_no, event.elapsed_ms) == (None, None, None)
+    assert event.provider_attempts is None and "scope_fork_secret" not in event.model_dump_json()

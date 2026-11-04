@@ -37,6 +37,7 @@ from .character_explanation_review import (
     ExplanationObservationSummary,
     run_character_explanation_review,
 )
+from .character_scope_failure import ScopeProviderFailureSeriesV1
 from .character_scope_review import (
     SCOPE_REVIEW_BASIS_INVALID_SUBTYPES,
     SCOPE_REVIEW_SLOT_CONFLICT_KINDS,
@@ -1140,21 +1141,23 @@ class CharacterConsistencyStage:
             nonlocal evidence_mismatch_chunks_omitted
             nonlocal failure_diagnostic_chunks_omitted
             diagnostics = getattr(extraction, "diagnostics", None)
+            raw_failure = getattr(diagnostics, "failure_diagnostics", None)
             safe_failure = _validated_failure_diagnostics_payload(
-                getattr(diagnostics, "failure_diagnostics", None)
+                raw_failure, expected_source_sha256=source.content_sha256
             )
+            if raw_failure is not None and safe_failure is None:
+                failure_diagnostic_chunks_omitted += 1
             if safe_failure is not None:
-                if len(failure_diagnostic_chunks) >= _MAX_EVIDENCE_MISMATCH_CHUNKS:
-                    failure_diagnostic_chunks_omitted += 1
-                else:
-                    failure_diagnostic_chunks.append({
+                failure_diagnostic_chunks_omitted += _append_failure_diagnostic_chunk(
+                    failure_diagnostic_chunks, {
                         "source_document_ordinal": source.ordinal,
                         "document_chunk_ordinal": original_chunk_ordinals[id(chunk)],
                         "stage_chunk_ordinal": chunk_ordinal,
                         "phase": phase,
                         "target_ordinal": target_ordinal,
                         "diagnostics": safe_failure,
-                    })
+                    },
+                )
             counts = getattr(diagnostics, "evidence_mismatch_counts", {})
             if not isinstance(counts, dict):
                 return
@@ -7830,16 +7833,58 @@ def _validated_baseline_trace_payload(trace: object) -> dict[str, Any] | None:
         return None
 
 
-def _validated_failure_diagnostics_payload(value: object) -> dict[str, Any] | None:
+def _failure_chunk_priority(chunk: dict[str, Any]) -> int:
+    diagnostics = chunk["diagnostics"]
+    series = diagnostics.get("scope_provider_failures")
+    if any(value for key, value in diagnostics.items() if key != "scope_provider_failures"):
+        return 2  # Existing failure details.
+    if series is None:
+        return 0
+    return 2 if series["events"] or series["omitted"] else 1
+
+
+def _append_failure_diagnostic_chunk(
+    chunks: list[dict[str, Any]], chunk: dict[str, Any],
+) -> int:
+    """Count every omission, retaining failures before coverage-only chunks."""
+    if len(chunks) < _MAX_EVIDENCE_MISMATCH_CHUNKS:
+        chunks.append(chunk)
+        return 0
+    if chunks:
+        # Evict the latest lowest-priority chunk, keeping stage order among survivors.
+        weakest = min(reversed(range(len(chunks))), key=lambda i: _failure_chunk_priority(chunks[i]))
+        if _failure_chunk_priority(chunk) > _failure_chunk_priority(chunks[weakest]):
+            del chunks[weakest]
+            chunks.append(chunk)
+    return 1
+
+
+def _validated_failure_diagnostics_payload(
+    value: object, *, expected_source_sha256: str | None = None,
+) -> dict[str, Any] | None:
     if not isinstance(value, CharacterSignalFailureDiagnosticsV1):
         return None
     try:
-        # Revalidate even model_construct/model_copy data at the export boundary.
-        return CharacterSignalFailureDiagnosticsV1.model_validate(
-            value.model_dump(mode="python", warnings=False)
-        ).model_dump(mode="json")
+        # Keep independent failure counts even if the optional series is corrupt.
+        validated = CharacterSignalFailureDiagnosticsV1.model_validate(
+            value.model_dump(mode="python", exclude={"scope_provider_failures"}, warnings=False)
+        )
     except (AttributeError, TypeError, ValueError):
         return None
+    payload = validated.model_dump(mode="json")
+    series = value.scope_provider_failures
+    if isinstance(series, ScopeProviderFailureSeriesV1):
+        try:
+            series = ScopeProviderFailureSeriesV1.model_validate(
+                series.model_dump(mode="python", warnings=False)
+            )
+            if expected_source_sha256 is None or all(
+                event.source_sha256 == expected_source_sha256 for event in series.events
+            ):
+                payload["scope_provider_failures"] = series.model_dump(mode="json")
+        except (AttributeError, TypeError, ValueError):
+            pass  # None means this series is unavailable.
+    return payload
 
 
 def _diagnostics(
