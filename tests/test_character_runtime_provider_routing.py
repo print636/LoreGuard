@@ -12,6 +12,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app import service
+from app.character_draft_actor_review import SCOPED_DRAFT_DIRECTION_GUIDE
+from app.character_draft_actor_review_provider import (
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11,
+)
 from app.character_drift import (
     CHARACTER_REVIEW_SYSTEM_PROMPT,
     CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT,
@@ -22,6 +27,7 @@ from app.character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from app.character_trait_extraction import (
     BASELINE_COVERAGE_SYSTEM_PROMPT_V1,
     BASELINE_COVERAGE_SYSTEM_PROMPT_V3,
+    CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1,
     CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
@@ -144,6 +150,45 @@ def test_active_formal_audit_and_old_prompts_reach_accounted_http(scope_review):
     safe = usage.safe_dict(terminal_status="completed")
     assert safe["scope"] == "character_consistency"
     assert "source-bound request" not in json.dumps(safe)
+
+
+@pytest.mark.parametrize("review_version", [None, "v2", "v3"])
+def test_scoped_draft_direction_reaches_only_enabled_purposes_and_is_metered(review_version):
+    settings = _settings(
+        character_draft_actor_review_v1=review_version is not None,
+        character_target_bound_draft_review_v2=review_version == "v2",
+        character_target_bound_draft_review_v3=review_version == "v3",
+    )
+    sent = []
+
+    def respond(request):
+        sent.append(json.loads(request.content)["messages"][0]["content"])
+        return _response_http("{}")
+
+    accounting, usage = _http_accounting(settings, respond)
+    guide = SCOPED_DRAFT_DIRECTION_GUIDE
+    focused = TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT + guide
+    if review_version:
+        focused += CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
+    expected = [(focused, settings.character_signal_max_completion_tokens)]
+    review_v2 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT + guide
+    review_v3 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11 + guide
+    if review_version:
+        expected.append((review_v2 if review_version == "v2" else review_v3,
+                         settings.character_draft_actor_review_completion_tokens))
+    for system, _ in expected:
+        accounting.complete(system, "frozen target")
+    for unsupported in (CHARACTER_REVIEW_SYSTEM_PROMPT + guide, focused + guide,
+                        review_v2 if review_version == "v3" else review_v3):
+        with pytest.raises(RuntimeError, match="unsupported character consistency provider purpose"):
+            accounting.complete(unsupported, "frozen target")
+
+    assert sent == [system for system, _ in expected]
+    assert usage.logical_calls == usage.successful_calls == len(expected)
+    assert usage.charged_tokens == sum(
+        estimate_issue_evidence_review_tokens(system, "frozen target", completion_reserve=reserve)
+        for system, reserve in expected
+    )
 
 
 @pytest.mark.parametrize("mutant", ["unknown", "prefix", "suffix", "wrong_parent", "targeted_parent", "repeat", "old_concat"])

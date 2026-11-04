@@ -53,6 +53,7 @@ from .character_observations import CharacterObservationRecorder
 from .character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from .character_history_semantic_review import HISTORY_REVIEW_SYSTEM_PROMPT
+from .character_draft_actor_review import SCOPED_DRAFT_DIRECTION_GUIDE
 from .character_draft_actor_review_provider import (
     DRAFT_ACTOR_REVIEW_SYSTEM_PROMPT,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT,
@@ -849,12 +850,18 @@ class _CharacterConsistencyAccountingProvider:
             allowed_primary_systems.add(
                 active_primary_system + CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4
             )
-        allowed_targeted_systems = {TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT}
+        targeted_bases = (
+            TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
+            TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT + SCOPED_DRAFT_DIRECTION_GUIDE,
+        )
+        allowed_targeted_systems = set(targeted_bases)
         if self.settings.character_draft_actor_review_v1:
-            allowed_targeted_systems.add(
-                TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
-                + CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
+            allowed_targeted_systems.update(
+                base + CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1 for base in targeted_bases
             )
+        # A frozen author-axis target may extend these specific review prompts.
+        # Send and meter the original, including the guide.
+        target_review_system = system.removesuffix(SCOPED_DRAFT_DIRECTION_GUIDE)
         if system in (
             allowed_primary_systems
             | allowed_targeted_systems
@@ -918,10 +925,10 @@ class _CharacterConsistencyAccountingProvider:
             system == DRAFT_ACTOR_REVIEW_SYSTEM_PROMPT
             and self.settings.character_draft_actor_review_v1
         ) or (
-            system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT
+            target_review_system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT
             and self.settings.character_target_bound_draft_review_v2
         ) or (
-            system in {
+            target_review_system in {
                 TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7,
                 TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8,
                 TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,

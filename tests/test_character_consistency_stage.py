@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.character_draft_actor_review import SCOPED_DRAFT_DIRECTION_GUIDE
 from app.character_consistency_stage import (
     CharacterConsistencyStage,
     CharacterConsistencyStageResult,
@@ -6626,8 +6627,8 @@ def test_primary_value_evidence_recovery_does_not_clear_another_claim(discloses,
 
     class Provider:
         def complete(self, system, user):
-            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9:
-                return reviewer.complete(system, user)
+            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9 + SCOPED_DRAFT_DIRECTION_GUIDE:
+                return reviewer.complete(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9, user)
             if system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT:
                 return QueueProvider(json.dumps({
                     "verdict": "needs_confirmation", "explanation": "需确认当时家人是否处于危险中。",
@@ -6675,7 +6676,7 @@ def test_primary_value_paraphrase_verifies_each_original_claim(add_unsupported_m
 
     class Provider:
         def complete(self, system, user):
-            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10:
+            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10 + SCOPED_DRAFT_DIRECTION_GUIDE:
                 batch = json.loads(user.split("：\n", 1)[1])
                 response = reviewer.complete(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9, user)
                 body = json.loads(response.text)
@@ -6693,8 +6694,8 @@ def test_primary_value_paraphrase_verifies_each_original_claim(add_unsupported_m
                                 verdict="supported" if same else "rejected")
                 response.text = json.dumps(body, ensure_ascii=False)
                 return response
-            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9:
-                return targeted_reviewer.complete(system, user)
+            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9 + SCOPED_DRAFT_DIRECTION_GUIDE:
+                return targeted_reviewer.complete(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9, user)
             if system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT:
                 return QueueProvider(json.dumps({
                     "verdict": "needs_confirmation", "explanation": "需确认当时家人是否处于危险中。",
@@ -6741,7 +6742,7 @@ def test_scoped_value_reviews_the_action_object_separately_from_the_author_axis(
 
     class Provider:
         def complete(self, system, user):
-            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11:
+            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11 + SCOPED_DRAFT_DIRECTION_GUIDE:
                 windows = json.loads(user.split("：\n", 1)[1])["windows"]
                 response = review.complete(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9, user)
                 body = json.loads(response.text)
@@ -6765,8 +6766,8 @@ def test_scoped_value_reviews_the_action_object_separately_from_the_author_axis(
                     )
                 response.text = json.dumps(body, ensure_ascii=False)
                 return response
-            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9:
-                return recall.complete(system, user)
+            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9 + SCOPED_DRAFT_DIRECTION_GUIDE:
+                return recall.complete(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9, user)
             if system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT:
                 return QueueProvider(json.dumps({
                     "verdict": "needs_confirmation", "explanation": "需核实当时家人是否遇险。",
