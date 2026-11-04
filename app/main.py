@@ -4120,6 +4120,7 @@ def _baseline_empty_reason(stage: dict) -> str:
         for code, causes in (
             ("provider_configuration", ("not_configured", "unauthorized", "forbidden")),
             ("provider_unavailable", ("upstream_5xx", "rate_limit", "connect_timeout", "read_timeout", "transport")),
+            ("evidence_unconfirmed", ("scope_review_reviewer_rejected",)),
         ):
             if any(type(reasons.get(cause)) is int and reasons[cause] > 0 for cause in causes):
                 return code

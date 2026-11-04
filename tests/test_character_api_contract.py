@@ -765,6 +765,10 @@ _COMPLETE_PRIMARY_CHUNK_COUNTS = {
       "counts": {**_COMPLETE_PRIMARY_CHUNK_COUNTS, "pending_candidate_count": 0}}, "no_candidates"),
     ({"outcome": "degraded", "reason_counts": {"upstream_5xx": 1}}, "provider_unavailable"),
     ({"outcome": "partial", "reason_counts": {"unauthorized": 1}}, "provider_configuration"),
+    ({"outcome": "partial", "reason_counts": {"scope_review_reviewer_rejected": 1,
+      "baseline_coverage_scope_incomplete": 1}}, "evidence_unconfirmed"),
+    ({"outcome": "partial", "reason_counts": {"scope_review_reviewer_rejected": 1,
+      "read_timeout": 1}}, "provider_unavailable"),
     ({"outcome": "partial", "reason_counts": {"upstream_5xx": True, "private text": 1}}, "incomplete"),
     ({"outcome": "completed", "snapshot_bound": True, "material_coverage": "complete"}, "unknown"),
 ])

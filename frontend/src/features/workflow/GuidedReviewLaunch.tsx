@@ -450,7 +450,8 @@ export default function GuidedReviewLaunch({
               <div className="stageStatusRecovery">
                 <p className="stageNotice warning" role="status"><strong>{emptyMessage.title}。</strong> {emptyMessage.detail}</p>
                 <div className="baselineRecoveryActions">
-                  {status.baseline_empty_reason === "no_candidates" && <button type="button" onClick={() => onNavigate("projects")}>查看正式资料</button>}
+                  {(status.baseline_empty_reason === "no_candidates" || status.baseline_empty_reason === "evidence_unconfirmed") &&
+                    <button type="button" onClick={() => onNavigate("projects")}>查看正式资料</button>}
                   {status.baseline_empty_reason === "provider_configuration" && characterReview !== "needs_account_model" && <button type="button" onClick={() => onNavigate("provider")}>检查模型设置</button>}
                   <button type="button" onClick={() => onOpenRun(currentBaselineRun.id)}>查看本次建档记录</button>
                   <button className="quietPrimary" type="button" disabled={baselineActionDisabled} onClick={() => void startBaseline()}>用现有资料重新建档</button>

@@ -2755,6 +2755,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               <CharacterWorkspace
                 projectId={project}
                 onOpenActiveBaseline={activeBaseline ? () => browserNavigate(workspacePath("audit", project, activeBaseline.id)) : undefined}
+                onOpenRun={(id) => browserNavigate(workspacePath("audit", project, id))}
                 documentCount={activeDocuments.length}
                 completedRunCount={runs.filter((row) => row.status === "completed").length}
                 projectLoading={projectLoading}

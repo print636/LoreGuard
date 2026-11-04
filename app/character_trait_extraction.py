@@ -6577,6 +6577,8 @@ def _review_clean_signals(
                 else None
             )
             reasons[f"scope_review_{failure or decision.reason}"] += 1
+            if not failure and decision.reason == "reviewer_rejected" and decision.verdict == "rejected":
+                reasons.update(f"scope_review_negative_{slot}" for slot in decision.rejection_slots)
     return _ScopeReviewOutcome(
         supported=supported,
         decisions=run.evaluation.decisions,

@@ -267,6 +267,7 @@ class ScopeReviewDecision(BaseModel):
     basis_ids: tuple[str, ...] = ()
     # Internal-only fixed categories; never persist proposal/source identifiers.
     slot_conflicts: tuple[ScopeReviewSlotConflict, ...] = Field(default=(), exclude=True)
+    rejection_slots: tuple[ScopeReviewSlotConflict, ...] = Field(default=(), exclude=True)
     basis_invalid_subtype: BasisInvalidSubtype | None = Field(default=None, exclude=True)
     # Only populated after the complete response and proposal bindings validate.
     raw_verdict: ReviewVerdict | None = Field(default=None, exclude=True)
@@ -502,26 +503,28 @@ def _support_slot_conflicts(
     return tuple(conflicts)
 
 
-def _slots_reject(proposal: ScopeReviewProposal, item: ScopeReviewItem) -> bool:
-    return (
-        item.actor == "other"
-        or item.actuality in {"reported", "hypothetical", "question"}
-        or item.statement_relation == "contradicted"
-        or item.label_relation == "different_axis"
-        or item.object_relation == "different"
-        or item.polarity_relation == "opposite"
-        or item.level_supported == "no"
-        or (
-            proposal.label_anchor_id is not None and item.label_relation == "none"
-        )
-        or (
-            not proposal.key_object and item.object_relation == "same"
-        )
-        or (
-            proposal.polarity in {"neutral", "unclear"}
-            and item.polarity_relation == "same"
-        )
-    )
+def _explicit_rejection_slots(
+    proposal: ScopeReviewProposal, item: ScopeReviewItem,
+) -> tuple[ScopeReviewSlotConflict, ...]:
+    """Only fixed, decisive negatives in a validated reviewer rejection."""
+    slots: list[ScopeReviewSlotConflict] = []
+    if item.actor == "other":
+        slots.append("actor")
+    if item.actuality in {"reported", "hypothetical", "question"}:
+        slots.append("actuality")
+    if item.statement_relation == "contradicted":
+        slots.append("statement_relation")
+    if item.label_relation == "different_axis" or (proposal.label_anchor_id and item.label_relation == "none"):
+        slots.append("label_relation")
+    if item.object_relation == "different" or (not proposal.key_object and item.object_relation == "same"):
+        slots.append("object_relation")
+    if item.polarity_relation == "opposite" or (
+        proposal.polarity in {"neutral", "unclear"} and item.polarity_relation == "same"
+    ):
+        slots.append("polarity_relation")
+    if item.level_supported == "no":
+        slots.append("level_supported")
+    return tuple(slots)
 
 
 def _rejected_slot_conflicts(item: ScopeReviewItem) -> tuple[ScopeReviewSlotConflict, ...]:
@@ -607,6 +610,7 @@ def evaluate_scope_review(
     for proposal in request.proposals:
         item = by_id[proposal.proposal_id]
         slot_conflicts: tuple[ScopeReviewSlotConflict, ...] = ()
+        rejection_slots: tuple[ScopeReviewSlotConflict, ...] = ()
         basis_invalid_subtype: BasisInvalidSubtype | None = None
         if not _basis_valid(request, proposal, item):
             verdict: ReviewVerdict = "uncertain"
@@ -617,7 +621,8 @@ def evaluate_scope_review(
             verdict = "supported" if not slot_conflicts else "uncertain"
             reason = "supported" if verdict == "supported" else "slot_conflict"
         elif item.verdict == "rejected":
-            verdict = "rejected" if _slots_reject(proposal, item) else "uncertain"
+            rejection_slots = _explicit_rejection_slots(proposal, item)
+            verdict = "rejected" if rejection_slots else "uncertain"
             reason = "reviewer_rejected" if verdict == "rejected" else "slot_conflict"
             if reason == "slot_conflict":
                 slot_conflicts = _rejected_slot_conflicts(item)
@@ -631,6 +636,7 @@ def evaluate_scope_review(
             reason=reason,
             basis_ids=item.basis_ids if reason not in {"basis_invalid", "slot_conflict"} else (),
             slot_conflicts=slot_conflicts,
+            rejection_slots=rejection_slots,
             basis_invalid_subtype=basis_invalid_subtype,
             raw_verdict=item.verdict,
             polarity_relation=item.polarity_relation,

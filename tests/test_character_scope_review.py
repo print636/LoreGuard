@@ -649,6 +649,7 @@ def test_rejected_without_any_negative_slot_is_an_inconsistent_response():
     result = _evaluate(request, identity, frozen_content, _item(request, verdict="rejected"))
     assert result.decisions[0].verdict == "uncertain"
     assert result.decisions[0].reason == "slot_conflict"
+    assert result.decisions[0].rejection_slots == ()
     assert result.decisions[0].slot_conflicts == (
         "rejected_without_rejection_signal",
     )
@@ -675,6 +676,7 @@ def test_uncertain_and_malformed_or_oversized_responses_never_support():
     ambiguous = _item(request, verdict="uncertain", actor="ambiguous")
     result = _evaluate(request, identity, frozen_content, ambiguous)
     assert result.decisions[0].reason == "reviewer_uncertain"
+    assert result.decisions[0].rejection_slots == ()
     for response, reason in (
         ("not JSON", "response_invalid"),
         ("x" * (MAX_SCOPE_REVIEW_RESPONSE_BYTES + 1), "response_too_large"),
@@ -686,6 +688,23 @@ def test_uncertain_and_malformed_or_oversized_responses_never_support():
         )
         assert evaluation.decisions[0].verdict == "uncertain"
         assert evaluation.decisions[0].reason == reason
+        assert evaluation.decisions[0].rejection_slots == ()
+
+
+@pytest.mark.parametrize("basis,expected", [
+    ([], ("actuality", "level_supported")),
+    (["L999:A1"], ()),
+])
+def test_only_source_bound_rejections_keep_decisive_slot_names(basis, expected):
+    request, identity, frozen_content = _request()
+    item = _item(request, verdict="rejected", actuality="hypothetical", level_supported="no",
+                 actor="ambiguous", basis_ids=basis)
+    result = _evaluate(request, identity, frozen_content, item)
+    decision = result.decisions[0]
+    assert decision.rejection_slots == expected
+    assert decision.reason == ("reviewer_rejected" if expected else "basis_invalid")
+    assert not decision.slot_conflicts
+    assert "rejection_slots" not in decision.model_dump()
 
 
 def test_duplicate_json_keys_are_not_silently_accepted():

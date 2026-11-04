@@ -197,6 +197,24 @@ test("有建档任务运行时不再次提供付费重试", async ({ page }) => 
   expect(state.posts).toEqual([]);
 });
 
+test("角色描述的原文依据未核实时可查看正式资料和本次建档记录", async ({ page }) => {
+  const state: MockState = { confirmed: 0, pending: 0, total: 0, coverage: "partial", emptyReason: "evidence_unconfirmed", posts: [], unexpected: [] };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/characters`);
+  const profile = page.locator(".characterPrerequisite");
+  await expect(profile.getByRole("heading")).toHaveText("提取到了角色描述，但还未核实原文依据");
+  await expect(profile.getByRole("button", { name: "查看正式资料" })).toBeVisible();
+  await profile.getByRole("button", { name: "查看本次建档记录" }).click();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectId}/runs/${baselineRun.id}$`));
+  await page.goto(`/app/projects/${projectId}/check`);
+  const review = page.locator(".guidedReviewLaunch");
+  await expect(review).toContainText("提取到了角色描述，但还未核实原文依据");
+  await expect(review.getByRole("button", { name: "查看正式资料" })).toBeVisible();
+  await expect(review.getByRole("button", { name: "查看本次建档记录" })).toBeVisible();
+  await expect(review.getByRole("button", { name: "用现有资料重新建档" })).toBeEnabled();
+  expect(state.posts).toEqual([]);
+});
+
 test("角色深度审查由作者逐次勾选，提交只绑定本次确认的基线", async ({ page }) => {
   const state: MockState = { accountDeepReview: true, posts: [], unexpected: [] };
   await mockApi(page, state);

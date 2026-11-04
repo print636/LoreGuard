@@ -316,6 +316,7 @@ def test_postposed_summary_cross_subject_or_axis_is_never_silent_evidence():
     assert result.signals == result.pending_candidates == ()
     assert result.diagnostics.reason_counts == {
         "scope_review_reviewer_rejected": 1,
+        "scope_review_negative_label_relation": 1,
     }
 
 
@@ -456,7 +457,10 @@ def test_four_p1_semantic_conflicts_do_not_reach_pending(line, record, conflict)
     assert len(provider.calls) == 2  # Semantic disagreement cannot regenerate.
     assert result.diagnostics.outcome == "partial"
     assert result.signals == result.pending_candidates == ()
-    assert result.diagnostics.reason_counts == {"scope_review_reviewer_rejected": 1}
+    assert result.diagnostics.reason_counts == {
+        "scope_review_reviewer_rejected": 1,
+        **{f"scope_review_negative_{slot}": 1 for slot in conflict},
+    }
     assert result.diagnostics.support_trace.final_accepted_slots == ()
 
 
@@ -543,7 +547,9 @@ def test_contradicted_statement_cannot_pass_even_with_correct_actor_and_object()
     assert len(provider.calls) == 2
     assert result.diagnostics.outcome == "partial"
     assert result.signals == result.pending_candidates == ()
-    assert result.diagnostics.reason_counts == {"scope_review_reviewer_rejected": 1}
+    assert result.diagnostics.reason_counts == {
+        "scope_review_reviewer_rejected": 1, "scope_review_negative_statement_relation": 1,
+    }
 
 
 def test_invalid_review_and_frozen_source_mismatch_fail_closed():

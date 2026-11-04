@@ -370,7 +370,9 @@ def test_scope_slot_history_and_actual_recovery_outcome_reach_extractor(retry_ve
     assert bool(result.signals) is (retry_verdict == "supported")
     assert diagnostics.outcome == ("completed" if retry_verdict == "supported" else "partial")
     if retry_verdict == "rejected":
-        assert diagnostics.reason_counts == {"scope_review_reviewer_rejected": 1}
+        assert diagnostics.reason_counts == {
+            "scope_review_reviewer_rejected": 1, "scope_review_negative_polarity_relation": 1,
+        }
 
 
 def test_failed_slot_retry_does_not_relabel_an_unrelated_valid_rejection(monkeypatch):

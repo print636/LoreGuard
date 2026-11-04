@@ -62,6 +62,7 @@ type CharacterWorkspaceProps = {
   completedRunCount: number;
   projectLoading: boolean;
   onOpenActiveBaseline?: () => void;
+  onOpenRun: (id: string) => void;
   baselineContextReady: boolean;
   baselineContextDetail: string;
   routeSearch: string;
@@ -129,6 +130,7 @@ export default function CharacterWorkspace({
   completedRunCount,
   projectLoading,
   onOpenActiveBaseline,
+  onOpenRun,
   baselineContextReady,
   baselineContextDetail,
   routeSearch,
@@ -236,6 +238,7 @@ export default function CharacterWorkspace({
   // also a direct detail target, independent of the roster search filter.
   const canBrowseCharacters = Boolean(characterPage?.total || route.characterId);
   const readinessView = canBrowseCharacters ? null : describeReadiness(readiness, characterPage?.baseline_empty_reason);
+  const evidenceRunId = characterPage?.baseline_empty_reason === "evidence_unconfirmed" ? characterPage.source_run_id : null;
 
   function pathFor(next: CharacterRouteState): string {
     return `/app/projects/${encodeURIComponent(projectId)}/characters${characterSearch(next)}`;
@@ -907,7 +910,9 @@ export default function CharacterWorkspace({
         <div className="characterPrerequisite">
           <h2>{readinessView.title}</h2>
           <p>{readinessView.detail}</p>
-          {readiness === "not_generated" && characterPage?.baseline_empty_reason === "no_candidates" && <button type="button" onClick={() => onNavigateWorkspace("projects")}>查看正式资料</button>}
+          {readiness === "not_generated" && (characterPage?.baseline_empty_reason === "no_candidates" || characterPage?.baseline_empty_reason === "evidence_unconfirmed") &&
+            <button type="button" onClick={() => onNavigateWorkspace("projects")}>查看正式资料</button>}
+          {readiness === "not_generated" && evidenceRunId && <button type="button" onClick={() => onOpenRun(evidenceRunId)}>查看本次建档记录</button>}
           {readiness === "not_generated" && characterPage?.baseline_empty_reason === "provider_configuration" && <button type="button" onClick={() => onNavigateWorkspace("provider")}>检查模型设置</button>}
           <button
             type="button"
