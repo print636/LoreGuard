@@ -265,6 +265,7 @@
 .stageStatusRecovery button,
 .stagePendingNotice button { min-height: 44px; margin-top: 10px; }
 .stageBaselineSummary { min-height: 52px; }
+.baselineRecoveryActions { display: flex; flex-wrap: wrap; gap: 0 8px; margin-bottom: 8px; }
 .stagePendingNotice { margin-top: 12px; padding: 12px 14px; border-left: 3px solid var(--color-warning, var(--warning)); border-radius: 0 9px 9px 0; background: var(--color-subtle, rgba(183,162,255,.08)); }
 .stagePendingNotice .stageNotice { margin: 0; }
 .draftReviewScopeNote { margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--color-border, var(--line)); border-radius: 9px; background: var(--color-field, #100d24); }

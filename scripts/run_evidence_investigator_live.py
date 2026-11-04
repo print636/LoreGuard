@@ -373,11 +373,12 @@ _CHARACTER_BASELINE_COVERAGE_KEYS = frozenset({
 })
 # This stdlib-only reader recognizes historical producer identities without
 # importing the live application. V1 recorded the unchanged audit suffix;
-# V2 records the complete, envelope-corrected active formal audit prompt.
-# A regression test binds V2 to the application's actual shared builder.
+# V2 fixed the output envelope. V3 also distinguishes lasting rules with
+# limited applicability from one-off actions. Keep past receipts readable.
 _CHARACTER_BASELINE_COVERAGE_PROMPT_HASHES = {
     "character-baseline-coverage-prompt-v1": "eb333171dd61e9cdbda16f9be4bafcd187bf61f55e3f206651d7c818085689d9",
     "character-baseline-coverage-prompt-v2": "79ad2973beb91f4d9ea0beeb6d142a1ba464fe64c4dc3370a772384e223d8a80",
+    "character-baseline-coverage-prompt-v3": "ffddb518f64f861ae2f6722378631397967b510ffd3e1bdaeb6fcd0c8fa34761",
 }
 
 

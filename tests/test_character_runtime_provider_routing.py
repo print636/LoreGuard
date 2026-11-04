@@ -21,6 +21,7 @@ from app.character_drift import (
 from app.character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from app.character_trait_extraction import (
     BASELINE_COVERAGE_SYSTEM_PROMPT_V1,
+    BASELINE_COVERAGE_SYSTEM_PROMPT_V3,
     CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
@@ -256,7 +257,7 @@ def _execute_service(run_id, settings, scripted, *, fail_purpose=None):
         requests.append(request)
         body = json.loads(request.content)
         system, user = (item["content"] for item in body["messages"])
-        if fail_purpose == "audit" and system.endswith(BASELINE_COVERAGE_SYSTEM_PROMPT_V1):
+        if fail_purpose == "audit" and system.endswith(BASELINE_COVERAGE_SYSTEM_PROMPT_V3):
             return httpx.Response(429, headers={"Retry-After": "0"})
         if fail_purpose == "scope" and system == SCOPE_REVIEW_SYSTEM_PROMPT:
             return httpx.Response(503, headers={"X-Request-ID": "private-scope-header"},

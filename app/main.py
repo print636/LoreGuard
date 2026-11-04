@@ -4087,14 +4087,46 @@ def _character_primary_chunk_coverage(stage: dict) -> str:
 
 def _character_coverage_for_run(
     db, run: AnalysisRunRow | None
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str | None]:
     if run is None:
-        return "unknown", None
+        return "unknown", None, None
     diagnostic = db.get(AnalysisDiagnosticRow, run.id)
     payload = diagnostic.payload if diagnostic and isinstance(diagnostic.payload, dict) else {}
     stage = payload.get("character_consistency")
     if not isinstance(stage, dict):
-        return "unknown", "该次分析没有可核对的角色一致性执行记录"
+        return "unknown", "该次分析没有可核对的角色一致性执行记录", "unknown"
+    coverage, detail = _character_stage_coverage(stage)
+    empty_reason = _baseline_empty_reason(stage) if run.batch_mode == "baseline_build" else "unknown"
+    return coverage, detail, empty_reason
+
+
+def _baseline_empty_reason(stage: dict) -> str:
+    """Summarize an empty build without exposing provider text or manuscript data."""
+    outcome = stage.get("outcome")
+    counts = stage.get("counts")
+    primary = _character_primary_chunk_coverage(stage)
+    if (
+        outcome == "completed" and primary == "complete"
+        and stage.get("snapshot_bound") is True and stage.get("material_coverage") == "complete"
+        and type(counts.get("pending_candidate_count")) is int and counts["pending_candidate_count"] == 0
+    ):
+        return "no_candidates"
+    if outcome not in ("partial", "degraded", "skipped") and not (
+        outcome == "completed" and (primary == "partial" or stage.get("material_coverage") == "partial")
+    ):
+        return "unknown"
+    reasons = stage.get("reason_counts")
+    if isinstance(reasons, dict):
+        for code, causes in (
+            ("provider_configuration", ("not_configured", "unauthorized", "forbidden")),
+            ("provider_unavailable", ("upstream_5xx", "rate_limit", "connect_timeout", "read_timeout", "transport")),
+        ):
+            if any(type(reasons.get(cause)) is int and reasons[cause] > 0 for cause in causes):
+                return code
+    return "incomplete"
+
+
+def _character_stage_coverage(stage: dict) -> tuple[str, str]:
     outcome = stage.get("outcome")
     if outcome == "completed":
         if stage.get("explanation_coverage") in {"partial", "not_run"}:
@@ -4254,13 +4286,14 @@ def get_character_baseline_status(
             readiness = "not_generated"
         else:
             readiness = "ready"
-        model_coverage, coverage_detail = _character_coverage_for_run(db, latest)
+        model_coverage, coverage_detail, empty_reason = _character_coverage_for_run(db, latest)
         return {
             "total_characters": total_characters,
             "confirmed_trait_count": confirmed_trait_count,
             "pending_candidate_count": pending_candidate_count,
             "baseline_run_id": latest.id if latest else None,
             "baseline_run_status": latest.status if latest else None,
+            "baseline_empty_reason": empty_reason if readiness == "not_generated" else None,
             "model_coverage": model_coverage,
             "coverage_detail": coverage_detail,
             "readiness": readiness,
@@ -4373,7 +4406,7 @@ def list_characters(
             readiness = "not_generated"
         else:
             readiness = "ready"
-        model_coverage, coverage_detail = _character_coverage_for_run(
+        model_coverage, coverage_detail, empty_reason = _character_coverage_for_run(
             db, latest_completed_run
         )
         return {
@@ -4383,6 +4416,7 @@ def list_characters(
             "total": total,
             "has_more": offset + len(items) < total,
             "readiness": readiness,
+            "baseline_empty_reason": empty_reason if readiness == "not_generated" else None,
             "model_coverage": model_coverage,
             "coverage_detail": coverage_detail,
             "source_run_id": (

@@ -10,7 +10,7 @@ import pytest
 from app.character_scope_review import ScopeReviewSourceIdentity
 from app.character_trait_extraction import (
     BASELINE_COVERAGE_SCHEMA_V1,
-    BASELINE_COVERAGE_SYSTEM_PROMPT_V1,
+    BASELINE_COVERAGE_SYSTEM_PROMPT_V3,
     CharacterSignalChunk,
     CharacterSignalExtractor,
     build_baseline_coverage_system_prompt,
@@ -51,7 +51,7 @@ class RecoveryProvider(ReviewingProvider):
         self.audit_calls = 0
 
     def complete(self, system, user):
-        if BASELINE_COVERAGE_SYSTEM_PROMPT_V1 in system:
+        if BASELINE_COVERAGE_SYSTEM_PROMPT_V3 in system:
             self.calls.append((system, user))
             self.audit_calls += 1
             if isinstance(self.audit, Exception):
@@ -110,6 +110,35 @@ def test_no_unrepresented_assertion_does_not_make_an_audit_call():
     assert provider.audit_calls == 0
     assert len(result.pending_candidates) == 1
     assert len(provider.calls) == 2
+
+
+@pytest.mark.parametrize("one_off", [False, True])
+def test_rule_scope_remains_attached_without_promoting_a_one_off_decision(one_off):
+    condition = "值班期间"
+    fact = "林蔚这一次临时拒绝借出钥匙" if one_off else "林蔚一律拒绝借出钥匙"
+    text = f"{condition}，{fact}。"
+    row = dict(_record(text, dimension="behavior_boundary", trait_key="钥匙借用", key_object="钥匙",
+                       stability="situational"), support_id="L1:A2", statement=fact)
+    audit = _audit(
+        [] if one_off else [dict(row, stability="stable")],
+        choices=[
+            {"support_id": "L1:A1", "disposition": "no_additional_trait"},
+            {"support_id": "L1:A2", "disposition": "no_additional_trait" if one_off else "record"},
+        ],
+    )
+    provider = RecoveryProvider([row], audit)
+    result = _extract(text, provider)
+    assert provider.audit_calls == 1 and provider.review_payload is not None
+    if one_off:
+        assert result.pending_candidates == ()
+        assert result.signals[0].stability == "situational"
+    else:
+        candidate, = result.pending_candidates
+        assert candidate.contexts == (condition,)
+        assert candidate.statement == fact and candidate.evidence[0].text == text
+        assert candidate.status == "pending" and candidate.support_refs[0].support_id == "L1:A2"
+        assert provider.review_payload["request"]["proposals"][0]["context"] == condition
+        assert result.diagnostics.baseline_coverage_trace.recovered_support_slots == (2,)
 
 
 @pytest.mark.parametrize(("text", "dimension", "trait_key", "key_object"), [

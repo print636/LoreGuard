@@ -208,6 +208,7 @@ export type CharacterDetail = {
 };
 
 export type CharacterPage = Page<CharacterSummary> & {
+  baseline_empty_reason?: import("../workflow/baselineEmpty").BaselineEmptyReason | null;
   readiness: CharacterReadiness;
   model_coverage: ModelCoverage;
   coverage_detail: string | null;

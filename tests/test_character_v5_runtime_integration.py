@@ -12,8 +12,6 @@ from app.character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from app.character_trait_extraction import (
     CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
     CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
-    CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1,
-    CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1,
     CHARACTER_SIGNAL_SEMANTIC_SCOPE_PROMPT_V5,
     CHARACTER_SIGNAL_SUPPORT_ID_PROMPT_V4,
     CHARACTER_SIGNAL_SYSTEM_PROMPT,
@@ -21,6 +19,7 @@ from app.character_trait_extraction import (
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
     CharacterSignalChunk,
     CharacterSignalExtractor,
+    build_formal_character_signal_system_prompt,
 )
 from app.config import Settings
 from app.provider import OpenAICompatibleProvider, ProviderError, RetryPolicy
@@ -163,12 +162,7 @@ def test_scope_review_accounting_accepts_only_active_formal_and_review_prompts()
         + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
         + CHARACTER_SIGNAL_SEMANTIC_SCOPE_PROMPT_V5
     )
-    formal_review_on = (
-        CHARACTER_SIGNAL_SYSTEM_PROMPT_V5
-        + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
-        + CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1
-        + CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1
-    )
+    formal_review_on = build_formal_character_signal_system_prompt(scope_review_v1=True)
     history = CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
     assert formal_review_on != formal_v5_off
     accounting.complete(formal_review_on, "formal")
@@ -234,10 +228,7 @@ def test_scope_review_extractor_emits_active_formal_prompt_and_original_other_pr
         1, 1, 1,
     ]
     assert [system for system, _ in provider.calls] == [
-        CHARACTER_SIGNAL_SYSTEM_PROMPT_V5
-        + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2
-        + CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1
-        + CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1,
+        build_formal_character_signal_system_prompt(scope_review_v1=True),
         CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
         CHARACTER_SIGNAL_SYSTEM_PROMPT + CHARACTER_SIGNAL_FULL_LINE_PROMPT_V2,
     ]

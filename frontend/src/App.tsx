@@ -674,6 +674,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     [docs],
   );
   const guidedState = useMemo(() => guidedDocumentState(docs), [docs]);
+  const activeBaseline = runs.find(row => row.project_id === project &&
+    (row.review_batch?.mode ?? row.mode) === "baseline_build" && ["queued", "running"].includes(row.status));
 
   function clearNotesView() {
     notesRef.current = {};
@@ -2375,6 +2377,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   providerTone={providerConnection.tone}
                   characterReview={providerConnection.characterReview}
                   onStart={startGuidedReview}
+                  activeBaselineId={activeBaseline?.id}
+                  onOpenRun={(id) => browserNavigate(workspacePath("audit", project, id))}
                   onNavigate={navigateWorkspace}
                 />
               ) : (
@@ -2430,6 +2434,9 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   {progress}% · {message}
                 </strong>
                 <div className="runActions">
+                  {runInfo?.id === run && runInfo?.status === "completed" &&
+                    (runInfo.review_batch?.mode ?? runInfo.mode) === "baseline_build" &&
+                    <button onClick={() => navigateWorkspace("check")}>查看当前角色建档结果</button>}
                   {busy && run && <button onClick={cancel}>取消</button>}
                   {runInfo &&
                     ["failed", "cancelled"].includes(runInfo.status) && (
@@ -2747,6 +2754,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             >
               <CharacterWorkspace
                 projectId={project}
+                onOpenActiveBaseline={activeBaseline ? () => browserNavigate(workspacePath("audit", project, activeBaseline.id)) : undefined}
                 documentCount={activeDocuments.length}
                 completedRunCount={runs.filter((row) => row.status === "completed").length}
                 projectLoading={projectLoading}

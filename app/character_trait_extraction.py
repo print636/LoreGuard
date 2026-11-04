@@ -1378,7 +1378,7 @@ class BaselineSignalTraceV1(BaseModel):
 
 BASELINE_COVERAGE_SCHEMA_V1 = "character-baseline-coverage-v1"
 BASELINE_COVERAGE_PROMPT_VERSION_V1 = "character-baseline-coverage-prompt-v1"
-BASELINE_COVERAGE_PROMPT_VERSION = "character-baseline-coverage-prompt-v2"
+BASELINE_COVERAGE_PROMPT_VERSION = "character-baseline-coverage-prompt-v3"
 
 
 class BaselineCoverageTraceV1(BaseModel):
@@ -1917,8 +1917,19 @@ records 的每一条仍严格遵守主抽取的完整记录、support_id、actor
 """
 
 
+BASELINE_COVERAGE_SYSTEM_PROMPT_V3 = BASELINE_COVERAGE_SYSTEM_PROMPT_V1.replace(
+    "疑问、引语、假设、条件、临时行动",
+    "疑问、引语、假设、尚未发生的条件分支、临时行动",
+)
+
+
+_FORMAL_SCOPED_RULE_PROMPT = """
+正式档案须分清适用场合和稳定程度。作者明确某人每逢特定场合都遵循的准则，可按原义提名 stable 的 value 或 behavior_boundary。例如“值夜时，守灯人一律拒绝外人进塔”与“昨夜，守灯人临时拦下一人”不同。用前置情境原文填 context，support_id 指向写明角色与行为的断言，evidence 保留整行。单次行动、临时命令、传闻或未实现的假设不能据此升格。
+"""
+
+
 def build_formal_character_signal_system_prompt(*, scope_review_v1: bool) -> str:
-    """Return the exact registered V5 primary prompt; its bytes are unchanged."""
+    """Use scoped rule instructions only on the independently reviewed profile route."""
     if type(scope_review_v1) is not bool:
         raise ValueError("formal_scope_review_variant_invalid")
     return (
@@ -1927,6 +1938,7 @@ def build_formal_character_signal_system_prompt(*, scope_review_v1: bool) -> str
         + (
             CHARACTER_SIGNAL_SEMANTIC_SCOPE_REVIEW_PROMPT_V1
             + CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_V1
+            + _FORMAL_SCOPED_RULE_PROMPT
             if scope_review_v1 else CHARACTER_SIGNAL_SEMANTIC_SCOPE_PROMPT_V5
         )
     )
@@ -1957,7 +1969,7 @@ def build_baseline_coverage_system_prompt(primary_system: str) -> str:
         "没有有效补充记录时，records 为空数组；assessments 仍须覆盖全部 missing_support_ids。",
         1,
     )
-    return audit_primary + BASELINE_COVERAGE_SYSTEM_PROMPT_V1
+    return audit_primary + BASELINE_COVERAGE_SYSTEM_PROMPT_V3
 
 
 @dataclass(frozen=True, slots=True)
@@ -3187,19 +3199,21 @@ class CharacterSignalExtractor:
                     still_represented = before & after
                     audited = ((after - before) | coverage_recovery.nontrait_support_ids) - still_represented
                     unresolved = len(support_index.clauses) - len(still_represented) - len(audited)
+                    # A corrected stability level keeps the same signal ID.
+                    recovered = [
+                        signal for signal in clean
+                        if signal.stability in {"stable", "core"} and signal.support_id in after - before
+                    ]
                     coverage_trace = coverage_recovery.trace.model_copy(update={
                         "status": "partial" if unresolved else coverage_recovery.trace.status,
                         "represented_assertions": len(still_represented),
                         "audited_assertions": len(audited),
                         "unresolved_assertions": unresolved,
                         "nontrait_assertions": len(coverage_recovery.nontrait_support_ids - still_represented),
-                        "added_records": sum(signal.id not in {row.id for row in pre_recovery_clean}
-                                             for signal in clean),
+                        "added_records": len(recovered),
                         "recovered_support_slots": tuple(sorted({
                             ordinal for ordinal, clause in enumerate(support_index.clauses, 1)
-                            for signal in clean
-                            if signal.id not in {row.id for row in pre_recovery_clean}
-                            and signal.support_id == clause.support_id
+                            for signal in recovered if signal.support_id == clause.support_id
                         })),
                     })
                     if unresolved and coverage_recovery.reason is None:
@@ -8033,7 +8047,12 @@ def _bind_record(
         polarity=record.polarity,
         stability=stability,
         observation_kind=observation_kind,
-        context=record.context.strip(),
+        context=(
+            _scoped_formal_rule_context(record, evidence_text, v4_clause)
+            if scope_review_v1 and v4_clause is not None
+            and stability == "stable" and dimension in _SCOPED_APPROVED_AXIS_DIMENSIONS
+            else record.context.strip()
+        ),
         key_object=record.key_object.strip(),
         source_kind=chunk.source_kind,
         evidence=evidence,
@@ -8042,6 +8061,23 @@ def _bind_record(
         label_anchor_id=(record.label_anchor_id or None) if v5_binding is not None else None,
         scope_relation=record.scope_relation if v5_binding is not None else None,
     )
+
+
+def _scoped_formal_rule_context(
+    record: _RawCharacterSignal, line: str, clause: SupportClauseV1,
+) -> str:
+    """Keep a prefixed scope with the assertion supplied to independent review."""
+    context = record.context.strip()
+    prefix = line[:clause.start_offset]
+    qualifier = re.search(
+        r"(?:^|[。！？!?；;])\s*([^，,；;：:。！？!?]{1,160}?(?:期间|时候|时|之前|之后|范围内|情况下))\s*[，,]\s*$",
+        prefix,
+    )
+    if not qualifier:
+        return context
+    frozen = qualifier.group(1).strip()
+    # Retain a more specific verbatim context when the model included it.
+    return context if frozen in context and context in line else frozen
 
 
 def _directional_trait_key(value: str) -> bool:

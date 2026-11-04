@@ -59,6 +59,7 @@ const baselineRun = {
 };
 
 type MockState = {
+  emptyReason?: string;
   accountDeepReview?: boolean;
   confirmed?: number;
   pending?: number;
@@ -148,8 +149,12 @@ async function mockApi(page: Page, state: MockState) {
         baseline_run_status: "completed",
         model_coverage: state.coverage ?? "full",
         coverage_detail: null,
-        readiness: "ready",
+        readiness: state.emptyReason ? "not_generated" : "ready",
+        baseline_empty_reason: state.emptyReason,
       };
+    }
+    else if (path === `${root}/characters` && state.emptyReason) {
+      body = { items: [], total: 0, has_more: false, page: 1, page_size: 20, readiness: "not_generated", model_coverage: state.coverage ?? "full", coverage_detail: null, source_run_id: baselineRun.id, baseline_empty_reason: state.emptyReason };
     }
     else {
       state.unexpected.push(`${method} ${path}`);
@@ -159,6 +164,38 @@ async function mockApi(page: Page, state: MockState) {
     await route.fulfill({ status: 200, json: body });
   });
 }
+
+test("空档案区分没有候选和模型中断，核对或重试由作者选择", async ({ page }) => {
+  const state: MockState = { accountDeepReview: true, total: 0, confirmed: 0, pending: 0, emptyReason: "no_candidates", posts: [], unexpected: [] };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/characters`);
+  await expect(page.getByRole("heading", { name: "这次没有提取到可确认的角色设定" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "查看正式资料" })).toBeVisible();
+  await page.getByRole("button", { name: "返回文稿校验", exact: true }).click();
+  const review = page.locator(".guidedReviewLaunch");
+  await expect(review).toContainText("模型已读完本次资料");
+  state.emptyReason = "provider_unavailable";
+  state.coverage = "partial";
+  await page.reload();
+  await expect(review).toContainText("模型服务中途未能完成建档");
+  await expect(review).not.toContainText("模型已读完本次资料");
+  expect(state.posts).toEqual([]);
+  await review.getByRole("button", { name: "用现有资料重新建档" }).click();
+  await expect.poll(() => state.posts.length).toBe(1);
+  expect(state.posts[0]).toMatchObject({ mode: "baseline_build", character_review_enabled: true });
+  expect(state.unexpected).toEqual([]);
+});
+
+test("有建档任务运行时不再次提供付费重试", async ({ page }) => {
+  const state: MockState = { total: 0, confirmed: 0, pending: 0, emptyReason: "incomplete",
+    extraRuns: [{ ...baselineRun, id: "active-baseline", status: "running" }], posts: [], unexpected: [] };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/check`);
+  const review = page.locator(".guidedReviewLaunch");
+  await expect(review.getByRole("button", { name: "查看建档进度" })).toBeVisible();
+  await expect(review.getByRole("button", { name: /重新建|建立角色基线/ })).toHaveCount(0);
+  expect(state.posts).toEqual([]);
+});
 
 test("角色深度审查由作者逐次勾选，提交只绑定本次确认的基线", async ({ page }) => {
   const state: MockState = { accountDeepReview: true, posts: [], unexpected: [] };

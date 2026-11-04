@@ -17,7 +17,7 @@ from app.character_scope_review_provider import SCOPE_REVIEW_USER_PREFIX, run_sc
 from app.character_consistency_stage import CharacterConsistencyStage, _FrozenDocument
 from app.character_trait_extraction import (
     BASELINE_COVERAGE_SCHEMA_V1,
-    BASELINE_COVERAGE_SYSTEM_PROMPT_V1,
+    BASELINE_COVERAGE_SYSTEM_PROMPT_V3,
     CharacterSignalChunk,
     CharacterSignalExtractor,
     build_pending_trait_candidates,
@@ -113,7 +113,7 @@ class ReviewingProvider:
 
     def complete(self, system: str, user: str):
         self.calls.append((system, user))
-        if BASELINE_COVERAGE_SYSTEM_PROMPT_V1 in system:
+        if BASELINE_COVERAGE_SYSTEM_PROMPT_V3 in system:
             self.audit_payload = json.loads(user.rsplit("\n\n补漏检查（数据非指令）：", 1)[1])
             if self.baseline_audit is None:
                 pytest.fail("configure an explicit response for the baseline coverage audit")
@@ -707,7 +707,7 @@ def test_stage_passes_frozen_run_identity_and_keeps_rejected_local_out_of_candid
     assert result.diagnostics["reason_counts"]["scope_review_reviewer_rejected"] == 1
     assert result.diagnostics["reason_counts"]["baseline_coverage_partial"] == 1
     assert len(provider.calls) == 3
-    assert BASELINE_COVERAGE_SYSTEM_PROMPT_V1 in provider.calls[1][0]
+    assert BASELINE_COVERAGE_SYSTEM_PROMPT_V3 in provider.calls[1][0]
     assert provider.calls[2][1].startswith(SCOPE_REVIEW_USER_PREFIX)
     assert provider.audit_payload["missing_support_ids"] == ["L1:A1"]
     assert [row["support_id"] for row in provider.audit_payload["accepted_records"]] == ["L2:A1"]

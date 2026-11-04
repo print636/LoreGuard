@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiJson } from "../../api/client";
 import type { WorkspaceView } from "../../routing";
 import type { ProviderConnectionView } from "../../providerConnection";
+import { baselineEmptyMessage } from "./baselineEmpty";
 import {
   fetchCharacterBaselineStatus,
   hasReadyCharacterBaseline,
@@ -37,6 +38,8 @@ type Props = {
   providerTone: string;
   characterReview?: ProviderConnectionView["characterReview"];
   onStart: (request: AnalysisRunRequest) => Promise<void>;
+  activeBaselineId?: string;
+  onOpenRun: (id: string) => void;
   onNavigate: (view: WorkspaceView) => void;
 };
 
@@ -93,6 +96,8 @@ export default function GuidedReviewLaunch({
   providerTone,
   characterReview,
   onStart,
+  activeBaselineId,
+  onOpenRun,
   onNavigate,
 }: Props) {
   const storageKey = selectionStorageKey(selectionUserId, selectionWorkspaceId, projectId);
@@ -214,7 +219,8 @@ export default function GuidedReviewLaunch({
     : null;
   const deepReviewChecked = deepReviewKey !== null && deepReviewSelection === deepReviewKey;
   useEffect(() => { setDeepReviewSelection(null); }, [deepReviewKey]);
-  const baselineActionDisabled = busy || Boolean(action) || characterReview === "needs_account_model";
+  const baselineActionDisabled = projectLoading || busy || Boolean(activeBaselineId) || Boolean(action) || characterReview === "needs_account_model";
+  const emptyMessage = baselineEmptyMessage(status?.baseline_empty_reason);
   const formalFallbackAvailable = contextsReady && !profilesReady &&
     (!currentBaselineRun || !profilesLoading);
   const draftsReady = (profilesReady || draftOnlyAvailable || formalFallbackAvailable) &&
@@ -402,7 +408,7 @@ export default function GuidedReviewLaunch({
               <div><h3>建立并确认角色基线</h3><p>{formalFallbackAvailable
                 ? "可选增强：AI 从正式资料归纳候选，只有你确认的特征才用于提高角色 OOC 覆盖。其他一致性审查可先进行。"
                 : "AI 从正式资料归纳候选；只有你确认的条目才进入角色档案。"}</p></div>
-              <b>{profilesReady ? "已就绪" : contextsReady ? "可选增强" : "待确认资料"}</b>
+              <b>{activeBaselineId && contextsReady ? "建档中" : profilesReady ? "已就绪" : contextsReady ? "可选增强" : "待确认资料"}</b>
             </header>
             {characterReview === "available" && contextsReady && (
               <p className="stageNotice">建立或重新建立基线会调用你的账户模型。候选设定由你逐条确认。</p>
@@ -412,6 +418,11 @@ export default function GuidedReviewLaunch({
             )}
             {!contextsReady ? (
               <p className="stageNotice">完成上一步后才能开始角色归纳，页面不会绕过未确认上下文。</p>
+            ) : activeBaselineId ? (
+              <div className="stageStatusRecovery">
+                <p className="stageNotice" role="status">角色建档已提交，正在排队或处理资料。完成后可以回来核对设定。</p>
+                <button type="button" onClick={() => onOpenRun(activeBaselineId)}>查看建档进度</button>
+              </div>
             ) : !currentBaselineRun ? (
               <>
                 <p className={`stageNotice ${baselineRunCompleted ? "warning" : ""}`}>
@@ -435,14 +446,27 @@ export default function GuidedReviewLaunch({
                 <p className="stageNotice warning">角色基线汇总并非来自当前冻结资料的完整运行，不能用于解锁新稿审查。</p>
                 <button className="quietPrimary" type="button" disabled={baselineActionDisabled} onClick={() => void startBaseline()}>重新建立角色基线</button>
               </>
+            ) : status.readiness === "not_generated" && confirmedItems === 0 && pendingCandidates === 0 ? (
+              <div className="stageStatusRecovery">
+                <p className="stageNotice warning" role="status"><strong>{emptyMessage.title}。</strong> {emptyMessage.detail}</p>
+                <div className="baselineRecoveryActions">
+                  {status.baseline_empty_reason === "no_candidates" && <button type="button" onClick={() => onNavigate("projects")}>查看正式资料</button>}
+                  {status.baseline_empty_reason === "provider_configuration" && characterReview !== "needs_account_model" && <button type="button" onClick={() => onNavigate("provider")}>检查模型设置</button>}
+                  <button type="button" onClick={() => onOpenRun(currentBaselineRun.id)}>查看本次建档记录</button>
+                  <button className="quietPrimary" type="button" disabled={baselineActionDisabled} onClick={() => void startBaseline()}>用现有资料重新建档</button>
+                </div>
+                <small>重新建档会创建新任务，可能使用模型额度。</small>
+              </div>
             ) : status.model_coverage !== "full" ? (
               <>
-                <p className="stageNotice warning">角色审查覆盖不完整（{status.model_coverage}），不会把已有少量结果当作完整基线。</p>
+                <p className="stageNotice warning">角色审查覆盖不完整。可以先核对已有的设定，之后再用现有资料重新建档。</p>
+                {pendingCandidates > 0 && <button type="button" onClick={() => onNavigate("characters")}>核对待确认候选</button>}
                 <button className="quietPrimary" type="button" disabled={baselineActionDisabled} onClick={() => void startBaseline()}>重新建立角色基线</button>
               </>
             ) : status.readiness !== "ready" ? (
               <>
-                <p className="stageNotice warning">角色基线尚未就绪（{status.readiness}），不会把未知状态当作可用档案。</p>
+                <p className="stageNotice warning">角色基线尚未就绪，可以打开本次建档记录查看处理情况。</p>
+                <button type="button" onClick={() => onOpenRun(currentBaselineRun.id)}>查看本次建档记录</button>
                 <button className="quietPrimary" type="button" disabled={baselineActionDisabled} onClick={() => void startBaseline()}>重新建立角色基线</button>
               </>
             ) : confirmedItems === 0 ? (

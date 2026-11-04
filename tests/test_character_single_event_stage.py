@@ -39,7 +39,7 @@ from app.character_explanation_review import (
 from app.character_trait_extraction import CharacterSignalTarget
 from app.character_trait_extraction import (
     BaselineCoverageTraceV1, CharacterSignalChunk, CharacterSignalDiagnostics,
-    CharacterSignalExtractionResult, CharacterSignalExtractor, BASELINE_COVERAGE_SYSTEM_PROMPT_V1,
+    CharacterSignalExtractionResult, CharacterSignalExtractor, BASELINE_COVERAGE_SYSTEM_PROMPT_V3,
 )
 from app.character_scope_review import ScopeReviewSourceIdentity
 from app.config import Settings
@@ -410,7 +410,7 @@ def test_primary_package_regeneration_still_has_only_one_baseline_audit():
         primary_calls = 0
 
         def complete(self, system, user):
-            if "角色信号抽取器" in system and BASELINE_COVERAGE_SYSTEM_PROMPT_V1 not in system:
+            if "角色信号抽取器" in system and BASELINE_COVERAGE_SYSTEM_PROMPT_V3 not in system:
                 self.primary_calls += 1
                 if self.primary_calls == 1:
                     self.calls.append((system, user))

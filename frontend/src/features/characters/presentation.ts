@@ -1,3 +1,4 @@
+import { baselineEmptyMessage, type BaselineEmptyReason } from "../workflow/baselineEmpty.ts";
 import type {
   CandidateDecision,
   CharacterDimension,
@@ -102,7 +103,7 @@ export function describeCoverage(coverage: ModelCoverage, detail?: string | null
   };
 }
 
-export function describeReadiness(readiness: CharacterReadiness) {
+export function describeReadiness(readiness: CharacterReadiness, emptyReason?: BaselineEmptyReason | null) {
   if (readiness === "no_documents") {
     return {
       title: "还没有可归纳的资料",
@@ -113,18 +114,17 @@ export function describeReadiness(readiness: CharacterReadiness) {
   }
   if (readiness === "no_completed_run") {
     return {
-      title: "还没有完成的校验运行",
-      detail: "角色档案候选来自冻结的分析输入；请先完成一次校验。",
+      title: "还没有建立角色档案",
+      detail: "到文稿校验点击“建立角色基线”。任务完成后，你可以核对提取的设定并决定哪些写入档案。",
       action: "前往文稿校验",
       destination: "check" as const,
     };
   }
   if (readiness === "not_generated") {
     return {
-      title: "本次运行没有生成角色档案",
-      detail: "这不代表资料中没有角色。请检查模型覆盖和文档类型后重新校验。",
-      action: "查看运行审计",
-      destination: "audit" as const,
+      ...baselineEmptyMessage(emptyReason),
+      action: "返回文稿校验",
+      destination: "check" as const,
     };
   }
   return null;

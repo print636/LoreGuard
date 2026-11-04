@@ -485,6 +485,7 @@ def test_character_baseline_status_counts_only_authorized_traits_and_current_pen
             "pending_candidate_count": 0,
             "baseline_run_id": None,
             "baseline_run_status": None,
+            "baseline_empty_reason": None,
             "model_coverage": "unknown",
             "coverage_detail": None,
             "readiness": "no_documents",
@@ -528,6 +529,7 @@ def test_character_baseline_status_counts_only_authorized_traits_and_current_pen
         assert pending.json()["readiness"] == "ready"
         assert pending.json()["baseline_run_id"] == run["id"]
         assert pending.json()["baseline_run_status"] == "completed"
+        assert pending.json()["baseline_empty_reason"] is None
 
         approved = _confirm(client, project_id, own)
         assert approved.status_code == 201, approved.text
@@ -756,6 +758,28 @@ _COMPLETE_PRIMARY_CHUNK_COUNTS = {
     "model_uncalled_chunks": 0,
     "model_incomplete_chunks": 0,
 }
+
+
+@pytest.mark.parametrize(("stage", "expected"), [
+    ({"outcome": "completed", "snapshot_bound": True, "material_coverage": "complete",
+      "counts": {**_COMPLETE_PRIMARY_CHUNK_COUNTS, "pending_candidate_count": 0}}, "no_candidates"),
+    ({"outcome": "degraded", "reason_counts": {"upstream_5xx": 1}}, "provider_unavailable"),
+    ({"outcome": "partial", "reason_counts": {"unauthorized": 1}}, "provider_configuration"),
+    ({"outcome": "partial", "reason_counts": {"upstream_5xx": True, "private text": 1}}, "incomplete"),
+    ({"outcome": "completed", "snapshot_bound": True, "material_coverage": "complete"}, "unknown"),
+])
+def test_empty_baseline_diagnostic_agrees_on_both_author_pages(stage, expected):
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        run = _completed_run(client, project["id"])
+        with SessionLocal() as db:
+            db.add(AnalysisDiagnosticRow(run_id=run["id"], payload={"character_consistency": stage}))
+            db.commit()
+        for route in ("character-baseline-status", "characters"):
+            response = client.get(f"/api/v1/projects/{project['id']}/{route}")
+            assert response.status_code == 200
+            assert response.json()["baseline_empty_reason"] == expected
+            assert "private text" not in response.text
 
 
 @pytest.mark.parametrize(
