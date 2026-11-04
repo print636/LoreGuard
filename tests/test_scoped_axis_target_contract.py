@@ -18,12 +18,14 @@ from app.character_consistency_stage import (
     _verified_target_axis_polarity,
 )
 from app.character_drift import ConfirmedTraitSnapshot
+from app.character_draft_actor_review import target_bound_draft_target_digest
 from app.character_trait_extraction import (
     TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
     CharacterSignal,
     CharacterSignalChunk,
     CharacterSignalTarget,
     _matching_target,
+    _target_bound_review_target,
     _targeted_chunk_prompt,
 )
 from app.domain import EvidenceSpan
@@ -166,6 +168,41 @@ def test_scoped_target_rejects_false_object_even_when_model_reuses_label(dimensi
     assert _signal_matches_target(
         true_object.model_copy(update={"trait_key": "另一种标签"}), target
     ) is True
+
+
+@pytest.mark.parametrize(("raw", "alignment", "axis", "requested_raw", "relation"), [
+    ("negative", "opposite", "positive", "positive", "contradicts"),
+    ("positive", "same", "positive", "negative", "contradicts"),
+    ("positive", "opposite", "negative", "negative", "supports"),
+    ("negative", "same", "negative", "positive", "supports"),
+])
+def test_author_proposition_direction_survives_recall_and_independent_review(
+    raw, alignment, axis, requested_raw, relation,
+):
+    row, _, scope, actor = _entry("behavior_boundary")
+    baseline = ConfirmedTraitSnapshot.model_validate({
+        **_baseline_payload("behavior_boundary"), "polarity": raw,
+        "axis_alignment": alignment, "axis_polarity": axis,
+    })
+    entry = (row, baseline, scope, actor)
+    source = _source()
+    target, = _safe_server_context(source, baselines=[entry]).targets
+    assert target.requested_polarity == requested_raw
+    assert target.requested_proposition_relation == relation
+    prompt = _targeted_chunk_prompt(
+        CharacterSignalChunk("draft", "draft.md", source.document.content, 1, "draft"), (target,),
+    )
+    assert f'"requested_proposition_relation":"{relation}"' in prompt
+    assert _verified_target_axis_polarity(target, source=source, baselines=[entry]) == axis
+    review_target = _target_bound_review_target(target, target_ordinal=1)
+    assert review_target.model_dump()["requested_proposition_relation"] == relation
+    for wrong in (None, "supports" if relation == "contradicts" else "contradicts"):
+        counterfeit = target.model_copy(update={"requested_proposition_relation": wrong})
+        assert _verified_target_axis_polarity(counterfeit, source=source, baselines=[entry]) is None
+        other = _target_bound_review_target(counterfeit, target_ordinal=1)
+        assert target_bound_draft_target_digest(other) != target_bound_draft_target_digest(review_target)
+        if wrong is None:
+            assert "requested_proposition_relation" not in other.model_dump()
 
 
 @pytest.mark.parametrize("dimension", ("value", "behavior_boundary"))

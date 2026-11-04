@@ -60,6 +60,7 @@ const baselineRun = {
 
 type MockState = {
   emptyReason?: string;
+  evidenceChecks?: string[];
   accountDeepReview?: boolean;
   confirmed?: number;
   pending?: number;
@@ -151,10 +152,11 @@ async function mockApi(page: Page, state: MockState) {
         coverage_detail: null,
         readiness: state.emptyReason ? "not_generated" : "ready",
         baseline_empty_reason: state.emptyReason,
+        baseline_evidence_checks: state.evidenceChecks,
       };
     }
     else if (path === `${root}/characters` && state.emptyReason) {
-      body = { items: [], total: 0, has_more: false, page: 1, page_size: 20, readiness: "not_generated", model_coverage: state.coverage ?? "full", coverage_detail: null, source_run_id: baselineRun.id, baseline_empty_reason: state.emptyReason };
+      body = { items: [], total: 0, has_more: false, page: 1, page_size: 20, readiness: "not_generated", model_coverage: state.coverage ?? "full", coverage_detail: null, source_run_id: baselineRun.id, baseline_empty_reason: state.emptyReason, baseline_evidence_checks: state.evidenceChecks };
     }
     else {
       state.unexpected.push(`${method} ${path}`);
@@ -198,17 +200,23 @@ test("有建档任务运行时不再次提供付费重试", async ({ page }) => 
 });
 
 test("角色描述的原文依据未核实时可查看正式资料和本次建档记录", async ({ page }) => {
-  const state: MockState = { confirmed: 0, pending: 0, total: 0, coverage: "partial", emptyReason: "evidence_unconfirmed", posts: [], unexpected: [] };
+  const state: MockState = { confirmed: 0, pending: 0, total: 0, coverage: "partial", emptyReason: "evidence_unconfirmed",
+    evidenceChecks: ["level_supported", "unknown_check", "actor", "actor"], posts: [], unexpected: [] };
+  const details = "本次建档未能核实的内容包括描述的是哪位角色、原文是否足以支持长期设定。";
   await mockApi(page, state);
   await page.goto(`/app/projects/${projectId}/characters`);
   const profile = page.locator(".characterPrerequisite");
   await expect(profile.getByRole("heading")).toHaveText("提取到了角色描述，但还未核实原文依据");
+  await expect(profile).toContainText(details);
+  await expect(profile).not.toContainText(/actor|unknown_check|level_supported/);
   await expect(profile.getByRole("button", { name: "查看正式资料" })).toBeVisible();
   await profile.getByRole("button", { name: "查看本次建档记录" }).click();
   await expect(page).toHaveURL(new RegExp(`/projects/${projectId}/runs/${baselineRun.id}$`));
   await page.goto(`/app/projects/${projectId}/check`);
   const review = page.locator(".guidedReviewLaunch");
   await expect(review).toContainText("提取到了角色描述，但还未核实原文依据");
+  await expect(review).toContainText(details);
+  await expect(review).not.toContainText(/actor|unknown_check|level_supported/);
   await expect(review.getByRole("button", { name: "查看正式资料" })).toBeVisible();
   await expect(review.getByRole("button", { name: "查看本次建档记录" })).toBeVisible();
   await expect(review.getByRole("button", { name: "用现有资料重新建档" })).toBeEnabled();

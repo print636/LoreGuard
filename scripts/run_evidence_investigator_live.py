@@ -373,12 +373,12 @@ _CHARACTER_BASELINE_COVERAGE_KEYS = frozenset({
 })
 # This stdlib-only reader recognizes historical producer identities without
 # importing the live application. V1 recorded the unchanged audit suffix;
-# V2 fixed the output envelope. V3 also distinguishes lasting rules with
-# limited applicability from one-off actions. Keep past receipts readable.
+# Keep published prompt hashes available for verifying historical receipts.
 _CHARACTER_BASELINE_COVERAGE_PROMPT_HASHES = {
     "character-baseline-coverage-prompt-v1": "eb333171dd61e9cdbda16f9be4bafcd187bf61f55e3f206651d7c818085689d9",
     "character-baseline-coverage-prompt-v2": "79ad2973beb91f4d9ea0beeb6d142a1ba464fe64c4dc3370a772384e223d8a80",
     "character-baseline-coverage-prompt-v3": "ffddb518f64f861ae2f6722378631397967b510ffd3e1bdaeb6fcd0c8fa34761",
+    "character-baseline-coverage-prompt-v4": "7aaff8aadd5b178e7881e4782999d5b4d3216b35b53fa352d13cea3b4e12f033",
 }
 
 
@@ -455,7 +455,7 @@ _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS = frozenset({
 })
 _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION = "character-scope-review-v2"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_SCHEMA_VERSION = "character-scope-review-v1"
-_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v5"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v6"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_CONTRACT_RECOVERY_VERSION = "character-scope-review-contract-recovery-v1"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSIONS = frozenset({
     "character-scope-review-prompt-v1",
@@ -531,7 +531,12 @@ _PRIMARY_SCOPED_OBJECT_VERSION = "character-target-bound-draft-review-prompt-v11
 _CHARACTER_SCOPED_CLAIM_KEYS = (
     _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEYS | {_PRIMARY_SCOPED_CLAIM_VERSION_KEY}
 )
-_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS = _CHARACTER_SCOPED_CLAIM_KEYS | {_PRIMARY_SCOPED_OBJECT_VERSION_KEY}
+_CHARACTER_SCOPED_OBJECT_KEYS = _CHARACTER_SCOPED_CLAIM_KEYS | {_PRIMARY_SCOPED_OBJECT_VERSION_KEY}
+_SCOPED_DRAFT_DIRECTION = {
+    "scoped_draft_direction_version": "character-scoped-draft-direction-v1",
+    "scoped_draft_direction_guide_sha256": "c8b6e937642ea73e2a644789b8ca4a4717ffc5522a358693d99224b55841b6c3",
+}
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS = _CHARACTER_SCOPED_OBJECT_KEYS | _SCOPED_DRAFT_DIRECTION.keys()
 _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_SCHEMA_VERSION = (
     "character-target-bound-draft-review-v2"
 )
@@ -3054,7 +3059,7 @@ def _build_summary(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
 def _valid_character_scope_review_limits(
     limits: dict[str, Any], *, allow_legacy_prompt_version: bool = False,
 ) -> bool:
-    """Validate Phase B limits; legacy V1 is for reading old reports only."""
+    """Require the current review contract on live runs; also recognize saved reports on read."""
 
     enabled = limits.get(_CHARACTER_SIGNAL_SCOPE_REVIEW_KEY)
     prompt_version = limits.get("signal_scope_review_prompt_version")
@@ -3069,7 +3074,10 @@ def _valid_character_scope_review_limits(
             == _CHARACTER_SIGNAL_SEMANTIC_SCOPE_VERSION
             and limits.get("signal_scope_review_schema_version")
             == _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION
-            and prompt_version == _CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION
+            and (
+                prompt_version == _CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION
+                or (allow_legacy_prompt_version and prompt_version == "character-scope-review-prompt-v5")
+            )
             and (
                 limits.get("signal_scope_review_contract_recovery_version")
                 == _CHARACTER_SIGNAL_SCOPE_REVIEW_CONTRACT_RECOVERY_VERSION
@@ -3323,6 +3331,7 @@ def _valid_character_target_bound_draft_review_limits(
         _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS,
         _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEYS,
         _CHARACTER_SCOPED_CLAIM_KEYS,
+        _CHARACTER_SCOPED_OBJECT_KEYS,
         _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS,
     ):
         return False
@@ -3343,6 +3352,8 @@ def _valid_character_target_bound_draft_review_limits(
     ):
         if key in present and limits[key] != (version if enabled_v3 else None):
             return False
+    if any(key in present and limits[key] != value for key, value in _SCOPED_DRAFT_DIRECTION.items()):
+        return False
     v2_expected = {
         "target_bound_draft_review_schema_version": (
             _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_SCHEMA_VERSION

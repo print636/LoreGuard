@@ -741,7 +741,7 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     limits = on["character_consistency_limits"]
     assert limits["signal_scope_review_v1"] is True
     assert limits["signal_scope_review_schema_version"] == "character-scope-review-v2"
-    assert limits["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v5"
+    assert limits["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v6"
     assert limits["signal_scope_review_contract_recovery_version"] == "character-scope-review-contract-recovery-v1"
     assert off["character_consistency_limits"]["signal_scope_review_contract_recovery_version"] is None
     assert limits["signal_scope_review_token_reserve"] == 6_000
@@ -759,13 +759,20 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     summary = axis_live._runtime_summary({"runtime_provenance": on})
     assert summary["signal_scope_review_v1"] is True
     assert summary["signal_scope_review_schema_version"] == "character-scope-review-v2"
-    assert summary["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v5"
+    assert summary["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v6"
     assert summary["signal_scope_review_contract_recovery_version"] == "character-scope-review-contract-recovery-v1"
     assert summary["signal_scope_review_limits"][
         "signal_scope_review_provider_max_completion_tokens"
     ] == 1_024
     assert "test-only-secret" not in json.dumps(summary)
     assert "https://" not in json.dumps(summary)
+
+    previous_report = json.loads(json.dumps(on))
+    previous_limits = previous_report["character_consistency_limits"]
+    previous_limits["signal_scope_review_prompt_version"] = "character-scope-review-prompt-v5"
+    assert live_runner._safe_runtime_provenance(previous_report) == previous_report
+    assert axis_live._safe_character_runtime_provenance(previous_report) is not None
+    assert not live_runner._valid_character_scope_review_limits(previous_limits)
 
     for old_prompt_version in (
         "character-scope-review-prompt-v1",

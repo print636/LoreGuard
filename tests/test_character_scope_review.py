@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from app.character_scope_review import (
     MAX_SCOPE_REVIEW_RESPONSE_BYTES,
     SCOPE_REVIEW_SCHEMA_V2,
-    SCOPE_REVIEW_PROMPT_V5,
+    SCOPE_REVIEW_PROMPT_V6,
     ScopeReviewClause,
     ScopeReviewItem,
     ScopeReviewLine,
@@ -163,7 +163,7 @@ def test_proposal_direction_and_persistence_contract(
 
 def test_nonliteral_same_axis_and_situational_middle_clause_are_supported():
     request, identity, frozen_content = _request()
-    assert request.prompt_version == SCOPE_REVIEW_PROMPT_V5
+    assert request.prompt_version == SCOPE_REVIEW_PROMPT_V6
     result = _evaluate(request, identity, frozen_content, _item(request))
     assert result.decisions[0].verdict == "supported"
     assert result.decisions[0].reason == "supported"

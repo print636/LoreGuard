@@ -1,5 +1,5 @@
 import { apiJson, apiJsonIdempotent } from "../../api/client.ts";
-import { baselineEmptyReason } from "../workflow/baselineEmpty.ts";
+import { baselineEmptyReason, baselineEvidenceChecks } from "../workflow/baselineEmpty.ts";
 import type {
   CandidateDecisionIn,
   CandidateDecisionOut,
@@ -775,6 +775,7 @@ function normalizeCharacterPage(
     ...pageFields(source, items.length),
     readiness: readiness(source.readiness),
     baseline_empty_reason: baselineEmptyReason(source.baseline_empty_reason),
+    baseline_evidence_checks: baselineEvidenceChecks(source.baseline_evidence_checks),
     model_coverage: coverage(source.model_coverage),
     coverage_detail: optionalText(source.coverage_detail),
     source_run_id: optionalText(source.source_run_id),

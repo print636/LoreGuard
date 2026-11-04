@@ -24,7 +24,7 @@ from .character_trait_extraction import (
     build_baseline_coverage_system_prompt,
     build_formal_character_signal_system_prompt,
 )
-from .character_scope_review import SCOPE_REVIEW_PROMPT_V5, SCOPE_REVIEW_SCHEMA_V2
+from .character_scope_review import SCOPE_REVIEW_PROMPT_V6, SCOPE_REVIEW_SCHEMA_V2
 from .character_scope_review_provider import SCOPE_REVIEW_CONTRACT_RECOVERY_V1
 from .character_history_semantic_review import (
     HISTORY_REVIEW_PROMPT_V1, HISTORY_REVIEW_SCHEMA_V1,
@@ -32,6 +32,8 @@ from .character_history_semantic_review import (
 )
 from .character_draft_actor_review import (
     DRAFT_ACTOR_CLAUSE_INDEX_V1,
+    SCOPED_DRAFT_DIRECTION_VERSION,
+    SCOPED_DRAFT_DIRECTION_GUIDE,
     DRAFT_ACTOR_REVIEW_BATCH_SCHEMA_V1,
     DRAFT_ACTOR_REVIEW_PROMPT_V1,
     DRAFT_ACTOR_REVIEW_SCHEMA_V1,
@@ -359,7 +361,7 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
                 SCOPE_REVIEW_SCHEMA_V2 if settings.character_signal_scope_review_v1 else None
             ),
             "signal_scope_review_prompt_version": (
-                SCOPE_REVIEW_PROMPT_V5 if settings.character_signal_scope_review_v1 else None
+                SCOPE_REVIEW_PROMPT_V6 if settings.character_signal_scope_review_v1 else None
             ),
             "signal_scope_review_contract_recovery_version": (
                 SCOPE_REVIEW_CONTRACT_RECOVERY_V1
@@ -524,6 +526,9 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "primary_scoped_object_review_prompt_version": (
                 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 if settings.character_target_bound_draft_review_v3 else None
             ),
+            # Fixed capability shared by extraction and verification of author-defined axes.
+            "scoped_draft_direction_version": SCOPED_DRAFT_DIRECTION_VERSION,
+            "scoped_draft_direction_guide_sha256": _fingerprint(SCOPED_DRAFT_DIRECTION_GUIDE),
             "target_bound_draft_review_signal_prompt_version": (
                 TARGET_BOUND_DRAFT_SIGNAL_PROMPT_V3
                 if settings.character_target_bound_draft_review_v3 else (

@@ -220,7 +220,7 @@ export default function GuidedReviewLaunch({
   const deepReviewChecked = deepReviewKey !== null && deepReviewSelection === deepReviewKey;
   useEffect(() => { setDeepReviewSelection(null); }, [deepReviewKey]);
   const baselineActionDisabled = projectLoading || busy || Boolean(activeBaselineId) || Boolean(action) || characterReview === "needs_account_model";
-  const emptyMessage = baselineEmptyMessage(status?.baseline_empty_reason);
+  const emptyMessage = baselineEmptyMessage(status?.baseline_empty_reason, status?.baseline_evidence_checks);
   const formalFallbackAvailable = contextsReady && !profilesReady &&
     (!currentBaselineRun || !profilesLoading);
   const draftsReady = (profilesReady || draftOnlyAvailable || formalFallbackAvailable) &&

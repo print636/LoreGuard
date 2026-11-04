@@ -42,6 +42,7 @@ from .character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11,
+    SCOPED_DRAFT_DIRECTION_GUIDE,
 )
 from .character_scope_review import ScopeReviewSourceIdentity
 from .provider import OpenAICompatibleProvider, ProviderError
@@ -401,6 +402,8 @@ def build_target_bound_draft_review_prompts(
         system = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7
     else:
         system = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT
+    if any(request.target.requested_proposition_relation is not None for request in requests):
+        system += SCOPED_DRAFT_DIRECTION_GUIDE
     return (
         system,
         DRAFT_ACTOR_REVIEW_USER_PREFIX

@@ -237,7 +237,7 @@ export default function CharacterWorkspace({
   // A confirmed trait survives document retirement. A selected character is
   // also a direct detail target, independent of the roster search filter.
   const canBrowseCharacters = Boolean(characterPage?.total || route.characterId);
-  const readinessView = canBrowseCharacters ? null : describeReadiness(readiness, characterPage?.baseline_empty_reason);
+  const readinessView = canBrowseCharacters ? null : describeReadiness(readiness, characterPage?.baseline_empty_reason, characterPage?.baseline_evidence_checks);
   const evidenceRunId = characterPage?.baseline_empty_reason === "evidence_unconfirmed" ? characterPage.source_run_id : null;
 
   function pathFor(next: CharacterRouteState): string {

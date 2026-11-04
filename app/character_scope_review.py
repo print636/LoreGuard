@@ -20,6 +20,7 @@ SCOPE_REVIEW_PROMPT_V1 = "character-scope-review-prompt-v1"
 SCOPE_REVIEW_PROMPT_V2 = "character-scope-review-prompt-v2"
 SCOPE_REVIEW_PROMPT_V4 = "character-scope-review-prompt-v4"
 SCOPE_REVIEW_PROMPT_V5 = "character-scope-review-prompt-v5"
+SCOPE_REVIEW_PROMPT_V6 = "character-scope-review-prompt-v6"
 ASSERTION_INDEX_V1 = "assertion-index-v1"
 MAX_SCOPE_REVIEW_REQUEST_BYTES = 131_072
 MAX_SCOPE_REVIEW_RESPONSE_BYTES = 32_768
@@ -152,7 +153,7 @@ class ScopeReviewProposal(BaseModel):
 
 class ScopeReviewRequest(ScopeReviewSourceIdentity):
     schema_version: Literal["character-scope-review-v2"] = SCOPE_REVIEW_SCHEMA_V2
-    prompt_version: Literal["character-scope-review-prompt-v5"] = SCOPE_REVIEW_PROMPT_V5
+    prompt_version: Literal["character-scope-review-prompt-v6"] = SCOPE_REVIEW_PROMPT_V6
     assertion_index_version: Literal["assertion-index-v1"] = ASSERTION_INDEX_V1
     block_line_start: int = Field(ge=1, le=10_000_000)
     lines: tuple[ScopeReviewLine, ...] = Field(min_length=1, max_length=64)

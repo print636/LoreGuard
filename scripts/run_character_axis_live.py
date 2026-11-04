@@ -68,7 +68,6 @@ from scripts.run_evidence_investigator_live import (
     _CHARACTER_DRAFT_ACTOR_REVIEW_KEYS,
     _valid_character_draft_actor_review_limits,
     _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS,
-    _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS,
     _valid_character_target_bound_draft_review_limits,
     _CHARACTER_OOC_PROTOCOL_KEY,
     _CHARACTER_OOC_DIMENSIONS_KEY,
@@ -878,11 +877,6 @@ def _safe_character_runtime_provenance(value: object) -> dict[str, Any] | None:
         )
         or draft_actor_review_keys not in (
             set(), set(_CHARACTER_DRAFT_ACTOR_REVIEW_KEYS)
-        )
-        or target_bound_draft_review_keys not in (
-            set(),
-            set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS),
-            set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS),
         )
         or explanation_review_keys not in (
             set(),

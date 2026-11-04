@@ -141,6 +141,44 @@ def test_rule_scope_remains_attached_without_promoting_a_one_off_decision(one_of
         assert result.diagnostics.baseline_coverage_trace.recovered_support_slots == (2,)
 
 
+@pytest.mark.parametrize(("context", "review", "relation"), [
+    ("演练当天，主管批准时例外", "supported", "supported"),
+    ("演练日时", "rejected", "contradicted"),
+    ("正式演出日", "rejected", "contradicted"),
+    ("演练期间，主管或值班人员同意时除外", "uncertain", "ambiguous"),
+])
+def test_qualified_boundary_keeps_the_actual_proposal_through_independent_review(
+    context, review, relation,
+):
+    fact = "岑青始终拒绝交出印章"
+    text = f"演练日时，{fact}；除非演练主管许可。"
+    row = dict(
+        _record(text, character="岑青", dimension="behavior_boundary",
+                trait_key="seal_handover", key_object="印章"),
+        statement=fact, support_id="L1:A2", context=context, polarity="negative",
+    )
+    choices = [
+        {"support_id": slot, "disposition": "no_additional_trait"}
+        for slot in ("L1:A1", "L1:A3")
+    ]
+    # Slot values are fixed here. Exercise source binding and admission,
+    # including a valid paraphrase that is not a literal source substring.
+    provider = RecoveryProvider([row], _audit(choices=choices),
+                                [{"verdict": review, "statement_relation": relation}])
+    result = _extract(text, provider)
+    request = provider.review_payload["request"]
+    assert request["lines"][0]["text"] == text
+    assert request["proposals"][0]["context"] == context
+    assert len(provider.calls) == 3
+    if review == "supported":
+        candidate, = result.pending_candidates
+        assert candidate.contexts == (context,)
+        assert candidate.status == "pending" and candidate.evidence[0].text == text
+    else:
+        assert result.pending_candidates == () and result.signals == ()
+        assert result.diagnostics.baseline_coverage_trace.unresolved_assertions == 1
+
+
 @pytest.mark.parametrize(("text", "dimension", "trait_key", "key_object"), [
     ("林蔚的核心性格是沉着。", "core_personality", "composure", ""),
     ("林蔚长期信任顾昭。", "relationship_attitude", "trust_orientation", "顾昭"),

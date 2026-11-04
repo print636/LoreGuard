@@ -209,6 +209,7 @@ export type CharacterDetail = {
 
 export type CharacterPage = Page<CharacterSummary> & {
   baseline_empty_reason?: import("../workflow/baselineEmpty").BaselineEmptyReason | null;
+  baseline_evidence_checks?: import("../workflow/baselineEmpty").BaselineEvidenceCheck[];
   readiness: CharacterReadiness;
   model_coverage: ModelCoverage;
   coverage_detail: string | null;

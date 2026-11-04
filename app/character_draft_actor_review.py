@@ -210,6 +210,15 @@ TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8 = (
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 = "character-target-bound-draft-review-prompt-v9"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10 = "character-target-bound-draft-review-prompt-v10"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 = "character-target-bound-draft-review-prompt-v11"
+SCOPED_DRAFT_DIRECTION_VERSION = "character-scoped-draft-direction-v1"
+SCOPED_DRAFT_DIRECTION_GUIDE = (
+    "\n\n对含 requested_proposition_relation 的目标，requested_polarity 是要返回的原始标签方向；"
+    "作者定义的 axis_positive_proposition 可以与该标签方向相反。判断草稿中的实际行为时，"
+    "以 requested_proposition_relation 指定的关系为准：supports 表示需要正文支持作者正向命题，"
+    "contradicts 表示需要正文与该命题相悖。只有对象、适用条件和事实均得到原文支持，"
+    "且行为与命题的关系符合所请求的关系，才算方向匹配。仅未提及某个行为不等于与命题相悖。"
+    "拿不准时保留不确定；不得把作者命题当作新稿中发生过的事。"
+)
 
 _PROPOSAL_ID = r"^dap_[a-f0-9]{32}$"
 
@@ -1553,6 +1562,15 @@ class TargetBoundDraftReviewTarget(BaseModel):
     axis_positive_proposition_sha256: str | None = Field(
         default=None, pattern=_SHA256
     )
+    requested_proposition_relation: Literal["supports", "contradicts"] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_target(self, handler):
+        data = handler(self)
+        if self.requested_proposition_relation is None:
+            # Preserve the signed identity of historical targets and certificates.
+            data.pop("requested_proposition_relation", None)
+        return data
 
     @model_validator(mode="after")
     def validate_server_target(self) -> "TargetBoundDraftReviewTarget":
@@ -1594,6 +1612,8 @@ class TargetBoundDraftReviewTarget(BaseModel):
                 or self.approved_axis_id is None
             ):
                 raise ValueError("target_bound_scoped_axis_incomplete")
+        if self.requested_proposition_relation is not None and self.axis_positive_proposition is None:
+            raise ValueError("target_bound_proposition_direction_requires_scoped_axis")
         hashed_pairs = (
             (self.approved_axis_definition, self.approved_axis_definition_sha256),
             (

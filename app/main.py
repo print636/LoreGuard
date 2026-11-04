@@ -892,7 +892,7 @@ def _require_character_review_sources(
         or baseline.project_id != project_id
         or baseline.batch_mode != "baseline_build"
         or baseline.status != "completed"
-        or _character_coverage_for_run(db, baseline)[0] != "full"
+        or _character_coverage_for_run(db, baseline)["model_coverage"] != "full"
     ):
         raise HTTPException(409, detail={"code": "character_baseline_not_ready"})
     # Compare frozen identities without loading the baseline's full story text.
@@ -4086,18 +4086,38 @@ def _character_primary_chunk_coverage(stage: dict) -> str:
 
 
 def _character_coverage_for_run(
-    db, run: AnalysisRunRow | None
-) -> tuple[str, str | None, str | None]:
-    if run is None:
-        return "unknown", None, None
-    diagnostic = db.get(AnalysisDiagnosticRow, run.id)
+    db, run: AnalysisRunRow | None, *, empty_roster: bool = False
+) -> dict:
+    diagnostic = db.get(AnalysisDiagnosticRow, run.id) if run is not None else None
     payload = diagnostic.payload if diagnostic and isinstance(diagnostic.payload, dict) else {}
     stage = payload.get("character_consistency")
-    if not isinstance(stage, dict):
-        return "unknown", "该次分析没有可核对的角色一致性执行记录", "unknown"
-    coverage, detail = _character_stage_coverage(stage)
-    empty_reason = _baseline_empty_reason(stage) if run.batch_mode == "baseline_build" else "unknown"
-    return coverage, detail, empty_reason
+    if isinstance(stage, dict):
+        coverage, detail = _character_stage_coverage(stage)
+    else:
+        coverage, detail = "unknown", "该次分析没有可核对的角色一致性执行记录" if run else None
+    result = {"model_coverage": coverage, "coverage_detail": detail, "baseline_empty_reason": None}
+    if not empty_roster or run is None:
+        return result
+    reason = (
+        _baseline_empty_reason(stage)
+        if isinstance(stage, dict) and run.batch_mode == "baseline_build" else "unknown"
+    )
+    result["baseline_empty_reason"] = reason
+    if reason == "evidence_unconfirmed":
+        counts = stage["reason_counts"]
+        rejected = counts["scope_review_reviewer_rejected"]
+        # Only expose validated categories, with no source text or attribution to any one proposal.
+        checks = []
+        for slot in (
+            "actor", "actuality", "statement_relation", "label_relation",
+            "object_relation", "polarity_relation", "level_supported",
+        ):
+            count = counts.get(f"scope_review_negative_{slot}")
+            if type(count) is int and 0 < count <= rejected:
+                checks.append(slot)
+        if checks:
+            result["baseline_evidence_checks"] = checks
+    return result
 
 
 def _baseline_empty_reason(stage: dict) -> str:
@@ -4287,16 +4307,13 @@ def get_character_baseline_status(
             readiness = "not_generated"
         else:
             readiness = "ready"
-        model_coverage, coverage_detail, empty_reason = _character_coverage_for_run(db, latest)
         return {
             "total_characters": total_characters,
             "confirmed_trait_count": confirmed_trait_count,
             "pending_candidate_count": pending_candidate_count,
             "baseline_run_id": latest.id if latest else None,
             "baseline_run_status": latest.status if latest else None,
-            "baseline_empty_reason": empty_reason if readiness == "not_generated" else None,
-            "model_coverage": model_coverage,
-            "coverage_detail": coverage_detail,
+            **_character_coverage_for_run(db, latest, empty_roster=readiness == "not_generated"),
             "readiness": readiness,
         }
 
@@ -4407,9 +4424,6 @@ def list_characters(
             readiness = "not_generated"
         else:
             readiness = "ready"
-        model_coverage, coverage_detail, empty_reason = _character_coverage_for_run(
-            db, latest_completed_run
-        )
         return {
             "items": items,
             "page": page,
@@ -4417,9 +4431,7 @@ def list_characters(
             "total": total,
             "has_more": offset + len(items) < total,
             "readiness": readiness,
-            "baseline_empty_reason": empty_reason if readiness == "not_generated" else None,
-            "model_coverage": model_coverage,
-            "coverage_detail": coverage_detail,
+            **_character_coverage_for_run(db, latest_completed_run, empty_roster=readiness == "not_generated"),
             "source_run_id": (
                 latest_completed_run.id if latest_completed_run else None
             ),

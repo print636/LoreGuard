@@ -42,6 +42,7 @@ from .character_history_semantic_review import (
     segment_history_line,
 )
 from .character_draft_actor_review import (
+    SCOPED_DRAFT_DIRECTION_GUIDE,
     has_object_reference,
     valid_primary_object_grounding,
     DraftActorClauseIndex,
@@ -877,6 +878,7 @@ class CharacterSignalTarget(BaseModel):
     axis_positive_proposition_sha256: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$"
     )
+    requested_proposition_relation: Literal["supports", "contradicts"] | None = None
     existing_evidence_ranges: tuple[tuple[int, int], ...] = Field(
         default=(), max_length=3
     )
@@ -997,7 +999,7 @@ class CharacterSignalTarget(BaseModel):
                 != self.axis_positive_proposition_sha256
             ):
                 raise ValueError("approved scoped target object or scope is invalid")
-        elif any(value is not None for value in scoped_fields):
+        elif self.requested_proposition_relation is not None or any(value is not None for value in scoped_fields):
             raise ValueError("unscoped target has object metadata")
         if any(
             unicodedata.category(character).startswith("C")
@@ -1378,7 +1380,7 @@ class BaselineSignalTraceV1(BaseModel):
 
 BASELINE_COVERAGE_SCHEMA_V1 = "character-baseline-coverage-v1"
 BASELINE_COVERAGE_PROMPT_VERSION_V1 = "character-baseline-coverage-prompt-v1"
-BASELINE_COVERAGE_PROMPT_VERSION = "character-baseline-coverage-prompt-v3"
+BASELINE_COVERAGE_PROMPT_VERSION = "character-baseline-coverage-prompt-v4"
 
 
 class BaselineCoverageTraceV1(BaseModel):
@@ -1924,7 +1926,7 @@ BASELINE_COVERAGE_SYSTEM_PROMPT_V3 = BASELINE_COVERAGE_SYSTEM_PROMPT_V1.replace(
 
 
 _FORMAL_SCOPED_RULE_PROMPT = """
-正式档案须分清适用场合和稳定程度。作者明确某人每逢特定场合都遵循的准则，可按原义提名 stable 的 value 或 behavior_boundary。例如“值夜时，守灯人一律拒绝外人进塔”与“昨夜，守灯人临时拦下一人”不同。用前置情境原文填 context，support_id 指向写明角色与行为的断言，evidence 保留整行。单次行动、临时命令、传闻或未实现的假设不能据此升格。
+每逢特定场合都遵循的准则可为 stable 的 value 或 behavior_boundary；单次行动、临时命令、传闻、假设不表明稳定。support_id 定位角色行为，statement 写该断言，evidence 保留整行。context 补全本条适用的时段、对象限制和例外，可忠实改述，无需重复 statement，勿挪用其他规则的条件。
 """
 
 
@@ -2407,6 +2409,9 @@ class CharacterSignalExtractor:
             chunk,
             system_prompt=(
                 TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
+                + (SCOPED_DRAFT_DIRECTION_GUIDE if any(
+                    target.requested_proposition_relation is not None for target in targets
+                ) else "")
                 + (
                     CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
                     if draft_actor_review_v1 else ""
@@ -5622,6 +5627,7 @@ def _target_bound_review_target(
             "axis_positive_proposition_sha256": (
                 target.axis_positive_proposition_sha256
             ),
+            "requested_proposition_relation": target.requested_proposition_relation,
         },
         strict=True,
     )
@@ -8068,18 +8074,18 @@ def _bind_record(
 def _scoped_formal_rule_context(
     record: _RawCharacterSignal, line: str, clause: SupportClauseV1,
 ) -> str:
-    """Keep a prefixed scope with the assertion supplied to independent review."""
+    """Preserve the proposed scope, falling back to an explicit prefix if omitted."""
     context = record.context.strip()
+    if context:
+        # A noncontiguous paraphrase may contain conditions and exceptions
+        # on both sides of the assertion. The independent reviewer checks it.
+        return context
     prefix = line[:clause.start_offset]
     qualifier = re.search(
         r"(?:^|[。！？!?；;])\s*([^，,；;：:。！？!?]{1,160}?(?:期间|时候|时|之前|之后|范围内|情况下))\s*[，,]\s*$",
         prefix,
     )
-    if not qualifier:
-        return context
-    frozen = qualifier.group(1).strip()
-    # Retain a more specific verbatim context when the model included it.
-    return context if frozen in context and context in line else frozen
+    return qualifier.group(1).strip() if qualifier else ""
 
 
 def _directional_trait_key(value: str) -> bool:
@@ -9770,6 +9776,8 @@ def _targeted_chunk_prompt(
                 {
                     "applicability_scope": target.approved_axis_applicability_scope,
                     "axis_positive_proposition": target.axis_positive_proposition,
+                    **({"requested_proposition_relation": target.requested_proposition_relation}
+                       if target.requested_proposition_relation is not None else {}),
                 }
                 if target.approved_axis_comparison_key is not None
                 else {}

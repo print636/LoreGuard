@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.character_draft_actor_review import (
+    SCOPED_DRAFT_DIRECTION_GUIDE,
     TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V2,
     TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V3,
     TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4,
@@ -450,7 +451,8 @@ def test_v4_source_and_trailing_context_gates_remain_fail_closed():
     assert mismatched.observed_object is None
 
 
-def test_v4_scoped_axis_remains_not_applicable_even_when_key_literal_occurs():
+@pytest.mark.parametrize("relation", (None, "supports"))
+def test_v4_scoped_axis_remains_not_applicable_even_when_key_literal_occurs(relation):
     content = "顾潮明确表示自己拒绝牺牲平民。"
     scope = "战争决策中是否主动牺牲无辜平民"
     proposition = "顾潮拒绝主动牺牲无辜平民"
@@ -474,15 +476,17 @@ def test_v4_scoped_axis_remains_not_applicable_even_when_key_literal_occurs():
             scope.encode("utf-8")
         ).hexdigest(),
         axis_positive_proposition=proposition,
+        requested_proposition_relation=relation,
         axis_positive_proposition_sha256=hashlib.sha256(
             proposition.encode("utf-8")
         ).hexdigest(),
     )
     source, request = _request(content, target=target, suffix="scoped")
-    _, user = build_target_bound_draft_review_prompts((request,))
-    hint = json.loads(user.split("：\n", 1)[1])["windows"][0][
-        "basis_path_hints"
-    ][0]
+    system, user = build_target_bound_draft_review_prompts((request,))
+    window = json.loads(user.split("：\n", 1)[1])["windows"][0]
+    assert (SCOPED_DRAFT_DIRECTION_GUIDE in system) == (relation is not None)
+    assert window["request"]["target"].get("requested_proposition_relation") == relation
+    hint = window["basis_path_hints"][0]
     decision = _evaluate(
         content,
         source,

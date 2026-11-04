@@ -4,6 +4,7 @@ import {
   hasReadyCharacterBaseline,
   normalizeCharacterBaselineStatus,
 } from "../src/features/workflow/baselineStatus.ts";
+import { baselineEmptyMessage } from "../src/features/workflow/baselineEmpty.ts";
 
 function status(overrides = {}) {
   return {
@@ -29,6 +30,17 @@ test("project-wide baseline counts do not inherit the first character page limit
 test("pending candidates warn but do not make confirmed traits authoritative by association", () => {
   assert.equal(hasReadyCharacterBaseline({ id: "run-current" }, status({ pending_candidate_count: 999 })), true);
   assert.equal(hasReadyCharacterBaseline({ id: "run-current" }, status({ confirmed_trait_count: 0 })), false);
+});
+
+test("empty baseline details use only supported checks for this run", () => {
+  const normalized = (checks) => normalizeCharacterBaselineStatus(status({ baseline_evidence_checks: checks })).baseline_evidence_checks;
+  const expected = baselineEmptyMessage("evidence_unconfirmed");
+  for (const checks of [undefined, null, "actor", ["unknown", "__proto__", 4]]) {
+    assert.deepEqual(baselineEmptyMessage("evidence_unconfirmed", normalized(checks)), expected);
+  }
+  const checks = normalized(["object_relation", "actor", "actor", "unknown"]);
+  assert.deepEqual(checks, ["actor", "object_relation"]);
+  assert.deepEqual(baselineEmptyMessage("no_candidates", checks), baselineEmptyMessage("no_candidates"));
 });
 
 test("stale, incomplete, rules-only or unavailable baseline never unlocks review", () => {

@@ -38,7 +38,7 @@ REVIEWER_DECLARATION = "developer_simulated_author_reviewed_frozen_source_axis_a
 REQUIRED_SUPPORT_SEGMENTER_VERSION = "assertion-index-v1"
 REQUIRED_SEMANTIC_SCOPE_VERSION = "semantic-scope-v6"
 REQUIRED_SCOPE_REVIEW_SCHEMA_VERSION = "character-scope-review-v2"
-REQUIRED_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v5"
+REQUIRED_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v6"
 PINNED_SHA256 = {
     "manifest.json": "7fd745c870e6a07284a98b08f650f7655831eca690f4efd1f531b6d1fc126b07",
     "author-plan.json": "a788b6ac60ee355278a97d7c7a9fa508f182241abda86228bb178220b84624f0",

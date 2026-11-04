@@ -42,7 +42,7 @@ def _runtime(**overrides):
 
 
 @pytest.mark.parametrize(("scope_review", "expected_sha"), [
-    (True, "8b888f5fc1e32abe37d0c57a6c03904bb62ec179839e793327a1bee57d373548"),
+    (True, "c215de11e63451a8e7262c1b5203fdf28be8b1de47ec0ff14c221a13be54d52a"),
     (False, "c36c245f7ed058566aea383dad89c9753775c30f61b423b1d7351db47b499b8f"),
 ])
 def test_active_primary_and_historical_v1_suffix_are_fingerprinted(scope_review, expected_sha):
@@ -90,7 +90,7 @@ def test_active_runtime_fingerprints_complete_scoped_rule_prompt():
     actual = build_baseline_coverage_system_prompt(
         build_formal_character_signal_system_prompt(scope_review_v1=True)
     )
-    assert BASELINE_COVERAGE_PROMPT_VERSION == "character-baseline-coverage-prompt-v3"
+    assert BASELINE_COVERAGE_PROMPT_VERSION == "character-baseline-coverage-prompt-v4"
     assert limits["baseline_coverage_recovery_prompt_version"] == BASELINE_COVERAGE_PROMPT_VERSION
     assert limits["baseline_coverage_recovery_schema_version"] == BASELINE_COVERAGE_SCHEMA_V1
     assert limits["baseline_coverage_recovery_prompt_sha256"] == _sha(actual)
@@ -102,6 +102,7 @@ def test_active_runtime_fingerprints_complete_scoped_rule_prompt():
 @pytest.mark.parametrize(("version", "digest"), [
     (BASELINE_COVERAGE_PROMPT_VERSION_V1, _sha(BASELINE_COVERAGE_SYSTEM_PROMPT_V1)),
     ("character-baseline-coverage-prompt-v2", "79ad2973beb91f4d9ea0beeb6d142a1ba464fe64c4dc3370a772384e223d8a80"),
+    ("character-baseline-coverage-prompt-v3", "ffddb518f64f861ae2f6722378631397967b510ffd3e1bdaeb6fcd0c8fa34761"),
 ])
 def test_known_historical_identity_is_still_readable_without_relabelling(version, digest):
     historical = _runtime()

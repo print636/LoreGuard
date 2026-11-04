@@ -347,7 +347,7 @@ def test_alpha_fixture_is_developer_visible_and_covers_bounded_major_scenarios()
         "character-scope-review-v2"
     )
     assert limits["signal_scope_review_prompt_version"] == (
-        "character-scope-review-prompt-v5"
+        "character-scope-review-prompt-v6"
     )
 
 
@@ -1200,7 +1200,7 @@ def test_alpha_rejects_api_worker_runtime_provenance_mismatch(mismatch):
         limits["explanation_max_windows_per_case"] -= 1
     else:
         limits["target_bound_draft_review_v3"] = False
-        for field in live_acceptance._TARGET_BOUND_DRAFT_REVIEW_V3:
+        for field in live_acceptance._TARGET_BOUND_DRAFT_REVIEW_V3.keys() - live_acceptance._SCOPED_DRAFT_DIRECTION.keys():
             limits[field] = None
     assert live_acceptance._safe_runtime_provenance(worker_provenance) is not None
     trials = [_passing_trial(1, runtime_provenance=worker_provenance)]

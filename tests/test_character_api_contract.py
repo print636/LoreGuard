@@ -783,7 +783,34 @@ def test_empty_baseline_diagnostic_agrees_on_both_author_pages(stage, expected):
             response = client.get(f"/api/v1/projects/{project['id']}/{route}")
             assert response.status_code == 200
             assert response.json()["baseline_empty_reason"] == expected
+            assert "baseline_evidence_checks" not in response.json()
             assert "private text" not in response.text
+
+
+def test_empty_baseline_only_shows_recorded_rejection_categories_until_candidates_exist():
+    with TestClient(app) as client:
+        project, _ = _project_and_document(client)
+        project_id = project["id"]
+        run = _completed_run(client, project_id)
+        with SessionLocal() as db:
+            db.add(AnalysisDiagnosticRow(run_id=run["id"], payload={"character_consistency": {
+                "outcome": "partial", "reason_counts": {
+                    "scope_review_reviewer_rejected": 2, "scope_review_negative_level_supported": 1,
+                    "scope_review_negative_object_relation": 2, "scope_review_negative_actor": True,
+                    "scope_review_negative_actuality": 3, "scope_review_negative_private text": 1,
+                },
+            }}))
+            db.commit()
+        for route in ("character-baseline-status", "characters"):
+            response = client.get(f"/api/v1/projects/{project_id}/{route}")
+            assert response.status_code == 200
+            assert response.json()["baseline_evidence_checks"] == ["object_relation", "level_supported"]
+            assert "private text" not in response.text
+        _candidate(project_id, run["id"])
+        for route in ("character-baseline-status", "characters"):
+            result = client.get(f"/api/v1/projects/{project_id}/{route}").json()
+            assert result["baseline_empty_reason"] is None
+            assert "baseline_evidence_checks" not in result
 
 
 @pytest.mark.parametrize(

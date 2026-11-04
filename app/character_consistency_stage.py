@@ -3529,6 +3529,9 @@ def _signal_matches_target(
     )
 
 
+_REVERSE_PROPOSITION_RELATION = {"positive": "contradicts", "negative": "supports"}
+
+
 def _verified_target_axis_polarity(
     target: CharacterSignalTarget,
     *,
@@ -3580,7 +3583,14 @@ def _verified_target_axis_polarity(
         ):
             continue
         directions.add(baseline.axis_polarity)
-    return next(iter(directions)) if len(directions) == 1 else None
+    if len(directions) != 1:
+        return None
+    direction = directions.pop()
+    if target.approved_axis_comparison_key is not None and (
+        target.requested_proposition_relation != _REVERSE_PROPOSITION_RELATION[direction]
+    ):
+        return None
+    return direction
 
 
 def _trusted_axis_binding(
@@ -4123,6 +4133,7 @@ def _safe_server_context(
                     baseline.approved_axis_applicability_scope_sha256
                 ),
                 "axis_positive_proposition": baseline.axis_positive_proposition,
+                "requested_proposition_relation": _REVERSE_PROPOSITION_RELATION[baseline.axis_polarity],
                 "axis_positive_proposition_sha256": (
                     baseline.axis_positive_proposition_sha256
                 ),

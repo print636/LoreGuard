@@ -38,6 +38,7 @@ from app.character_traits import (
     _validated_comparison_key,
 )
 from scripts.run_evidence_investigator_live import (
+    _SCOPED_DRAFT_DIRECTION,
     _local_service_artifact_sha256,
     _safe_runtime_provenance as _safe_evidence_runtime_provenance,
 )
@@ -84,7 +85,7 @@ _ALPHA_FORMAL_SUPPORT_BINDING_IDENTITY = {
     "signal_semantic_scope_version": "semantic-scope-v6",
     "signal_scope_review_v1": True,
     "signal_scope_review_schema_version": "character-scope-review-v2",
-    "signal_scope_review_prompt_version": "character-scope-review-prompt-v5",
+    "signal_scope_review_prompt_version": "character-scope-review-prompt-v6",
     "signal_scope_review_contract_recovery_version": "character-scope-review-contract-recovery-v1",
 }
 _ALPHA_EXPLANATION_REVIEW_IDENTITY = {
@@ -122,6 +123,7 @@ _AUTHOR_AXIS_PLAN_FIELDS = frozenset({
     "positive_proposition", "applicability_scope", "axis_alignment",
 })
 _TARGET_BOUND_DRAFT_REVIEW_V2 = {
+    **_SCOPED_DRAFT_DIRECTION,
     "target_bound_draft_review_schema_version": (
         "character-target-bound-draft-review-v2"
     ),
@@ -139,6 +141,7 @@ _TARGET_BOUND_DRAFT_REVIEW_V2 = {
     ),
 }
 _TARGET_BOUND_DRAFT_REVIEW_V3 = {
+    **_SCOPED_DRAFT_DIRECTION,
     "target_bound_draft_review_schema_version": (
         "character-target-bound-draft-review-v4"
     ),

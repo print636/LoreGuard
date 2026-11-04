@@ -1,4 +1,4 @@
-import { baselineEmptyMessage, type BaselineEmptyReason } from "../workflow/baselineEmpty.ts";
+import { baselineEmptyMessage, type BaselineEmptyReason, type BaselineEvidenceCheck } from "../workflow/baselineEmpty.ts";
 import type {
   CandidateDecision,
   CharacterDimension,
@@ -103,7 +103,7 @@ export function describeCoverage(coverage: ModelCoverage, detail?: string | null
   };
 }
 
-export function describeReadiness(readiness: CharacterReadiness, emptyReason?: BaselineEmptyReason | null) {
+export function describeReadiness(readiness: CharacterReadiness, emptyReason?: BaselineEmptyReason | null, checks?: BaselineEvidenceCheck[]) {
   if (readiness === "no_documents") {
     return {
       title: "还没有可归纳的资料",
@@ -122,7 +122,7 @@ export function describeReadiness(readiness: CharacterReadiness, emptyReason?: B
   }
   if (readiness === "not_generated") {
     return {
-      ...baselineEmptyMessage(emptyReason),
+      ...baselineEmptyMessage(emptyReason, checks),
       action: "返回文稿校验",
       destination: "check" as const,
     };

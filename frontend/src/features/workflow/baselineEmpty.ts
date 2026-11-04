@@ -27,10 +27,33 @@ const reasons = {
 
 export type BaselineEmptyReason = keyof typeof reasons;
 
+const evidenceChecks = {
+  actor: "描述的是哪位角色",
+  actuality: "这件事在故事中是否属实",
+  statement_relation: "归纳的内容是否符合原意",
+  label_relation: "归纳的角色特征是否与原文相符",
+  object_relation: "描述涉及的对象是否一致",
+  polarity_relation: "归纳的倾向是否与原意一致",
+  level_supported: "原文是否足以支持长期设定",
+};
+
+export type BaselineEvidenceCheck = keyof typeof evidenceChecks;
+
+export function baselineEvidenceChecks(value: unknown): BaselineEvidenceCheck[] {
+  if (!Array.isArray(value)) return [];
+  return (Object.keys(evidenceChecks) as BaselineEvidenceCheck[]).filter(check => value.includes(check));
+}
+
 export function baselineEmptyReason(value: unknown): BaselineEmptyReason | null {
   return typeof value === "string" && Object.hasOwn(reasons, value) ? value as BaselineEmptyReason : null;
 }
 
-export function baselineEmptyMessage(value: BaselineEmptyReason | null | undefined) {
+export function baselineEmptyMessage(value: BaselineEmptyReason | null | undefined, checks: BaselineEvidenceCheck[] = []) {
+  if (value === "evidence_unconfirmed" && checks.length) {
+    return {
+      title: reasons[value].title,
+      detail: `本次建档未能核实的内容包括${checks.map(check => evidenceChecks[check]).join("、")}。可以打开正式资料对照原文，也可以查看本次建档记录。`,
+    };
+  }
   return reasons[value ?? "unknown"];
 }

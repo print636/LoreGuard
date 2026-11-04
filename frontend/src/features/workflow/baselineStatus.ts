@@ -1,5 +1,5 @@
 import { apiJson } from "../../api/client.ts";
-import { baselineEmptyReason, type BaselineEmptyReason } from "./baselineEmpty.ts";
+import { baselineEmptyReason, baselineEvidenceChecks, type BaselineEmptyReason, type BaselineEvidenceCheck } from "./baselineEmpty.ts";
 import type { BaselineRunSummary } from "./guidedReview.ts";
 
 export type CharacterBaselineStatus = {
@@ -11,6 +11,7 @@ export type CharacterBaselineStatus = {
   model_coverage: "full" | "partial" | "rules_only" | "unknown";
   coverage_detail: string | null;
   baseline_empty_reason?: BaselineEmptyReason | null;
+  baseline_evidence_checks?: BaselineEvidenceCheck[];
   readiness: "ready" | "no_documents" | "no_completed_run" | "not_generated";
 };
 
@@ -40,7 +41,11 @@ export function normalizeCharacterBaselineStatus(value: unknown): CharacterBasel
   ) {
     throw new TypeError("角色基线汇总格式不完整，请重试读取；未知状态不会解锁新稿审查。");
   }
-  return { ...source as CharacterBaselineStatus, baseline_empty_reason: baselineEmptyReason(source.baseline_empty_reason) };
+  return {
+    ...source as CharacterBaselineStatus,
+    baseline_empty_reason: baselineEmptyReason(source.baseline_empty_reason),
+    baseline_evidence_checks: baselineEvidenceChecks(source.baseline_evidence_checks),
+  };
 }
 
 export async function fetchCharacterBaselineStatus(
