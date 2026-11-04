@@ -44,7 +44,7 @@ def test_v3_runtime_identity_round_trips_strict_consumer():
         for field, expected in _TARGET_BOUND_DRAFT_REVIEW_V3.items()
     )
     assert limits["target_bound_draft_review_prompt_version"] == (
-        "character-target-bound-draft-review-prompt-v8"
+        "character-target-bound-draft-review-prompt-v9"
     )
     assert _target_bound_semantic_v3_ready(limits)
     assert _safe_runtime_provenance(provenance) == provenance

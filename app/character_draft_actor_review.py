@@ -207,6 +207,7 @@ TARGET_BOUND_DRAFT_REVIEW_PROMPT_V7 = (
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8 = (
     "character-target-bound-draft-review-prompt-v8"
 )
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 = "character-target-bound-draft-review-prompt-v9"
 
 _PROPOSAL_ID = r"^dap_[a-f0-9]{32}$"
 
@@ -1632,6 +1633,7 @@ class TargetBoundDraftProposal(BaseModel):
         "explicit_named_subject",
         "narrator_explicit_attribution",
         "adjacent_zero_subject",
+        "named_direct_speech",
     ]
     target_digest: str = Field(pattern=_TARGET_DIGEST)
     canonical_statement: str = Field(min_length=2, max_length=300)
@@ -1659,6 +1661,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
         "character-target-bound-draft-review-prompt-v6",
         "character-target-bound-draft-review-prompt-v7",
         "character-target-bound-draft-review-prompt-v8",
+        "character-target-bound-draft-review-prompt-v9",
     ] = (
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
     )
@@ -1682,7 +1685,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
             or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3
             and self.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V7
             or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
-            and self.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8
+            and self.prompt_version not in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9}
         ):
             raise ValueError("target_bound_protocol_identity_invalid")
         if self.target_digest != target_bound_draft_target_digest(self.target):
@@ -1727,7 +1730,14 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
                     or anchor.support_id == fact.support_id
                     or not proposal.line_start <= anchor.line_number <= proposal.line_end
                 )
-                or proposal.binding_kind != "adjacent_zero_subject"
+                or proposal.binding_kind == "named_direct_speech"
+                and (
+                    self.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9
+                    or self.target.dimension != "speech_pattern" or anchor is None
+                    or proposal.line_start != proposal.line_end or anchor.line_number != fact.line_number
+                    or anchor.end_offset >= fact.start_offset
+                )
+                or proposal.binding_kind not in {"adjacent_zero_subject", "named_direct_speech"}
                 and proposal.actor_anchor_id is not None
                 or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2
                 and proposal.binding_kind == "explicit_named_subject"
@@ -2013,6 +2023,62 @@ def _target_bound_proposal_id(
     return f"tdp_{hashlib.sha256(payload).hexdigest()[:32]}"
 
 
+_DIRECT_SPEECH_VERBS = ("说", "说道", "回答", "答道", "问道")
+_SPEECH_FRAME_VETO = re.compile(r"台本|剧本|朗读|复述|转述|代读|假设|假如|设想|如果|并未开口|并非本人|冒充|配音")
+
+
+def _speech_context_bounds(frozen_content: str, line_number: int) -> tuple[int, int]:
+    lines = frozen_content.splitlines()
+    start = line_number - 1 if line_number > 1 and lines[line_number - 2].strip() else line_number
+    end = line_number + 1 if line_number < len(lines) and lines[line_number].strip() else line_number
+    return start, end
+
+
+def _named_direct_speech(
+    index: DraftActorClauseIndex, target: TargetBoundDraftReviewTarget, frozen_content: str,
+) -> TargetBoundDraftProposal | None:
+    """Whitelist an attributed utterance. Its quoted proposition is never an action or belief."""
+    if target.dimension != "speech_pattern" or len(index.lines) != 1:
+        return None
+    line = index.lines[0]
+    if len(line.clauses) != 2 or len(line.text.strip()) > 300:
+        return None
+    speaker, words = line.clauses
+    if not any(speaker.text == actor + verb for actor in _target_actor_literals(target)
+               for verb in _DIRECT_SPEECH_VERBS):
+        return None
+    if (line.text[:speaker.start_offset].strip()
+            or line.text[speaker.end_offset:words.start_offset].strip() not in {"：", ":"}
+            or line.text[words.end_offset:].strip() not in {"", "。", "."}):
+        return None
+    quote = words.text
+    if (len(quote) < 3 or _OPEN_QUOTES.get(quote[0]) != quote[-1]
+            or not any(c.isalnum() for c in quote[1:-1])
+            or any(c in _QUOTE_MARKS or c == "'" for c in quote[1:-1])):
+        return None
+    # Direct words in a staged, hypothetical or relayed scene are not firsthand
+    # samples. The reviewer also sees both actual neighboring lines, including
+    # uncertainty and corrections; they do not become the quoted evidence.
+    start, end = _speech_context_bounds(frozen_content, line.line_number)
+    # Exclude inadmissible new windows here so one malformed neighbor cannot
+    # turn an otherwise valid multi-window review batch into a failed request.
+    if any(len(text) > MAX_DRAFT_ACTOR_EVIDENCE_CHARS for text in frozen_content.splitlines()[start - 1:end]):
+        return None
+    try:
+        context = _build_draft_actor_review_lines(frozen_content, index.source, review_line_start=start, review_line_end=end)
+    except ValueError:
+        return None
+    if any(_TARGET_UNSAFE_REALITY.search(row.text) or _TARGET_NON_FACTUAL.search(row.text)
+           or _SPEECH_FRAME_VETO.search(row.text) for row in context if row.line_number != line.line_number):
+        return None
+    return TargetBoundDraftProposal(
+        source_sha256=index.source.content_sha256, target_digest=target_bound_draft_target_digest(target),
+        line_start=line.line_number, line_end=line.line_number, evidence=line.text,
+        fact_clause_id=words.support_id, actor_anchor_id=speaker.support_id,
+        binding_kind="named_direct_speech", canonical_statement=line.text.strip(),
+    )
+
+
 def build_target_bound_draft_proposals(
     frozen_content: str,
     source: ScopeReviewSourceIdentity,
@@ -2021,6 +2087,7 @@ def build_target_bound_draft_proposals(
     line_start: int,
     line_end: int,
     protocol_version: Literal["v2", "v3", "v4"] = "v2",
+    allow_named_speech: bool = False,
 ) -> tuple[DraftActorClauseIndex, tuple[TargetBoundDraftProposal, ...]]:
     """Create bounded structural leads; this function never certifies semantics."""
 
@@ -2037,6 +2104,9 @@ def build_target_bound_draft_proposals(
     ):
         return index, ()
     evidence = _exact_evidence(frozen_content, line_start, line_end)
+    if allow_named_speech and protocol_version == "v4" and any(mark in evidence for mark in _QUOTE_MARKS):
+        speech = _named_direct_speech(index, target, frozen_content)
+        return index, (speech,) if speech is not None else ()
     if (
         any(mark in evidence for mark in _QUOTE_MARKS)
         or _BRANCH.search(evidence)
@@ -2138,7 +2208,7 @@ def target_bound_draft_review_batch_digest(
     digests = tuple(target_bound_draft_review_request_digest(item) for item in requests)
     if (
         len(set(digests)) != len(digests)
-        or len({request.schema_version for request in requests}) != 1
+        or len({(request.schema_version, request.prompt_version) for request in requests}) != 1
         or sum(len(request.proposals) for request in requests)
         > MAX_DRAFT_ACTOR_REVIEW_ITEMS
     ):
@@ -2172,6 +2242,7 @@ def build_target_bound_draft_review_request(
     frozen_content: str,
     expected_source: ScopeReviewSourceIdentity,
     protocol_version: Literal["v2", "v3", "v4"] = "v2",
+    allow_named_speech: bool = False,
 ) -> TargetBoundDraftReviewRequest:
     if (
         not isinstance(index, DraftActorClauseIndex)
@@ -2188,6 +2259,7 @@ def build_target_bound_draft_review_request(
         line_start=index.line_start,
         line_end=index.line_end,
         protocol_version=protocol_version,
+        allow_named_speech=allow_named_speech,
     )
     requested = {
         json.dumps(
@@ -2221,10 +2293,13 @@ def build_target_bound_draft_review_request(
         line_start=index.line_start,
         proposal_line_end=index.line_end,
     )
+    review_start = index.line_start
+    if any(p.binding_kind == "named_direct_speech" for p in review_proposals):
+        review_start, review_end = _speech_context_bounds(frozen_content, index.line_start)
     lines = _build_draft_actor_review_lines(
         frozen_content,
         expected_source,
-        review_line_start=index.line_start,
+        review_line_start=review_start,
         review_line_end=review_end,
     )
     return TargetBoundDraftReviewRequest(
@@ -2239,7 +2314,7 @@ def build_target_bound_draft_review_request(
             )
         ),
         prompt_version=(
-            TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8
+            (TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 if allow_named_speech else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8)
             if protocol_version == "v4"
             else (
                 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V7
@@ -2249,7 +2324,7 @@ def build_target_bound_draft_review_request(
         ),
         target=target,
         target_digest=target_bound_draft_target_digest(target),
-        review_line_start=index.line_start,
+        review_line_start=review_start,
         review_line_end=review_end,
         lines=lines,
         proposals=review_proposals,
@@ -2282,6 +2357,7 @@ def verify_target_bound_draft_review_source(
             request.target,
             line_start=line_start,
             line_end=line_end,
+            allow_named_speech=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
             protocol_version=(
                 "v4"
                 if request.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
@@ -2306,6 +2382,7 @@ def verify_target_bound_draft_review_source(
             ),
             frozen_content=frozen_content,
             expected_source=expected_source,
+            allow_named_speech=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
             protocol_version=(
                 "v4"
                 if request.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
@@ -2375,7 +2452,9 @@ def _target_bound_supported_conflicts(
         conflicts.append("polarity_relation")
     if item.correction_relation != "none":
         conflicts.append("correction_relation")
-    if not item.observation_kind:
+    if not item.observation_kind or (
+        proposal.binding_kind == "named_direct_speech" and item.observation_kind != "speech_sample"
+    ):
         conflicts.append("observation_kind")
     if semantic_protocol:
         object_fields_present = {

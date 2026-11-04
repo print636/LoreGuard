@@ -11,6 +11,7 @@ from app.character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V3,
     TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
     TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2,
     TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3,
     TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
@@ -22,9 +23,11 @@ from app.character_draft_actor_review import (
     required_target_bound_draft_basis_ids,
     target_bound_draft_review_batch_digest,
     target_bound_draft_review_request_digest,
+    verify_target_bound_draft_review_source,
 )
 from app.character_draft_actor_review_provider import (
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
     TargetBoundDraftReviewBatchEntry,
     build_target_bound_draft_review_prompts,
     run_target_bound_draft_review,
@@ -154,6 +157,93 @@ def _evaluate(content, source, request, **item_updates):
         expected_source=source,
         frozen_content=content,
     )
+
+
+def _speech_target():
+    return _target(dimension="speech_pattern", trait_key="directness", key_object="",
+                   comparison_key="speech_pattern:directness", baseline_hint="余霁通常直言不讳")
+
+
+def test_v9_named_speech_is_one_attributed_utterance_with_a_frozen_context_window():
+    quote = "余霁说：“您说得都对，怎么定都好。”"
+    content = f"会上有人问余霁是否赞成。\n{quote}\n录音没有保存语气，无法分清是同意还是反问。"
+    source, target = _source(content), _speech_target()
+    kwargs = dict(line_start=2, line_end=2, protocol_version="v4")
+    _, historical = build_target_bound_draft_proposals(content, source, target, **kwargs)
+    assert historical == ()
+    index, proposals = build_target_bound_draft_proposals(content, source, target, **kwargs, allow_named_speech=True)
+    proposal, = proposals
+    assert (proposal.binding_kind, proposal.actor_anchor_id, proposal.fact_clause_id) == ("named_direct_speech", "L2:A1", "L2:A2")
+    assert proposal.canonical_statement == proposal.evidence == quote
+    request = build_target_bound_draft_review_request(index, target, proposals, frozen_content=content,
+                                                      expected_source=source, protocol_version="v4", allow_named_speech=True)
+    assert request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9
+    assert [line.line_number for line in request.lines] == [1, 2, 3]
+    assert verify_target_bound_draft_review_source(request, source, frozen_content=content)
+    legacy = request.model_copy(update={"prompt_version": TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8})
+    assert not verify_target_bound_draft_review_source(legacy, source, frozen_content=content)
+    assert not verify_target_bound_draft_review_source(request, source, frozen_content=content.replace("没有", "已经"))
+    system, _ = build_target_bound_draft_review_prompts((request,))
+    assert system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9 and "确实说出" in system
+    opts = {"object_relation": "not_applicable", "observation_kind": "speech_sample"}
+    assert _evaluate(content, source, request, **opts).decisions[0].verdict == "supported"
+    for change in ({"observation_kind": "action"}, {"actor": "other"}, {"polarity_relation": "ambiguous"},
+                   {"actuality": "reported"}, {"basis_ids": ["L2:A2"]}, {"correction_relation": "corrected"}):
+        assert _evaluate(content, source, request, **(opts | change)).decisions[0].verdict != "supported"
+    assert _evaluate(content, source, request, **opts, verdict="uncertain").decisions[0].verdict == "uncertain"
+
+
+@pytest.mark.parametrize(("content", "line"), [
+    ("路人对余霁说：“钥匙是我拿的。”", 1),
+    ("余霁和路人说：“钥匙是我拿的。”", 1),
+    ("余霁转述：“钥匙是我拿的。”", 1),
+    ("如果余霁说：“钥匙是我拿的。”", 1),
+    ("余霁说：“她说‘钥匙是我拿的’。”", 1),
+    ("余霁说：“是我。”另一人答道：“不是。”", 1),
+    ("台词排练开始。\n余霁说：“钥匙是我拿的。”", 2),
+    ("余霁说：“钥匙是我拿的。”\n上一段只是幻觉。", 1),
+    ("主持人提到：“\n余霁说：“钥匙是我拿的。”", 2),
+    ("余霁说：“钥匙是我拿的。”\n" + "界" * 2001, 1),
+])
+def test_v9_does_not_admit_joint_relayed_staged_or_nested_quotes(content, line):
+    _, proposals = build_target_bound_draft_proposals(content, _source(content), _speech_target(),
+                            line_start=line, line_end=line, protocol_version="v4", allow_named_speech=True)
+    assert not proposals
+
+
+def test_v9_words_about_someone_elses_action_cannot_certify_an_action_target():
+    content = "余霁答道：「周岚把名册烧了。」"
+    kw = dict(line_start=1, line_end=1, protocol_version="v4", allow_named_speech=True)
+    _, speech = build_target_bound_draft_proposals(content, _source(content), _speech_target(), **kw)
+    assert [p.canonical_statement for p in speech] == [content]
+    _, non_speech = build_target_bound_draft_proposals(content, _source(content), _target(), **kw)
+    assert not non_speech
+
+
+def test_v9_clean_empty_generation_admits_only_the_verified_temporary_speech_sample():
+    from app.character_draft_actor_review import TargetBoundDraftReviewRequest
+    from tests.test_character_target_bound_draft_review_v3 import _extract, _signal_target
+
+    class SpeechReview:
+        def complete(self, system, user):
+            if system != TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9:
+                text = '{"records":[]}'
+            else:
+                payload = json.loads(user.split("：\n", 1)[1])
+                window, = payload["windows"]
+                request = TargetBoundDraftReviewRequest.model_validate_json(json.dumps(window["request"]))
+                text = _batch_response(request, _response(request, item_updates={
+                    "observation_kind": "speech_sample", "object_relation": "not_applicable",
+                }))
+            return SimpleNamespace(text=text, prompt_tokens=7, completion_tokens=3)
+
+    content = "沈砚答道：「周岚烧了名册。」"
+    target = _signal_target(dimension="speech_pattern", trait_key="directness",
+                            comparison_key="speech_pattern:directness", key_object="", baseline_hint="说话直截了当")
+    result = _extract(content, SpeechReview(), target)
+    sample, = result.draft_observations
+    assert (sample.observation_kind, sample.stability, sample.character) == ("speech_sample", "temporary", "沈砚")
+    assert sample.statement == sample.evidence.text == content
 
 
 @pytest.mark.parametrize(

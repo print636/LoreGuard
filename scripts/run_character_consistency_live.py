@@ -146,7 +146,7 @@ _TARGET_BOUND_DRAFT_REVIEW_V3 = {
         "character-target-bound-draft-review-batch-v4"
     ),
     "target_bound_draft_review_prompt_version": (
-        "character-target-bound-draft-review-prompt-v8"
+        "character-target-bound-draft-review-prompt-v9"
     ),
     "target_bound_draft_review_signal_prompt_version": (
         "character-target-bound-draft-signal-prompt-v3"

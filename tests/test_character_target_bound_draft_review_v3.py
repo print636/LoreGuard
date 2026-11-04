@@ -26,6 +26,7 @@ from app.character_draft_actor_review import (
 from app.character_draft_actor_review_provider import (
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
     TargetBoundDraftReviewBatchEntry,
     build_target_bound_draft_review_prompts,
     run_target_bound_draft_review,
@@ -1403,6 +1404,7 @@ class _V3Provider:
         if system not in {
             TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7,
             TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8,
+            TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
         }:
             self.signal_calls += 1
             return SimpleNamespace(

@@ -39,7 +39,7 @@ from .character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2,
     TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2,
     TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4,
-    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
     TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
 )
 from .character_explanation_review import (
@@ -510,7 +510,7 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
                 )
             ),
             "target_bound_draft_review_prompt_version": (
-                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9
                 if settings.character_target_bound_draft_review_v3 else (
                     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
                     if settings.character_target_bound_draft_review_v2 else None

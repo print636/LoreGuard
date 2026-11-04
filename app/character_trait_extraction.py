@@ -5080,6 +5080,7 @@ def _discover_target_bound_draft_candidates_v3(
                 line_start=line_start,
                 line_end=line_end,
                 protocol_version="v4",
+                allow_named_speech=True,
             )
         except (TypeError, ValueError, ValidationError, UnicodeError):
             continue
@@ -5843,6 +5844,7 @@ def _review_target_bound_discoveries_v3(
                 frozen_content=frozen_content,
                 expected_source=source_identity,
                 protocol_version="v4",
+                allow_named_speech=True,
             )
             entry = TargetBoundDraftReviewBatchEntry(
                 request=request,
