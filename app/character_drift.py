@@ -3079,8 +3079,18 @@ def _promote_single_event(
     if decision.verdict == "needs_confirmation":
         return result("needs_confirmation", "model_needs_confirmation", decision.explanation)
     if candidate.case.material_coverage != "complete":
-        return result("needs_confirmation", "material_coverage_incomplete",
-                      "当前材料覆盖不完整，尚不能确立角色设定冲突或排除其他问题。")
+        caveat = "还有相关材料未核实，本条保留为待复核线索。"
+        if decision.verdict == "contradicts":
+            # The validated decision cites whole events. Only explain a cited
+            # event here; another event in the same chapter may be outside scope.
+            cited = set(decision.citations)
+            event = next(event for event in events if cited.intersection(event.current_citations))
+            explanation = f"{caveat}请对照两侧原文复核模型的判断“{event.explanation}”"
+        elif all(_event_is_outside_comparison(event) for event in events):
+            explanation = "已核实的片段不适合直接与这条设定比较。" + caveat
+        else:
+            explanation = "在已经核实的片段里，模型找到了能解释这次表现的依据。" + caveat
+        return result("needs_confirmation", "material_coverage_incomplete", explanation)
     if decision.verdict == "explained" and candidate.unreviewed_observation_count:
         return result("needs_confirmation", "single_event_unreviewed_observations",
                       "本轮有相关表现未进入有界审查，尚不能确认全部表现均无问题。")

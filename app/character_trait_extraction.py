@@ -69,6 +69,7 @@ from .character_draft_actor_review import (
     is_unsafe_target_actor_literal,
     _target_bound_literal_object_required,
     _same_primary_statement,
+    _target_bound_proposal_id,
     screen_draft_actor_proposal,
     target_bound_draft_review_request_digest,
     target_bound_draft_target_digest,
@@ -1670,6 +1671,8 @@ class _TargetBoundDraftOutcome:
     resolved_record_indices: frozenset[int] = frozenset()
     unresolved_record_indices: frozenset[int] = frozenset()
     unresolved_discovery_count: int = 0
+    # Transient frozen (window, proposal) identities, never a resolved raw claim.
+    source_recall_candidates: tuple[tuple[int, int, str], ...] = ()
     rejected_count: int = 0
     reason_counts: tuple[tuple[str, int], ...] = ()
     slot_conflict_counts: tuple[tuple[TargetBoundSlotConflict, int], ...] = ()
@@ -2633,6 +2636,20 @@ class CharacterSignalExtractor:
             output.update(target_bound_reason_counts)
             return output
 
+        def collect_target_review(outcome: _TargetBoundDraftOutcome) -> None:
+            nonlocal auxiliary_attempted_calls, total_prompt_tokens, total_completion_tokens, total_charged_tokens
+            nonlocal target_bound_signals, target_bound_rejected, target_bound_unresolved
+            auxiliary_attempted_calls += outcome.attempted_calls
+            total_prompt_tokens += outcome.prompt_tokens
+            total_completion_tokens += outcome.completion_tokens
+            total_charged_tokens += outcome.charged_tokens
+            target_bound_signals = tuple({s.id: s for s in (*target_bound_signals, *outcome.signals)}.values())
+            target_bound_rejected += outcome.rejected_count
+            target_bound_unresolved += outcome.unresolved_count
+            target_bound_reason_counts.update(dict(outcome.reason_counts))
+            target_bound_slot_conflict_counts.update(dict(outcome.slot_conflict_counts))
+            target_bound_failure_events.extend(outcome.failure_events)
+
         def validate_response(
             response_text: Any,
             *,
@@ -2941,22 +2958,7 @@ class CharacterSignalExtractor:
                         ),
                         monotonic=self._monotonic,
                     )
-                    auxiliary_attempted_calls += target_review.attempted_calls
-                    total_prompt_tokens += target_review.prompt_tokens
-                    total_completion_tokens += target_review.completion_tokens
-                    total_charged_tokens += target_review.charged_tokens
-                    target_bound_signals = tuple({
-                        signal.id: signal for signal in target_review.signals
-                    }.values())
-                    target_bound_rejected += target_review.rejected_count
-                    target_bound_unresolved += target_review.unresolved_count
-                    target_bound_reason_counts.update(
-                        dict(target_review.reason_counts)
-                    )
-                    target_bound_slot_conflict_counts.update(
-                        dict(target_review.slot_conflict_counts)
-                    )
-                    target_bound_failure_events.extend(target_review.failure_events)
+                    collect_target_review(target_review)
                     if not source_only_habit_review:
                         validation = _resolve_completed_target_bound_discovery(
                             validation, target_review, discovery_count=len(discoveries),
@@ -3119,19 +3121,7 @@ class CharacterSignalExtractor:
                     ),
                     monotonic=self._monotonic,
                 )
-                auxiliary_attempted_calls += target_review.attempted_calls
-                total_prompt_tokens += target_review.prompt_tokens
-                total_completion_tokens += target_review.completion_tokens
-                total_charged_tokens += target_review.charged_tokens
-                target_bound_signals = tuple({
-                    signal.id: signal
-                    for signal in (*target_bound_signals, *target_review.signals)
-                }.values())
-                target_bound_rejected += target_review.rejected_count
-                target_bound_unresolved += target_review.unresolved_count
-                target_bound_reason_counts.update(
-                    dict(target_review.reason_counts)
-                )
+                collect_target_review(target_review)
                 if primary_recovery:
                     target_bound_reason_counts[f"{recovery_label}_recovery_selected"] += len(
                         validation.target_bound_draft_deferred
@@ -3144,13 +3134,42 @@ class CharacterSignalExtractor:
                         )
                     if target_review.unresolved_count:
                         target_bound_reason_counts[f"{recovery_label}_recovery_unresolved"] += target_review.unresolved_count
-                target_bound_slot_conflict_counts.update(
-                    dict(target_review.slot_conflict_counts)
-                )
-                target_bound_failure_events.extend(target_review.failure_events)
                 validation = _resolve_target_bound_validation(
                     validation, target_review, certified_primary=primary_recovery,
                 )
+                if targeted_habit and target_review.source_recall_candidates:
+                    used_windows = {(s.evidence.line_start, s.evidence.line_end)
+                                    for s in (*validation.signals, *target_bound_signals)}
+                    missing = tuple((start, end, pid) for start, end, pid in target_review.source_recall_candidates
+                                    if not any(_ranges_overlap((start, end), used) for used in used_windows))
+                    if missing and len(used_windows) < 3:
+                        candidates, _ = _discover_target_bound_draft_candidates_v3(
+                            chunk=chunk, target=targets[0], target_ordinal=target_ordinal,
+                            source_identity=source_identity, frozen_content=frozen_content,
+                            allowed_ranges=tuple(sorted({(s, e) for s, e, _ in missing})),
+                            eligible_proposal_ids={pid for _, _, pid in missing},
+                        )
+                        if candidates:
+                            first_window = candidates[0].index
+                            source_review = _review_target_bound_discoveries_v3(
+                                chunk=chunk, target=targets[0], target_ordinal=target_ordinal,
+                                discoveries=tuple(c for c in candidates if c.index == first_window),
+                                source_identity=source_identity, frozen_content=frozen_content,
+                                dispatch_ranges=verification_dispatch.bound_ranges if verification_dispatch else None,
+                                provider=self._base_provider, settings=settings,
+                                token_budget=max(0, settings.character_signal_token_budget - total_charged_tokens),
+                                remaining_deadline_seconds=total_deadline - (self._monotonic() - started),
+                                monotonic=self._monotonic,
+                            )
+                            if source_review.attempted_calls:
+                                target_bound_reason_counts["habit_after_claim_source_calls"] += source_review.attempted_calls
+                            if source_review.signals:
+                                # The targeted pass retains at most one action per frozen evidence window.
+                                target_bound_reason_counts["habit_after_claim_source_supported"] += 1
+                                if len(source_review.signals) > 1:
+                                    target_bound_reason_counts["targeted_duplicate_evidence"] += len(source_review.signals) - 1
+                                source_review = replace(source_review, signals=source_review.signals[:1])
+                            collect_target_review(source_review)
             elif (
                 target_bound_review_v2
                 and validation.target_bound_draft_deferred
@@ -5464,6 +5483,7 @@ def _discover_target_bound_draft_candidates_v3(
     source_identity: ScopeReviewSourceIdentity,
     frozen_content: str,
     allowed_ranges: tuple[tuple[int, int], ...],
+    eligible_proposal_ids: set[str] | None = None,
 ) -> tuple[tuple[_TargetBoundDraftDiscovery, ...], int]:
     """Build a bounded server-owned whitelist; never ask AI to find evidence."""
 
@@ -5504,6 +5524,8 @@ def _discover_target_bound_draft_candidates_v3(
         except (TypeError, ValueError, ValidationError, UnicodeError):
             continue
         for proposal in proposals:
+            if eligible_proposal_ids is not None and _target_bound_proposal_id(proposal) not in eligible_proposal_ids:
+                continue
             if (
                 proposal.binding_kind == "adjacent_zero_subject"
                 and proposal.actor_anchor_id is None
@@ -6223,6 +6245,7 @@ def _review_target_bound_draft_candidates(
     unresolved: set[int] = set()
     rejected = 0
     review_reasons: Counter[str] = Counter()
+    ambiguous_claim_digests: set[str] = set()
     slot_conflict_counts: Counter[TargetBoundSlotConflict] = Counter()
     failure_events: list[TargetBoundFailureEventV1] = []
     for batch, run in batches:
@@ -6269,10 +6292,13 @@ def _review_target_bound_draft_candidates(
                             review_reasons[f"{review_label}_recovery_rejected"] += 1
                         else:
                             review_reasons[f"{review_label}_paraphrase_ambiguous_source"] += 1
+                            ambiguous_claim_digests.add(request_digest)
                         for item in decisions:
                             slot_conflict_counts.update(item.slot_conflicts)
                     continue
                 decisions = supported
+            elif entry.expected_primary_claim and len(decisions) == 1 and decisions[0].reason == "reviewer_uncertain":
+                ambiguous_claim_digests.add(request_digest)
             for decision in decisions:
                 if decision.reason == "slot_conflict":
                     slot_conflict_counts.update(decision.slot_conflicts)
@@ -6347,6 +6373,10 @@ def _review_target_bound_draft_candidates(
         signals=tuple(signals.values()),
         resolved_record_indices=frozenset(resolved),
         unresolved_record_indices=frozenset(unresolved),
+        source_recall_candidates=(
+            _habit_source_recall_candidates(batches, ambiguous_claim_digests)
+            if accepted_target_windows is not None and ambiguous_claim_digests else ()
+        ),
         rejected_count=rejected,
         reason_counts=tuple(sorted(review_reasons.items())),
         slot_conflict_counts=tuple(sorted(slot_conflict_counts.items())),
@@ -6356,6 +6386,39 @@ def _review_target_bound_draft_candidates(
         completion_tokens=sum(run.completion_tokens for run in completed_runs),
         charged_tokens=sum(run.charged_tokens for run in completed_runs),
     )
+
+
+def _habit_source_recall_candidates(
+    batches: list[tuple[tuple[TargetBoundDraftReviewBatchEntry, ...], TargetBoundDraftReviewRun | None]],
+    ambiguous_digests: set[str],
+) -> tuple[tuple[int, int, str], ...]:
+    """Restrict a fresh source check to proposals without a hard or contrary decision."""
+    eligible: set[tuple[int, int, str]] = set()
+    vetoed: set[str] = set()
+    failed_windows: set[tuple[int, int]] = set()
+    for entries, run in batches:
+        for i, entry in enumerate(entries):
+            request = entry.request
+            if request.prompt_version not in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14}:
+                continue
+            digest = target_bound_draft_review_request_digest(request)
+            window = (request.proposals[0].line_start, request.proposals[0].line_end)
+            if not run or not run.attempted_calls or run.failure_reason or len(run.evaluation.evaluations) != len(entries):
+                failed_windows.add(window)
+                continue
+            evaluation = run.evaluation.evaluations[i]
+            checked = {d.proposal_id: d for d in evaluation.decisions}
+            if evaluation.request_digest != digest or set(checked) != {p.proposal_id for p in request.proposals}:
+                failed_windows.add(window)
+                continue
+            for proposal in request.proposals:
+                decision = checked[proposal.proposal_id]
+                if (decision.raw_verdict is None or decision.negative_slots
+                        or decision.reason not in {"supported", "reviewer_uncertain"}):
+                    vetoed.add(proposal.proposal_id)
+                elif digest in ambiguous_digests:
+                    eligible.add((proposal.line_start, proposal.line_end, proposal.proposal_id))
+    return tuple(sorted(row for row in eligible if row[:2] not in failed_windows and row[2] not in vetoed))
 
 
 def _review_target_bound_discoveries_v3(

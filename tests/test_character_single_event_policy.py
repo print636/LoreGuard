@@ -289,7 +289,23 @@ def test_outside_event_still_cannot_bypass_missing_material():
     candidate = prepared(coverage="partial", explanation="not_run")
     result, _ = review(candidate, payload(event("C01", verdict="needs_confirmation", actor_match="different"),
                                           verdict="explained"))
-    assert promote_character_drift(candidate, result).reason == "material_coverage_incomplete"
+    lead = promote_character_drift(candidate, result)
+    assert lead.reason == "material_coverage_incomplete"
+    assert "不适合直接与这条设定比较" in lead.explanation and "未核实" in lead.explanation
+
+
+def test_partial_coverage_lead_explains_only_the_cited_event():
+    candidate = prepared(count=2, coverage="partial")
+    classroom = "课堂上演的是另一个角色。"
+    after_class = "散课后角色当面泄露了受托保密的地址。"
+    result, _ = review(candidate, payload(
+        event("C01", verdict="explained", situation_match="different", explanation=classroom),
+        event("C02", explanation=after_class), citations=("B01", "C02"),
+    ))
+    lead = promote_character_drift(candidate, result)
+    assert lead.outcome == "needs_confirmation" and lead.reason == "material_coverage_incomplete"
+    assert after_class in lead.explanation and classroom not in lead.explanation
+    assert "待复核" in lead.explanation and "未核实" in lead.explanation
 
 
 @pytest.mark.parametrize("field", ["actor_match", "trait_match", "actuality",
