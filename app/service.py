@@ -13,7 +13,10 @@ from uuid import uuid4
 
 from sqlalchemy import and_, delete, exists, func, or_, select, update
 
-from .config import get_settings
+from .config import (
+    HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS,
+    HABIT_SCENE_POLICY_V1, get_settings,
+)
 from .account_provider import runtime_for_analysis_run
 from .db import (
     AnalysisDiagnosticRow,
@@ -431,6 +434,14 @@ class _CharacterConsistencyAccountingProvider:
     ) -> None:
         self.settings = settings
         self.usage = usage
+        self._habit_scene_provider = signal_provider
+        if settings._character_habit_scene_scheduling_v1 and signal_provider is None:
+            # Signal generation has its own, shorter transport timeout. Start
+            # the opted-in scene reviewer from the same authenticated account
+            # before that cap is applied. Injected transports keep their limits.
+            self._habit_scene_provider = OpenAICompatibleProvider(settings.model_copy(update={
+                "provider_timeout_seconds": HABIT_SCENE_CALL_TIMEOUT_SECONDS,
+            }))
         if signal_provider is None or drift_provider is None:
             base = OpenAICompatibleProvider(settings)
             signal_provider = signal_provider or _bounded_provider(
@@ -707,6 +718,9 @@ class _CharacterConsistencyAccountingProvider:
             ),
         )
 
+    def fork_for_habit_scene_review(self, **limits):
+        return self.fork_for_character_draft_actor_review(**limits, habit_scene=True)
+
     def fork_for_character_draft_actor_review(
         self,
         *,
@@ -715,6 +729,7 @@ class _CharacterConsistencyAccountingProvider:
         completion_reserve: int,
         max_response_bytes: int,
         max_attempts: int,
+        habit_scene: bool = False,
     ):
         """Give the source-bound draft actor batch one bounded model call."""
 
@@ -738,19 +753,26 @@ class _CharacterConsistencyAccountingProvider:
         ):
             raise ValueError("character draft actor review limits are invalid")
 
-        review_provider = self.signal_provider
+        if habit_scene and not self.settings._character_habit_scene_scheduling_v1:
+            raise ValueError("habit scene scheduling is disabled")
+        review_provider = self._habit_scene_provider if habit_scene else self.signal_provider
         reserve = min(
             completion_reserve,
             self.settings.character_draft_actor_review_completion_tokens,
         )
         if isinstance(review_provider, OpenAICompatibleProvider):
             provider_settings = review_provider.settings
+            package_cap = self.settings.character_signal_total_deadline_seconds
+            call_cap = min(self.settings.character_draft_actor_review_timeout_seconds, self.settings.provider_timeout_seconds)
+            if habit_scene:
+                package_cap = HABIT_SCENE_PACKAGE_DEADLINE_SECONDS
+                call_cap = HABIT_SCENE_CALL_TIMEOUT_SECONDS
             deadline = min(
                 value
                 for value in (
                     float(timeout_seconds),
                     float(remaining_deadline_seconds),
-                    float(self.settings.character_signal_total_deadline_seconds),
+                    package_cap,
                     provider_settings.provider_total_deadline_seconds,
                     self.settings.provider_total_deadline_seconds,
                 )
@@ -759,8 +781,7 @@ class _CharacterConsistencyAccountingProvider:
             timeout = min(
                 float(timeout_seconds),
                 deadline,
-                float(self.settings.character_draft_actor_review_timeout_seconds),
-                float(self.settings.provider_timeout_seconds),
+                call_cap,
                 float(provider_settings.provider_timeout_seconds),
             )
             completion = min(
@@ -3132,9 +3153,19 @@ def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
         raise RuntimeError(
             "RUN_INPUT_SNAPSHOT_CORRUPT: review batch sensitivity is invalid"
         )
-    return settings.model_copy(
+    stage = settings.model_copy(
         update={"character_consistency_sensitivity": sensitivity}
     )
+    coverage = run.batch_coverage if run is not None and isinstance(run.batch_coverage, dict) else {}
+    stage._character_habit_scene_scheduling_v1 = bool(
+        settings.habit_scene_policy_available and settings.character_review_requires_opt_in
+        and settings.enable_character_consistency and run is not None and run.batch_mode == "draft_review"
+        and run.provider_config_id and run.provider_config_id == settings.provider_runtime_config_id
+        and run.requested_by_user_id and run.requested_by_user_id == settings.provider_runtime_user_id
+        and coverage.get("character_review_enabled") is True and coverage.get("character_baseline_run_id")
+        and not coverage.get("no_formal_context_expected") and coverage.get("habit_scene_policy") == HABIT_SCENE_POLICY_V1
+    )
+    return stage
 
 
 def execute_analysis(

@@ -509,8 +509,11 @@ def _bounded_provider(
     completion_reserve: int,
     max_response_bytes: int,
     max_attempts: int,
+    habit_scene_policy: bool = False,
 ) -> ChatProvider:
-    fork = getattr(provider, "fork_for_character_draft_actor_review", None)
+    fork = getattr(provider, "fork_for_habit_scene_review", None) if habit_scene_policy else None
+    if not callable(fork):
+        fork = getattr(provider, "fork_for_character_draft_actor_review", None)
     if callable(fork):
         bounded = fork(
             timeout_seconds=timeout_seconds,
@@ -906,6 +909,7 @@ def run_target_bound_draft_review(
     remaining_deadline_seconds: float,
     max_response_bytes: int,
     max_attempts: Literal[1] = 1,
+    habit_scene_policy: bool = False,
     monotonic: Callable[[], float] = time.perf_counter,
 ) -> TargetBoundDraftReviewRun:
     """Run one bounded target-binding batch with at most one full replay.
@@ -923,6 +927,11 @@ def run_target_bound_draft_review(
     ):
         raise TypeError("target bound draft review batch entries are invalid")
     requests = tuple(entry.request for entry in entries)
+    if habit_scene_policy and any(request.prompt_version not in {
+        TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13,
+        TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
+    } for request in requests):
+        raise ValueError("habit scene policy requires a contextual habit review")
     expected_sources = tuple(entry.expected_source for entry in entries)
     frozen_contents = tuple(entry.frozen_content for entry in entries)
     primary_claims = tuple(entry.expected_primary_claim for entry in entries)
@@ -1004,6 +1013,7 @@ def run_target_bound_draft_review(
                 completion_reserve=completion_reserve,
                 max_response_bytes=max_response_bytes,
                 max_attempts=max_attempts,
+                habit_scene_policy=habit_scene_policy,
             )
         except Exception:
             return TargetBoundDraftReviewRun(

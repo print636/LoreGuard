@@ -131,6 +131,8 @@ def _exercise_author_review(client):
     from unittest.mock import patch
     import httpx
     from app import service
+    from app.config import HABIT_SCENE_POLICY_V1
+    from app.db import AnalysisRunRow, SessionLocal
     from app.character_drift import CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
     from app.character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
     from app.character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
@@ -146,6 +148,10 @@ def _exercise_author_review(client):
     from tests.test_character_consistency_stage import _confirm_only_candidate, _record, _response
     from tests.test_character_single_event_stage import _RuntimeSingleEventProvider
     from tests.test_review_batch import _document, _project
+
+    def frozen_scene_policy(run):
+        with SessionLocal() as db:
+            return db.get(AnalysisRunRow, run["id"]).batch_coverage.get("habit_scene_policy")
 
     _, csrf = register(client)
     client.headers.update({"X-CSRF-Token": csrf})
@@ -254,6 +260,8 @@ def _exercise_author_review(client):
         assert ordinary["review_batch"]["character_review_enabled"] is False
         assert calls and set(calls) <= {SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT}
         reviewed = start(opted_in)
+        assert frozen_scene_policy(reviewed) == HABIT_SCENE_POLICY_V1
+        assert all(frozen_scene_policy(run) is None for run in (default, ordinary, created))
         assert reviewed["review_batch"]["character_baseline_run_id"] == baseline_id
         assert calls.count(CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT) == 1
         run_url = "/api/v1/analysis-runs/" + reviewed["id"]
@@ -290,6 +298,7 @@ def _exercise_author_review(client):
             assert retry.status_code == 202
             enabled = payload is opted_in
             assert retry.json()["review_batch"]["character_review_enabled"] is enabled
+            assert frozen_scene_policy(retry.json()) == (HABIT_SCENE_POLICY_V1 if enabled else None)
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
         # A new draft version requires a fresh choice, even after a paid review.
         _document(client, project, name="draft.md", role="chapter", publication="draft",
@@ -304,6 +313,7 @@ def _exercise_author_review(client):
             assert recheck.status_code == 202, recheck.text
             enabled = choice is True
             assert recheck.json()["review_batch"]["character_review_enabled"] is enabled
+            assert frozen_scene_policy(recheck.json()) == (HABIT_SCENE_POLICY_V1 if enabled else None)
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
         assert client.post(recheck_url, headers={"Idempotency-Key": "deep-recheck"}).status_code == 409
         _document(client, project, name="profile.md", role="character_profile", publication="published",

@@ -91,6 +91,7 @@ def create_app():
     class IsolatedSettings(config.Settings):
         model_config = SettingsConfigDict(env_file=None)
         character_review_requires_opt_in = True
+        habit_scene_policy_available = True
 
         @classmethod
         def settings_customise_sources(

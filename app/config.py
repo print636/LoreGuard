@@ -2,10 +2,15 @@ from functools import lru_cache
 from typing import ClassVar, Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, ValidationError, field_validator, model_validator
+from pydantic import Field, PrivateAttr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
+
+
+HABIT_SCENE_POLICY_V1 = "habit-scene-windows-v1"
+HABIT_SCENE_CALL_TIMEOUT_SECONDS = 60.0
+HABIT_SCENE_PACKAGE_DEADLINE_SECONDS = 180.0
 
 
 _SENSITIVE_SETTING_INPUTS = frozenset(
@@ -261,6 +266,10 @@ class Settings(BaseSettings):
     # Only the isolated author factory requires explicit per-run consent. This
     # profile marker cannot be enabled by dotenv or by a request.
     character_review_requires_opt_in: ClassVar[bool] = False
+    # The isolated launcher advertises the policy. Only a new, opted-in
+    # account run carrying the frozen policy can activate it on its stage copy.
+    habit_scene_policy_available: ClassVar[bool] = False
+    _character_habit_scene_scheduling_v1: bool = PrivateAttr(default=False)
     character_consistency_sensitivity: Literal[
         "conservative", "balanced", "exploratory"
     ] = "balanced"

@@ -20,7 +20,7 @@ from pydantic import (
     model_validator,
 )
 
-from .config import Settings, get_settings
+from .config import HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS, Settings, get_settings
 from .character_scope_failure import ScopeProviderFailureSeriesV1
 from .character_scope_review import (
     BasisInvalidSubtype,
@@ -2592,7 +2592,13 @@ class CharacterSignalExtractor:
         if draft_actor_review_v1:
             review_reserve = settings.character_draft_actor_review_token_reserve
         started = self._monotonic()
-        total_deadline = _effective_signal_deadline(settings)
+        regular_deadline = _effective_signal_deadline(settings)
+        habit_package = (
+            settings._character_habit_scene_scheduling_v1 and chunk.source_kind == "draft"
+            and settings.character_target_bound_draft_review_v3
+            and any(t.dimension == "contextual_behavior" and t.habit_contexts for t in (targets or primary_value_targets))
+        )
+        total_deadline = _effective_signal_deadline(settings, habit_package=True) if habit_package else regular_deadline
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_charged_tokens = 0
@@ -2982,7 +2988,7 @@ class CharacterSignalExtractor:
                         0, settings.character_signal_token_budget - total_charged_tokens
                     ),
                     remaining_deadline_seconds=(
-                        total_deadline - (self._monotonic() - started)
+                        regular_deadline - (self._monotonic() - started)
                     ),
                     monotonic=self._monotonic,
                 )
@@ -3022,7 +3028,7 @@ class CharacterSignalExtractor:
                             - total_charged_tokens,
                         ),
                         remaining_deadline_seconds=(
-                            total_deadline - (self._monotonic() - started)
+                            regular_deadline - (self._monotonic() - started)
                         ),
                         monotonic=self._monotonic,
                     )
@@ -3117,7 +3123,8 @@ class CharacterSignalExtractor:
                         - total_charged_tokens,
                     ),
                     remaining_deadline_seconds=(
-                        total_deadline - (self._monotonic() - started)
+                        (total_deadline if recovery_label == "habit_claim" else regular_deadline)
+                        - (self._monotonic() - started)
                     ),
                     monotonic=self._monotonic,
                 )
@@ -4799,8 +4806,8 @@ def _failed_package_result(
     )
 
 
-def _effective_signal_deadline(settings: Settings) -> float:
-    values = [float(settings.character_signal_total_deadline_seconds)]
+def _effective_signal_deadline(settings: Settings, *, habit_package: bool = False) -> float:
+    values = [HABIT_SCENE_PACKAGE_DEADLINE_SECONDS if habit_package else float(settings.character_signal_total_deadline_seconds)]
     if settings.provider_total_deadline_seconds is not None:
         values.append(float(settings.provider_total_deadline_seconds))
     return min(values)
@@ -6100,6 +6107,12 @@ def _bind_target_bound_draft_certificate(
     return signal
 
 
+_TargetBoundBatch = tuple[
+    tuple[TargetBoundDraftReviewBatchEntry, ...],
+    TargetBoundDraftReviewRun | Literal["request_invalid", "deadline", "scene_time_insufficient"],
+]
+
+
 def _run_target_bound_review_batches(
     entries: tuple[TargetBoundDraftReviewBatchEntry, ...],
     *,
@@ -6108,7 +6121,7 @@ def _run_target_bound_review_batches(
     token_budget: int,
     remaining_deadline_seconds: float,
     monotonic: Any,
-) -> list[tuple[tuple[TargetBoundDraftReviewBatchEntry, ...], TargetBoundDraftReviewRun | None]]:
+) -> list[_TargetBoundBatch]:
     # A discovery entry owns one source window. A claim entry owns all viable
     # alternatives to that original record, which must be adjudicated together.
     habit_protocols = {
@@ -6118,28 +6131,59 @@ def _run_target_bound_review_batches(
     }
     if sum(len(entry.request.proposals) for entry in entries) > MAX_DRAFT_ACTOR_REVIEW_ITEMS:
         raise ValueError("target_bound_batch_too_large")
+    first_wave = 0
     if all(entry.request.prompt_version in habit_protocols for entry in entries):
         groups = [(entry,) for entry in entries]
+        if settings._character_habit_scene_scheduling_v1:
+            # Keep alternatives for one original claim indivisible. Assign
+            # each *entry* its turn within a source window, not within a target.
+            turns: Counter[tuple[str, str, int, int]] = Counter()
+            ranked = []
+            for entry in entries:
+                req = entry.request
+                proposal = req.proposals[0]  # Request validation requires one source window.
+                window = (req.run_input_id, req.content_sha256, proposal.line_start, proposal.line_end)
+                ranked.append((turns[window], (entry,)))
+                turns[window] += 1
+            groups = [group for _, group in sorted(ranked, key=lambda row: row[0])]
+            first_wave = len(turns)
     else:
         groups = [entries]  # Historical protocols retain the original batch bytes.
     runs = []
     deadline = monotonic() + remaining_deadline_seconds
-    for group in groups:
+    for ordinal, group in enumerate(groups):
+        remaining = deadline - monotonic()
+        timeout = settings.character_draft_actor_review_timeout_seconds
+        if first_wave:
+            # A single remaining window may use the whole tail. Only skip
+            # a sub-10-second fragment; reserving such slices for many
+            # open windows would merely manufacture expensive read timeouts.
+            if remaining < 10:
+                runs.append((group, "deadline" if remaining <= 0 else "scene_time_insufficient"))
+                continue
+            unserved = max(1, first_wave - ordinal)
+            # Reserve half a full window (30s) when splitting. Tolerance
+            # avoids losing a whole share to subsecond scheduling overhead;
+            # the actual slice still cannot exceed the real remaining time.
+            viable = min(unserved, max(1, int((remaining + 0.1) // (HABIT_SCENE_CALL_TIMEOUT_SECONDS / 2))))
+            remaining = min(HABIT_SCENE_CALL_TIMEOUT_SECONDS, remaining / viable)
+            timeout = remaining
         try:
             run = run_target_bound_draft_review(
                 group,
                 provider=provider,
                 token_budget=token_budget,
                 completion_reserve=settings.character_draft_actor_review_completion_tokens,
-                timeout_seconds=settings.character_draft_actor_review_timeout_seconds,
-                remaining_deadline_seconds=deadline - monotonic(),
+                timeout_seconds=timeout,
+                remaining_deadline_seconds=remaining,
                 max_response_bytes=settings.character_draft_actor_review_max_response_bytes,
                 max_attempts=1,
                 monotonic=monotonic,
+                **({"habit_scene_policy": True} if first_wave else {}),
             )
         except (TypeError, ValueError, UnicodeError):
             # A local request size/contract failure must not discard siblings.
-            runs.append((group, None))
+            runs.append((group, "request_invalid"))
             continue
         runs.append((group, run))
         token_budget = max(0, token_budget - run.charged_tokens)
@@ -6252,9 +6296,9 @@ def _review_target_bound_draft_candidates(
         batch_indices = set().union(*(
             indices_by_digest[target_bound_draft_review_request_digest(entry.request)] for entry in batch
         ))
-        if run is None:
+        if isinstance(run, str):
             unresolved.update(batch_indices)
-            review_reasons["target_bound_request_invalid"] += len(batch_indices)
+            review_reasons[f"target_bound_{run}"] += len(batch_indices)
             continue
         if claim_review and run.attempted_calls:
             review_reasons[f"{review_label}_claim_review_calls"] += run.attempted_calls
@@ -6368,7 +6412,7 @@ def _review_target_bound_draft_candidates(
     unresolved.update(deferred_indices - resolved - unresolved)
     if unresolved and not review_reasons:
         review_reasons["target_bound_response_mismatch"] += len(unresolved)
-    completed_runs = [run for _, run in batches if run is not None]
+    completed_runs = [run for _, run in batches if not isinstance(run, str)]
     return _TargetBoundDraftOutcome(
         signals=tuple(signals.values()),
         resolved_record_indices=frozenset(resolved),
@@ -6389,7 +6433,7 @@ def _review_target_bound_draft_candidates(
 
 
 def _habit_source_recall_candidates(
-    batches: list[tuple[tuple[TargetBoundDraftReviewBatchEntry, ...], TargetBoundDraftReviewRun | None]],
+    batches: list[_TargetBoundBatch],
     ambiguous_digests: set[str],
 ) -> tuple[tuple[int, int, str], ...]:
     """Restrict a fresh source check to proposals without a hard or contrary decision."""
@@ -6403,7 +6447,7 @@ def _habit_source_recall_candidates(
                 continue
             digest = target_bound_draft_review_request_digest(request)
             window = (request.proposals[0].line_start, request.proposals[0].line_end)
-            if not run or not run.attempted_calls or run.failure_reason or len(run.evaluation.evaluations) != len(entries):
+            if isinstance(run, str) or not run.attempted_calls or run.failure_reason or len(run.evaluation.evaluations) != len(entries):
                 failed_windows.add(window)
                 continue
             evaluation = run.evaluation.evaluations[i]
@@ -6503,9 +6547,9 @@ def _review_target_bound_discoveries_v3(
     decisions_seen = 0
     for batch, run in batches:
         count = sum(len(entry.request.proposals) for entry in batch)
-        if run is None:
+        if isinstance(run, str):
             unresolved += count
-            reasons["target_bound_request_invalid"] += count
+            reasons[f"target_bound_{run}"] += count
             continue
         if dispatch_ranges is not None and run.attempted_calls:
             dispatch_ranges.update(
@@ -6567,7 +6611,7 @@ def _review_target_bound_discoveries_v3(
         missing = len(discoveries) - decisions_seen
         unresolved += missing
         reasons["target_bound_response_mismatch"] += missing
-    completed_runs = [run for _, run in batches if run is not None]
+    completed_runs = [run for _, run in batches if not isinstance(run, str)]
     return _TargetBoundDraftOutcome(
         signals=tuple(signals.values()),
         unresolved_discovery_count=unresolved,

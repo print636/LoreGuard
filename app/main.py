@@ -23,7 +23,7 @@ from sqlalchemy.orm import load_only
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
-from .config import get_settings
+from .config import HABIT_SCENE_POLICY_V1, get_settings
 from .auth import (
     AuthContext,
     ExactOriginMiddleware,
@@ -855,6 +855,8 @@ def _review_batch_selection(
         "excluded_documents": excluded,
         "target_selection_exclusions": target_selection_exclusions,
     }
+    if settings.habit_scene_policy_available and payload.mode == "draft_review" and payload.character_review_enabled:
+        coverage["habit_scene_policy"] = HABIT_SCENE_POLICY_V1
     return selected, roles, coverage
 
 
