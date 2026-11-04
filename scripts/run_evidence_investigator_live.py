@@ -454,7 +454,7 @@ _CHARACTER_SIGNAL_SCOPE_REVIEW_KEYS = frozenset({
 })
 _CHARACTER_SIGNAL_SCOPE_REVIEW_SCHEMA_VERSION = "character-scope-review-v2"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_SCHEMA_VERSION = "character-scope-review-v1"
-_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v4"
+_CHARACTER_SIGNAL_SCOPE_REVIEW_PROMPT_VERSION = "character-scope-review-prompt-v5"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_CONTRACT_RECOVERY_VERSION = "character-scope-review-contract-recovery-v1"
 _CHARACTER_SIGNAL_SCOPE_REVIEW_LEGACY_PROMPT_VERSIONS = frozenset({
     "character-scope-review-prompt-v1",

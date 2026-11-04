@@ -378,7 +378,9 @@ now lets a bounded model reviewer assess same-line subject and label carryover
 against frozen source clauses. The existing default-off environment flag names
 are retained for deployment compatibility, while enabled runs report the
 `semantic-scope-v6` / `character-scope-review-v2` /
-`character-scope-review-prompt-v4` identity. Its
+`character-scope-review-prompt-v5` identity. The reviewer compares the source
+with the proposed statement, including the duration of any restriction.
+The proposal supplies the direction. The reviewer reports whether the source agrees with that direction. Its
 [precise support binding](character-support-binding-v1.md)
 keeps separately supported clauses on one line as independently reviewable
 author decisions and distinguishes the target clause from carryover context in

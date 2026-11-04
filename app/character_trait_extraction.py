@@ -30,6 +30,7 @@ from .character_scope_review import (
     ScopeReviewProposal,
     ScopeReviewRequest,
     ScopeReviewSlotConflict,
+    ScopeSlotComparisonsV1,
     ScopeReviewSourceIdentity,
 )
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT, run_scope_review
@@ -1428,6 +1429,7 @@ class TargetBoundFailureEventV1(BaseModel):
 class CharacterSignalFailureDiagnosticsV1(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     scope_provider_failures: ScopeProviderFailureSeriesV1 | None = None
+    scope_slot_comparisons_v1: ScopeSlotComparisonsV1 | None = None
     statement_support_counts: dict[StatementSupportFailureKind, StrictInt] = Field(
         default_factory=dict
     )
@@ -1642,6 +1644,7 @@ class _ScopeReviewOutcome:
     slot_recovery_succeeded: int = 0
     slot_recovery_failed: int = 0
     scope_provider_failures: ScopeProviderFailureSeriesV1 | None = None
+    scope_slot_comparisons_v1: ScopeSlotComparisonsV1 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -4430,6 +4433,7 @@ def _failure_diagnostics_for_result(
         return None
     return CharacterSignalFailureDiagnosticsV1(
         scope_provider_failures=scope_review.scope_provider_failures if scope_review else None,
+        scope_slot_comparisons_v1=scope_review.scope_slot_comparisons_v1 if scope_review else None,
         statement_support_counts=dict(sorted(counts.items())),
         target_bound_events=tuple(target_events[:64]),
         target_bound_events_omitted=max(0, len(target_events) - 64),
@@ -6268,6 +6272,7 @@ def _review_clean_signals(
         slot_recovery_succeeded=getattr(run, "slot_recovery_succeeded", 0),
         slot_recovery_failed=getattr(run, "slot_recovery_failed", 0),
         scope_provider_failures=getattr(run, "scope_provider_failures", None),
+        scope_slot_comparisons_v1=getattr(run, "scope_slot_comparisons_v1", None),
     )
 
 

@@ -347,7 +347,7 @@ def test_alpha_fixture_is_developer_visible_and_covers_bounded_major_scenarios()
         "character-scope-review-v2"
     )
     assert limits["signal_scope_review_prompt_version"] == (
-        "character-scope-review-prompt-v4"
+        "character-scope-review-prompt-v5"
     )
 
 

@@ -44,7 +44,7 @@ provenance 不会被重解释为 V4，也不能通过当前 Alpha preflight。
 仅开启 support-ID v4 不足以产生 `required_v1`：V4 定位断言，semantic-scope v5
 提供承接关系，scope reviewer 才将获支持的主张绑定到冻结运行输入。因此运行来源须为
 `assertion-index-v1` / `semantic-scope-v6` / `character-scope-review-v2` /
-`character-scope-review-prompt-v4`；这些身份由服务端派生，不是额外环境变量。v6 明确支持
+`character-scope-review-prompt-v5`。这些身份由服务端派生。提示 v5 区分候选本身的方向与原文是否支持该方向。v6 明确支持
 同行后置的核心/稳定总结标签，但仅能通过 `postposed_label_summary` 提交；label 必须是该行
 最后一个断言，且独立复核须覆盖从目标到标签的完整分句路径。标签后仍有任何断言、跨行、
 换主体、不同语义轴或依据不完整，均失败关闭。路径内同轴事实自身的负向措辞（例如“不

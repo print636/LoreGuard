@@ -741,7 +741,7 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     limits = on["character_consistency_limits"]
     assert limits["signal_scope_review_v1"] is True
     assert limits["signal_scope_review_schema_version"] == "character-scope-review-v2"
-    assert limits["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v4"
+    assert limits["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v5"
     assert limits["signal_scope_review_contract_recovery_version"] == "character-scope-review-contract-recovery-v1"
     assert off["character_consistency_limits"]["signal_scope_review_contract_recovery_version"] is None
     assert limits["signal_scope_review_token_reserve"] == 6_000
@@ -759,7 +759,7 @@ def test_scope_review_runtime_identity_is_bounded_versioned_and_back_compatible(
     summary = axis_live._runtime_summary({"runtime_provenance": on})
     assert summary["signal_scope_review_v1"] is True
     assert summary["signal_scope_review_schema_version"] == "character-scope-review-v2"
-    assert summary["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v4"
+    assert summary["signal_scope_review_prompt_version"] == "character-scope-review-prompt-v5"
     assert summary["signal_scope_review_contract_recovery_version"] == "character-scope-review-contract-recovery-v1"
     assert summary["signal_scope_review_limits"][
         "signal_scope_review_provider_max_completion_tokens"

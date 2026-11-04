@@ -19,10 +19,12 @@ SCOPE_REVIEW_SCHEMA_V2 = "character-scope-review-v2"
 SCOPE_REVIEW_PROMPT_V1 = "character-scope-review-prompt-v1"
 SCOPE_REVIEW_PROMPT_V2 = "character-scope-review-prompt-v2"
 SCOPE_REVIEW_PROMPT_V4 = "character-scope-review-prompt-v4"
+SCOPE_REVIEW_PROMPT_V5 = "character-scope-review-prompt-v5"
 ASSERTION_INDEX_V1 = "assertion-index-v1"
 MAX_SCOPE_REVIEW_REQUEST_BYTES = 131_072
 MAX_SCOPE_REVIEW_RESPONSE_BYTES = 32_768
 MAX_SCOPE_REVIEW_ITEMS = 64
+MAX_RECORDED_SLOT_COMPARISONS = 12
 
 _SUPPORT_ID_PATTERN = r"^L[1-9][0-9]{0,7}:A[1-9][0-9]{0,2}$"
 _PROPOSAL_ID_PATTERN = r"^[A-Za-z0-9:_-]{1,96}$"
@@ -30,6 +32,7 @@ _SHA256_PATTERN = r"^[a-f0-9]{64}$"
 _SUPPORT_ID_PARTS = re.compile(r"^L([1-9][0-9]{0,7}):A([1-9][0-9]{0,2})$")
 
 ReviewVerdict = Literal["supported", "rejected", "uncertain"]
+PolarityRelation = Literal["same", "opposite", "not_applicable", "ambiguous"]
 BasisInvalidSubtype = Literal[
     "duplicate",
     "unknown_id",
@@ -149,7 +152,7 @@ class ScopeReviewProposal(BaseModel):
 
 class ScopeReviewRequest(ScopeReviewSourceIdentity):
     schema_version: Literal["character-scope-review-v2"] = SCOPE_REVIEW_SCHEMA_V2
-    prompt_version: Literal["character-scope-review-prompt-v4"] = SCOPE_REVIEW_PROMPT_V4
+    prompt_version: Literal["character-scope-review-prompt-v5"] = SCOPE_REVIEW_PROMPT_V5
     assertion_index_version: Literal["assertion-index-v1"] = ASSERTION_INDEX_V1
     block_line_start: int = Field(ge=1, le=10_000_000)
     lines: tuple[ScopeReviewLine, ...] = Field(min_length=1, max_length=64)
@@ -241,7 +244,7 @@ class ScopeReviewItem(BaseModel):
     statement_relation: Literal["supported", "contradicted", "ambiguous"]
     label_relation: Literal["same_axis", "different_axis", "none", "ambiguous"]
     object_relation: Literal["same", "different", "not_applicable", "ambiguous"]
-    polarity_relation: Literal["same", "opposite", "not_applicable", "ambiguous"]
+    polarity_relation: PolarityRelation
     level_supported: Literal["yes", "no", "ambiguous"]
     basis_ids: tuple[str, ...] = Field(max_length=64)
 
@@ -265,6 +268,54 @@ class ScopeReviewDecision(BaseModel):
     # Internal-only fixed categories; never persist proposal/source identifiers.
     slot_conflicts: tuple[ScopeReviewSlotConflict, ...] = Field(default=(), exclude=True)
     basis_invalid_subtype: BasisInvalidSubtype | None = Field(default=None, exclude=True)
+    # Only populated after the complete response and proposal bindings validate.
+    raw_verdict: ReviewVerdict | None = Field(default=None, exclude=True)
+    polarity_relation: PolarityRelation | None = Field(default=None, exclude=True)
+
+
+class ScopeSlotRoundV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    raw_verdict: ReviewVerdict
+    polarity_relation: PolarityRelation
+    verdict: ReviewVerdict
+    reason: ReviewReason
+    slot_conflicts: tuple[ScopeReviewSlotConflict, ...] = Field(max_length=8)
+
+
+class ScopeSlotComparisonV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    proposal_digest: str = Field(pattern=_SHA256_PATTERN)
+    source_line: int = Field(ge=1, le=10_000_000)
+    assertion_ordinal: int = Field(ge=1, le=64)
+    proposed_polarity: Literal["positive", "negative", "neutral", "unclear"]
+    correction_attempted_for_item: bool
+    initial: ScopeSlotRoundV1 | None
+    correction: ScopeSlotRoundV1 | None
+
+    @model_validator(mode="after")
+    def _checked_rounds(self):
+        if self.correction is not None and not self.correction_attempted_for_item:
+            raise ValueError("unattempted item correction")
+        if not any(row and row.reason == "slot_conflict" and row.slot_conflicts
+                   for row in (self.initial, self.correction)):
+            raise ValueError("no recorded slot conflict")
+        return self
+
+
+class ScopeSlotComparisonsV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    source_sha256: str = Field(pattern=_SHA256_PATTERN)
+    attempted_rounds: int = Field(ge=1, le=2)
+    events: tuple[ScopeSlotComparisonV1, ...] = Field(min_length=1, max_length=MAX_RECORDED_SLOT_COMPARISONS)
+    omitted: int = Field(ge=0, le=MAX_SCOPE_REVIEW_ITEMS)
+
+    @model_validator(mode="after")
+    def _bounded_events(self):
+        if (len(self.events) + self.omitted > MAX_SCOPE_REVIEW_ITEMS
+                or len({event.proposal_digest for event in self.events}) != len(self.events)
+                or (self.attempted_rounds == 1 and any(event.correction_attempted_for_item for event in self.events))):
+            raise ValueError("invalid scope slot event accounting")
+        return self
 
 
 class ScopeReviewEvaluation(BaseModel):
@@ -581,5 +632,7 @@ def evaluate_scope_review(
             basis_ids=item.basis_ids if reason not in {"basis_invalid", "slot_conflict"} else (),
             slot_conflicts=slot_conflicts,
             basis_invalid_subtype=basis_invalid_subtype,
+            raw_verdict=item.verdict,
+            polarity_relation=item.polarity_relation,
         ))
     return ScopeReviewEvaluation(request_digest=request_digest(request), decisions=tuple(decisions))

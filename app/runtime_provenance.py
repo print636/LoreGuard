@@ -24,7 +24,7 @@ from .character_trait_extraction import (
     build_baseline_coverage_system_prompt,
     build_formal_character_signal_system_prompt,
 )
-from .character_scope_review import SCOPE_REVIEW_PROMPT_V4, SCOPE_REVIEW_SCHEMA_V2
+from .character_scope_review import SCOPE_REVIEW_PROMPT_V5, SCOPE_REVIEW_SCHEMA_V2
 from .character_scope_review_provider import SCOPE_REVIEW_CONTRACT_RECOVERY_V1
 from .character_history_semantic_review import (
     HISTORY_REVIEW_PROMPT_V1, HISTORY_REVIEW_SCHEMA_V1,
@@ -357,7 +357,7 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
                 SCOPE_REVIEW_SCHEMA_V2 if settings.character_signal_scope_review_v1 else None
             ),
             "signal_scope_review_prompt_version": (
-                SCOPE_REVIEW_PROMPT_V4 if settings.character_signal_scope_review_v1 else None
+                SCOPE_REVIEW_PROMPT_V5 if settings.character_signal_scope_review_v1 else None
             ),
             "signal_scope_review_contract_recovery_version": (
                 SCOPE_REVIEW_CONTRACT_RECOVERY_V1

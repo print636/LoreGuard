@@ -788,6 +788,12 @@ def test_stage_preserves_slot_conflict_history_when_correction_budget_is_exhaust
     assert recovery["scope_review_slot_recovery_attempts"] == 0
     assert recovery["scope_review_slot_recovery_succeeded"] == 0
     assert recovery["scope_review_slot_recovery_failed"] == 1
+    comparison = recovery["scope_slot_comparisons_v1"]
+    assert comparison["source_sha256"] == source.content_sha256
+    event, = comparison["events"]
+    assert (event["source_line"], event["assertion_ordinal"]) == (2, 1)
+    assert event["initial"]["slot_conflicts"] == ["actor", "statement_relation"]
+    assert event["correction"] is None
     assert recovery["scope_provider_failures"] == {"events": [], "omitted": 0}
     assert result.diagnostics["outcome"] == "partial"
     assert result.diagnostics["material_coverage"] == "partial"

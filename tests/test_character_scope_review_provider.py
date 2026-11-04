@@ -584,6 +584,16 @@ def test_slot_regeneration_only_replaces_original_conflicts(verdict, overrides, 
     assert result.initial_evaluation is not None
     assert result.initial_evaluation.decisions[0].reason == "slot_conflict"
     assert result.initial_evaluation.decisions[0].slot_conflicts == ("polarity_relation",)
+    series = result.scope_slot_comparisons_v1
+    assert (series.source_sha256, series.attempted_rounds, series.omitted) == (source.content_sha256, 2, 0)
+    event, = series.events
+    assert (event.source_line, event.assertion_ordinal, event.proposed_polarity) == (2, 3, "positive")
+    assert len(event.proposal_digest) == 64
+    assert (event.initial.raw_verdict, event.initial.polarity_relation, event.initial.verdict,
+            event.initial.slot_conflicts) == ("supported", "opposite", "uncertain", ("polarity_relation",))
+    assert event.correction.raw_verdict == event.correction.verdict == verdict
+    assert event.correction_attempted_for_item
+    assert event.correction.polarity_relation == second["items"][0]["polarity_relation"]
     assert result.evaluation.decisions[1:] == result.initial_evaluation.decisions[1:]
     assert [item.verdict for item in result.evaluation.decisions] == [
         verdict, "supported", "rejected", "uncertain", "uncertain",
@@ -644,6 +654,11 @@ def test_slot_retry_failure_preserves_first_legal_items_and_bounds_calls(failure
     assert result.evaluation.decisions[0].reason == "slot_conflict"
     assert result.evaluation.decisions[1].verdict == "supported"
     assert result.slot_recovery_attempts == expected_calls - 1
+    assert result.scope_slot_comparisons_v1.attempted_rounds == expected_calls
+    event, = result.scope_slot_comparisons_v1.events
+    assert event.initial.reason == "slot_conflict"
+    assert event.correction is None
+    assert event.correction_attempted_for_item is (expected_calls == 2)
     assert (result.slot_recovery_succeeded, result.slot_recovery_failed) == (0, 1)
     assert result.failure_reason == {
         "invalid": "response_invalid", "mismatch": "response_mismatch",
@@ -671,7 +686,29 @@ def test_envelope_retry_then_slot_conflict_has_no_third_call():
     assert result.evaluation.decisions[0].reason == "slot_conflict"
     assert result.initial_evaluation is None
     assert result.slot_recovery_attempts == 0
+    event, = result.scope_slot_comparisons_v1.events
+    assert event.initial is None
+    assert event.correction.slot_conflicts == ("polarity_relation",)
     assert len(provider.responses) == 1
+
+
+def test_conflicting_items_are_bounded_and_do_not_leak_proposals():
+    request, source, frozen = _source_request()
+    proposals = tuple(request.proposals[0].model_copy(update={"proposal_id": f"private-{i}"}) for i in range(14))
+    request = ScopeReviewRequest(**{**request.model_dump(), "proposals": proposals})
+    reply = json.loads(_response(request, polarity_relation="opposite"))
+    item = reply["items"][0]
+    reply["items"] = [{**item, "proposal_id": proposal.proposal_id} for proposal in proposals]
+    provider = FakeProvider(json.dumps(reply))
+    result = _run(request, source, frozen, provider)
+    series = result.scope_slot_comparisons_v1
+    assert len(series.events) == 12 and series.omitted == 2
+    assert len(result.evaluation.decisions) == 14
+    assert len({event.proposal_digest for event in series.events}) == 12
+    trace = series.model_dump_json()
+    for private in (source.run_input_id, source.document_id, "private-", proposals[0].character,
+                    proposals[0].statement, proposals[0].support_id):
+        assert private not in trace
 
 
 def test_slot_regeneration_keeps_original_basis_gate():

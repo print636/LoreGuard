@@ -42,6 +42,7 @@ from .character_scope_review import (
     SCOPE_REVIEW_BASIS_INVALID_SUBTYPES,
     SCOPE_REVIEW_SLOT_CONFLICT_KINDS,
     ScopeReviewSourceIdentity,
+    ScopeSlotComparisonsV1,
 )
 from .character_history_semantic_review import HistoryReviewSourceIdentity
 from .character_trait_extraction import (
@@ -7953,11 +7954,19 @@ def _validated_failure_diagnostics_payload(
     try:
         # Keep independent failure counts even if the optional series is corrupt.
         validated = CharacterSignalFailureDiagnosticsV1.model_validate(
-            value.model_dump(mode="python", exclude={"scope_provider_failures"}, warnings=False)
+            value.model_dump(mode="python", exclude={"scope_provider_failures", "scope_slot_comparisons_v1"}, warnings=False)
         )
     except (AttributeError, TypeError, ValueError):
         return None
-    payload = validated.model_dump(mode="json")
+    payload = validated.model_dump(mode="json", exclude={"scope_slot_comparisons_v1"})
+    comparisons = value.scope_slot_comparisons_v1
+    if isinstance(comparisons, ScopeSlotComparisonsV1) and comparisons.source_sha256 == expected_source_sha256:
+        try:
+            payload["scope_slot_comparisons_v1"] = ScopeSlotComparisonsV1.model_validate(
+                comparisons.model_dump(mode="python", warnings=False)
+            ).model_dump(mode="json")
+        except (AttributeError, TypeError, ValueError):
+            pass  # Keep independently validated diagnostics.
     series = value.scope_provider_failures
     if isinstance(series, ScopeProviderFailureSeriesV1):
         try:

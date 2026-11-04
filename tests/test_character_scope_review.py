@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from app.character_scope_review import (
     MAX_SCOPE_REVIEW_RESPONSE_BYTES,
     SCOPE_REVIEW_SCHEMA_V2,
-    SCOPE_REVIEW_PROMPT_V4,
+    SCOPE_REVIEW_PROMPT_V5,
     ScopeReviewClause,
     ScopeReviewItem,
     ScopeReviewLine,
@@ -140,9 +140,30 @@ def _evaluate(request: ScopeReviewRequest, identity: ScopeReviewSourceIdentity,
     )
 
 
+@pytest.mark.parametrize("source,statement,dimension,axis,polarity,stability,relation,level,expected", [
+    ("桑衍喜欢坚果", "桑衍喜欢坚果", "preference", "偏好坚果", "positive", "stable", "same", "yes", "supported"),
+    ("桑衍确诊坚果过敏", "桑衍确诊坚果过敏", "current_state", "过敏记录", "neutral", "unknown", "not_applicable", "yes", "supported"),
+    ("医嘱要求桑衍两周内不吃坚果", "桑衍两周内不得食用坚果", "contextual_behavior", "允许食用坚果", "negative", "temporary", "same", "yes", "supported"),
+    ("医嘱要求桑衍两周内不吃坚果", "桑衍两周内不得食用坚果", "contextual_behavior", "允许食用坚果", "negative", "temporary", "opposite", "yes", "uncertain"),
+    ("医嘱要求桑衍两周内不吃坚果", "桑衍一向厌恶坚果", "preference", "偏好坚果", "negative", "stable", "ambiguous", "no", "uncertain"),
+])
+def test_proposal_direction_and_persistence_contract(
+    source, statement, dimension, axis, polarity, stability, relation, level, expected,
+):
+    # Fixed, hand-specified review slots exercise the admission rule. This
+    # does not test a model's ability to select those slots from prose.
+    proposal = _proposal(
+        support_id="L2:A1", actor_anchor_id=None, label_anchor_id=None, scope_relation="local",
+        dimension=dimension, stability=stability, key_object="坚果", statement=statement, polarity=polarity,
+    ).model_copy(update={"trait_key": axis})
+    request, identity, frozen = _request(_line((source,)), (proposal,))
+    decision, = _evaluate(request, identity, frozen, _item(request, polarity_relation=relation, level_supported=level)).decisions
+    assert decision.verdict == expected
+
+
 def test_nonliteral_same_axis_and_situational_middle_clause_are_supported():
     request, identity, frozen_content = _request()
-    assert request.prompt_version == SCOPE_REVIEW_PROMPT_V4
+    assert request.prompt_version == SCOPE_REVIEW_PROMPT_V5
     result = _evaluate(request, identity, frozen_content, _item(request))
     assert result.decisions[0].verdict == "supported"
     assert result.decisions[0].reason == "supported"

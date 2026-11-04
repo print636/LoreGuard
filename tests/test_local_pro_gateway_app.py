@@ -135,7 +135,8 @@ def _exercise_author_review(client):
     from app.character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
     from app.character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
     from app.character_trait_extraction import (
-        CHARACTER_SIGNAL_SYSTEM_PROMPT, build_formal_character_signal_system_prompt,
+        CHARACTER_SIGNAL_SYSTEM_PROMPT, TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT,
+        build_formal_character_signal_system_prompt,
     )
     from app.model_extractor import SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT
     from app.provider import OpenAICompatibleProvider
@@ -168,6 +169,7 @@ def _exercise_author_review(client):
                                        dimension="speech_pattern", trait_key="concise_speech"))
     reviewer = _RuntimeSingleEventProvider()
     calls = []
+    draft_service_unavailable = False
 
     def respond(request):
         assert request.url.host == "127.0.0.1" and request.url.port == 8317
@@ -175,6 +177,10 @@ def _exercise_author_review(client):
         assert body["model"] == "mock-author"
         system, user = (message["content"] for message in body["messages"])
         calls.append(system)
+        if draft_service_unavailable and system.startswith(
+            (CHARACTER_SIGNAL_SYSTEM_PROMPT, TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT)
+        ) and system != formal_prompt:
+            return httpx.Response(503)
         if system == SYSTEM_PROMPT:
             content = '{"records":[]}'
         elif system == BATCH_SYSTEM_PROMPT:
@@ -195,6 +201,7 @@ def _exercise_author_review(client):
 
     def with_mock_transport(self, config=None, **kwargs):
         kwargs["transport"] = httpx.MockTransport(respond)
+        kwargs["sleep"] = lambda delay: None
         original_init(self, config, **kwargs)
 
     with (
@@ -223,7 +230,26 @@ def _exercise_author_review(client):
         opted_in = {**chosen, "character_review_enabled": True, "character_baseline_run_id": baseline_id}
         assert client.post(runs_url, json=opted_in).json()["detail"]["code"] == "character_baseline_not_ready"
         _confirm_only_candidate(client, project, baseline_id)
+
+        # A temporary draft-extraction outage can leave a completed report with no decision.
+        draft_service_unavailable = True
+        interrupted = start(opted_in)
+        interrupted_url = "/api/v1/analysis-runs/" + interrupted["id"]
+        interrupted_run = client.get(interrupted_url).json()
+        interrupted_stage = client.get(interrupted_url + "/diagnostics").json()["character_consistency"]
+        assert interrupted_run["status"] == "completed"
+        assert interrupted_stage["outcome"] == "partial"
+        assert interrupted_stage["reason_counts"]["upstream_5xx"] > 0
+        assert interrupted_stage["reason_counts"]["targeted_pass_upstream_5xx"] > 0
+        assert interrupted_stage["target_assessment_summary_v1"]["needs_review"] == 1
+        assert client.get(interrupted_url + "/issues").json() == []
+
+        draft_service_unavailable = False
         calls.clear()
+        assert client.post(interrupted_url + "/retry").status_code == 409
+        unchanged = client.post(interrupted_url + "/rechecks", json={"character_review_enabled": True})
+        assert unchanged.status_code == 409 and unchanged.json()["detail"]["code"] == "no_document_changes"
+        assert not calls
         ordinary = start(chosen)
         assert ordinary["review_batch"]["character_review_enabled"] is False
         assert calls and set(calls) <= {SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT}
@@ -231,7 +257,14 @@ def _exercise_author_review(client):
         assert reviewed["review_batch"]["character_baseline_run_id"] == baseline_id
         assert calls.count(CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT) == 1
         run_url = "/api/v1/analysis-runs/" + reviewed["id"]
-        assert client.get(run_url).json()["review_batch"]["character_review_enabled"] is True
+        recovered = client.get(run_url).json()
+        assert recovered["status"] == "completed" and recovered["id"] != interrupted["id"]
+        assert recovered["review_batch"]["character_review_enabled"] is True
+        assert recovered["retried_from"] is None and recovered["comparison_id"] is None
+        assert recovered["input_documents"] == interrupted_run["input_documents"]
+        assert recovered["character_profile_snapshot_sha256"] == interrupted_run["character_profile_snapshot_sha256"]
+        assert client.get(interrupted_url + "/diagnostics").json()["character_consistency"] == interrupted_stage
+        assert client.get(interrupted_url + "/issues").json() == []
         worker = client.get(run_url + "/diagnostics").json()["runtime_provenance"]
         api = client.get("/health").json()["runtime_provenance"]
         assert worker["capabilities"] == api["capabilities"]
