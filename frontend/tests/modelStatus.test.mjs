@@ -88,6 +88,46 @@ test('a verification timeout describes pending behavior without erasing other ch
   assert.doesNotMatch(legacy.detail + legacy.emptyCaveat, /超时|没有新稿行为进入/);
 });
 
+test('the author can distinguish checks not sent, replies not received, and ambiguous actions', () => {
+  const partial = {
+    ...completeCharacter, outcome: 'partial', material_coverage: 'partial',
+    target_assessment_summary_v1: { ...targetSummary, total_targets: 1, conflict: 0, no_issue: 0, needs_review: 1 },
+    counts: { ...completeCharacter.counts, draft_observation_count: 0, drift_considered: 0, drift_reviewed: 0 },
+  };
+  for (const prefix of ['', 'targeted_pass_', 'targeted_verification_']) {
+    const skipped = describeCharacterReviewStage({ ...partial,
+      reason_counts: { [prefix + 'target_bound_scene_time_insufficient']: 2 } });
+    assert.match(skipped.detail, /剩余时间不足.*核对请求未发出/);
+    assert.doesNotMatch(skipped.detail + skipped.emptyCaveat, /超时|核对已发起/);
+    const unclear = describeCharacterReviewStage({ ...partial,
+      reason_counts: { [prefix + 'habit_paraphrase_ambiguous_source']: 1 } });
+    assert.match(unclear.detail, /概括未能对应到原文中的具体动作/);
+    assert.match(unclear.emptyCaveat, /本次没有新稿行为进入角色主审/);
+    assert.doesNotMatch(unclear.detail, /超时|请求未发出|未发现冲突/);
+  }
+  const mixed = describeCombinedReviewStatus(complete, { ...partial,
+    reason_counts: { target_bound_scene_time_insufficient: 1, targeted_pass_target_bound_scene_time_insufficient: 1,
+      target_bound_provider_timeout: 2, targeted_verification_habit_paraphrase_ambiguous_source: 1 },
+    counts: { ...partial.counts, draft_observation_count: 1, drift_considered: 1, drift_reviewed: 1 },
+  }, { mode: 'draft_review', character_review_enabled: true });
+  for (const text of [mixed.detail, mixed.emptyCaveat]) {
+    assert.equal(text.match(/核对请求未发出/g)?.length, 1);
+    assert.match(text, /核对已发起.*模型请求超时/);
+    assert.match(text, /概括未能对应到原文中的具体动作/);
+    assert.match(text, /已有新稿行为进入角色主审/);
+    assert.doesNotMatch(text, /本次没有新稿行为进入|target_bound|ambiguous_source|未发现冲突/);
+  }
+  const unclear = { habit_paraphrase_ambiguous_source: 2 };
+  for (const overrides of [{ counts: undefined }, { enabled: undefined }, { target_assessment_summary_v1: undefined },
+    { counts: { ...partial.counts, drift_considered: 1 } }]) {
+    const historical = describeCharacterReviewStage({ ...partial, reason_counts: unclear, ...overrides });
+    assert.doesNotMatch(historical.emptyCaveat, /本次没有新稿行为进入|已有新稿行为进入/);
+  }
+  const noGap = describeCharacterReviewStage({ ...partial,
+    reason_counts: { habit_paraphrase_ambiguous_source: '1', target_bound_scene_time_insufficient: 0 } });
+  assert.doesNotMatch(noGap.detail, /概括未能|核对请求未发出/);
+});
+
 test('combined review coverage needs actual target judgments as well as frozen material processing', () => {
   const judged = {
     ...completeCharacter, target_assessment_summary_v1: targetSummary,

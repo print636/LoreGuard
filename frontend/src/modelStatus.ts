@@ -686,16 +686,28 @@ function hasCharacterReason(diagnostics: CharacterConsistencyDiagnostics, ...key
     Number.isSafeInteger(reasons[key]) && reasons[key] > 0);
 }
 
-function characterVerificationTimeout(diagnostics: CharacterConsistencyDiagnostics): string {
-  if (!hasCharacterReason(diagnostics, 'target_bound_provider_timeout', 'targeted_pass_target_bound_provider_timeout')) return '';
+function characterVerificationGaps(diagnostics: CharacterConsistencyDiagnostics): string {
+  const occurred = (reason: string) => hasCharacterReason(
+    diagnostics, reason, `targeted_pass_${reason}`, `targeted_verification_${reason}`,
+  );
+  const details = [
+    occurred('target_bound_scene_time_insufficient') && '本轮剩余时间不足，部分行为的核对请求未发出。',
+    occurred('target_bound_provider_timeout') && '部分核对已发起，但模型请求超时，有些行为尚未核实。',
+    occurred('habit_paraphrase_ambiguous_source') && '系统对部分行为的概括未能对应到原文中的具体动作。',
+  ].filter(Boolean);
+  if (!details.length) return '';
   const targets = targetCounts(diagnostics.target_assessment_summary_v1);
   const counts = diagnostics.counts;
-  const noBehaviorReviewed = diagnostics.snapshot_bound === true && diagnostics.material_coverage === 'partial' &&
-    targets && targets.total_targets > 0 && targets.conflict === 0 && targets.no_issue === 0 &&
+  const bound = diagnostics.enabled === true && diagnostics.snapshot_bound === true &&
+    diagnostics.material_coverage === 'partial' && targets && targets.total_targets > 0;
+  const noBehaviorReviewed = bound && targets.conflict === 0 && targets.no_issue === 0 &&
     counts?.draft_observation_count === 0 && counts.drift_considered === 0 && counts.drift_reviewed === 0;
-  return '模型核对新稿行为时超时，有些行为尚未核实。' + (noBehaviorReviewed
-    ? '本次没有新稿行为进入角色主审，相关设定与新稿是否一致仍未判断。'
-    : '这些行为是否符合设定仍待核对。');
+  const alreadyInReview = bound && [counts?.draft_observation_count, counts?.drift_considered, counts?.drift_reviewed]
+    .every(value => isNonnegativeInteger(value) && value > 0);
+  if (noBehaviorReviewed) details.push('本次没有新稿行为进入角色主审，相关设定与新稿是否一致仍未判断。');
+  else if (alreadyInReview) details.push('已有新稿行为进入角色主审，未核实的部分仍待核对。');
+  else details.push('这些行为是否符合设定仍待核对。');
+  return details.join('');
 }
 
 export function describeCharacterReviewStage(
@@ -750,8 +762,8 @@ export function describeCharacterReviewStage(
         counts: chunks.text, emptyCaveat: unknownCaveat,
       };
     }
-    const timeout = characterVerificationTimeout(diagnostics);
-    let explanation = timeout ? '如需补查，可重新发起校验。' : `${reason || '部分角色审查未完成'}。请核对本次运行诊断后重新发起校验。`;
+    const gaps = characterVerificationGaps(diagnostics);
+    let explanation = gaps ? '如需补查，可重新发起校验。' : `${reason || '部分角色审查未完成'}。请核对本次运行诊断后重新发起校验。`;
     if (hasCharacterReason(diagnostics, 'token_budget', 'stage_token_budget')) {
       explanation = '审查中发生 Token 预算门控；部分内容可能未调用模型。请核对预算后重新发起校验。';
     } else if (hasCharacterReason(diagnostics, 'upstream_5xx', 'targeted_pass_upstream_5xx')) {
@@ -763,19 +775,21 @@ export function describeCharacterReviewStage(
     }
     return {
       coverage: 'partial', label: '角色审查仅覆盖部分内容',
-      detail: `${timeout}${explanation} 未覆盖内容不能视为没有问题。`,
+      detail: `${gaps}${explanation} 未覆盖内容不能视为没有问题。`,
       counts: chunks.text,
-      emptyCaveat: timeout || '角色审查仅部分完成，当前结果不能证明没有角色设定或行为漂移问题。',
+      emptyCaveat: gaps || '角色审查仅部分完成，当前结果不能证明没有角色设定或行为漂移问题。',
     };
   }
   if (['disabled', 'skipped', 'degraded'].includes(diagnostics.outcome)) {
     const label = diagnostics.outcome === 'disabled' ? '角色审查未启用'
       : diagnostics.outcome === 'skipped' ? '角色审查未执行' : '角色审查未完成';
+    const gaps = diagnostics.outcome === 'degraded' && frozen && diagnostics.enabled === true
+      ? characterVerificationGaps(diagnostics) : '';
     return {
       coverage: 'partial', label,
-      detail: `${reason || label}；通用规则或语义抽取不能替代角色一致性审查。${diagnostics.reason_code === 'run_token_budget' ? '请核对预算后重新发起校验。' : ''}`,
+      detail: gaps || `${reason || label}；通用规则或语义抽取不能替代角色一致性审查。${diagnostics.reason_code === 'run_token_budget' ? '请核对预算后重新发起校验。' : ''}`,
       counts: chunks.text,
-      emptyCaveat: `${label}，当前结果不能证明没有角色设定或行为漂移问题。`,
+      emptyCaveat: gaps || `${label}，当前结果不能证明没有角色设定或行为漂移问题。`,
     };
   }
   return {

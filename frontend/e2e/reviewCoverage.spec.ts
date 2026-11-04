@@ -195,14 +195,15 @@ test("a model service failure leaves the affected setting open in the completed 
   expect(state.unexpected).toEqual([]);
 });
 
-test("超时的行为在报告中显示为未判断", async ({ page }) => {
+test("报告区分未发出的核对、回复超时和未能对应原文的行为", async ({ page }) => {
   const state = {
     choice: true, unexpected: [] as string[],
     character: {
       ...processedStage, outcome: "partial", material_coverage: "partial",
       counts: { planned_chunks: 2, model_called_chunks: 2, model_completed_chunks: 1, model_uncalled_chunks: 0,
         model_incomplete_chunks: 1, draft_observation_count: 0, drift_considered: 0, drift_reviewed: 0 },
-      reason_counts: { target_bound_provider_timeout: 5, targeted_pass_target_bound_provider_timeout: 5 },
+      reason_counts: { target_bound_provider_timeout: 5, targeted_pass_target_bound_scene_time_insufficient: 1,
+        targeted_pass_habit_paraphrase_ambiguous_source: 1 },
       target_assessment_summary_v1: {
         schema_version: "character-target-assessment-summary-v1", total_targets: 1,
         conflict: 0, no_issue: 0, no_matching_observation: 0, needs_review: 1, unprocessed: 0,
@@ -212,7 +213,9 @@ test("超时的行为在报告中显示为未判断", async ({ page }) => {
   await mockCompletedRun(page, state);
   await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
   const coverage = page.getByRole("region", { name: "本次审查范围" });
-  await expect(coverage).toContainText("模型核对新稿行为时超时");
+  await expect(coverage).toContainText("核对请求未发出");
+  await expect(coverage).toContainText("核对已发起，但模型请求超时");
+  await expect(coverage).toContainText("概括未能对应到原文中的具体动作");
   await expect(coverage).toContainText("如需补查，可重新发起校验");
   await expect(page.locator(".issues .empty")).toContainText("相关设定与新稿是否一致仍未判断");
   await expect(coverage).not.toContainText("未发现冲突");
