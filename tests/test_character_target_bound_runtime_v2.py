@@ -82,7 +82,7 @@ def test_target_bound_v2_runtime_bundle_round_trips_strict_consumers():
             **on,
             "character_consistency_limits": {
                 **on["character_consistency_limits"],
-                key: None,
+                key: "unexpected" if on["character_consistency_limits"][key] is None else None,
             },
         }
         assert investigator_runner._safe_runtime_provenance(malformed) is None

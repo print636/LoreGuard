@@ -519,10 +519,15 @@ _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS = frozenset({
     "target_bound_draft_review_signal_prompt_version",
     "target_bound_draft_review_clause_index_version",
 })
-_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS = frozenset({
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEYS = frozenset({
     *_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS,
     _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEY,
 })
+_PRIMARY_SCOPED_CLAIM_VERSION_KEY = "primary_scoped_claim_review_prompt_version"
+_PRIMARY_SCOPED_CLAIM_VERSION = "character-target-bound-draft-review-prompt-v10"
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS = (
+    _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEYS | {_PRIMARY_SCOPED_CLAIM_VERSION_KEY}
+)
 _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_SCHEMA_VERSION = (
     "character-target-bound-draft-review-v2"
 )
@@ -3311,8 +3316,9 @@ def _valid_character_target_bound_draft_review_limits(
 
     present = set(limits) & _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS
     if present not in (
-        set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS),
-        set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS),
+        _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS,
+        _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEYS,
+        _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS,
     ):
         return False
     enabled_v2 = limits[_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEY]
@@ -3325,6 +3331,10 @@ def _valid_character_target_bound_draft_review_limits(
         return False
     enabled = enabled_v2 or enabled_v3
     if enabled and limits.get(_CHARACTER_DRAFT_ACTOR_REVIEW_KEY) is not True:
+        return False
+    if _PRIMARY_SCOPED_CLAIM_VERSION_KEY in present and (
+        limits[_PRIMARY_SCOPED_CLAIM_VERSION_KEY] != (_PRIMARY_SCOPED_CLAIM_VERSION if enabled_v3 else None)
+    ):
         return False
     v2_expected = {
         "target_bound_draft_review_schema_version": (
@@ -3471,11 +3481,6 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
         )
         or draft_actor_review_keys not in (
             set(), set(_CHARACTER_DRAFT_ACTOR_REVIEW_KEYS)
-        )
-        or target_bound_draft_review_keys not in (
-            set(),
-            set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS),
-            set(_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS),
         )
         or explanation_review_keys not in (
             set(),
@@ -3667,7 +3672,7 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             return None
         safe_character_limits.update({
             key: character_limits[key]
-            for key in _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS
+            for key in target_bound_draft_review_keys
         })
     if explanation_review_keys:
         enabled = character_limits[_CHARACTER_EXPLANATION_REVIEW_KEY]

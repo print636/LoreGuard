@@ -43,6 +43,7 @@ from .character_history_semantic_review import (
 )
 from .character_draft_actor_review import (
     DraftActorClauseIndex,
+    PrimaryDraftClaim,
     DraftActorProposal,
     TargetBoundSlotConflict,
     TargetBoundNegativeSlot,
@@ -57,6 +58,7 @@ from .character_draft_actor_review import (
     build_target_bound_draft_review_request,
     is_unsafe_target_actor_literal,
     _target_bound_literal_object_required,
+    _same_primary_statement,
     screen_draft_actor_proposal,
     target_bound_draft_review_request_digest,
     target_bound_draft_target_digest,
@@ -1615,6 +1617,8 @@ class _TargetBoundDraftDeferred:
     failure_reason: Literal[
         "character_support", "statement_support", "key_object_support"
     ]
+    claim_review: bool = False
+    alternatives: tuple[TargetBoundDraftProposal, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -3000,6 +3004,7 @@ class CharacterSignalExtractor:
                     chunk=chunk,
                     deferred=validation.target_bound_draft_deferred,
                     primary_value_recovery=primary_recovery,
+                    package_attempt=package_attempt + 1,
                     source_identity=source_identity,
                     frozen_content=frozen_content,
                     provider=self._base_provider,
@@ -5085,17 +5090,20 @@ def _primary_value_debts(
     source_identity: ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None,
     frozen_content: str | None,
 ) -> tuple[tuple[_TargetBoundDraftDeferred, ...], Counter[str]]:
-    """Bind a last-attempt lexical rejection to its own frozen, scoped value proposition."""
+    """Prepare bounded final-attempt checks against the rejected record’s own claim."""
     counts: Counter[str] = Counter()
-    rejected_indices = [
-        failure.record_index for failure in validation.failures
-        if failure.statement_support_kind == "lexical_polarity" and failure.record_index is not None
-    ]
-    if not rejected_indices or not _draft_actor_source_matches_chunk(source_identity, frozen_content, chunk):
+    rejected = {
+        failure.record_index: failure.reason for failure in validation.failures
+        if failure.record_index is not None and (
+            failure.statement_support_kind in {"lexical_polarity", "anchor_overlap"}
+            or failure.reason == "character_support"
+        )
+    }
+    if not rejected or not _draft_actor_source_matches_chunk(source_identity, frozen_content, chunk):
         return (), counts
     envelope = _ENVELOPE_ADAPTER.validate_json(response_text)
     debts = []
-    for record_index in rejected_indices:
+    for record_index, failure_reason in rejected.items():
         record = _RECORD_ADAPTER.validate_python(envelope.records[record_index])
         if record.dimension not in _SCOPED_APPROVED_AXIS_DIMENSIONS:
             continue
@@ -5103,10 +5111,20 @@ def _primary_value_debts(
             counts["primary_value_recovery_other_gate"] += 1
             counts["primary_value_recovery_other_gate_stability"] += 1
             continue
-        # Re-run all ordinary gates including actor, literal object, and statement
-        # anchoring. Only the lexical polarity check that actually failed is deferred.
+        # Re-run all hard gates. Only an attribution explicitly marked for
+        # independent review may be deferred together with lexical checks.
+        actor_deferred = False
         try:
-            preflight = _bind_record(record, chunk, skip_lexical_polarity=True)
+            try:
+                preflight = _bind_record(
+                    record, chunk, skip_lexical_polarity=True, defer_primary_anchor_overlap=True
+                )
+            except _DraftActorAttributionRequired:
+                actor_deferred = True
+                preflight = _bind_record(
+                    record, chunk, skip_lexical_polarity=True,
+                    defer_primary_anchor_overlap=True, skip_draft_actor_attribution=True,
+                )
         except (TypeError, ValueError) as exc:
             counts["primary_value_recovery_other_gate"] += 1
             counts[f"primary_value_recovery_other_gate_{_primary_value_other_gate_code(exc)}"] += 1
@@ -5121,9 +5139,10 @@ def _primary_value_debts(
             counts["primary_value_recovery_target_mismatch"] += 1
             continue
         ordinal, target = matched[0]
+        review_target = _target_bound_review_target(target, target_ordinal=ordinal)
         try:
             index, proposals = build_target_bound_draft_proposals(
-                frozen_content, source_identity, _target_bound_review_target(target, target_ordinal=ordinal),
+                frozen_content, source_identity, review_target,
                 line_start=record.source_line_start, line_end=record.source_line_end,
                 protocol_version="v4",
             )
@@ -5135,15 +5154,31 @@ def _primary_value_debts(
         exact = [
             proposal for proposal in proposals
             if proposal.evidence == record.evidence
-            and proposal.canonical_statement.strip().removesuffix("。").removesuffix(".")
-            == record.statement.strip().removesuffix("。").removesuffix(".")
+            and _same_primary_statement(record.statement, proposal.canonical_statement)
         ]
-        if len(exact) != 1:
+        claim_review = actor_deferred or len(exact) != 1
+        choices = tuple(exact)
+        if not exact:
+            index, rebuilt = build_target_bound_draft_proposals(
+                frozen_content, source_identity, review_target,
+                line_start=record.source_line_start, line_end=record.source_line_end,
+                protocol_version="v4", primary_claim_review=True,
+            )
+            choices = tuple(proposal for proposal in rebuilt if proposal.evidence == record.evidence)
+        if not choices:
             counts["primary_value_recovery_no_exact_proposal"] += 1
             continue
+        if len({fact.canonical_statement for fact in choices}) != len(choices):
+            counts["primary_value_paraphrase_ambiguous_source"] += 1
+            continue
+        if not exact:
+            counts["primary_value_paraphrase_selected"] += 1
+        if actor_deferred:
+            counts["primary_value_actor_attribution_deferred"] += 1
         debts.append(_TargetBoundDraftDeferred(
             record_index=record_index, record=record, preflight_signal=preflight, index=index,
-            proposal=exact[0], target=target, target_ordinal=ordinal, failure_reason="statement_support",
+            proposal=choices[0], alternatives=choices[1:], claim_review=claim_review,
+            target=target, target_ordinal=ordinal, failure_reason=failure_reason,
         ))
     return tuple(debts), counts
 
@@ -5613,6 +5648,25 @@ def _target_bound_signal_id(
     return f"cs_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:32]}"
 
 
+def _primary_claim_identity(
+    row: _TargetBoundDraftDeferred, package_attempt: int,
+    source: ScopeReviewSourceIdentity, target: TargetBoundDraftReviewTarget,
+) -> PrimaryDraftClaim:
+    ordinal = row.record_index + 1
+    identity = {
+        "package_attempt": package_attempt, "record_ordinal": ordinal,
+        "source": source.model_dump(mode="json"), "target_digest": target_bound_draft_target_digest(target),
+        "record": row.record.model_dump(mode="json"),
+    }
+    digest = hashlib.sha256(json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    return PrimaryDraftClaim(
+        package_attempt=package_attempt, record_ordinal=ordinal,
+        statement=row.record.statement, context=row.record.context, claim_digest=digest,
+    )
+
+
 def _bind_target_bound_draft_certificate(
     *,
     request: TargetBoundDraftReviewRequest,
@@ -5622,6 +5676,7 @@ def _bind_target_bound_draft_certificate(
     chunk: CharacterSignalChunk,
     source_identity: ScopeReviewSourceIdentity,
     frozen_content: str,
+    expected_primary_claim: PrimaryDraftClaim | None = None,
 ) -> CharacterSignal:
     """Mechanically bind a validated target-bound certificate to server identity."""
 
@@ -5630,12 +5685,13 @@ def _bind_target_bound_draft_certificate(
         or decision.reason != "supported"
         or decision.proposal_id != proposal.proposal_id
         or decision.target_digest != request.target_digest
+        or decision.verified_claim_digest != (expected_primary_claim.claim_digest if expected_primary_claim else None)
         or decision.target_ordinal != request.target.target_ordinal
         or decision.observation_kind is None
         or request.target_digest
         != target_bound_draft_target_digest(request.target)
         or not verify_target_bound_draft_review_source(
-            request, source_identity, frozen_content=frozen_content
+            request, source_identity, frozen_content=frozen_content, expected_primary_claim=expected_primary_claim
         )
     ):
         raise ValueError("semantic_binding_unresolved")
@@ -5726,6 +5782,7 @@ def _review_target_bound_draft_candidates(
     chunk: CharacterSignalChunk,
     deferred: tuple[_TargetBoundDraftDeferred, ...],
     primary_value_recovery: bool = False,
+    package_attempt: int = 1,
     source_identity: ScopeReviewSourceIdentity,
     frozen_content: str,
     provider: _ChatProvider,
@@ -5750,12 +5807,15 @@ def _review_target_bound_draft_candidates(
             TargetBoundDraftReviewProposal,
         ]
     ] = {}
+    claim_review = primary_value_recovery and any(item.claim_review for item in deferred)
     try:
-        grouped: dict[
-            tuple[int, int, int], list[_TargetBoundDraftDeferred]
-        ] = defaultdict(list)
+        grouped: dict[tuple[int, int, int, int], list[_TargetBoundDraftDeferred]] = defaultdict(list)
         for item in deferred:
-            grouped[(item.target_ordinal, item.index.line_start, item.index.line_end)].append(item)
+            # With v10 each raw claim has its own request digest, including when
+            # two rejected records cite the same character, line and source facts.
+            key = (item.target_ordinal, item.index.line_start, item.index.line_end,
+                   item.record_index if claim_review else -1)
+            grouped[key].append(item)
         for window in sorted(grouped):
             rows = grouped[window]
             index = rows[0].index
@@ -5763,8 +5823,10 @@ def _review_target_bound_draft_candidates(
             if any(row.index != index for row in rows):
                 raise ValueError("target_bound_index_mismatch")
             proposals = tuple({
-                row.proposal.model_dump_json(): row.proposal for row in rows
+                proposal.model_dump_json(): proposal
+                for row in rows for proposal in (row.proposal, *row.alternatives)
             }.values())
+            claim = _primary_claim_identity(rows[0], package_attempt, source_identity, review_target) if claim_review else None
             request = build_target_bound_draft_review_request(
                 index,
                 review_target,
@@ -5772,23 +5834,19 @@ def _review_target_bound_draft_candidates(
                 frozen_content=frozen_content,
                 expected_source=source_identity,
                 protocol_version="v4" if primary_value_recovery else "v2",
-                allow_named_speech=primary_value_recovery,
+                allow_named_speech=primary_value_recovery and not claim_review,
+                primary_claim=claim,
             )
             entries.append(TargetBoundDraftReviewBatchEntry(
-                request=request,
-                expected_source=source_identity,
-                frozen_content=frozen_content,
+                request=request, expected_source=source_identity,
+                frozen_content=frozen_content, expected_primary_claim=claim,
             ))
             request_digest = target_bound_draft_review_request_digest(request)
             for proposal in request.proposals:
-                matches = tuple(
-                    row for row in rows
-                    if row.proposal.model_dump(mode="json")
-                    == {
-                        name: getattr(proposal, name)
-                        for name in TargetBoundDraftProposal.model_fields
-                    }
+                source_fact = TargetBoundDraftProposal.model_validate(
+                    proposal.model_dump(exclude={"proposal_id"}), strict=True
                 )
+                matches = tuple(row for row in rows if source_fact in (row.proposal, *row.alternatives))
                 if len(matches) != 1:
                     raise ValueError("target_bound_candidate_mismatch")
                 candidate_by_key[(request_digest, proposal.proposal_id)] = (
@@ -5821,6 +5879,8 @@ def _review_target_bound_draft_candidates(
     review_reasons: Counter[str] = Counter()
     slot_conflict_counts: Counter[TargetBoundSlotConflict] = Counter()
     failure_events: list[TargetBoundFailureEventV1] = []
+    if claim_review and run.attempted_calls:
+        review_reasons["primary_value_claim_review_calls"] += run.attempted_calls
     if run.failure_reason is not None:
         review_reasons[f"target_bound_{run.failure_reason}"] += len(deferred)
     if len(run.evaluation.evaluations) != len(entries):
@@ -5838,7 +5898,27 @@ def _review_target_bound_draft_candidates(
                 unresolved.update(row.record_index for row in rows)
                 review_reasons["target_bound_response_mismatch"] += len(rows)
                 continue
-            for decision in evaluation.decisions:
+            decisions = evaluation.decisions
+            if entry.expected_primary_claim is not None and len(decisions) > 1:
+                # Only a unique faithful mapping discharges the raw record.
+                # Rejecting another fact on its axis is not proof of non-equivalence.
+                supported = tuple(item for item in decisions if item.verdict == "supported")
+                digest = entry.expected_primary_claim.claim_digest
+                if len(supported) != 1 or any(
+                    item.verdict != "supported" and item.different_claim_digest != digest
+                    for item in decisions
+                ):
+                    if run.failure_reason is None:
+                        if all(item.different_claim_digest == digest for item in decisions):
+                            rejected += 1
+                            review_reasons["primary_value_recovery_rejected"] += 1
+                        else:
+                            review_reasons["primary_value_paraphrase_ambiguous_source"] += 1
+                        for item in decisions:
+                            slot_conflict_counts.update(item.slot_conflicts)
+                    continue
+                decisions = supported
+            for decision in decisions:
                 if decision.reason == "slot_conflict":
                     slot_conflict_counts.update(decision.slot_conflicts)
                 candidate = candidate_by_key.get(
@@ -5877,6 +5957,9 @@ def _review_target_bound_draft_candidates(
                         chunk=chunk,
                         source_identity=source_identity,
                         frozen_content=frozen_content,
+                        expected_primary_claim=(_primary_claim_identity(
+                            item, package_attempt, source_identity, request.target
+                        ) if claim_review else None),
                     )
                 except (TypeError, ValueError, ValidationError, UnicodeError):
                     unresolved.add(item.record_index)
@@ -5884,6 +5967,8 @@ def _review_target_bound_draft_candidates(
                     continue
                 resolved.add(item.record_index)
                 signals.setdefault(signal.id, signal)
+    if claim_review and resolved:
+        review_reasons["primary_value_claim_review_supported"] += len(resolved)
     unresolved.update(deferred_indices - resolved - unresolved)
     if unresolved and not review_reasons:
         review_reasons["target_bound_response_mismatch"] += len(unresolved)
@@ -7625,9 +7710,12 @@ def _bind_record(
     semantic_scope_v5: bool = False,
     scope_review_v1: bool = False,
     skip_lexical_polarity: bool = False,
+    defer_primary_anchor_overlap: bool = False,
     skip_draft_actor_attribution: bool = False,
     skip_target_bound_semantic_binding: bool = False,
 ) -> CharacterSignal:
+    if defer_primary_anchor_overlap and (not skip_lexical_polarity or chunk.source_kind != "draft"):
+        raise ValueError("statement_support")
     if skip_lexical_polarity and (
         chunk.source_kind not in {"published_history", "draft"}
         or record.dimension not in {"value", "behavior_boundary"}
@@ -7811,6 +7899,7 @@ def _bind_record(
         _require_statement_supported(
             record, v4_clause.text if v4_clause is not None else evidence_text,
             skip_lexical_polarity=skip_lexical_polarity,
+            defer_primary_anchor_overlap=defer_primary_anchor_overlap,
         )
     if (
         chunk.source_kind == "draft"
@@ -10205,11 +10294,12 @@ def _statement_supported(
 
 def _require_statement_supported(
     record: _RawCharacterSignal, evidence: str, *, skip_lexical_polarity: bool = False,
+    defer_primary_anchor_overlap: bool = False,
 ) -> None:
     failure = _statement_support_failure(
         record, evidence, skip_lexical_polarity=skip_lexical_polarity
     )
-    if failure is not None:
+    if failure is not None and not (defer_primary_anchor_overlap and failure == "anchor_overlap"):
         raise _StatementSupportFailure(failure)
 
 

@@ -14,7 +14,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_serializer, model_validator
 
 from .character_scope_review import ScopeReviewClause, ScopeReviewLine, ScopeReviewSourceIdentity
 
@@ -208,6 +208,7 @@ TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8 = (
     "character-target-bound-draft-review-prompt-v8"
 )
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 = "character-target-bound-draft-review-prompt-v9"
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10 = "character-target-bound-draft-review-prompt-v10"
 
 _PROPOSAL_ID = r"^dap_[a-f0-9]{32}$"
 
@@ -1643,6 +1644,18 @@ class TargetBoundDraftReviewProposal(TargetBoundDraftProposal):
     proposal_id: str = Field(pattern=_TARGET_PROPOSAL_ID)
 
 
+class PrimaryDraftClaim(BaseModel):
+    """Transient identity of the extractor statement against which a fact is reviewed."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    package_attempt: int = Field(ge=1, strict=True)
+    record_ordinal: int = Field(ge=1, le=64, strict=True)
+    statement: str = Field(min_length=2, max_length=300)
+    context: str = Field(default="", max_length=160)
+    claim_digest: str = Field(pattern=_SHA256)
+
+
 class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -1662,6 +1675,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
         "character-target-bound-draft-review-prompt-v7",
         "character-target-bound-draft-review-prompt-v8",
         "character-target-bound-draft-review-prompt-v9",
+        "character-target-bound-draft-review-prompt-v10",
     ] = (
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
     )
@@ -1677,15 +1691,36 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
         min_length=1, max_length=MAX_DRAFT_ACTOR_REVIEW_ITEMS
     )
 
+    primary_claim: PrimaryDraftClaim | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_request(self, handler):
+        data = handler(self)
+        if self.primary_claim is None:
+            data.pop("primary_claim", None)  # Preserve legacy wire bytes and digests.
+        return data
+
     @model_validator(mode="after")
     def validate_target_bound_request(self) -> "TargetBoundDraftReviewRequest":
+        if self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10:
+            if (
+                self.primary_claim is None
+                or self.target.dimension not in {"value", "behavior_boundary"}
+                or not self.target.approved_axis_comparison_key
+            ):
+                raise ValueError("target_bound_primary_claim_invalid")
+        elif "primary_claim" in self.model_fields_set:
+            raise ValueError("target_bound_primary_claim_invalid")
         if (
             self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2
             and self.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
             or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3
             and self.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V7
             or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
-            and self.prompt_version not in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9}
+            and self.prompt_version not in {
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10,
+            }
         ):
             raise ValueError("target_bound_protocol_identity_invalid")
         if self.target_digest != target_bound_draft_target_digest(self.target):
@@ -1792,6 +1827,8 @@ class TargetBoundDraftReviewItem(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     proposal_id: str = Field(pattern=_TARGET_PROPOSAL_ID)
+    claim_digest: str | None = Field(default=None, pattern=_SHA256)
+    claim_relation: Literal["equivalent", "different", "uncertain"] | None = None
     verdict: TargetBoundReviewVerdict
     actor: Literal["proposed", "other", "ambiguous"]
     actuality: Literal[
@@ -1823,6 +1860,14 @@ class TargetBoundDraftReviewItem(BaseModel):
     object_end_offset: int | None = Field(default=None, ge=1, le=20_000, strict=True)
     basis_ids: tuple[str, ...] = Field(max_length=MAX_DRAFT_ACTOR_CLAUSES)
 
+    @model_serializer(mode="wrap")
+    def serialize_item(self, handler):
+        data = handler(self)
+        for name in ("claim_digest", "claim_relation"):
+            if name not in self.model_fields_set:
+                data.pop(name, None)
+        return data
+
 
 class TargetBoundDraftReviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
@@ -1844,6 +1889,9 @@ class TargetBoundDraftReviewDecision(BaseModel):
     proposal_id: str = Field(pattern=_TARGET_PROPOSAL_ID)
     verdict: TargetBoundReviewVerdict
     reason: TargetBoundReviewReason
+    # Only validated verdicts can attest equivalence or an explicit non-match.
+    different_claim_digest: str | None = Field(default=None, pattern=_SHA256, exclude=True)
+    verified_claim_digest: str | None = Field(default=None, pattern=_SHA256, exclude=True)
     # Internal diagnostic metadata comes only from a validated semantic item.
     # Absent on synthetic protocol/provider failures; legacy JSON is unchanged.
     raw_verdict: TargetBoundReviewVerdict | None = Field(default=None, exclude=True)
@@ -1972,9 +2020,21 @@ def _canonical_named_statement(
     return statement, kind
 
 
+# A scoped claim review may classify a common disposal construction, provided
+# its explicit named antecedent and the actual event are independently verified.
+_PRIMARY_DISPOSAL = re.compile(
+    r"^(?:主动|自愿|亲自|公开|当场|独自|悄悄|正式|擅自){0,2}(?:把|将)"
+    r"(?!.*(?:代为|命令|指使|委托|要求|派人|让人))"
+    r"[^，,。；;！？!?：:\n]{1,80}?(?:提交|递交|上交|转交|移交|封存|归还|交还|销毁|退回)"
+    r"(?:了|掉|完毕)?$"
+)
+
+
 def _zero_subject_statement(
     clause: ScopeReviewClause,
     target: TargetBoundDraftReviewTarget,
+    *,
+    primary_claim_review: bool = False,
 ) -> str | None:
     text = clause.text.strip()
     lead = _TARGET_ZERO_SUBJECT_LEAD.match(text)
@@ -1995,6 +2055,7 @@ def _zero_subject_statement(
         or (
             _TARGET_ZERO_SUBJECT_PREDICATE.match(tail) is None
             and _TARGET_ZERO_SUBJECT_BA_CONSTRUCTION.fullmatch(tail) is None
+            and not (primary_claim_review and _PRIMARY_DISPOSAL.fullmatch(tail))
         )
         or _TARGET_EXPLICIT_OTHER_ACTOR.match(tail)
     ):
@@ -2088,6 +2149,7 @@ def build_target_bound_draft_proposals(
     line_end: int,
     protocol_version: Literal["v2", "v3", "v4"] = "v2",
     allow_named_speech: bool = False,
+    primary_claim_review: bool = False,
 ) -> tuple[DraftActorClauseIndex, tuple[TargetBoundDraftProposal, ...]]:
     """Create bounded structural leads; this function never certifies semantics."""
 
@@ -2157,7 +2219,7 @@ def build_target_bound_draft_proposals(
             and index.lines[-1].clauses[0] == fact
         ):
             continue
-        statement = _zero_subject_statement(fact, target)
+        statement = _zero_subject_statement(fact, target, primary_claim_review=primary_claim_review)
         if statement is None:
             continue
         proposals.append(TargetBoundDraftProposal(
@@ -2234,6 +2296,11 @@ def required_target_bound_draft_basis_ids(
     )
 
 
+def _same_primary_statement(statement: str, frozen_statement: str) -> bool:
+    return (statement.strip().removesuffix("。").removesuffix(".")
+            == frozen_statement.strip().removesuffix("。").removesuffix("."))
+
+
 def build_target_bound_draft_review_request(
     index: DraftActorClauseIndex,
     target: TargetBoundDraftReviewTarget,
@@ -2243,6 +2310,7 @@ def build_target_bound_draft_review_request(
     expected_source: ScopeReviewSourceIdentity,
     protocol_version: Literal["v2", "v3", "v4"] = "v2",
     allow_named_speech: bool = False,
+    primary_claim: PrimaryDraftClaim | None = None,
 ) -> TargetBoundDraftReviewRequest:
     if (
         not isinstance(index, DraftActorClauseIndex)
@@ -2260,6 +2328,7 @@ def build_target_bound_draft_review_request(
         line_end=index.line_end,
         protocol_version=protocol_version,
         allow_named_speech=allow_named_speech,
+        primary_claim_review=primary_claim is not None,
     )
     requested = {
         json.dumps(
@@ -2281,6 +2350,15 @@ def build_target_bound_draft_review_request(
     }
     if rebuilt_index != index or set(requested) - set(rebuilt):
         raise ValueError("target_bound_proposal_not_eligible")
+    if primary_claim is not None and set(requested) != set(rebuilt):
+        # Paraphrases must be compared against every eligible fact in the window.
+        # An exact unique source statement already identifies its own proposition.
+        exact_keys = {
+            key for key, fact in rebuilt.items()
+            if _same_primary_statement(primary_claim.statement, fact.canonical_statement)
+        }
+        if len(exact_keys) != 1 or set(requested) != exact_keys:
+            raise ValueError("target_bound_primary_claim_incomplete_source")
     review_proposals = tuple(
         TargetBoundDraftReviewProposal(
             **requested[key].model_dump(mode="python"),
@@ -2302,6 +2380,12 @@ def build_target_bound_draft_review_request(
         review_line_start=review_start,
         review_line_end=review_end,
     )
+    if primary_claim is not None:
+        prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10
+    elif protocol_version == "v4":
+        prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 if allow_named_speech else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8
+    else:
+        prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V7 if protocol_version == "v3" else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
     return TargetBoundDraftReviewRequest(
         **expected_source.model_dump(mode="python"),
         schema_version=(
@@ -2313,15 +2397,8 @@ def build_target_bound_draft_review_request(
                 else TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2
             )
         ),
-        prompt_version=(
-            (TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 if allow_named_speech else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8)
-            if protocol_version == "v4"
-            else (
-                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V7
-                if protocol_version == "v3"
-                else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
-            )
-        ),
+        **({"primary_claim": primary_claim} if primary_claim is not None else {}),
+        prompt_version=prompt_version,
         target=target,
         target_digest=target_bound_draft_target_digest(target),
         review_line_start=review_start,
@@ -2336,9 +2413,12 @@ def verify_target_bound_draft_review_source(
     expected_source: ScopeReviewSourceIdentity,
     *,
     frozen_content: str,
+    expected_primary_claim: PrimaryDraftClaim | None = None,
 ) -> bool:
     if not isinstance(request, TargetBoundDraftReviewRequest):
         raise TypeError("target bound draft request is invalid")
+    if expected_primary_claim != request.primary_claim:
+        return False
     if any(
         getattr(request, name) != getattr(expected_source, name)
         for name in ScopeReviewSourceIdentity.model_fields
@@ -2357,6 +2437,7 @@ def verify_target_bound_draft_review_source(
             request.target,
             line_start=line_start,
             line_end=line_end,
+            primary_claim_review=expected_primary_claim is not None,
             allow_named_speech=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
             protocol_version=(
                 "v4"
@@ -2382,6 +2463,7 @@ def verify_target_bound_draft_review_source(
             ),
             frozen_content=frozen_content,
             expected_source=expected_source,
+            primary_claim=expected_primary_claim,
             allow_named_speech=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
             protocol_version=(
                 "v4"
@@ -2717,11 +2799,12 @@ def evaluate_target_bound_draft_review(
     *,
     expected_source: ScopeReviewSourceIdentity,
     frozen_content: str,
+    expected_primary_claim: PrimaryDraftClaim | None = None,
 ) -> TargetBoundDraftReviewEvaluation:
     if not isinstance(request, TargetBoundDraftReviewRequest) or not isinstance(raw_response, str):
         raise TypeError("target bound draft review arguments are invalid")
     if not verify_target_bound_draft_review_source(
-        request, expected_source, frozen_content=frozen_content
+        request, expected_source, frozen_content=frozen_content, expected_primary_claim=expected_primary_claim
     ):
         return _uncertain_target_bound_review(request, "source_mismatch")
     try:
@@ -2750,6 +2833,14 @@ def evaluate_target_bound_draft_review(
     decisions: list[TargetBoundDraftReviewDecision] = []
     for proposal in request.proposals:
         item = returned[proposal.proposal_id]
+        claim_fields = {"claim_digest", "claim_relation"} & item.model_fields_set
+        if (
+            request.primary_claim is None and claim_fields
+            or request.primary_claim is not None and (
+                item.claim_digest != request.primary_claim.claim_digest or item.claim_relation is None
+            )
+        ):
+            return _uncertain_target_bound_review(request, "response_mismatch")
         basis_valid = (
             len(set(item.basis_ids)) == len(item.basis_ids)
             and set(item.basis_ids) <= allowed
@@ -2764,6 +2855,8 @@ def evaluate_target_bound_draft_review(
             continue
         if item.verdict == "supported":
             conflicts = _target_bound_supported_conflicts(request, proposal, item)
+            if request.primary_claim is not None and item.claim_relation != "equivalent":
+                conflicts = tuple(dict.fromkeys((*conflicts, "statement_relation")))
             observed_object: str | None = None
             object_basis_id: str | None = None
             if (
@@ -2799,6 +2892,7 @@ def evaluate_target_bound_draft_review(
                     reason="supported",
                     basis_ids=basis,
                     target_digest=request.target_digest,
+                    verified_claim_digest=item.claim_digest,
                     target_ordinal=request.target.target_ordinal,
                     observation_kind=item.observation_kind,
                     object_relation=(
@@ -2812,11 +2906,12 @@ def evaluate_target_bound_draft_review(
                     object_basis_id=object_basis_id,
                 ))
         elif item.verdict == "rejected":
-            negative = _target_bound_negative_slot(item)
+            negative = _target_bound_negative_slot(item) or item.claim_relation == "different"
             decisions.append(TargetBoundDraftReviewDecision(
                 proposal_id=proposal.proposal_id,
                 verdict="rejected" if negative else "uncertain",
                 reason="reviewer_rejected" if negative else "slot_conflict",
+                different_claim_digest=item.claim_digest if item.claim_relation == "different" else None,
                 basis_ids=basis if negative else (),
                 slot_conflicts=() if negative else ("rejected_without_negative_slot",),
             ))
@@ -2856,10 +2951,14 @@ def evaluate_target_bound_draft_review_batch(
     *,
     expected_sources: tuple[ScopeReviewSourceIdentity, ...],
     frozen_contents: tuple[str, ...],
+    expected_primary_claims: tuple[PrimaryDraftClaim | None, ...] | None = None,
 ) -> TargetBoundDraftReviewBatchEvaluation:
     digest = target_bound_draft_review_batch_digest(requests)
+    if expected_primary_claims is None:
+        expected_primary_claims = (None,) * len(requests)
     if (
-        not isinstance(raw_response, str)
+        len(expected_primary_claims) != len(requests)
+        or not isinstance(raw_response, str)
         or type(expected_sources) is not tuple
         or type(frozen_contents) is not tuple
         or len(expected_sources) != len(requests)
@@ -2868,9 +2967,9 @@ def evaluate_target_bound_draft_review_batch(
         raise TypeError("target bound draft batch arguments are invalid")
     if any(
         not verify_target_bound_draft_review_source(
-            request, source, frozen_content=content
+            request, source, frozen_content=content, expected_primary_claim=claim
         )
-        for request, source, content in zip(requests, expected_sources, frozen_contents)
+        for request, source, content, claim in zip(requests, expected_sources, frozen_contents, expected_primary_claims)
     ):
         return uncertain_target_bound_draft_review_batch(requests, "source_mismatch")
     try:
@@ -2916,19 +3015,15 @@ def evaluate_target_bound_draft_review_batch(
     returned = {item.request_digest: item for item in response.responses}
     if len(returned) != len(response.responses) or set(returned) != set(requested):
         return uncertain_target_bound_draft_review_batch(requests, "response_mismatch")
-    source_map = {
-        target_bound_draft_review_request_digest(request): (source, content)
-        for request, source, content in zip(requests, expected_sources, frozen_contents)
-    }
     evaluations: list[TargetBoundDraftReviewEvaluation] = []
-    for request in requests:
+    for request, source, content, claim in zip(requests, expected_sources, frozen_contents, expected_primary_claims):
         request_digest = target_bound_draft_review_request_digest(request)
-        source, content = source_map[request_digest]
         evaluations.append(evaluate_target_bound_draft_review(
             request,
-            returned[request_digest].model_dump_json(),
+            returned[request_digest].model_dump_json(exclude_unset=True),
             expected_source=source,
             frozen_content=content,
+            expected_primary_claim=claim,
         ))
     return TargetBoundDraftReviewBatchEvaluation(
         batch_digest=digest,

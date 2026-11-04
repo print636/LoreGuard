@@ -59,6 +59,7 @@ from .character_draft_actor_review_provider import (
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10,
 )
 from .character_drift import (
     CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
@@ -923,6 +924,7 @@ class _CharacterConsistencyAccountingProvider:
                 TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7,
                 TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8,
                 TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
+                TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10,
             }
             and self.settings.character_target_bound_draft_review_v3
         ):

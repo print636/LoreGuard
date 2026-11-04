@@ -6653,6 +6653,73 @@ def test_primary_value_evidence_recovery_does_not_clear_another_claim(discloses,
     assert result.issues == ()
 
 
+@pytest.mark.parametrize("add_unsupported_motive", [False, True])
+def test_primary_value_paraphrase_verifies_each_original_claim(add_unsupported_motive):
+    from app.character_draft_actor_review_provider import (
+        TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
+        TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10,
+    )
+    from tests.test_character_target_bound_draft_review_v3 import _V3Provider
+
+    evidence = "林澈主动将家人的藏身地址交给追踪者。"
+    faithful = "林澈主动把家人的藏身地址透露给追踪者"
+    invented = "林澈为了报复而主动将家人的藏身地址透露给追踪者"
+    statements = [faithful, invented] if add_unsupported_motive else [faithful]
+    records = [{
+        **_record(evidence=evidence, statement=statement, dimension="value", trait_key="保护家人",
+                  polarity="negative", kind="decision"), "stability": "temporary", "key_object": "家人",
+    } for statement in statements]
+    requests_seen = {}
+    reviewer = _V3Provider(object_text="交给追踪者")
+    targeted_reviewer = _V3Provider(object_text="交给追踪者")
+
+    class Provider:
+        def complete(self, system, user):
+            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10:
+                batch = json.loads(user.split("：\n", 1)[1])
+                response = reviewer.complete(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9, user)
+                body = json.loads(response.text)
+                for window, result in zip(batch["windows"], body["responses"], strict=True):
+                    request = window["request"]
+                    claim = request["primary_claim"]
+                    proposal, = request["proposals"]
+                    assert proposal["evidence"] == evidence
+                    assert proposal["canonical_statement"] == evidence.rstrip("。")
+                    requests_seen[claim["statement"]] = claim["claim_digest"]
+                    item, = result["items"]
+                    same = claim["statement"] == faithful
+                    item.update(claim_digest=claim["claim_digest"],
+                                claim_relation="equivalent" if same else "different",
+                                verdict="supported" if same else "rejected")
+                response.text = json.dumps(body, ensure_ascii=False)
+                return response
+            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9:
+                return targeted_reviewer.complete(system, user)
+            if system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT:
+                return QueueProvider(json.dumps({
+                    "verdict": "needs_confirmation", "explanation": "需确认当时家人是否处于危险中。",
+                    "citations": ["B01", "C01"],
+                }, ensure_ascii=False)).complete(system, user)
+            if user.startswith("服务端来源类型：draft\n") and "检索视图：" not in user:
+                return QueueProvider(_response(*records)).complete(system, user)
+            return QueueProvider(_response()).complete(system, user)
+
+    result, _ = _run_scoped_axis_stage(
+        (evidence,), situation_match="same", provider=Provider(),
+        character_signal_full_line_prompt_v2=True, character_draft_actor_review_v1=True,
+        character_target_bound_draft_review_v3=True, character_signal_package_max_attempts=1,
+    )
+    assert reviewer.review_calls == 1
+    reasons = result.diagnostics["reason_counts"]
+    assert set(requests_seen) == set(statements), reasons
+    assert len(set(requests_seen.values())) == len(statements)
+    assert reasons["primary_value_recovery_supported"] == 1
+    assert reasons.get("primary_value_recovery_rejected", 0) == int(add_unsupported_motive)
+    assert result.diagnostics["material_coverage"] == ("partial" if add_unsupported_motive else "complete"), reasons
+    assert result.diagnostics["case_trace"][0]["matched_observation_count"] == 1, reasons
+    assert result.issues == ()
+
+
 def test_scoped_axis_different_situation_is_not_a_formal_issue():
     """A model-nominated same-object action is not enough to satisfy author scope."""
     result, _ = _run_scoped_axis_stage(

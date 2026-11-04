@@ -34,7 +34,7 @@ python scripts/run_character_consistency_live.py --fixture alpha-v1 --trials 1
 `CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3=true`（且 V2 保持关闭），并重启 API（以及使用中的 worker）。
 这些实验能力不由 runner 自动开启，也不因此改变生产默认值；preflight 会严格核验
 正式候选精确绑定链、scoped-axis v1 开关及 target-bound semantic 当前整组协议版本；
-其中 runtime 模型输出合同必须为 request/response/batch V4 与 `character-target-bound-draft-review-prompt-v9`。唯一 raw target literal 的 `matches_target` 使用服务端坐标绑定并要求模型返回 null offsets；`broader`/`narrower` 以及非唯一情形仍要求合法的事实分句区间。坐标绑定不替代任何语义、basis 或来源门。
+预检会分别核对普通定向召回的 `character-target-bound-draft-review-prompt-v9` 和主抽取改述核验的 `character-target-bound-draft-review-prompt-v10`。两者均使用 request/response/batch V4。后者需要额外绑定本次主抽取的原始改述；运行记录里的版本字段仅表明服务具有此能力，实际调用应查本次运行记录。早期记录保留其当时的版本。唯一 raw target literal 的 `matches_target` 使用服务端坐标绑定并要求模型返回 null offsets；`broader`/`narrower` 以及非唯一情形仍要求合法的事实分句区间。坐标绑定不替代任何语义、basis 或来源门。
 当前 V4 在定向模型返回 clean-empty 时仍只复核服务端白名单候选；唯一同对象关系由服务端
 按冻结原文绑定。提示 v9 新增的直接发言候选仅用于说话方式。具名角色说过原话，只能证明发生了这次发言。独立核验器还需根据邻近叙述判断语气和表达方式是否有据可判。有关措辞有歧义时可保留不确定，引语不能直接证明其中提及的第三人采取了行动。
 其余对象关系仍保存经严格区间验证的冻结原文切片。旧 V2/V3

@@ -40,6 +40,7 @@ from .character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2,
     TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10,
     TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
 )
 from .character_explanation_review import (
@@ -515,6 +516,9 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
                     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
                     if settings.character_target_bound_draft_review_v2 else None
                 )
+            ),
+            "primary_scoped_claim_review_prompt_version": (
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10 if settings.character_target_bound_draft_review_v3 else None
             ),
             "target_bound_draft_review_signal_prompt_version": (
                 TARGET_BOUND_DRAFT_SIGNAL_PROMPT_V3

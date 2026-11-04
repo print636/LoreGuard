@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.character_draft_actor_review import (
+    PrimaryDraftClaim,
     TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V3,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V7,
     TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3,
@@ -27,6 +28,7 @@ from app.character_draft_actor_review_provider import (
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10,
     TargetBoundDraftReviewBatchEntry,
     build_target_bound_draft_review_prompts,
     run_target_bound_draft_review,
@@ -1395,7 +1397,9 @@ class _V3Provider:
         mode="supported",
         object_text="栗子糕",
         signal_records=None,
+        primary_match=None,
     ):
+        self.primary_match = primary_match
         self.mode = mode
         self.object_text = object_text
         self.signal_records = signal_records
@@ -1407,6 +1411,7 @@ class _V3Provider:
             TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7,
             TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8,
             TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
+            TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10,
         }:
             self.signal_calls += 1
             return SimpleNamespace(
@@ -1471,6 +1476,14 @@ class _V3Provider:
                     ),
                     "basis_ids": hint["required_basis_ids"],
                 })
+                if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10:
+                    claim = request["primary_claim"]
+                    same = self.primary_match(claim["statement"], fact) if self.primary_match else has_object
+                    items[-1].update(
+                        claim_digest=claim["claim_digest"],
+                        claim_relation="equivalent" if same else "different",
+                        verdict="supported" if same and has_object else "rejected",
+                    )
             responses.append({
                 "schema_version": request["schema_version"],
                 "request_digest": window["request_digest"],
@@ -1804,11 +1817,13 @@ def _scoped_rescue_target():
 @pytest.mark.parametrize(("scenario", "calls", "reason"), [
     ("supported", 1, "primary_value_recovery_supported"),
     ("timeout", 1, "target_bound_provider_timeout"),
-    ("different_claim", 0, "primary_value_recovery_no_exact_proposal"),
+    ("faithful_paraphrase", 1, "primary_value_claim_review_supported"),
     ("different_axis", 0, "primary_value_recovery_target_mismatch"),
     ("stable", 0, "primary_value_recovery_other_gate_stability"),
-    ("weak_anchor", 0, "primary_value_recovery_other_gate_anchor_overlap"),
+    ("changed_action", 1, "primary_value_recovery_rejected"),
     ("multiline", 0, "primary_value_recovery_other_gate_statement_support"),
+    ("reported", 0, "primary_value_recovery_other_gate_character_support"),
+    ("other_character", 0, "primary_value_recovery_no_exact_proposal"),
     ("disabled", 0, None),
 ])
 def test_final_primary_value_recovery_requires_its_own_frozen_claim(scenario, calls, reason):
@@ -1821,20 +1836,27 @@ def test_final_primary_value_recovery_requires_its_own_frozen_claim(scenario, ca
         observation_kind="decision", statement=statement, source_line_start=1,
         source_line_end=1, evidence=evidence,
     )
-    if scenario == "different_claim":
+    if scenario == "faithful_paraphrase":
         record["statement"] = "唐岫主动转卖救援优先物资"
     if scenario == "different_axis":
         record["trait_key"] = "other_axis"
     if scenario == "stable":
         record["stability"] = "stable"
-    if scenario == "weak_anchor":
+    if scenario == "changed_action":
         record["statement"] = "唐岫将救援优先物资登记为跨城巡诊专用药箱"
+    if scenario == "reported":
+        evidence = f"助手只是朗读台词：“{statement}”。"
+        record["evidence"] = evidence
+    if scenario == "other_character":
+        evidence = evidence.replace(target.character, "周昂")
+        record["evidence"] = evidence
     if scenario == "multiline":
         evidence += "\n夕阳落下。"
         record.update(evidence=evidence, source_line_end=2)
     provider = _V3Provider(
         mode="timeout" if scenario == "timeout" else "supported",
         object_text="转卖给商贩", signal_records=[record],
+        primary_match=lambda claim, fact: scenario == "faithful_paraphrase",
     )
     settings = _settings(
         character_signal_package_max_attempts=2, character_signal_draft_trace_v1=True,
@@ -1852,13 +1874,130 @@ def test_final_primary_value_recovery_requires_its_own_frozen_claim(scenario, ca
         assert result.diagnostics.reason_counts[reason] == 1
         if reason.startswith("primary_value_recovery_other_gate_"):
             assert result.diagnostics.reason_counts["primary_value_recovery_other_gate"] == 1
-    if scenario == "supported":
+    if scenario in {"supported", "faithful_paraphrase"}:
         assert result.diagnostics.outcome == "completed"
         assert result.diagnostics.draft_trace.final_accepted_record_ordinals == (1,)
         assert result.draft_observations[0].statement == statement
     else:
         assert result.diagnostics.outcome in {"partial", "degraded"}
         assert not result.draft_observations
+
+
+@pytest.mark.parametrize("other_relation", ["different", "uncertain", "equivalent"])
+def test_primary_claim_requires_one_unambiguous_fact_across_actor_continuation(other_relation):
+    target = _scoped_rescue_target()
+    evidence = "唐岫翻阅过入库清单，随后亲自将救援优先物资封存。"
+    statement = "唐岫封存了救援优先物资"
+    record = dict(
+        character=target.character, dimension="value", trait_key=target.trait_key,
+        key_object="救援优先", polarity="negative", stability="temporary",
+        observation_kind="decision", statement=statement, source_line_start=1,
+        source_line_end=1, evidence=evidence,
+    )
+
+    class Provider(_V3Provider):
+        def complete(self, system, user):
+            response = super().complete(system, user)
+            if system != TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10:
+                return response
+            payload = json.loads(user.split("：\n", 1)[1])
+            window, = payload["windows"]
+            assert window["request"]["primary_claim"]["statement"] == statement
+            assert len(window["request"]["proposals"]) == 2
+            body = json.loads(response.text)
+            for item, hint in zip(body["responses"][0]["items"], window["basis_path_hints"], strict=True):
+                if "翻阅" in hint["fact_clause_text"]:
+                    item["claim_relation"] = other_relation
+                    if other_relation == "uncertain":
+                        item.update(verdict="uncertain", basis_ids=[])
+                    elif other_relation == "equivalent":
+                        item.update(verdict="supported", axis_relation="matches_scoped_axis",
+                                    object_relation="not_applicable")
+            response.text = json.dumps(body)
+            return response
+
+    provider = Provider(object_text="封存", signal_records=[record])
+    result = CharacterSignalExtractor(provider, settings=_settings()).extract(
+        CharacterSignalChunk("draft-v3", "draft.md", evidence, 1, "draft"),
+        source_identity=_source(evidence), frozen_content=evidence, primary_value_targets=(target,),
+    )
+    assert provider.review_calls == 1
+    reasons = result.diagnostics.reason_counts
+    assert reasons["primary_value_actor_attribution_deferred"] == 1
+    if other_relation == "different":
+        signal, = result.draft_observations
+        assert result.diagnostics.outcome == "completed"
+        assert signal.statement == "唐岫随后亲自将救援优先物资封存"
+        assert signal.evidence.text == evidence
+    else:
+        assert not result.draft_observations
+        assert reasons["primary_value_paraphrase_ambiguous_source"] == 1
+
+
+def test_primary_paraphrase_cannot_hide_an_eligible_sibling_fact():
+    target = _target_bound_review_target(_scoped_rescue_target(), target_ordinal=1)
+    content = "唐岫翻阅过入库清单，随后亲自将救援优先物资封存。"
+    source = _source(content)
+    index, facts = build_target_bound_draft_proposals(
+        content, source, target, protocol_version="v4", line_start=1, line_end=1, primary_claim_review=True,
+    )
+    assert len(facts) == 2
+    claim = PrimaryDraftClaim(
+        package_attempt=1, record_ordinal=1, statement="唐岫封存了救援优先物资", claim_digest="a" * 64,
+    )
+    with pytest.raises(ValueError, match="incomplete_source"):
+        build_target_bound_draft_review_request(
+            index, target, facts[-1:], frozen_content=content, expected_source=source,
+            protocol_version="v4", primary_claim=claim,
+        )
+
+
+def test_primary_scoped_claim_wire_requires_exact_request_claim_and_frozen_source():
+    content = "唐岫主动将救援优先物资转卖给商贩。"
+    source = _source(content)
+    target = _target_bound_review_target(_scoped_rescue_target(), target_ordinal=1)
+    index, proposals = build_target_bound_draft_proposals(
+        content, source, target, line_start=1, line_end=1, protocol_version="v4",
+    )
+    claim = PrimaryDraftClaim(
+        package_attempt=2, record_ordinal=1, statement="唐岫转售了救援优先物资", claim_digest="8" * 64
+    )
+    def build(**kwargs):
+        return build_target_bound_draft_review_request(
+            index, target, proposals, frozen_content=content, expected_source=source, protocol_version="v4", **kwargs
+        )
+    request = build(primary_claim=claim)
+    legacy = build(allow_named_speech=True)
+    assert "primary_claim" not in legacy.model_dump(mode="json")
+    assert target_bound_draft_review_request_digest(legacy) != target_bound_draft_review_request_digest(request)
+    with pytest.raises(ValueError):
+        target_bound_draft_review_batch_digest((legacy, request))
+    def review(frozen_request, expected_claim, **new_fields):
+        raw = json.loads(_response(frozen_request, object_text="", observation_kind="decision", **new_fields))
+        raw["schema_version"] = TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
+        return evaluate_target_bound_draft_review(
+            frozen_request, json.dumps(raw), frozen_content=content,
+            expected_source=source, expected_primary_claim=expected_claim,
+        ).decisions[0]
+
+    fields = dict(claim_digest=claim.claim_digest, claim_relation="equivalent")
+    assert review(request, claim, **fields).verified_claim_digest == claim.claim_digest
+    assert review(request, None, **fields).reason == "source_mismatch"
+    stale = claim.model_copy(update={"record_ordinal": 2})
+    assert review(request, stale, **fields).reason == "source_mismatch"
+    assert review(request, claim).reason == "response_mismatch"
+    assert review(request, claim, **dict(fields, claim_digest="0"*64)).reason == "response_mismatch"
+    assert review(request, claim, **dict(fields, claim_relation="uncertain")).reason == "slot_conflict"
+    assert review(request, claim, **dict(fields, actor="other")).reason == "slot_conflict"
+    assert review(legacy, None, **fields).reason == "response_mismatch"
+    entry = TargetBoundDraftReviewBatchEntry(request, source, content, expected_primary_claim=claim)
+    provider = _V3Provider()
+    run = run_target_bound_draft_review(
+        (entry,), provider=provider, token_budget=0, completion_reserve=512, timeout_seconds=2,
+        remaining_deadline_seconds=10, max_response_bytes=8192,
+    )
+    assert run.failure_reason == "token_budget"
+    assert provider.review_calls == 0 and run.charged_tokens == 0
 
 
 def test_primary_value_other_gate_diagnostics_never_echo_unknown_exception_text():

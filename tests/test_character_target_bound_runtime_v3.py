@@ -56,6 +56,7 @@ def test_v3_runtime_identity_round_trips_strict_consumer():
         "target_bound_draft_review_schema_version",
         "target_bound_draft_review_batch_schema_version",
         "target_bound_draft_review_prompt_version",
+        "primary_scoped_claim_review_prompt_version",
         "target_bound_draft_review_signal_prompt_version",
         "target_bound_draft_review_clause_index_version",
     ),
@@ -64,3 +65,11 @@ def test_v3_runtime_identity_tampering_is_rejected(field):
     provenance = safe_runtime_provenance(_settings())
     provenance["character_consistency_limits"][field] = "unknown"
     assert _safe_runtime_provenance(provenance) is None
+
+
+def test_older_receipt_remains_readable_but_cannot_pass_current_live_preflight():
+    provenance = safe_runtime_provenance(_settings())
+    limits = provenance["character_consistency_limits"]
+    del limits["primary_scoped_claim_review_prompt_version"]
+    assert _safe_runtime_provenance(provenance) == provenance
+    assert not _target_bound_semantic_v3_ready(limits)
