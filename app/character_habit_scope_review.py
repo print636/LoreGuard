@@ -38,8 +38,11 @@ _DISPOSAL = re.compile(_ADVERBS + r"(?:把|将)")
 _DIRECT_ACTION = re.compile(_ADVERBS + r"(?:拿出|取出|递出|送出|带来|搬来|运来|摆出|交出|留下|留出)")
 _QUANTITY = re.compile(r"^(?:这|那)?[一二两三四五六七八九十百千数几0-9]+[份件只枚张本条批台套片卷箱块盏把个]")
 _TRANSITIVE = re.compile(r"[摆放递交移送传还挂贴装收发铺搬抬取拿举带展分存归倒塞插抛扔投置推运撤锁搁藏留换]")
-# A use following a handoff is only eligible after one simple recipient.
-_RECIPIENT = re.compile(r"(?:递|送|交|分)给[\w·]{1,10}")
+# A short arbitrary string can be another action with its own object. Admit
+# only an entire recipient pronoun or a two-character occupational/group noun.
+_RECIPIENT = re.compile(
+    r"(?:递|送|交|分)给(?:(?:他|她)们?|对方|大家|众人|[\u4e00-\u9fff][员师官生队团组])"
+)
 _NEGATED_OR_UNCERTAIN = re.compile(
     r"并非|并不|不是|并未|未曾|不曾|没有|从未|并无|不供|不作|不得|不再|不必|未必|未能|"
     r"假如|如果|也许|可能|据说|听说|声称|误以为|本以为|原以为|虚构|剧本|谎称|计划|打算|"

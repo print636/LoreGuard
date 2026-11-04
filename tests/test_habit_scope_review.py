@@ -73,6 +73,9 @@ def test_framed_or_other_person_or_other_objects_use_does_not_enter_review(text)
     ("祁雾把专供搭台的运箱搬进库房。", "专供搭台的运箱", "只供练习"),
     ("祁雾把专供搭台的运箱搬进库房。", "运箱", "专供搭台"),
     ("祁雾拿出运箱旁的模型供剧团排演。", "运箱", "供剧团排演"),
+    ("祁雾把运箱递给演员拿纸盒作为临时坐凳。", "运箱", "作为临时坐凳"),
+    ("祁雾把运箱交给剧团选木板用作舞台道具。", "运箱", "用作舞台道具"),
+    ("祁雾把运箱送给学员另取胶片供观摩。", "运箱", "供观摩"),
 ])
 def test_an_assertive_model_cannot_move_purpose_or_replace_the_affected_object(text, obj, use):
     with pytest.raises(ValueError):
