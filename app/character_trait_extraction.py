@@ -321,6 +321,15 @@ class _DraftActorAttributionRequired(ValueError):
     def __init__(self) -> None:
         super().__init__("character_support")
 
+
+class _UnobservedDraftAction(ValueError):
+    """Preserve the public rejection while identifying the exact hard gate internally."""
+
+    def __init__(self, kind: Literal["quoted_only", "joint_pronoun", "occurrence_unproven"]) -> None:
+        super().__init__("character_support")
+        self.kind = kind
+
+
 _EXPLICIT_CORE_PERSONALITY = re.compile(
     r"(?:这也?是|这属于|属于|被定义为|被设定为|被视为|构成).{0,16}核心(?:性格|人格)"
 )
@@ -2589,6 +2598,7 @@ class CharacterSignalExtractor:
         provisional_draft_actor_clues: tuple[CharacterSignal, ...] = ()
         draft_actor_review_performed = False
         target_bound_review_performed = False
+        source_only_habit_review = False
         target_bound_signals: tuple[CharacterSignal, ...] = ()
         target_bound_rejected = 0
         target_bound_unresolved = 0
@@ -2851,14 +2861,32 @@ class CharacterSignalExtractor:
                 target_bound_review_v3 and len(targets) == 1 and targets[0].habit_contexts
                 and targets[0].dimension == "contextual_behavior"
             )
+            habit_stage = "verify" if verification_dispatch is not None else "targeted" if targets else "primary"
+            habit_debts = ()
+            if target_bound_review_v3 and not target_bound_review_performed:
+                habit_debts = _habit_claim_debts(
+                    validation, response_text, chunk, targets, source_identity, frozen_content,
+                    first_ordinal=target_ordinal, allowed_ranges=allowed_targeted_evidence_ranges,
+                    counts=target_bound_reason_counts, stage=habit_stage,
+                )
+            elif targeted_habit and validation.failures:
+                target_bound_reason_counts[f"habit_gate_{habit_stage}_review_used"] += 1
+            # A frozen-source check can still find real actions when no failed
+            # record is eligible for an equivalence check. Keep the two ledgers separate.
+            source_only_habit_review = bool(
+                targeted_habit and not target_bound_review_performed and not habit_debts
+                and validation.parsed and validation.failures
+                and all(f.record_index is not None for f in validation.failures)
+                and not validation.draft_actor_deferred
+            )
+            if source_only_habit_review:
+                target_bound_reason_counts[f"habit_gate_{habit_stage}_source_only"] += 1
             if (
                 target_bound_review_v3
                 and not target_bound_review_performed
-                and not validation.signals
+                and (not validation.signals or source_only_habit_review)
                 and not target_bound_signals
-                # An independent source discovery is not proof of equivalence
-                # to a rejected generated claim on the same line.
-                and not (targeted_habit and validation.failures)
+                and (not targeted_habit or not validation.failures or source_only_habit_review)
             ):
                 assert isinstance(source_identity, ScopeReviewSourceIdentity)
                 assert isinstance(frozen_content, str)
@@ -2923,12 +2951,11 @@ class CharacterSignalExtractor:
                         dict(target_review.slot_conflict_counts)
                     )
                     target_bound_failure_events.extend(target_review.failure_events)
-                    validation = _resolve_completed_target_bound_discovery(
-                        validation,
-                        target_review,
-                        discovery_count=len(discoveries),
-                        discovery_truncated=discovery_truncated,
-                    )
+                    if not source_only_habit_review:
+                        validation = _resolve_completed_target_bound_discovery(
+                            validation, target_review, discovery_count=len(discoveries),
+                            discovery_truncated=discovery_truncated,
+                        )
             if (
                 history_review_v1
                 and validation.history_deferred
@@ -3026,11 +3053,15 @@ class CharacterSignalExtractor:
                         ):
                             draft_actor_coverage_debt.add(key)
             last_attempt = package_attempt + 1 == settings.character_signal_package_max_attempts
-            habit_debts = _habit_claim_debts(
-                validation, response_text, chunk, targets if targeted_habit else primary_value_targets,
-                source_identity, frozen_content, first_ordinal=target_ordinal if targeted_habit else 1,
-                allowed_ranges=allowed_targeted_evidence_ranges,
-            ) if not target_bound_review_performed else ()
+            if not target_bound_review_v3 and draft_actor_review_v1 and settings.character_target_bound_draft_review_v3:
+                if not target_bound_review_performed:
+                    habit_debts = _habit_claim_debts(
+                        validation, response_text, chunk, primary_value_targets, source_identity, frozen_content,
+                        first_ordinal=1, allowed_ranges=allowed_targeted_evidence_ranges,
+                        counts=target_bound_reason_counts, stage=habit_stage,
+                    )
+                elif validation.failures and any(t.habit_contexts for t in primary_value_targets):
+                    target_bound_reason_counts[f"habit_gate_{habit_stage}_review_used"] += 1
             primary_debts = ()
             recovery_label = "primary_value"
             if primary_value_targets and (last_attempt or habit_debts):
@@ -3046,6 +3077,8 @@ class CharacterSignalExtractor:
             if habit_debts and not primary_debts:
                 recovery_label = "habit_claim"
                 primary_debts = habit_debts
+            elif habit_debts:
+                target_bound_reason_counts[f"habit_gate_{habit_stage}_other_protocol"] += len(habit_debts)
             primary_recovery = bool(primary_debts) and (last_attempt or recovery_label == "habit_claim")
             if primary_recovery:
                 validation = replace(validation, target_bound_draft_deferred=primary_debts)
@@ -3391,7 +3424,7 @@ class CharacterSignalExtractor:
                     ),
                 )
 
-            if recovery_label == "habit_claim" and target_bound_review_performed:
+            if source_only_habit_review or recovery_label == "habit_claim" and target_bound_review_performed:
                 # A different generation is not a certificate for any remaining sibling.
                 break
             verified_before_clean.extend(validation.signals)
@@ -3401,7 +3434,7 @@ class CharacterSignalExtractor:
         return _failed_package_result(
             validation_attempts,
             recovered_signals=target_bound_signals,
-            force_partial=bool(target_bound_unresolved),
+            force_partial=bool(target_bound_unresolved or source_only_habit_review),
             attempted_calls=attempted_calls + auxiliary_attempted_calls,
             trace_attempted_calls=attempted_calls,
             prompt_tokens=total_prompt_tokens,
@@ -5178,45 +5211,96 @@ def _habit_claim_debts(
     source_identity: ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None,
     frozen_content: str | None, *, first_ordinal: int | None,
     allowed_ranges: tuple[tuple[int, int], ...],
+    counts: Counter[str], stage: Literal["primary", "targeted", "verify"],
 ) -> tuple[_TargetBoundDraftDeferred, ...]:
     """Keep failed observed actions attached to their original frozen target and record."""
-    if first_ordinal is None:
+    def gate(code: str) -> None:
+        # All call sites use fixed categories, including the binder's allowlisted reasons.
+        counts[f"habit_gate_{stage}_{code}"] += 1
+
+    habit_targets = any(target.dimension == "contextual_behavior" for target in targets)
+    if not validation.failures:
+        return ()
+    if not validation.parsed or first_ordinal is None:
+        if habit_targets:
+            gate("unparsed" if not validation.parsed else "missing_ordinal")
+        return ()
+    envelope = _ENVELOPE_ADAPTER.validate_json(response_text)
+    if not habit_targets:
+        for failure in validation.failures:
+            if failure.record_index is not None:
+                raw = envelope.records[failure.record_index]
+                if isinstance(raw, dict) and raw.get("dimension") == "contextual_behavior":
+                    gate("no_habit_target")
         return ()
     candidates = [(ordinal, target) for ordinal, target in enumerate(targets, first_ordinal)
                   if target.dimension == "contextual_behavior" and target.habit_contexts]
-    if (not candidates or not validation.parsed or not validation.failures
-            or not _draft_actor_source_matches_chunk(source_identity, frozen_content, chunk)):
+    if not candidates:
+        gate("missing_context")
         return ()
-    envelope = _ENVELOPE_ADAPTER.validate_json(response_text)
+    if not _draft_actor_source_matches_chunk(source_identity, frozen_content, chunk):
+        gate("source_mismatch")
+        return ()
     separately_reviewed = {item.record_index for item in validation.draft_actor_deferred}
     debts = []
     for failure in validation.failures:
-        if failure.record_index is None or failure.record_index in separately_reviewed or not (
-            failure.reason == "character_support"
-            or failure.statement_support_kind in {"lexical_polarity", "anchor_overlap"}
+        if failure.record_index is None:
+            gate("package_failure")
+            continue
+        if failure.record_index in separately_reviewed:
+            gate("actor_review")
+            continue
+        if not (failure.reason == "character_support"
+                or failure.statement_support_kind in {"lexical_polarity", "anchor_overlap"}
         ):
+            # _SignalValidationFailure permits only closed, server-owned enums.
+            gate(f"failure_{failure.statement_support_kind or failure.reason}")
             continue
         record = _RECORD_ADAPTER.validate_python(envelope.records[failure.record_index])
         window = (record.source_line_start, record.source_line_end)
-        if (record.dimension != "contextual_behavior" or record.key_object.strip()
-                or record.stability not in {"temporary", "situational"}
-                or window[0] != window[1] or (allowed_ranges and window not in allowed_ranges)):
+        if record.dimension != "contextual_behavior":
+            gate("other_dimension")
+            continue
+        if record.key_object.strip():
+            gate("object_present")
+            continue
+        if record.stability not in {"temporary", "situational"}:
+            gate("stability")
+            continue
+        if window[0] != window[1]:
+            gate("multi_line")
+            continue
+        if allowed_ranges and window not in allowed_ranges:
+            gate("outside_window")
             continue
         try:
             # Hard source, quote, joint-subject and occurrence gates still
             # run. Only the rejected label/attribution can go to review.
             signal = _bind_record(record, chunk, skip_draft_actor_attribution=True,
                                   skip_lexical_polarity=True, defer_primary_anchor_overlap=True)
-        except (TypeError, ValueError):
+        except _UnobservedDraftAction as exc:
+            gate(f"preflight_{exc.kind}")
             continue
-        matches = [
-            (ordinal, target) for ordinal, target in candidates
-            if record.character in _target_actor_literals(target)
-            and record.polarity == target.requested_polarity
-            and target.comparison_key == stable_trait_identity(record.dimension, record.trait_key)
-            and not any(_ranges_overlap(window, excluded) for excluded in target.existing_evidence_ranges)
-        ]
+        except (TypeError, ValueError) as exc:
+            gate(f"preflight_{_primary_value_other_gate_code(exc)}")
+            continue
+        matches = [(ordinal, t) for ordinal, t in candidates if record.character in _target_actor_literals(t)]
+        if not matches:
+            gate("actor")
+            continue
+        matches = [(ordinal, t) for ordinal, t in matches if record.polarity == t.requested_polarity]
+        if not matches:
+            gate("direction")
+            continue
+        comparison_key = stable_trait_identity(record.dimension, record.trait_key)
+        matches = [(ordinal, t) for ordinal, t in matches if t.comparison_key == comparison_key]
+        if not matches:
+            gate("comparison_key")
+            continue
+        matches = [(ordinal, t) for ordinal, t in matches
+                   if not any(_ranges_overlap(window, excluded) for excluded in t.existing_evidence_ranges)]
         if len(matches) != 1:
+            gate("existing_window" if not matches else "ambiguous_target")
             continue
         ordinal, target = matches[0]
         try:
@@ -5225,10 +5309,13 @@ def _habit_claim_debts(
                 line_start=window[0], line_end=window[1], protocol_version="v4", primary_claim_review=True,
             )
         except (TypeError, ValueError):
+            gate("proposal_invalid")
             continue
         choices = tuple(p for p in proposals if p.evidence == record.evidence)
         if not choices:
+            gate("quote_mismatch" if proposals else "no_proposal")
             continue
+        gate("eligible")
         debts.append(_TargetBoundDraftDeferred(
             record_index=failure.record_index, record=record, preflight_signal=signal, index=index,
             proposal=choices[0], alternatives=choices[1:], claim_review=True,
@@ -7988,11 +8075,11 @@ def _bind_record(
         raise ValueError("evidence_mismatch")
     if v4_clause is None and chunk.source_kind == "draft":
         if _draft_statement_only_inside_quote(record, evidence_text):
-            raise ValueError("character_support")
+            raise _UnobservedDraftAction("quoted_only")
         if _draft_ambiguous_joint_pronoun_claim(record, evidence_text):
-            raise ValueError("character_support")
+            raise _UnobservedDraftAction("joint_pronoun")
         if _draft_action_occurrence_unproven(record, evidence_text):
-            raise ValueError("character_support")
+            raise _UnobservedDraftAction("occurrence_unproven")
     if v4_clause is None and not _character_attribution_supported(
         record,
         evidence_text,

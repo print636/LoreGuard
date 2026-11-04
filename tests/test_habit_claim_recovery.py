@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.character_draft_actor_review import TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4
-from app.character_draft_actor_review_provider import TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13
+from app.character_draft_actor_review_provider import (
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
+)
 from app.character_trait_extraction import CharacterSignalChunk, CharacterSignalExtractor, CharacterSignalTarget
 from tests.test_character_target_bound_draft_review_v3 import _settings, _source
 
@@ -26,14 +28,18 @@ def record(statement):
 
 
 class ClaimProvider:
-    def __init__(self, records):
+    def __init__(self, records, *, generation_tokens=9, source_support=True):
         self.records = records
+        self.generation_tokens = generation_tokens
+        self.source_support = source_support
         self.requests = []
         self.generations = 0
 
     def complete(self, system, user):
-        if system != TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13:
+        prompt_tokens = 9
+        if system not in {TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13}:
             self.generations += 1
+            prompt_tokens = self.generation_tokens
             result = {"records": self.records}
         else:
             batch = json.loads(user.split("：\n", 1)[1])
@@ -41,18 +47,21 @@ class ClaimProvider:
             for window in batch["windows"]:
                 request = window["request"]
                 self.requests.append(request)
-                claim = request["primary_claim"]
+                claim = request.get("primary_claim")
                 items = []
                 for proposal, hint in zip(request["proposals"], window["basis_path_hints"], strict=True):
-                    same = "口袋" in hint["fact_clause_text"] and "口袋" in claim["statement"]
+                    same = "口袋" in hint["fact_clause_text"] and (
+                        "口袋" in claim["statement"] if claim else self.source_support
+                    )
                     item = dict(
                         proposal_id=proposal["proposal_id"], verdict="supported" if same else "rejected",
                         actor="proposed", actuality="asserted", statement_relation="supported",
                         axis_relation="matches_target" if same else "different", object_relation="not_applicable",
                         polarity_relation="requested", correction_relation="none", observation_kind="action",
                         object_start_offset=None, object_end_offset=None, basis_ids=hint["required_basis_ids"],
-                        claim_digest=claim["claim_digest"], claim_relation="equivalent" if same else "different",
                     )
+                    if claim:
+                        item.update(claim_digest=claim["claim_digest"], claim_relation="equivalent" if same else "different")
                     if "action_path" in hint:
                         item["action_steps"] = [
                             dict(clause_id=step["clause_id"], quote=step["text"],
@@ -63,19 +72,21 @@ class ClaimProvider:
                                       request_digest=window["request_digest"], items=items))
             result = dict(schema_version=TARGET_BOUND_DRAFT_REVIEW_BATCH_SCHEMA_V4,
                           batch_digest=batch["batch_digest"], responses=responses)
-        return SimpleNamespace(text=json.dumps(result, ensure_ascii=False), prompt_tokens=9, completion_tokens=8)
+        return SimpleNamespace(text=json.dumps(result, ensure_ascii=False), prompt_tokens=prompt_tokens, completion_tokens=8)
 
 
-def extract(records, targeted, **target_changes):
-    provider = ClaimProvider(records)
+def extract(records, targeted, *, generation_tokens=9, source_support=True, candidate_ranges=(), content=SOURCE,
+            **target_changes):
+    provider = ClaimProvider(records, generation_tokens=generation_tokens, source_support=source_support)
     target = HABIT.model_copy(update=target_changes)
-    chunk = CharacterSignalChunk("draft-v3", "draft.md", SOURCE, 1, "draft")
+    chunk = CharacterSignalChunk("draft-v3", "draft.md", content, 1, "draft")
     extractor = CharacterSignalExtractor(provider, settings=_settings(
         character_signal_package_max_attempts=2, character_signal_draft_trace_v1=True,
     ))
-    source = dict(source_identity=_source(SOURCE), frozen_content=SOURCE)
+    source = dict(source_identity=_source(content), frozen_content=content)
     if targeted:
-        result = extractor.extract_targeted(chunk, (target,), target_ordinal=3, **source)
+        result = extractor.extract_targeted(chunk, (target,), target_ordinal=3,
+                                            candidate_evidence_ranges=candidate_ranges, **source)
     else:
         result = extractor.extract(chunk, primary_value_targets=(target,), **source)
     return result, provider
@@ -109,4 +120,48 @@ def test_unrelated_claim_on_same_line_is_not_refunded(targeted):
 
 def test_excluded_window_cannot_certify_a_targeted_record():
     result, provider = extract([record("廖辰把行李牌装入口袋")], True, existing_evidence_ranges=((1, 1),))
+    assert not provider.requests and not result.draft_observations
+
+
+@pytest.mark.parametrize("candidate_ranges,stage", [((), "targeted"), (((1, 1),), "verify")])
+def test_independent_source_finds_action_but_leaves_wrong_original_partial(candidate_ranges, stage):
+    bad = dict(record("廖辰把一枚纪念章装入口袋"), key_object="PRIVATE-RAW-OBJECT")
+    result, provider = extract([bad], True, candidate_ranges=candidate_ranges)
+    request, = provider.requests
+    assert not request.get("primary_claim")
+    assert provider.generations == 1
+    observation, = result.draft_observations
+    assert "行李牌" in observation.statement and "纪念章" not in observation.statement
+    assert result.diagnostics.outcome == "partial"
+    assert result.diagnostics.rejected_records == 1
+    reasons = result.diagnostics.reason_counts
+    assert reasons[f"habit_gate_{stage}_source_only"] == 1
+    assert reasons[f"habit_gate_{stage}_failure_key_object_support"] == 1
+    assert not any(reason.startswith("habit_claim_recovery") for reason in reasons)
+    assert "PRIVATE" not in json.dumps(reasons)
+
+
+@pytest.mark.parametrize("generation_tokens,source_support", [(9, False), (1_000_000, True)])
+def test_no_supported_source_or_exhausted_budget_keeps_original_unresolved(generation_tokens, source_support):
+    bad = dict(record("廖辰把一枚纪念章装入口袋"), key_object="PRIVATE-RAW-OBJECT")
+    result, provider = extract([bad], True, generation_tokens=generation_tokens, source_support=source_support)
+    assert provider.generations == 1
+    assert len(provider.requests) == (0 if generation_tokens > 9 else 1)
+    assert result.diagnostics.outcome == "partial"
+    assert result.diagnostics.rejected_records == 1 and not result.draft_observations
+
+
+@pytest.mark.parametrize("changes,gate", [({"character": "甲"}, "actor"), ({"polarity": "positive"}, "direction"),
+                                          ({"trait_key": "other_key"}, "comparison_key")])
+def test_primary_gate_counts_distinguish_parts_of_frozen_target(changes, gate):
+    result, provider = extract([dict(record("廖辰把行李牌装入口袋"), **changes)], False)
+    assert result.diagnostics.reason_counts[f"habit_gate_primary_{gate}"] == provider.generations
+    assert not provider.requests
+
+
+def test_quoted_story_action_remains_unobserved_and_hard_gate_is_identified():
+    claim = "廖辰把行李牌收进口袋"
+    text = f"演员只是朗读剧本：“{claim}”。"
+    result, provider = extract([dict(record(claim), evidence=text)], False, content=text)
+    assert result.diagnostics.reason_counts["habit_gate_primary_preflight_quoted_only"] == provider.generations
     assert not provider.requests and not result.draft_observations
