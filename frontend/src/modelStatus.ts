@@ -676,10 +676,10 @@ const characterStageReasons: Record<string, string> = {
   internal_failure: '角色审查阶段发生内部错误',
 };
 
-function characterBudgetRejected(diagnostics: CharacterConsistencyDiagnostics): boolean {
+function hasCharacterReason(diagnostics: CharacterConsistencyDiagnostics, ...keys: string[]): boolean {
   const reasons = diagnostics.reason_counts;
   if (!reasons || typeof reasons !== 'object' || Array.isArray(reasons)) return false;
-  return ['token_budget', 'stage_token_budget'].some(key =>
+  return keys.some(key =>
     Number.isSafeInteger(reasons[key]) && reasons[key] > 0);
 }
 
@@ -697,7 +697,6 @@ export function describeCharacterReviewStage(
   const chunks = characterChunkSummary(diagnostics);
   const reason = characterStageReasons[diagnostics.reason_code ?? ''];
   const frozen = diagnostics.snapshot_bound === true;
-  const budgetsRejected = characterBudgetRejected(diagnostics);
   if (!chunks.valid) {
     return {
       coverage: 'unknown', label: '角色审查覆盖无法核对',
@@ -737,13 +736,14 @@ export function describeCharacterReviewStage(
       };
     }
     let explanation = `${reason || '部分角色审查未完成'}。请核对本次运行诊断后重新发起校验。`;
-    if (budgetsRejected) {
+    if (hasCharacterReason(diagnostics, 'token_budget', 'stage_token_budget')) {
       explanation = '审查中发生 Token 预算门控；部分内容可能未调用模型。请核对预算后重新发起校验。';
-    } else if (['upstream_5xx', 'targeted_pass_upstream_5xx'].some(key => {
-      const count = diagnostics.reason_counts?.[key];
-      return Number.isSafeInteger(count) && count! > 0;
-    })) {
+    } else if (hasCharacterReason(diagnostics, 'upstream_5xx', 'targeted_pass_upstream_5xx')) {
       explanation = '模型服务出错，部分角色审查未完成。如需补查，可在服务恢复后发起新一轮校验。';
+    } else if (hasCharacterReason(diagnostics, 'primary_value_recovery_unresolved',
+      'primary_value_recovery_no_exact_proposal', 'primary_value_recovery_target_mismatch',
+      'primary_value_recovery_other_gate', 'primary_value_recovery_rejected')) {
+      explanation = '有些行为描述未能按原文核实，无法据此判定角色违反了设定。你仍可查看报告中已有原文依据的问题和线索。';
     }
     return {
       coverage: 'partial', label: '角色审查仅覆盖部分内容',

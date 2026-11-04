@@ -6489,7 +6489,7 @@ def test_approved_axis_primary_key_match_still_requires_clean_targeted_binding()
 def _run_scoped_axis_stage(
     source_lines: tuple[str, ...], *, situation_match: str,
     duplicate_baseline: bool = False, independent_events: str = "not_applicable",
-    scoped_enabled: bool = True,
+    scoped_enabled: bool = True, provider=None, **stage_settings,
 ):
     definition = "家人遇险时是否保护家人"
     candidate_id = str(uuid4())
@@ -6586,15 +6586,71 @@ def _run_scoped_axis_stage(
             narrative_context=_context(publication="draft"),
         )
         run_id = _new_run(client, project["id"])
-        provider_responses = [_response(), _response(), _response(*observations), review]
-        provider = QueueProvider(*provider_responses)
+        if provider is None:
+            provider = QueueProvider(_response(), _response(), _response(*observations), review)
         with patch.object(
             CharacterConsistencyStage, "_load_confirmed_traits", return_value=entries
         ):
             result = _run_stage(
-                run_id, provider, character_scoped_axis_drift_v1=scoped_enabled
+                run_id, provider, character_scoped_axis_drift_v1=scoped_enabled, **stage_settings,
             )
     return result, provider
+
+
+@pytest.mark.parametrize(("discloses", "protects"), [
+    pytest.param(True, False, id="disclosure"),
+    pytest.param(False, True, id="protection-mislabeled-as-harm"),
+    pytest.param(True, True, id="unresolved-claim-on-same-line"),
+])
+def test_primary_value_evidence_recovery_does_not_clear_another_claim(discloses, protects):
+    from app.character_draft_actor_review_provider import TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9
+    from tests.test_character_target_bound_draft_review_v3 import _V3Provider
+
+    claims = []
+    if discloses:
+        claims.append("林澈主动将家人的藏身地址交给追踪者")
+    if protects:
+        claims.append("林澈主动保护家人的私人名单")
+    evidence = "；".join(claims) + "。"
+    primary_records = [
+        {
+            **_record(evidence=evidence, statement=claim, dimension="value", trait_key="保护家人",
+                      polarity="negative", kind="decision"),
+            "stability": "temporary", "key_object": "家人",
+        }
+        for claim in claims
+    ]
+    # Treat the disclosure as contrary to the approved value. The second
+    # claim on that same frozen line must not borrow the first certificate.
+    reviewer = _V3Provider(object_text="交给追踪者")
+
+    class Provider:
+        def complete(self, system, user):
+            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9:
+                return reviewer.complete(system, user)
+            if system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT:
+                return QueueProvider(json.dumps({
+                    "verdict": "needs_confirmation", "explanation": "需确认当时家人是否处于危险中。",
+                    "citations": ["B01", "C01"],
+                }, ensure_ascii=False)).complete(system, user)
+            if user.startswith("服务端来源类型：draft\n") and "检索视图：" not in user:
+                return QueueProvider(_response(*primary_records)).complete(system, user)
+            return QueueProvider(_response()).complete(system, user)
+
+    result, _ = _run_scoped_axis_stage(
+        (evidence,), situation_match="same", provider=Provider(),
+        character_signal_full_line_prompt_v2=True, character_draft_actor_review_v1=True,
+        character_target_bound_draft_review_v3=True, character_signal_package_max_attempts=1,
+    )
+    counts = result.diagnostics["counts"]
+    assert reviewer.review_calls >= 1
+    reasons = result.diagnostics["reason_counts"]
+    assert reasons.get("primary_value_recovery_supported", 0) == int(discloses)
+    assert reasons.get("primary_value_recovery_rejected", 0) == int(protects)
+    assert counts["model_completed_chunks"] == (1 if protects else 2)
+    assert result.diagnostics["material_coverage"] == ("partial" if protects else "complete")
+    assert result.diagnostics["case_trace"][0]["matched_observation_count"] == int(discloses)
+    assert result.issues == ()
 
 
 def test_scoped_axis_different_situation_is_not_a_formal_issue():

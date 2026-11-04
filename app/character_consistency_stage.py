@@ -1430,6 +1430,8 @@ class CharacterConsistencyStage:
                     or draft_actor_review_v1
                     else None
                 ),
+                **({"primary_value_targets": server_contexts[source.document.id].targets}
+                   if draft_actor_review_v1 and settings.character_target_bound_draft_review_v3 else {}),
                 **baseline_coverage_kwargs,
             )
             for signal in extraction.signals:

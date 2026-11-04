@@ -1776,11 +1776,11 @@ def test_v3_provider_failures_are_partial_and_never_create_signal(mode, reason):
     assert result.diagnostics.reason_counts[reason] == 1
 
 
-def test_v3_scoped_value_axis_is_bound_without_copying_baseline_object():
+def _scoped_rescue_target():
     definition = "生命与货物冲突时优先救人"
     scope = "救援与保全发生直接冲突"
     proposition = "先救人"
-    target = _signal_target(
+    return _signal_target(
         character="唐岫",
         dimension="value",
         trait_key="rescue_priority",
@@ -1797,6 +1797,58 @@ def test_v3_scoped_value_axis_is_bound_without_copying_baseline_object():
         axis_positive_proposition=proposition,
         axis_positive_proposition_sha256=hashlib.sha256(proposition.encode()).hexdigest(),
     )
+
+
+@pytest.mark.parametrize(("scenario", "calls", "reason"), [
+    ("supported", 1, "primary_value_recovery_supported"),
+    ("timeout", 1, "target_bound_provider_timeout"),
+    ("different_claim", 0, "primary_value_recovery_no_exact_proposal"),
+    ("different_axis", 0, "primary_value_recovery_target_mismatch"),
+    ("disabled", 0, None),
+])
+def test_final_primary_value_recovery_requires_its_own_frozen_claim(scenario, calls, reason):
+    target = _scoped_rescue_target()
+    statement = "唐岫主动将救援优先物资转卖给商贩"
+    evidence = statement + "。"
+    record = dict(
+        character=target.character, dimension="value", trait_key=target.trait_key,
+        key_object="救援优先", polarity="negative", stability="temporary",
+        observation_kind="decision", statement=statement, source_line_start=1,
+        source_line_end=1, evidence=evidence,
+    )
+    if scenario == "different_claim":
+        record["statement"] = "唐岫主动转卖救援优先物资"
+    if scenario == "different_axis":
+        record["trait_key"] = "other_axis"
+    provider = _V3Provider(
+        mode="timeout" if scenario == "timeout" else "supported",
+        object_text="转卖给商贩", signal_records=[record],
+    )
+    settings = _settings(
+        character_signal_package_max_attempts=2, character_signal_draft_trace_v1=True,
+        character_target_bound_draft_review_v3=scenario != "disabled",
+    )
+    result = CharacterSignalExtractor(provider, settings=settings).extract(
+        CharacterSignalChunk("draft-v3", "draft.md", evidence, 1, "draft"),
+        source_identity=_source(evidence), frozen_content=evidence, primary_value_targets=(target,),
+    )
+    assert provider.signal_calls == 2
+    assert provider.review_calls == calls
+    assert result.diagnostics.reason_counts.get("primary_value_recovery_selected", 0) == calls
+    assert result.diagnostics.reason_counts.get("primary_value_recovery_calls", 0) == calls
+    if reason:
+        assert result.diagnostics.reason_counts[reason] == 1
+    if scenario == "supported":
+        assert result.diagnostics.outcome == "completed"
+        assert result.diagnostics.draft_trace.final_accepted_record_ordinals == (1,)
+        assert result.draft_observations[0].statement == statement
+    else:
+        assert result.diagnostics.outcome in {"partial", "degraded"}
+        assert not result.draft_observations
+
+
+def test_v3_scoped_value_axis_is_bound_without_copying_baseline_object():
+    target = _scoped_rescue_target()
     content = "唐岫明确要求先打捞货物，随后才允许救人。"
     result = _extract(content, _V3Provider(object_text="先打捞货物"), target)
     assert result.diagnostics.outcome == "completed"

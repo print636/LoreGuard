@@ -206,6 +206,12 @@ test('partial character stage reports model-call coverage and only names budget 
   assert.equal(generic.coverage, 'partial');
   assert.match(generic.detail, /部分冻结材料尚未完成/);
   assert.doesNotMatch(generic.detail, /Token 预算|bounded_partial/);
+  const unverified = describeCharacterReviewStage({...partial,
+    reason_counts: {primary_value_recovery_no_exact_proposal: 1}});
+  assert.match(unverified.detail, /有些行为描述未能按原文核实/);
+  const otherGap = describeCharacterReviewStage({...partial,
+    reason_counts: {primary_value_recovery_supported: 1, primary_value_recovery_unresolved: 0}});
+  assert.doesNotMatch(otherGap.detail, /有些行为描述未能按原文核实/);
 
   const legacy = describeCharacterReviewStage({...partial, counts:undefined});
   assert.equal(legacy.coverage, 'partial');

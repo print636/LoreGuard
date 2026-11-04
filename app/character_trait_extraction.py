@@ -1610,6 +1610,8 @@ class _TargetBoundDraftDeferred:
     preflight_signal: CharacterSignal
     index: DraftActorClauseIndex
     proposal: TargetBoundDraftProposal
+    target: CharacterSignalTarget
+    target_ordinal: int
     failure_reason: Literal[
         "character_support", "statement_support", "key_object_support"
     ]
@@ -2152,6 +2154,7 @@ class CharacterSignalExtractor:
         frozen_content: str | None = None,
         baseline_coverage_recovery: bool = False,
         baseline_coverage_recovery_already_used: bool = False,
+        primary_value_targets: tuple[CharacterSignalTarget, ...] = (),
     ) -> CharacterSignalExtractionResult:
         _validate_signal_prompt_variant_settings(self.settings)
         full_line_prompt_v2 = self.settings.character_signal_full_line_prompt_v2
@@ -2213,6 +2216,11 @@ class CharacterSignalExtractor:
             scope_review_v1=scope_review_v1,
             history_review_v1=history_review_v1,
             draft_actor_review_v1=draft_actor_review_v1,
+            primary_value_targets=(
+                primary_value_targets[:self.settings.character_signal_targeted_max_targets_per_chunk]
+                if draft_actor_review_v1
+                and self.settings.character_target_bound_draft_review_v3 else ()
+            ),
             source_identity=source_identity,
             frozen_content=frozen_content,
             baseline_coverage_recovery=coverage_enabled,
@@ -2413,6 +2421,7 @@ class CharacterSignalExtractor:
         targets: tuple[CharacterSignalTarget, ...] = (),
         allowed_targeted_evidence_ranges: tuple[tuple[int, int], ...] = (),
         verification_dispatch: _VerificationDispatch | None = None,
+        primary_value_targets: tuple[CharacterSignalTarget, ...] = (),
         full_line_prompt_v2: bool = False,
         support_index: AssertionIndexV1 | None = None,
         scope_review_v1: bool = False,
@@ -2969,20 +2978,28 @@ class CharacterSignalExtractor:
                             and key not in draft_actor_rejected
                         ):
                             draft_actor_coverage_debt.add(key)
+            primary_recovery = bool(primary_value_targets) and (
+                package_attempt + 1 == settings.character_signal_package_max_attempts
+            )
+            if primary_recovery:
+                primary_debts, diagnostic_counts = _primary_value_debts(
+                    validation, response_text, chunk, primary_value_targets,
+                    source_identity, frozen_content,
+                )
+                validation = replace(validation, target_bound_draft_deferred=primary_debts)
+                target_bound_reason_counts.update(diagnostic_counts)
             if (
-                target_bound_review_v2
+                (target_bound_review_v2 or primary_recovery)
                 and validation.target_bound_draft_deferred
                 and not target_bound_review_performed
             ):
                 assert isinstance(source_identity, ScopeReviewSourceIdentity)
                 assert isinstance(frozen_content, str)
-                assert target_ordinal is not None
                 target_bound_review_performed = True
                 target_review = _review_target_bound_draft_candidates(
                     chunk=chunk,
-                    target=targets[0],
-                    target_ordinal=target_ordinal,
                     deferred=validation.target_bound_draft_deferred,
+                    primary_value_recovery=primary_recovery,
                     source_identity=source_identity,
                     frozen_content=frozen_content,
                     provider=self._base_provider,
@@ -3010,12 +3027,24 @@ class CharacterSignalExtractor:
                 target_bound_reason_counts.update(
                     dict(target_review.reason_counts)
                 )
+                if primary_recovery:
+                    target_bound_reason_counts["primary_value_recovery_selected"] += len(
+                        validation.target_bound_draft_deferred
+                    )
+                    if target_review.attempted_calls:
+                        target_bound_reason_counts["primary_value_recovery_calls"] += target_review.attempted_calls
+                    if target_review.resolved_record_indices:
+                        target_bound_reason_counts["primary_value_recovery_supported"] += len(
+                            target_review.resolved_record_indices
+                        )
+                    if target_review.unresolved_count:
+                        target_bound_reason_counts["primary_value_recovery_unresolved"] += target_review.unresolved_count
                 target_bound_slot_conflict_counts.update(
                     dict(target_review.slot_conflict_counts)
                 )
                 target_bound_failure_events.extend(target_review.failure_events)
                 validation = _resolve_target_bound_validation(
-                    validation, target_review
+                    validation, target_review, certified_primary=primary_recovery,
                 )
             elif (
                 target_bound_review_v2
@@ -5033,8 +5062,77 @@ def _target_bound_draft_deferred_candidate(
         preflight_signal=preflight,
         index=index,
         proposal=exact[0],
+        target=target,
+        target_ordinal=target_ordinal,
         failure_reason=failure_reason,
     )
+
+
+def _primary_value_debts(
+    validation: _ValidatedSignalPackage, response_text: str, chunk: CharacterSignalChunk,
+    targets: tuple[CharacterSignalTarget, ...],
+    source_identity: ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None,
+    frozen_content: str | None,
+) -> tuple[tuple[_TargetBoundDraftDeferred, ...], Counter[str]]:
+    """Bind a last-attempt lexical rejection to its own frozen, scoped value proposition."""
+    counts: Counter[str] = Counter()
+    rejected_indices = [
+        failure.record_index for failure in validation.failures
+        if failure.statement_support_kind == "lexical_polarity" and failure.record_index is not None
+    ]
+    if not rejected_indices or not _draft_actor_source_matches_chunk(source_identity, frozen_content, chunk):
+        return (), counts
+    envelope = _ENVELOPE_ADAPTER.validate_json(response_text)
+    debts = []
+    for record_index in rejected_indices:
+        record = _RECORD_ADAPTER.validate_python(envelope.records[record_index])
+        if record.dimension not in _SCOPED_APPROVED_AXIS_DIMENSIONS:
+            continue
+        if record.stability not in {"temporary", "situational"}:
+            counts["primary_value_recovery_other_gate"] += 1
+            continue
+        # Re-run all ordinary gates including actor, literal object, and statement
+        # anchoring. Only the lexical polarity check that actually failed is deferred.
+        try:
+            preflight = _bind_record(record, chunk, skip_lexical_polarity=True)
+        except (TypeError, ValueError):
+            counts["primary_value_recovery_other_gate"] += 1
+            continue
+        matched = [
+            (ordinal, target) for ordinal, target in enumerate(targets, 1)
+            if target.approved_axis_identity is not None and target.approved_axis_comparison_key
+            and _matching_target(preflight, (target,)) is target
+            and record.polarity == target.requested_polarity
+        ]
+        if len(matched) != 1:
+            counts["primary_value_recovery_target_mismatch"] += 1
+            continue
+        ordinal, target = matched[0]
+        try:
+            index, proposals = build_target_bound_draft_proposals(
+                frozen_content, source_identity, _target_bound_review_target(target, target_ordinal=ordinal),
+                line_start=record.source_line_start, line_end=record.source_line_end,
+                protocol_version="v4",
+            )
+        except (TypeError, ValueError):
+            counts["primary_value_recovery_no_exact_proposal"] += 1
+            continue
+        # A normal sentence-final full stop is presentation only. In particular,
+        # sharing an evidence line, object or actor does not identify a proposition.
+        exact = [
+            proposal for proposal in proposals
+            if proposal.evidence == record.evidence
+            and proposal.canonical_statement.strip().removesuffix("。").removesuffix(".")
+            == record.statement.strip().removesuffix("。").removesuffix(".")
+        ]
+        if len(exact) != 1:
+            counts["primary_value_recovery_no_exact_proposal"] += 1
+            continue
+        debts.append(_TargetBoundDraftDeferred(
+            record_index=record_index, record=record, preflight_signal=preflight, index=index,
+            proposal=exact[0], target=target, target_ordinal=ordinal, failure_reason="statement_support",
+        ))
+    return tuple(debts), counts
 
 
 def _discover_target_bound_draft_candidates_v3(
@@ -5613,9 +5711,8 @@ def _bind_target_bound_draft_certificate(
 def _review_target_bound_draft_candidates(
     *,
     chunk: CharacterSignalChunk,
-    target: CharacterSignalTarget,
-    target_ordinal: int,
     deferred: tuple[_TargetBoundDraftDeferred, ...],
+    primary_value_recovery: bool = False,
     source_identity: ScopeReviewSourceIdentity,
     frozen_content: str,
     provider: _ChatProvider,
@@ -5632,15 +5729,6 @@ def _review_target_bound_draft_candidates(
             unresolved_record_indices=deferred_indices,
             reason_counts=(("target_bound_request_invalid", len(deferred)),),
         )
-    try:
-        review_target = _target_bound_review_target(
-            target, target_ordinal=target_ordinal
-        )
-    except (TypeError, ValueError, ValidationError, UnicodeError):
-        return _TargetBoundDraftOutcome(
-            unresolved_record_indices=deferred_indices,
-            reason_counts=(("target_bound_request_invalid", len(deferred)),),
-        )
     entries: list[TargetBoundDraftReviewBatchEntry] = []
     candidate_by_key: dict[
         tuple[str, str], tuple[
@@ -5651,13 +5739,14 @@ def _review_target_bound_draft_candidates(
     ] = {}
     try:
         grouped: dict[
-            tuple[int, int], list[_TargetBoundDraftDeferred]
+            tuple[int, int, int], list[_TargetBoundDraftDeferred]
         ] = defaultdict(list)
         for item in deferred:
-            grouped[(item.index.line_start, item.index.line_end)].append(item)
+            grouped[(item.target_ordinal, item.index.line_start, item.index.line_end)].append(item)
         for window in sorted(grouped):
             rows = grouped[window]
             index = rows[0].index
+            review_target = _target_bound_review_target(rows[0].target, target_ordinal=rows[0].target_ordinal)
             if any(row.index != index for row in rows):
                 raise ValueError("target_bound_index_mismatch")
             proposals = tuple({
@@ -5669,6 +5758,8 @@ def _review_target_bound_draft_candidates(
                 proposals,
                 frozen_content=frozen_content,
                 expected_source=source_identity,
+                protocol_version="v4" if primary_value_recovery else "v2",
+                allow_named_speech=primary_value_recovery,
             )
             entries.append(TargetBoundDraftReviewBatchEntry(
                 request=request,
@@ -5749,7 +5840,11 @@ def _review_target_bound_draft_candidates(
                     failure_events.append(event)
                 if decision.verdict == "rejected":
                     rejected += 1
-                    resolved.add(item.record_index)
+                    if primary_value_recovery:
+                        unresolved.add(item.record_index)
+                        review_reasons["primary_value_recovery_rejected"] += 1
+                    else:
+                        resolved.add(item.record_index)
                     continue
                 if decision.verdict != "supported":
                     unresolved.add(item.record_index)
@@ -5765,7 +5860,7 @@ def _review_target_bound_draft_candidates(
                         request=request,
                         proposal=proposal,
                         decision=decision,
-                        target=target,
+                        target=item.target,
                         chunk=chunk,
                         source_identity=source_identity,
                         frozen_content=frozen_content,
@@ -5958,8 +6053,9 @@ def _review_target_bound_discoveries_v3(
 def _resolve_target_bound_validation(
     validation: _ValidatedSignalPackage,
     outcome: _TargetBoundDraftOutcome,
+    *, certified_primary: bool = False,
 ) -> _ValidatedSignalPackage:
-    """Remove only the exact binding debts resolved by V2 certificates."""
+    """Remove only the exact record debts resolved by this package's certificates."""
 
     resolved = outcome.resolved_record_indices
     if not resolved:
@@ -5979,12 +6075,20 @@ def _resolve_target_bound_validation(
         reasons[reason] -= 1
         if reasons[reason] <= 0:
             reasons.pop(reason, None)
+    trace = validation.draft_trace_attempt
+    if certified_primary and trace is not None:
+        # These specific generated records now have a bound support certificate.
+        # Preserve all sibling dispositions and the positions claimed on this attempt.
+        trace = trace.model_copy(update={"events": tuple(
+            event.model_copy(update={"outcome": "accepted", "reason": None})
+            if event.record_ordinal - 1 in resolved else event for event in trace.events
+        )})
     return replace(
         validation,
         rejected_records=max(0, validation.rejected_records - len(resolved)),
         reason_counts=dict(sorted(reasons.items())),
         failures=remaining_failures,
-        draft_trace_attempt=None,
+        draft_trace_attempt=trace if certified_primary else None,
         target_bound_draft_deferred=tuple(
             item for item in validation.target_bound_draft_deferred
             if item.record_index not in resolved
@@ -7512,7 +7616,7 @@ def _bind_record(
     skip_target_bound_semantic_binding: bool = False,
 ) -> CharacterSignal:
     if skip_lexical_polarity and (
-        chunk.source_kind != "published_history"
+        chunk.source_kind not in {"published_history", "draft"}
         or record.dimension not in {"value", "behavior_boundary"}
         or record.source_line_start != record.source_line_end
         or support_index is not None
