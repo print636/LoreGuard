@@ -1547,6 +1547,93 @@ def test_v3_clean_empty_recovery_preserves_actual_object_in_signal():
     assert signal.target_bound_object_basis_id == "L1:A1"
 
 
+@pytest.mark.parametrize("accept", [True, False])
+def test_candidate_verification_traces_actual_prompt_claims_and_bound_review_separately(accept):
+    from app.character_verification_trace import verification_trace_chunk
+
+    full_text = "未发送的文稿开头。\n沈砚明确表示自己讨厌栗子糕。"
+    chunk = CharacterSignalChunk("draft-v3", "私人稿名", full_text.splitlines()[1], 2, "draft")
+    target = _signal_target()
+    selected = ((2, 2),)
+    source = _source(full_text)
+    provider = _V3Provider(object_text="栗子糕" if accept else "不存在对象")
+    result = CharacterSignalExtractor(provider, settings=_settings()).extract_targeted(
+        chunk, (target,), candidate_evidence_ranges=selected,
+        source_identity=source, frozen_content=full_text,
+    )
+    row = verification_trace_chunk(
+        source, full_text, chunk, target, stage_chunk_ordinal=2, target_ordinal=1,
+        selected=selected, omitted_lines=0, selection_status="extractor", result=result,
+    )
+    assert row["source_sha256"] == source.content_sha256
+    assert row["selected_ranges"] == [(2, 2)]
+    assert row["primary_attempts"] == [{
+        "attempt": 1, "observability": "parsed", "submitted_record_count": 0, "records": [], "records_omitted": 0,
+    }]
+    assert row["bound_review_submitted_ranges"] == [(2, 2)]
+    assert row["accepted_observation_ranges"] == ([(2, 2)] if accept else [])
+    if not accept:
+        event, = result.diagnostics.failure_diagnostics.target_bound_events
+        assert event.target_digest == row["target_digest"]
+        assert event.verdict == "rejected" and event.source_line_start == 2
+    encoded = json.dumps(row, ensure_ascii=False)
+    assert all(secret not in encoded for secret in ("沈砚", "栗子糕", "私人稿名"))
+
+
+def test_verification_trace_nonresponse_is_not_a_parsed_empty_result():
+    from app.character_verification_trace import verification_trace_chunk
+
+    class Unavailable:
+        def complete(self, system, user):
+            assert "candidate_lines_only" in user
+            raise ProviderError("private unavailable reason", category="upstream_5xx")
+
+    content = "沈砚明确表示自己讨厌栗子糕。"
+    source = _source(content)
+    chunk = CharacterSignalChunk("draft-v3", "draft.md", content, 1, "draft")
+    target = _signal_target()
+    result = CharacterSignalExtractor(Unavailable(), settings=_settings()).extract_targeted(
+        chunk, (target,), candidate_evidence_ranges=((1, 1),),
+        source_identity=source, frozen_content=content,
+    )
+    kwargs = dict(stage_chunk_ordinal=1, target_ordinal=1, selected=((1, 1),),
+                  omitted_lines=0, selection_status="extractor", result=result)
+    row = verification_trace_chunk(source, content, chunk, target, **kwargs)
+    assert row["primary_attempts"][0]["observability"] == "no_response"
+    assert row["primary_attempts"][0]["submitted_record_count"] is None
+    assert row["bound_review_submitted_ranges"] == []
+    assert verification_trace_chunk(source, content + "其他", chunk, target, **kwargs) is None
+
+
+def test_verification_trace_caps_claims_without_manufacturing_bound_evidence():
+    from app.character_verification_trace import verification_trace_chunk
+
+    content = "沈砚明确表示自己讨厌栗子糕。"
+    chunk = CharacterSignalChunk("draft-v3", "draft.md", content, 1, "draft")
+    source = _source(content)
+    target = _signal_target()
+    # Malformed proposed records do not become evidence even if the claimed
+    # line is in range. Anonymous retained rows must disclose any truncation.
+    provider = _V3Provider(
+        object_text="不存在对象",
+        signal_records=[{"source_line_start": 1, "source_line_end": 1, "unexpected": "private"}] * 17,
+    )
+    result = CharacterSignalExtractor(provider, settings=_settings()).extract_targeted(
+        chunk, (target,), candidate_evidence_ranges=((1, 1),), source_identity=source, frozen_content=content,
+    )
+    row = verification_trace_chunk(
+        source, content, chunk, target, stage_chunk_ordinal=1, target_ordinal=1,
+        selected=((1, 1),), omitted_lines=0, selection_status="extractor", result=result,
+    )
+    attempt, = row["primary_attempts"]
+    assert attempt["submitted_record_count"] == 17 and attempt["records_omitted"] == 1
+    assert len(attempt["records"]) == 16
+    assert all(record["claimed_range"] == (1, 1) and record["outcome"] == "rejected"
+               for record in attempt["records"])
+    assert row["accepted_observation_ranges"] == []
+    assert "private" not in json.dumps(row)
+
+
 @pytest.mark.parametrize(
     ("signal_records", "generation_reason"),
     (

@@ -38,6 +38,7 @@ from .character_explanation_review import (
     run_character_explanation_review,
 )
 from .character_scope_failure import ScopeProviderFailureSeriesV1
+from .character_verification_trace import MAX_VERIFICATION_TRACE_CHUNKS, verification_trace_chunk
 from .character_scope_review import (
     SCOPE_REVIEW_BASIS_INVALID_SUBTYPES,
     SCOPE_REVIEW_SLOT_CONFLICT_KINDS,
@@ -748,6 +749,8 @@ class CharacterConsistencyStage:
         support_trace_chunks_omitted = 0
         draft_trace_chunks: list[dict[str, Any]] = []
         draft_trace_chunks_omitted = 0
+        verification_trace_chunks: list[dict] = []
+        verification_trace_omitted = 0
         baseline_trace_chunks: list[dict[str, Any]] = []
         baseline_trace_chunks_omitted = 0
         provisional_draft_candidates: list[
@@ -1760,6 +1763,27 @@ class CharacterConsistencyStage:
                 ]
             ] = []
             targeted_verification_first_empty_targets += len(first_empty_targets)
+
+            def record_verification(target_index, target, ranges, omitted, status, result=None):
+                nonlocal verification_trace_omitted
+                if not settings.character_target_bound_draft_review_v3:
+                    return
+                if len(verification_trace_chunks) < MAX_VERIFICATION_TRACE_CHUNKS:
+                    try:
+                        row = verification_trace_chunk(
+                            draft_actor_source, source.document.content, targeted_chunk, target,
+                            stage_chunk_ordinal=chunk_ordinal, target_ordinal=target_index + 1,
+                            selected=ranges, omitted_lines=omitted, selection_status=status, result=result,
+                        )
+                    except (AttributeError, TypeError, ValueError):
+                        row = None  # Optional diagnostics cannot change review decisions.
+                    if row is not None:
+                        row["source_document_ordinal"] = source.ordinal
+                        row["document_chunk_ordinal"] = original_chunk_ordinals[id(chunk)]
+                        verification_trace_chunks.append(row)
+                        return
+                verification_trace_omitted += 1
+
             if initial_round_finished:
                 for target_index, target in completed_targets:
                     target = _target_with_existing_evidence_ranges(
@@ -1784,6 +1808,7 @@ class CharacterConsistencyStage:
                         )
                     )
                     if not candidate_ranges:
+                        record_verification(target_index, target, (), truncated_lines, "no_candidates")
                         targeted_verification_no_candidate_targets += 1
                         continue
                     targeted_verification_eligible_targets += 1
@@ -1814,7 +1839,7 @@ class CharacterConsistencyStage:
                 target_index,
                 target,
                 candidate_ranges,
-                _,
+                truncated_lines,
             ) in enumerate(verification_queue):
                 self.checkpoint()
                 remaining = stage_budget - usage.charged_tokens
@@ -1830,9 +1855,10 @@ class CharacterConsistencyStage:
                     targeted_verification_budget_exhausted += exhausted
                     partial = True
                     chunk_targets_complete = False
-                    for _, pending_target, _, _ in verification_queue[
+                    for pending_index, pending_target, ranges, omitted in verification_queue[
                         verification_index:
                     ]:
+                        record_verification(pending_index, pending_target, ranges, omitted, "stage_budget")
                         mark_target_material_gap(
                             source,
                             pending_target,
@@ -1879,6 +1905,7 @@ class CharacterConsistencyStage:
                 )
                 for signal in verification.signals:
                     observation_journal.capture(signal)
+                record_verification(target_index, target, candidate_ranges, truncated_lines, "extractor", verification)
                 record_draft_trace(
                     "targeted_verification", verification,
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
@@ -3182,6 +3209,12 @@ class CharacterConsistencyStage:
             baseline_trace_chunks=baseline_trace_chunks,
             baseline_trace_chunks_omitted_count=baseline_trace_chunks_omitted,
         )
+        if settings.character_target_bound_draft_review_v3 and eligible_draft_count:
+            diagnostics["targeted_verification_trace_v1"] = {
+                "schema_version": "targeted-verification-trace-v1",
+                "chunks": verification_trace_chunks,
+                "omitted_count": verification_trace_omitted,
+            }
         if (
             self.observation_applicable and eligible_draft_count
             and not reason_counts["invalid_confirmed_trait_snapshot"]

@@ -6,7 +6,7 @@ import re
 import time
 import unicodedata
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, get_args
 from uuid import UUID
 
@@ -1501,6 +1501,12 @@ class CharacterSignalDiagnostics(BaseModel):
     )
 
 
+@dataclass(slots=True)
+class _VerificationDispatch:
+    primary_attempts: list[DraftSignalTraceAttemptV1] = field(default_factory=list)
+    bound_ranges: set[tuple[int, int]] = field(default_factory=set)
+
+
 class CharacterSignalExtractionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -1513,6 +1519,13 @@ class CharacterSignalExtractionResult(BaseModel):
         default=(), exclude=True
     )
     diagnostics: CharacterSignalDiagnostics
+    # For the candidate-lines verification pass only. None means unobserved.
+    verification_primary_attempts: tuple[DraftSignalTraceAttemptV1, ...] | None = Field(
+        default=None, exclude=True, max_length=2
+    )
+    bound_review_submitted_ranges: tuple[tuple[int, int], ...] | None = Field(
+        default=None, exclude=True, max_length=MAX_TARGETED_CHARACTER_SIGNAL_CANDIDATE_LINES
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2358,7 +2371,12 @@ class CharacterSignalExtractor:
             # request-crashing assertions.  Never expose the rejected content
             # or exception text through diagnostics.
             return skipped("targeted_invalid_targets")
-        return self._extract_with_prompt(
+        # The extraction prompt and the server-generated binding proposals
+        # can cover different lines. Record the latter only at dispatch.
+        dispatch = (
+            _VerificationDispatch() if target_bound_review_v3 and candidate_evidence_ranges else None
+        )
+        result = self._extract_with_prompt(
             chunk,
             system_prompt=(
                 TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
@@ -2370,6 +2388,7 @@ class CharacterSignalExtractor:
             user_prompt=targeted_prompt,
             targets=targets,
             allowed_targeted_evidence_ranges=candidate_evidence_ranges,
+            verification_dispatch=dispatch,
             full_line_prompt_v2=self.settings.character_signal_full_line_prompt_v2,
             draft_actor_review_v1=draft_actor_review_v1,
             target_bound_review_v2=target_bound_review_v2,
@@ -2378,6 +2397,12 @@ class CharacterSignalExtractor:
             source_identity=source_identity,
             frozen_content=frozen_content,
         )
+        if dispatch is None:
+            return result
+        return result.model_copy(update={
+            "verification_primary_attempts": tuple(dispatch.primary_attempts),
+            "bound_review_submitted_ranges": tuple(sorted(dispatch.bound_ranges)),
+        })
 
     def _extract_with_prompt(
         self,
@@ -2387,6 +2412,7 @@ class CharacterSignalExtractor:
         user_prompt: str,
         targets: tuple[CharacterSignalTarget, ...] = (),
         allowed_targeted_evidence_ranges: tuple[tuple[int, int], ...] = (),
+        verification_dispatch: _VerificationDispatch | None = None,
         full_line_prompt_v2: bool = False,
         support_index: AssertionIndexV1 | None = None,
         scope_review_v1: bool = False,
@@ -2562,7 +2588,7 @@ class CharacterSignalExtractor:
                 ),
                 scope_review_v1=scope_review_v1,
                 support_trace_enabled=trace_index is not None,
-                draft_trace_enabled=draft_trace_enabled,
+                draft_trace_enabled=draft_trace_enabled or verification_dispatch is not None,
                 history_review_v1=history_review_v1,
                 history_supported_record_indices=history_supported,
                 draft_actor_review_v1=draft_actor_review_v1,
@@ -2695,6 +2721,10 @@ class CharacterSignalExtractor:
                 )
                 self.provider = call_provider
             attempted_calls += 1
+            if verification_dispatch is not None:
+                verification_dispatch.primary_attempts.append(DraftSignalTraceAttemptV1(
+                    attempt=attempted_calls, observability="no_response",
+                ))
             try:
                 response = call_provider.complete(system_prompt, current_user_prompt)
             except ProviderError as exc:
@@ -2760,6 +2790,14 @@ class CharacterSignalExtractor:
                 response_text,
                 actor_supported=frozenset(draft_actor_supported),
             )
+            if verification_dispatch is not None:
+                # Preserve the original package disposition before auxiliary
+                # evidence review can supersede a local rejection.
+                parsed = validation.draft_trace_attempt
+                verification_dispatch.primary_attempts[-1] = (
+                    parsed.model_copy(update={"attempt": attempted_calls}) if parsed is not None
+                    else DraftSignalTraceAttemptV1(attempt=attempted_calls, observability="unavailable")
+                )
             if (
                 target_bound_review_v3
                 and not target_bound_review_performed
@@ -2798,6 +2836,7 @@ class CharacterSignalExtractor:
                         target=targets[0],
                         target_ordinal=target_ordinal,
                         discoveries=discoveries,
+                        dispatch_ranges=verification_dispatch.bound_ranges if verification_dispatch is not None else None,
                         source_identity=source_identity,
                         frozen_content=frozen_content,
                         provider=self._base_provider,
@@ -5767,6 +5806,7 @@ def _review_target_bound_discoveries_v3(
     token_budget: int,
     remaining_deadline_seconds: float,
     monotonic: Any,
+    dispatch_ranges: set[tuple[int, int]] | None = None,
 ) -> _TargetBoundDraftOutcome:
     """Review one bounded V3 whitelist, including a clean-empty recovery."""
 
@@ -5832,6 +5872,11 @@ def _review_target_bound_discoveries_v3(
             reason_counts=(("target_bound_request_invalid", len(discoveries)),),
         )
 
+    if dispatch_ranges is not None and run.attempted_calls:
+        dispatch_ranges.update(
+            (proposal.line_start, proposal.line_end)
+            for _, proposal in candidate_by_key.values()
+        )
     signals: dict[str, CharacterSignal] = {}
     unresolved = 0
     rejected = 0

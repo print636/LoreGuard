@@ -3490,6 +3490,31 @@ def test_zero_primary_observations_trigger_one_targeted_batch_and_recover_signal
         assert "说话直来直往，这是他的核心性格" not in targeted_prompt
 
 
+def test_second_pass_publishes_only_selected_frozen_ranges_with_v3_enabled():
+    from tests.test_character_target_bound_draft_review_v3 import _V3Provider
+
+    content = "无人说话。\n祁雾直接说明了计划。"
+    with TestClient(app) as client:
+        project = _confirmed_directness_project(client)
+        _create_document(
+            client, project["id"], name="private.md", role="chapter",
+            content=content, narrative_context=_context(publication="draft"),
+        )
+        result = _run_stage(
+            _new_run(client, project["id"]), _V3Provider(object_text="无关对象"),
+            character_signal_full_line_prompt_v2=True, character_draft_actor_review_v1=True,
+            character_target_bound_draft_review_v3=True,
+        )
+    trace = result.diagnostics["targeted_verification_trace_v1"]
+    assert trace["omitted_count"] == 0
+    row, = trace["chunks"]
+    assert row["selected_ranges"] == [(2, 2)]
+    assert row["selection_status"] == "extractor" and row["selection_omitted_line_count"] == 0
+    assert row["primary_attempts"][0]["submitted_record_count"] == 0
+    assert row["accepted_observation_ranges"] == []
+    assert "private.md" not in json.dumps(trace)
+
+
 def test_completed_empty_targeted_pass_does_not_manufacture_observation():
     with TestClient(app) as client:
         project = _confirmed_directness_project(client)
