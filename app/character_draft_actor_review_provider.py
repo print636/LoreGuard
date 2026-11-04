@@ -41,6 +41,7 @@ from .character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11,
 )
 from .character_scope_review import ScopeReviewSourceIdentity
 from .provider import OpenAICompatibleProvider, ProviderError
@@ -204,6 +205,26 @@ TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_P
     '      "proposal_id": "<逐字回显对应 proposal>",\n'
     '      "claim_digest": "<逐字回显对应 primary_claim.claim_digest>",\n'
     '      "claim_relation": "<equivalent|different|uncertain>",',
+)
+
+TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10.replace(
+    "唯一合法枚举：",
+    "另核对 primary_claim.key_object，各 item 必须提供 claim_object。设定轴的 object_relation 仍按原合同。"
+    "claim_object 独立检查本动作实际涉及的物品、信息或人物。若候选 key_object 只是与 target.key_object 完全一致的"
+    "作者准则标签，role=axis_label，不能拿这个标签冒充原文的事物。若提名具体事物，role=event_object。"
+    "在 fact_clause_text 中逐字选取指向这个动作客体的最短完整词组 fact_quote。明写物件 grounding=explicit，"
+    "antecedent_clause_id 与 antecedent_quote 为 null。动作分句使用‘它’等指代时 grounding=unique_reference，"
+    "fact_quote 逐字引用代词，还须返回紧邻前一分句的 support_id 与其中唯一明确的先行名词原文。"
+    "同时有两件可能的物品、背景不清选 uncertain；擅自换物选 different。不能用相邻分句中的另一事件补证。"
+    "event_object 另独立判断 referent_relation，原 key_object 与该行为的实际客体确指同一个事物才是 same。"
+    "允许忠实同义改述。不能把接收人、角色、地点、旁边另一件事物或缺少证据的具体修饰当成同一受事。"
+    "只有所有槽都支持才给 supported。rejected 或 uncertain 可返回 claim_object:null。\n\n唯一合法枚举：",
+).replace(
+    '      "claim_relation": "<equivalent|different|uncertain>",',
+    '      "claim_relation": "<equivalent|different|uncertain>",\n'
+    '      "claim_object": {"role":"<axis_label|event_object>", "grounding":"<explicit|unique_reference|different|uncertain>",'
+    ' "fact_quote":"<仅本分句实际客体或代词>", "antecedent_clause_id":null, "antecedent_quote":null,'
+    ' "referent_relation":"<same|different|uncertain，仅 event_object 填写，axis_label 填 null>"},',
 )
 
 MAX_DRAFT_ACTOR_REVIEW_REPORTED_TOKENS = 1_000_000
@@ -373,6 +394,7 @@ def build_target_bound_draft_review_prompts(
     if requests[0].schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4:
         system = {
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10,
+            TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
         }.get(requests[0].prompt_version, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8)
     elif requests[0].schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3:

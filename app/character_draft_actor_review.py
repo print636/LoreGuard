@@ -209,6 +209,7 @@ TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8 = (
 )
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 = "character-target-bound-draft-review-prompt-v9"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10 = "character-target-bound-draft-review-prompt-v10"
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 = "character-target-bound-draft-review-prompt-v11"
 
 _PROPOSAL_ID = r"^dap_[a-f0-9]{32}$"
 
@@ -1654,6 +1655,16 @@ class PrimaryDraftClaim(BaseModel):
     statement: str = Field(min_length=2, max_length=300)
     context: str = Field(default="", max_length=160)
     claim_digest: str = Field(pattern=_SHA256)
+    key_object: str | None = Field(default=None, min_length=1, max_length=80)
+    include_previous_line: bool = False
+
+    @model_serializer(mode="wrap")
+    def serialize_claim(self, handler):
+        data = handler(self)
+        if self.key_object is None:
+            data.pop("key_object", None)
+            data.pop("include_previous_line", None)
+        return data
 
 
 class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
@@ -1676,6 +1687,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
         "character-target-bound-draft-review-prompt-v8",
         "character-target-bound-draft-review-prompt-v9",
         "character-target-bound-draft-review-prompt-v10",
+        "character-target-bound-draft-review-prompt-v11",
     ] = (
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
     )
@@ -1702,9 +1714,12 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
 
     @model_validator(mode="after")
     def validate_target_bound_request(self) -> "TargetBoundDraftReviewRequest":
-        if self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10:
+        if self.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11}:
             if (
                 self.primary_claim is None
+                or (self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11) != ("key_object" in self.primary_claim.model_fields_set)
+                or (self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 and not self.primary_claim.key_object)
+                or (self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10 and "include_previous_line" in self.primary_claim.model_fields_set)
                 or self.target.dimension not in {"value", "behavior_boundary"}
                 or not self.target.approved_axis_comparison_key
             ):
@@ -1719,7 +1734,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
             or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
             and self.prompt_version not in {
                 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
-                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10,
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11,
             }
         ):
             raise ValueError("target_bound_protocol_identity_invalid")
@@ -1821,6 +1836,17 @@ TargetBoundSlotConflict = Literal[
 ]
 
 
+class ClaimObjectGrounding(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    role: Literal["axis_label", "event_object"]
+    grounding: Literal["explicit", "unique_reference", "different", "uncertain"]
+    referent_relation: Literal["same", "different", "uncertain"] | None = None
+    fact_quote: str | None = Field(max_length=80)
+    antecedent_clause_id: str | None = Field(pattern=_SUPPORT_ID)
+    antecedent_quote: str | None = Field(max_length=80)
+
+
 class TargetBoundDraftReviewItem(BaseModel):
     """Only enums and frozen IDs may cross back from the model."""
 
@@ -1829,6 +1855,7 @@ class TargetBoundDraftReviewItem(BaseModel):
     proposal_id: str = Field(pattern=_TARGET_PROPOSAL_ID)
     claim_digest: str | None = Field(default=None, pattern=_SHA256)
     claim_relation: Literal["equivalent", "different", "uncertain"] | None = None
+    claim_object: ClaimObjectGrounding | None = None
     verdict: TargetBoundReviewVerdict
     actor: Literal["proposed", "other", "ambiguous"]
     actuality: Literal[
@@ -1863,7 +1890,7 @@ class TargetBoundDraftReviewItem(BaseModel):
     @model_serializer(mode="wrap")
     def serialize_item(self, handler):
         data = handler(self)
-        for name in ("claim_digest", "claim_relation"):
+        for name in ("claim_digest", "claim_relation", "claim_object"):
             if name not in self.model_fields_set:
                 data.pop(name, None)
         return data
@@ -1892,6 +1919,7 @@ class TargetBoundDraftReviewDecision(BaseModel):
     # Only validated verdicts can attest equivalence or an explicit non-match.
     different_claim_digest: str | None = Field(default=None, pattern=_SHA256, exclude=True)
     verified_claim_digest: str | None = Field(default=None, pattern=_SHA256, exclude=True)
+    verified_object: ClaimObjectGrounding | None = Field(default=None, exclude=True)
     # Internal diagnostic metadata comes only from a validated semantic item.
     # Absent on synthetic protocol/provider failures; legacy JSON is unchanged.
     raw_verdict: TargetBoundReviewVerdict | None = Field(default=None, exclude=True)
@@ -2372,6 +2400,9 @@ def build_target_bound_draft_review_request(
         proposal_line_end=index.line_end,
     )
     review_start = index.line_start
+    if primary_claim and primary_claim.include_previous_line and index.line_start == index.line_end:
+        if review_start > 1 and _segments(frozen_content)[review_start - 2][1].strip():
+            review_start -= 1
     if any(p.binding_kind == "named_direct_speech" for p in review_proposals):
         review_start, review_end = _speech_context_bounds(frozen_content, index.line_start)
     lines = _build_draft_actor_review_lines(
@@ -2381,7 +2412,7 @@ def build_target_bound_draft_review_request(
         review_line_end=review_end,
     )
     if primary_claim is not None:
-        prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10
+        prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 if primary_claim.key_object else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10
     elif protocol_version == "v4":
         prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 if allow_named_speech else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8
     else:
@@ -2494,6 +2525,61 @@ def _uncertain_target_bound_review(
             )
             for proposal in request.proposals
         ),
+    )
+
+
+_OBJECT_REFERENCE = re.compile(r"它们?|该物(?:品)?|那件东西|这件东西|那样东西|这样东西")
+
+
+def has_object_reference(text: str) -> bool:
+    return bool(_OBJECT_REFERENCE.search(text))
+
+
+def _competing_antecedent(text: str, quote: str) -> bool:
+    # A coordination next to the offered noun phrase ("胶卷和另一张样片")
+    # leaves multiple possible objects. An unrelated 和 elsewhere does not.
+    before, _, after = text.partition(quote)
+    conjunction = r"(?:和|与|、|或者|或|以及|还有)"
+    return bool(re.match(conjunction, after) or re.search(conjunction + r"[^，。]{0,5}$", before))
+
+
+def valid_primary_object_grounding(
+    request: TargetBoundDraftReviewRequest,
+    proposal: TargetBoundDraftReviewProposal,
+    obj: ClaimObjectGrounding | None,
+) -> bool:
+    if (obj is None or obj.grounding not in {"explicit", "unique_reference"} or not obj.fact_quote
+            or obj.referent_relation in {"different", "uncertain"}):
+        return False
+    clauses = [c for line in request.lines for c in line.clauses]
+    index = next(i for i, clause in enumerate(clauses) if clause.support_id == proposal.fact_clause_id)
+    fact = clauses[index]
+    if fact.text.count(obj.fact_quote) != 1:
+        return False
+    raw = request.primary_claim.key_object
+    if obj.role == "axis_label" and raw != request.target.key_object:
+        return False
+    if obj.grounding == "explicit":
+        if obj.antecedent_quote is not None or obj.antecedent_clause_id is not None or has_object_reference(fact.text):
+            return False
+        grounded = obj.fact_quote
+    else:
+        if not _OBJECT_REFERENCE.fullmatch(obj.fact_quote) or not obj.antecedent_quote or not index:
+            return False
+        previous = clauses[index - 1]
+        if (
+            obj.antecedent_clause_id != previous.support_id or previous.text.count(obj.antecedent_quote) != 1
+            or previous.line_number < fact.line_number - 1 or has_object_reference(obj.antecedent_quote)
+            or _competing_antecedent(previous.text, obj.antecedent_quote)
+            or re.search(r"、|以及|或者|[和与]", obj.antecedent_quote)
+        ):
+            return False
+        grounded = obj.antecedent_quote
+    # Semantic aliases need a second independent judgment and a unique mention
+    # in the very claim already found equivalent. Only the source words survive.
+    equivalent_object = obj.referent_relation == "same" and request.primary_claim.statement.count(raw) == 1
+    return obj.role == "axis_label" or raw == grounded or equivalent_object or (
+        obj.grounding == "unique_reference" and raw == obj.fact_quote
     )
 
 
@@ -2834,8 +2920,10 @@ def evaluate_target_bound_draft_review(
     for proposal in request.proposals:
         item = returned[proposal.proposal_id]
         claim_fields = {"claim_digest", "claim_relation"} & item.model_fields_set
+        object_review = request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11
         if (
-            request.primary_claim is None and claim_fields
+            ("claim_object" in item.model_fields_set) != object_review
+            or request.primary_claim is None and claim_fields
             or request.primary_claim is not None and (
                 item.claim_digest != request.primary_claim.claim_digest or item.claim_relation is None
             )
@@ -2855,6 +2943,8 @@ def evaluate_target_bound_draft_review(
             continue
         if item.verdict == "supported":
             conflicts = _target_bound_supported_conflicts(request, proposal, item)
+            if object_review and not valid_primary_object_grounding(request, proposal, item.claim_object):
+                conflicts = tuple(dict.fromkeys((*conflicts, "object_span")))
             if request.primary_claim is not None and item.claim_relation != "equivalent":
                 conflicts = tuple(dict.fromkeys((*conflicts, "statement_relation")))
             observed_object: str | None = None
@@ -2893,6 +2983,7 @@ def evaluate_target_bound_draft_review(
                     basis_ids=basis,
                     target_digest=request.target_digest,
                     verified_claim_digest=item.claim_digest,
+                    verified_object=item.claim_object,
                     target_ordinal=request.target.target_ordinal,
                     observation_kind=item.observation_kind,
                     object_relation=(
@@ -2906,7 +2997,8 @@ def evaluate_target_bound_draft_review(
                     object_basis_id=object_basis_id,
                 ))
         elif item.verdict == "rejected":
-            negative = _target_bound_negative_slot(item) or item.claim_relation == "different"
+            negative = (_target_bound_negative_slot(item) or item.claim_relation == "different"
+                        or (object_review and item.claim_object is not None and item.claim_object.grounding == "different"))
             decisions.append(TargetBoundDraftReviewDecision(
                 proposal_id=proposal.proposal_id,
                 verdict="rejected" if negative else "uncertain",

@@ -2000,6 +2000,77 @@ def test_primary_scoped_claim_wire_requires_exact_request_claim_and_frozen_sourc
     assert provider.review_calls == 0 and run.charged_tokens == 0
 
 
+@pytest.mark.parametrize(("raw_object", "relation", "role", "expected"), [
+    ("书单", "same", "event_object", "supported"),
+    ("书单", None, "event_object", "uncertain"),
+    ("书单", "uncertain", "event_object", "uncertain"),
+    ("书单", "different", "event_object", "uncertain"),
+    ("住址", "same", "event_object", "uncertain"),  # Unmentioned in the claim.
+    ("会员地址", None, "axis_label", "uncertain"),
+    ("救援优先", None, "axis_label", "supported"),
+])
+def test_scoped_object_wire_checks_object_independently_of_statement(raw_object, relation, role, expected):
+    content = "唐岫将书目转交给来访者。"
+    source = _source(content)
+    target = _target_bound_review_target(_scoped_rescue_target(), target_ordinal=1)
+    index, proposals = build_target_bound_draft_proposals(
+        content, source, target, line_start=1, line_end=1, protocol_version="v4",
+    )
+    claim = PrimaryDraftClaim(package_attempt=1, record_ordinal=1, statement="唐岫转交了书单",
+                              key_object=raw_object, claim_digest="b" * 64)
+    request = build_target_bound_draft_review_request(
+        index, target, proposals, expected_source=source, frozen_content=content,
+        protocol_version="v4", primary_claim=claim,
+    )
+    grounding = dict(role=role, grounding="explicit", fact_quote="书目", antecedent_clause_id=None,
+                     antecedent_quote=None, referent_relation=relation)
+    raw = json.loads(_response(request, object_text="", observation_kind="action", claim_digest=claim.claim_digest,
+                               claim_relation="equivalent", claim_object=grounding))
+    raw["schema_version"] = TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
+    def check(body, expected_claim):
+        return evaluate_target_bound_draft_review(
+            request, json.dumps(body), frozen_content=content, expected_source=source,
+            expected_primary_claim=expected_claim,
+        ).decisions[0]
+    assert check(raw, claim).verdict == expected
+    stale = claim.model_copy(update={"key_object": "另一物件"})
+    assert check(raw, stale).reason == "source_mismatch"
+    del raw["items"][0]["claim_object"]
+    assert check(raw, claim).reason == "response_mismatch"
+
+
+@pytest.mark.parametrize(("lead", "id", "span", "supported"), [
+    ("桌上放着封存的清册。", "L1:A1", "清册", True),
+    ("桌上放着封存的清册。", "L2:A1", "清册", False),
+    ("桌上放着封存的清册。", "L1:A1", "地址", False),
+    ("桌上放着封存的清册与废弃的草图。", "L1:A1", "清册", False),
+    ("桌上放着封存的清册与废弃的草图。", "L1:A1", "清册与废弃的草图", False),
+])
+def test_scoped_object_reference_binds_previous_clause_and_action(lead, id, span, supported):
+    content = lead + "\n唐岫亲自将它销毁。"
+    source = _source(content)
+    target = _target_bound_review_target(_scoped_rescue_target(), target_ordinal=1)
+    index, proposals = build_target_bound_draft_proposals(
+        content, source, target, line_start=2, line_end=2, protocol_version="v4",
+    )
+    claim = PrimaryDraftClaim(package_attempt=1, record_ordinal=1, statement="唐岫销毁了清册",
+                              key_object="清册", include_previous_line=True, claim_digest="f" * 64)
+    request = build_target_bound_draft_review_request(
+        index, target, proposals, expected_source=source, frozen_content=content,
+        protocol_version="v4", primary_claim=claim,
+    )
+    grounding = dict(role="event_object", grounding="unique_reference", fact_quote="它",
+                     antecedent_clause_id=id, antecedent_quote=span, referent_relation="same")
+    raw = json.loads(_response(request, object_text="", observation_kind="action", claim_digest=claim.claim_digest,
+                               claim_relation="equivalent", claim_object=grounding))
+    raw["schema_version"] = TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4
+    out, = evaluate_target_bound_draft_review(
+        request, json.dumps(raw), frozen_content=content, expected_source=source, expected_primary_claim=claim,
+    ).decisions
+    assert (out.verdict == "supported") == supported
+    assert bool(out.verified_object) == supported
+
+
 def test_primary_value_other_gate_diagnostics_never_echo_unknown_exception_text():
     assert _primary_value_other_gate_code(ValueError("private text")) == "unknown"
     assert _primary_value_other_gate_code(_StatementSupportFailure("unregistered")) == "unknown"

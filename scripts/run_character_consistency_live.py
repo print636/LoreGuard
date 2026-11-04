@@ -149,6 +149,7 @@ _TARGET_BOUND_DRAFT_REVIEW_V3 = {
         "character-target-bound-draft-review-prompt-v9"
     ),
     "primary_scoped_claim_review_prompt_version": "character-target-bound-draft-review-prompt-v10",
+    "primary_scoped_object_review_prompt_version": "character-target-bound-draft-review-prompt-v11",
     "target_bound_draft_review_signal_prompt_version": (
         "character-target-bound-draft-signal-prompt-v3"
     ),

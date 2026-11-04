@@ -42,6 +42,8 @@ from .character_history_semantic_review import (
     segment_history_line,
 )
 from .character_draft_actor_review import (
+    has_object_reference,
+    valid_primary_object_grounding,
     DraftActorClauseIndex,
     PrimaryDraftClaim,
     DraftActorProposal,
@@ -1618,6 +1620,7 @@ class _TargetBoundDraftDeferred:
         "character_support", "statement_support", "key_object_support"
     ]
     claim_review: bool = False
+    object_review: bool = False
     alternatives: tuple[TargetBoundDraftProposal, ...] = ()
 
 
@@ -2592,6 +2595,7 @@ class CharacterSignalExtractor:
                 response_text,
                 chunk=chunk,
                 targets=targets,
+                primary_value_targets=primary_value_targets,
                 allowed_targeted_evidence_ranges=allowed_targeted_evidence_ranges,
                 settings=settings,
                 support_index=support_index,
@@ -3357,6 +3361,7 @@ def _validate_signal_package(
     *,
     chunk: CharacterSignalChunk,
     targets: tuple[CharacterSignalTarget, ...],
+    primary_value_targets: tuple[CharacterSignalTarget, ...] = (),
     allowed_targeted_evidence_ranges: tuple[tuple[int, int], ...],
     settings: Settings,
     support_index: AssertionIndexV1 | None = None,
@@ -3513,6 +3518,11 @@ def _validate_signal_package(
                 frozen_content=frozen_content,
             )
             assert signal is not None
+            if any(_needs_primary_object_review(record, target) for target in primary_value_targets
+                   if _primary_scoped_axis_matches(record, target)):
+                # Literal overlap can still assign "it" to the wrong member of a pair.
+                # Do not expose the ordinary record until that object is certified.
+                raise ValueError("key_object_support")
             if repair_probe is not None and (
                 signal.dimension != repair_probe.dimension
                 or signal.polarity != repair_probe.polarity
@@ -5084,6 +5094,22 @@ def _primary_value_other_gate_code(error: TypeError | ValueError) -> str:
     return "unknown"
 
 
+def _primary_scoped_axis_matches(record: _RawCharacterSignal, target: CharacterSignalTarget) -> bool:
+    return (
+        record.dimension in _SCOPED_APPROVED_AXIS_DIMENSIONS and target.dimension == record.dimension
+        and target.approved_axis_identity is not None and bool(target.approved_axis_comparison_key)
+        and record.character in _target_actor_literals(target) and record.polarity == target.requested_polarity
+        and stable_trait_identity(record.dimension, record.trait_key) == stable_trait_identity(target.dimension, target.trait_key)
+    )
+
+
+def _needs_primary_object_review(record: _RawCharacterSignal, target: CharacterSignalTarget) -> bool:
+    return bool(record.key_object) and (
+        has_object_reference(record.evidence)
+        or scoped_axis_object_identity(record.dimension, record.key_object) != target.approved_axis_comparison_key
+    )
+
+
 def _primary_value_debts(
     validation: _ValidatedSignalPackage, response_text: str, chunk: CharacterSignalChunk,
     targets: tuple[CharacterSignalTarget, ...],
@@ -5096,7 +5122,7 @@ def _primary_value_debts(
         failure.record_index: failure.reason for failure in validation.failures
         if failure.record_index is not None and (
             failure.statement_support_kind in {"lexical_polarity", "anchor_overlap"}
-            or failure.reason == "character_support"
+            or failure.reason in {"character_support", "key_object_support"}
         )
     }
     if not rejected or not _draft_actor_source_matches_chunk(source_identity, frozen_content, chunk):
@@ -5114,27 +5140,33 @@ def _primary_value_debts(
         # Re-run all hard gates. Only an attribution explicitly marked for
         # independent review may be deferred together with lexical checks.
         actor_deferred = False
+        matching_axes = [(ordinal, target) for ordinal, target in enumerate(targets, 1)
+                         if _primary_scoped_axis_matches(record, target)]
+        object_deferred = failure_reason == "key_object_support" or any(
+            _needs_primary_object_review(record, target) for _, target in matching_axes
+        )
         try:
-            try:
-                preflight = _bind_record(
-                    record, chunk, skip_lexical_polarity=True, defer_primary_anchor_overlap=True
-                )
-            except _DraftActorAttributionRequired:
-                actor_deferred = True
-                preflight = _bind_record(
-                    record, chunk, skip_lexical_polarity=True,
-                    defer_primary_anchor_overlap=True, skip_draft_actor_attribution=True,
-                )
+            while True:
+                try:
+                    preflight = _bind_record(
+                        record, chunk, skip_lexical_polarity=True, defer_primary_anchor_overlap=True,
+                        skip_draft_actor_attribution=actor_deferred, defer_primary_object=object_deferred,
+                    )
+                    break
+                except _DraftActorAttributionRequired:
+                    if actor_deferred:
+                        raise
+                    actor_deferred = True
+                except ValueError as exc:
+                    if object_deferred or exc.args != ("key_object_support",):
+                        raise
+                    object_deferred = True
         except (TypeError, ValueError) as exc:
             counts["primary_value_recovery_other_gate"] += 1
             counts[f"primary_value_recovery_other_gate_{_primary_value_other_gate_code(exc)}"] += 1
             continue
-        matched = [
-            (ordinal, target) for ordinal, target in enumerate(targets, 1)
-            if target.approved_axis_identity is not None and target.approved_axis_comparison_key
-            and _matching_target(preflight, (target,)) is target
-            and record.polarity == target.requested_polarity
-        ]
+        matched = [(ordinal, target) for ordinal, target in matching_axes
+                   if object_deferred or _matching_target(preflight, (target,)) is target]
         if len(matched) != 1:
             counts["primary_value_recovery_target_mismatch"] += 1
             continue
@@ -5156,7 +5188,7 @@ def _primary_value_debts(
             if proposal.evidence == record.evidence
             and _same_primary_statement(record.statement, proposal.canonical_statement)
         ]
-        claim_review = actor_deferred or len(exact) != 1
+        claim_review = object_deferred or actor_deferred or len(exact) != 1
         choices = tuple(exact)
         if not exact:
             index, rebuilt = build_target_bound_draft_proposals(
@@ -5175,9 +5207,11 @@ def _primary_value_debts(
             counts["primary_value_paraphrase_selected"] += 1
         if actor_deferred:
             counts["primary_value_actor_attribution_deferred"] += 1
+        if object_deferred:
+            counts["primary_value_object_review_selected"] += 1
         debts.append(_TargetBoundDraftDeferred(
             record_index=record_index, record=record, preflight_signal=preflight, index=index,
-            proposal=choices[0], alternatives=choices[1:], claim_review=claim_review,
+            proposal=choices[0], alternatives=choices[1:], claim_review=claim_review, object_review=object_deferred,
             target=target, target_ordinal=ordinal, failure_reason=failure_reason,
         ))
     return tuple(debts), counts
@@ -5651,6 +5685,7 @@ def _target_bound_signal_id(
 def _primary_claim_identity(
     row: _TargetBoundDraftDeferred, package_attempt: int,
     source: ScopeReviewSourceIdentity, target: TargetBoundDraftReviewTarget,
+    *, object_review: bool = False, chunk_start: int = 1,
 ) -> PrimaryDraftClaim:
     ordinal = row.record_index + 1
     identity = {
@@ -5664,6 +5699,10 @@ def _primary_claim_identity(
     return PrimaryDraftClaim(
         package_attempt=package_attempt, record_ordinal=ordinal,
         statement=row.record.statement, context=row.record.context, claim_digest=digest,
+        **({
+            "key_object": row.record.key_object,
+            "include_previous_line": row.index.line_start > chunk_start and has_object_reference(row.proposal.evidence),
+        } if object_review else {}),
     )
 
 
@@ -5732,6 +5771,18 @@ def _bind_target_bound_draft_certificate(
         observed_object = decision.observed_object or ""
     else:
         observed_object = target.key_object
+    evidence_start = proposal.line_start
+    if expected_primary_claim is not None and expected_primary_claim.key_object:
+        grounded = decision.verified_object
+        if not valid_primary_object_grounding(request, proposal, grounded):
+            raise ValueError("semantic_binding_unresolved")
+        observed_object = grounded.antecedent_quote or grounded.fact_quote
+        if grounded.antecedent_clause_id:
+            basis = next(c for line in request.lines for c in line.clauses if c.support_id == grounded.antecedent_clause_id)
+            evidence_start = min(evidence_start, basis.line_number)
+            if evidence_start < chunk.global_line_start:
+                raise ValueError("semantic_binding_unresolved")
+            expected_evidence = _frozen_line_evidence(frozen_content, evidence_start, proposal.line_end)
     signal = CharacterSignal(
         id=_target_bound_signal_id(
             chunk=chunk, target=target, proposal=proposal
@@ -5751,7 +5802,7 @@ def _bind_target_bound_draft_certificate(
         evidence=EvidenceSpan(
             document_id=chunk.document_id,
             document_name=chunk.document_name,
-            line_start=proposal.line_start,
+            line_start=evidence_start,
             line_end=proposal.line_end,
             text=expected_evidence,
         ),
@@ -5808,6 +5859,7 @@ def _review_target_bound_draft_candidates(
         ]
     ] = {}
     claim_review = primary_value_recovery and any(item.claim_review for item in deferred)
+    object_review = primary_value_recovery and any(item.object_review for item in deferred)
     try:
         grouped: dict[tuple[int, int, int, int], list[_TargetBoundDraftDeferred]] = defaultdict(list)
         for item in deferred:
@@ -5826,7 +5878,8 @@ def _review_target_bound_draft_candidates(
                 proposal.model_dump_json(): proposal
                 for row in rows for proposal in (row.proposal, *row.alternatives)
             }.values())
-            claim = _primary_claim_identity(rows[0], package_attempt, source_identity, review_target) if claim_review else None
+            claim = _primary_claim_identity(rows[0], package_attempt, source_identity, review_target,
+                                            object_review=object_review, chunk_start=chunk.global_line_start) if claim_review else None
             request = build_target_bound_draft_review_request(
                 index,
                 review_target,
@@ -5881,6 +5934,8 @@ def _review_target_bound_draft_candidates(
     failure_events: list[TargetBoundFailureEventV1] = []
     if claim_review and run.attempted_calls:
         review_reasons["primary_value_claim_review_calls"] += run.attempted_calls
+    if object_review and run.attempted_calls:
+        review_reasons["primary_value_object_review_calls"] += run.attempted_calls
     if run.failure_reason is not None:
         review_reasons[f"target_bound_{run.failure_reason}"] += len(deferred)
     if len(run.evaluation.evaluations) != len(entries):
@@ -5958,7 +6013,8 @@ def _review_target_bound_draft_candidates(
                         source_identity=source_identity,
                         frozen_content=frozen_content,
                         expected_primary_claim=(_primary_claim_identity(
-                            item, package_attempt, source_identity, request.target
+                            item, package_attempt, source_identity, request.target,
+                            object_review=object_review, chunk_start=chunk.global_line_start
                         ) if claim_review else None),
                     )
                 except (TypeError, ValueError, ValidationError, UnicodeError):
@@ -5969,6 +6025,8 @@ def _review_target_bound_draft_candidates(
                 signals.setdefault(signal.id, signal)
     if claim_review and resolved:
         review_reasons["primary_value_claim_review_supported"] += len(resolved)
+    if object_review and resolved:
+        review_reasons["primary_value_object_review_supported"] += len(resolved)
     unresolved.update(deferred_indices - resolved - unresolved)
     if unresolved and not review_reasons:
         review_reasons["target_bound_response_mismatch"] += len(unresolved)
@@ -7712,10 +7770,13 @@ def _bind_record(
     skip_lexical_polarity: bool = False,
     defer_primary_anchor_overlap: bool = False,
     skip_draft_actor_attribution: bool = False,
+    defer_primary_object: bool = False,
     skip_target_bound_semantic_binding: bool = False,
 ) -> CharacterSignal:
     if defer_primary_anchor_overlap and (not skip_lexical_polarity or chunk.source_kind != "draft"):
         raise ValueError("statement_support")
+    if defer_primary_object and not defer_primary_anchor_overlap:
+        raise ValueError("key_object_support")
     if skip_lexical_polarity and (
         chunk.source_kind not in {"published_history", "draft"}
         or record.dimension not in {"value", "behavior_boundary"}
@@ -7868,6 +7929,7 @@ def _bind_record(
     if (
         record.key_object
         and not skip_target_bound_semantic_binding
+        and not defer_primary_object
         and _compact(record.key_object) not in _compact(
             v4_clause.text if v4_clause is not None else evidence_text
         )
@@ -7921,6 +7983,7 @@ def _bind_record(
     if (
         dimension in _OBJECT_REQUIRED_DIMENSIONS
         and not skip_target_bound_semantic_binding
+        and not defer_primary_object
         and not _object_bound_to_minimal_statement(
             record,
             v4_clause.text if v4_clause is not None else evidence_text,

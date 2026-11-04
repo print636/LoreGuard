@@ -525,9 +525,12 @@ _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEYS = frozenset({
 })
 _PRIMARY_SCOPED_CLAIM_VERSION_KEY = "primary_scoped_claim_review_prompt_version"
 _PRIMARY_SCOPED_CLAIM_VERSION = "character-target-bound-draft-review-prompt-v10"
-_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS = (
+_PRIMARY_SCOPED_OBJECT_VERSION_KEY = "primary_scoped_object_review_prompt_version"
+_PRIMARY_SCOPED_OBJECT_VERSION = "character-target-bound-draft-review-prompt-v11"
+_CHARACTER_SCOPED_CLAIM_KEYS = (
     _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEYS | {_PRIMARY_SCOPED_CLAIM_VERSION_KEY}
 )
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS = _CHARACTER_SCOPED_CLAIM_KEYS | {_PRIMARY_SCOPED_OBJECT_VERSION_KEY}
 _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_SCHEMA_VERSION = (
     "character-target-bound-draft-review-v2"
 )
@@ -3318,6 +3321,7 @@ def _valid_character_target_bound_draft_review_limits(
     if present not in (
         _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V2_KEYS,
         _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEYS,
+        _CHARACTER_SCOPED_CLAIM_KEYS,
         _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS,
     ):
         return False
@@ -3332,10 +3336,12 @@ def _valid_character_target_bound_draft_review_limits(
     enabled = enabled_v2 or enabled_v3
     if enabled and limits.get(_CHARACTER_DRAFT_ACTOR_REVIEW_KEY) is not True:
         return False
-    if _PRIMARY_SCOPED_CLAIM_VERSION_KEY in present and (
-        limits[_PRIMARY_SCOPED_CLAIM_VERSION_KEY] != (_PRIMARY_SCOPED_CLAIM_VERSION if enabled_v3 else None)
+    for key, version in (
+        (_PRIMARY_SCOPED_CLAIM_VERSION_KEY, _PRIMARY_SCOPED_CLAIM_VERSION),
+        (_PRIMARY_SCOPED_OBJECT_VERSION_KEY, _PRIMARY_SCOPED_OBJECT_VERSION),
     ):
-        return False
+        if key in present and limits[key] != (version if enabled_v3 else None):
+            return False
     v2_expected = {
         "target_bound_draft_review_schema_version": (
             _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_SCHEMA_VERSION

@@ -6720,6 +6720,75 @@ def test_primary_value_paraphrase_verifies_each_original_claim(add_unsupported_m
     assert result.issues == ()
 
 
+@pytest.mark.parametrize("include_swapped_object", [False, True])
+def test_scoped_value_reviews_the_action_object_separately_from_the_author_axis(include_swapped_object):
+    from app.character_draft_actor_review_provider import (
+        TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
+        TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11,
+    )
+    from tests.test_character_target_bound_draft_review_v3 import _V3Provider
+
+    evidence = "林澈主动将家人的藏身地址交给追踪者。"
+    objects = ["藏身地址", "通讯密码"] if include_swapped_object else ["藏身地址"]
+    records = [{
+        **_record(evidence=evidence, statement=evidence.rstrip("。"), dimension="value",
+                  trait_key="保护家人", polarity="negative", kind="action"),
+        "key_object": event_object, "stability": "temporary",
+    } for event_object in objects]
+    reviewed_claims = {}
+    review = _V3Provider(object_text="藏身地址")
+    recall = _V3Provider(object_text="藏身地址")
+
+    class Provider:
+        def complete(self, system, user):
+            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11:
+                windows = json.loads(user.split("：\n", 1)[1])["windows"]
+                response = review.complete(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9, user)
+                body = json.loads(response.text)
+                for window, row in zip(windows, body["responses"], strict=True):
+                    request = window["request"]
+                    claim = request["primary_claim"]
+                    assert request["target"]["approved_axis_comparison_key"] == "value:家人"
+                    assert claim["statement"] == evidence.rstrip("。")
+                    reviewed_claims[claim["key_object"]] = claim["claim_digest"]
+                    supported = claim["key_object"] == "藏身地址"
+                    item, = row["items"]
+                    item.update(
+                        claim_digest=claim["claim_digest"], claim_relation="equivalent",
+                        verdict="supported" if supported else "rejected",
+                        claim_object={
+                            "role": "event_object", "grounding": "explicit" if supported else "different",
+                            "referent_relation": "same" if supported else "different",
+                            "fact_quote": "藏身地址" if supported else None,
+                            "antecedent_clause_id": None, "antecedent_quote": None,
+                        },
+                    )
+                response.text = json.dumps(body, ensure_ascii=False)
+                return response
+            if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9:
+                return recall.complete(system, user)
+            if system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT:
+                return QueueProvider(json.dumps({
+                    "verdict": "needs_confirmation", "explanation": "需核实当时家人是否遇险。",
+                    "citations": ["B01", "C01"],
+                }, ensure_ascii=False)).complete(system, user)
+            if user.startswith("服务端来源类型：draft\n") and "检索视图：" not in user:
+                return QueueProvider(_response(*records)).complete(system, user)
+            return QueueProvider(_response()).complete(system, user)
+
+    result, _ = _run_scoped_axis_stage(
+        (evidence,), situation_match="same", provider=Provider(), character_signal_package_max_attempts=1,
+        character_signal_full_line_prompt_v2=True, character_draft_actor_review_v1=True,
+        character_target_bound_draft_review_v3=True,
+    )
+    assert review.review_calls == 1
+    assert set(reviewed_claims) == set(objects)
+    assert len(set(reviewed_claims.values())) == len(objects)
+    assert result.diagnostics["case_trace"][0]["matched_observation_count"] == 1
+    assert result.diagnostics["material_coverage"] == ("partial" if include_swapped_object else "complete")
+    assert result.issues == ()
+
+
 def test_scoped_axis_different_situation_is_not_a_formal_issue():
     """A model-nominated same-object action is not enough to satisfy author scope."""
     result, _ = _run_scoped_axis_stage(
