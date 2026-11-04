@@ -29,6 +29,13 @@ _ROLE_NAMES = {
     "chapter": "故事正文",
 }
 _MARKDOWN_PUNCTUATION = re.compile(r"([\\`*_{}\[\]()#+\-.!|>])")
+_TARGET_RESULTS = {
+    "conflict": "发现冲突",
+    "no_issue": "未发现冲突",
+    "no_matching_observation": "未匹配到新稿表现（尚无法判断）",
+    "needs_review": "证据不足或待确认",
+    "unprocessed": "未处理",
+}
 
 
 def _clean(value: Any) -> str:
@@ -99,6 +106,70 @@ def _character_review_note(diagnostics: Mapping[str, Any] | None) -> str:
     return "角色一致性阶段状态无法核对；不能据此判断角色 OOC 是否存在。"
 
 
+def _valid_count(value: object) -> bool:
+    return type(value) is int and 0 <= value <= 2**53 - 1
+
+
+def _stage_supports_target_counts(stage: Mapping[str, Any]) -> bool:
+    if stage.get("enabled") is not True or stage.get("snapshot_bound") is not True:
+        return False
+    outcome = stage.get("outcome")
+    counts = stage.get("counts", {})
+    if not isinstance(counts, Mapping):
+        return False
+    keys = ("planned_chunks", "model_called_chunks", "model_completed_chunks",
+            "model_uncalled_chunks", "model_incomplete_chunks")
+    if any(key in counts for key in keys):
+        values = [counts.get(key) for key in keys]
+        if not all(_valid_count(value) for value in values):
+            return False
+        planned, called, completed, uncalled, incomplete = values
+        if (completed > called or called + uncalled != planned or completed + incomplete != planned
+                or outcome == "completed" and (not planned or incomplete)):
+            return False
+    material = stage.get("material_coverage")
+    explanation_incomplete = stage.get("explanation_coverage") in ("partial", "not_run")
+    if outcome == "completed":
+        return material == "complete" and not explanation_incomplete
+    if outcome == "partial":
+        return material == "partial" or explanation_incomplete
+    return outcome == "degraded"
+
+
+def _target_assessment_note(diagnostics: Mapping[str, Any] | None) -> str:
+    unknown = "缺少可核对的逐项判断记录，无法确认哪些角色设定得到判断。"
+    if not isinstance(diagnostics, Mapping):
+        return unknown
+    batch = diagnostics.get("review_batch")
+    if isinstance(batch, Mapping) and batch.get("mode") == "baseline_build":
+        return "本次用于整理后续审查的基线，没有待对照的新稿。"
+    stage = diagnostics.get("character_consistency")
+    if not isinstance(stage, Mapping):
+        return unknown
+    if stage.get("outcome") in ("disabled", "skipped"):
+        return "本次没有执行新稿的角色设定对照。"
+    if isinstance(batch, Mapping) and batch.get("character_review_enabled") is False:
+        return unknown
+    if not _stage_supports_target_counts(stage):
+        return unknown
+    summary = stage.get("target_assessment_summary_v1")
+    if not isinstance(summary, Mapping) or summary.get("schema_version") != "character-target-assessment-summary-v1":
+        return unknown
+    total = summary.get("total_targets")
+    if not _valid_count(total) or not all(_valid_count(summary.get(key)) for key in _TARGET_RESULTS):
+        return unknown
+    if sum(summary[key] for key in _TARGET_RESULTS) != total:
+        return unknown
+    if stage["outcome"] == "degraded" and any(
+        summary[key] for key in ("conflict", "no_issue", "no_matching_observation")
+    ):
+        return unknown
+    if total == 0:
+        return "本次没有可与新稿对照的角色设定。"
+    results = "，".join(f"{summary[key]} 项{label}" for key, label in _TARGET_RESULTS.items() if summary[key])
+    return f"本次对照范围共 {total} 项角色设定，其中 {results}。"
+
+
 def render_markdown_report(
     *,
     project_name: str,
@@ -143,6 +214,7 @@ def render_markdown_report(
         "",
         _model_note(diagnostics),
         _character_review_note(diagnostics),
+        _target_assessment_note(diagnostics),
         "报告只列出本次运行发现且带原文证据的结果；0 条问题不代表故事绝对无误。",
         "",
         "## 一致性问题",

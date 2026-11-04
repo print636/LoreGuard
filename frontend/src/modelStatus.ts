@@ -77,6 +77,7 @@ export type CharacterConsistencyDiagnostics = {
   snapshot_bound?: boolean;
   material_coverage?: string;
   explanation_coverage?: string;
+  target_assessment_summary_v1?: unknown;
   counts?: {
     planned_chunks?: number;
     model_called_chunks?: number;
@@ -668,7 +669,7 @@ function characterChunkSummary(diagnostics: CharacterConsistencyDiagnostics): Ch
 const characterStageReasons: Record<string, string> = {
   bounded_partial: '部分冻结材料尚未完成角色审查',
   run_token_budget: '本次运行剩余 Token 预算不足，角色审查未启动',
-  feature_disabled: '当前部署未启用角色审查',
+  feature_disabled: '本次运行未启用角色审查',
   no_eligible_frozen_documents: '本次没有符合角色审查条件的冻结资料',
   model_stage_unavailable: '模型角色审查没有成功完成',
   invalid_remaining_budget: '本次运行的剩余预算记录异常',
@@ -716,10 +717,10 @@ export function describeCharacterReviewStage(
       };
     }
     return {
-      coverage: 'full', label: '角色审查完整',
-      detail: '角色一致性阶段已基于冻结输入完整执行；这不保证每条结论都正确。',
+      coverage: 'full', label: '角色审查材料处理完成',
+      detail: '角色审查已处理本次冻结材料。每项设定是否得到判断，见报告中的审查范围。',
       counts: chunks.text,
-      emptyCaveat: '已完成角色审查，但没有发现问题仍不等于故事绝无矛盾。',
+      emptyCaveat: '材料处理完成后，仍需核对每项角色设定是否有足够证据。',
     };
   }
   if (diagnostics.outcome === 'partial') {
@@ -735,9 +736,15 @@ export function describeCharacterReviewStage(
         counts: chunks.text, emptyCaveat: unknownCaveat,
       };
     }
-    const explanation = budgetsRejected
-      ? '审查中发生 Token 预算门控；部分内容可能未调用模型。请核对预算后重新发起校验。'
-      : `${reason || '部分角色审查未完成'}；请检查本次运行诊断，处理原因后重新发起校验。`;
+    let explanation = `${reason || '部分角色审查未完成'}。请核对本次运行诊断后重新发起校验。`;
+    if (budgetsRejected) {
+      explanation = '审查中发生 Token 预算门控；部分内容可能未调用模型。请核对预算后重新发起校验。';
+    } else if (['upstream_5xx', 'targeted_pass_upstream_5xx'].some(key => {
+      const count = diagnostics.reason_counts?.[key];
+      return Number.isSafeInteger(count) && count! > 0;
+    })) {
+      explanation = '模型服务出错，部分角色审查未完成。如需补查，可在服务恢复后发起新一轮校验。';
+    }
     return {
       coverage: 'partial', label: '角色审查仅覆盖部分内容',
       detail: `${explanation} 未覆盖内容不能视为没有问题。`,
@@ -762,42 +769,97 @@ export function describeCharacterReviewStage(
   };
 }
 
+type CharacterReviewBatch = { mode?: string; character_review_enabled?: boolean } | null;
+type TargetAssessmentView = { coverage: ModelCoverage; label: string; detail: string };
+type TargetCounts = {
+  total_targets: number; conflict: number; no_issue: number;
+  no_matching_observation: number; needs_review: number; unprocessed: number;
+};
+
+function targetCounts(value: unknown): TargetCounts | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (row.schema_version !== 'character-target-assessment-summary-v1') return null;
+  const categories = ['conflict', 'no_issue', 'no_matching_observation', 'needs_review', 'unprocessed'] as const;
+  const validCount = (count: unknown): count is number => Number.isSafeInteger(count) && Number(count) >= 0;
+  if (!validCount(row.total_targets)) return null;
+  let sum = 0;
+  for (const key of categories) {
+    const count = row[key];
+    if (!validCount(count)) return null;
+    sum += count;
+  }
+  return sum === row.total_targets ? row as TargetCounts : null;
+}
+
+function describeTargetAssessment(
+  diagnostics: CharacterConsistencyDiagnostics | undefined, stage: ModelStatusView, batch?: CharacterReviewBatch,
+): TargetAssessmentView {
+  const outcome = diagnostics?.outcome;
+  if (batch?.character_review_enabled === false) {
+    if (diagnostics?.enabled === true || outcome === 'completed' || outcome === 'partial') {
+      return { coverage: 'unknown', label: '角色审查范围无法核对',
+        detail: '提交时未勾选角色审查，但执行记录显示角色审查已启用。无法核对本次角色结论。' };
+    }
+    return { coverage: 'limited', label: '本次未勾选角色审查',
+      detail: '本次未选择角色审查，不能从问题数判断角色表现是否符合设定。' };
+  }
+  if (batch?.mode === 'baseline_build') {
+    return { coverage: 'limited', label: '本次建立基线',
+      detail: '本次用于整理后续审查的基线，没有待对照的新稿。' };
+  }
+  const summary = targetCounts(diagnostics?.target_assessment_summary_v1);
+  if (outcome === 'disabled' || outcome === 'skipped' || (outcome === 'degraded' && !summary)) {
+    return { coverage: stage.coverage, label: stage.label, detail: stage.emptyCaveat };
+  }
+  if (!summary || stage.coverage === 'unknown' || diagnostics?.enabled !== true || diagnostics.snapshot_bound !== true ||
+      (outcome === 'degraded' && (summary.conflict || summary.no_issue || summary.no_matching_observation))) {
+    return { coverage: 'unknown', label: '角色设定判断范围未知',
+      detail: '缺少可核对的逐项判断记录，无法确认哪些角色设定得到判断。' };
+  }
+  if (summary.total_targets === 0) {
+    return { coverage: 'limited', label: '没有可对照的角色设定',
+      detail: '本次没有可与新稿对照的角色设定。' };
+  }
+  const results = [
+    [summary.conflict, '发现冲突'], [summary.no_issue, '未发现冲突'],
+    [summary.no_matching_observation, '未匹配到新稿表现（尚无法判断）'],
+    [summary.needs_review, '证据不足或待确认'], [summary.unprocessed, '未处理'],
+  ] as const;
+  const counts = results.filter(([count]) => count > 0)
+    .map(([count, description]) => `${count} 项${description}`).join('，');
+  const allJudged = summary.conflict + summary.no_issue === summary.total_targets;
+  return {
+    coverage: allJudged ? 'full' : 'partial',
+    label: allJudged ? '本次角色设定目标已逐项判断' : '有角色设定尚无结论',
+    detail: `本次对照范围共 ${summary.total_targets} 项角色设定，其中 ${counts}。`,
+  };
+}
+
 export function describeCombinedReviewStatus(
   model?: ModelDiagnostics,
   characterConsistency?: CharacterConsistencyDiagnostics,
-): ModelStatusView {
+  batch?: CharacterReviewBatch,
+) {
   const base = describeModelStatus(model);
   const character = describeCharacterReviewStage(characterConsistency);
+  const assessment = describeTargetAssessment(characterConsistency, character, batch);
+  const choice = batch?.character_review_enabled === true ? '提交时已勾选角色审查。'
+    : batch?.character_review_enabled === false ? '提交时未勾选角色审查。'
+    : '此次运行未记录提交时是否勾选角色审查。';
   const counts = [base.counts, character.counts].filter(Boolean).join('；');
-  if (character.coverage === 'full') {
-    if (base.coverage === 'full') {
-      return {
-        ...base,
-        label: 'AI 语义与角色审查完整',
-        detail: `${base.detail} ${character.detail}`,
-        counts,
-      };
-    }
-    return {
-      ...base,
-      detail: `${base.detail} ${character.detail} 角色审查完成不会提升通用语义抽取的覆盖等级。`,
-      counts,
-    };
-  }
-  if (character.coverage === 'partial') {
-    return {
-      coverage: base.coverage === 'unknown' ? 'unknown' : 'partial',
-      label: character.label,
-      detail: character.detail,
-      counts,
-      emptyCaveat: character.emptyCaveat,
-    };
-  }
+  const boundary = character.coverage === 'full' || batch?.character_review_enabled === false
+    ? assessment : character;
+  const coverage = base.coverage === 'unknown' ? 'unknown'
+    : boundary.coverage === 'full' ? base.coverage : boundary.coverage;
+  const label = boundary.coverage === 'full' && base.coverage !== 'full' ? base.label : boundary.label;
+  const emptyCaveat = [...new Set([
+    base.emptyCaveat,
+    character.coverage !== 'full' && batch?.character_review_enabled !== false ? character.emptyCaveat : '',
+    assessment.detail,
+  ].filter(Boolean))].join(' ');
   return {
-    coverage: 'unknown',
-    label: character.label,
-    detail: character.detail,
-    counts,
-    emptyCaveat: character.emptyCaveat,
+    coverage, label, counts, emptyCaveat, character, assessment, choice,
+    detail: [base.detail, character.detail, assessment.detail].join(' '),
   };
 }

@@ -3181,6 +3181,13 @@ class CharacterConsistencyStage:
             baseline_trace_chunks=baseline_trace_chunks,
             baseline_trace_chunks_omitted_count=baseline_trace_chunks_omitted,
         )
+        if (
+            self.observation_applicable and eligible_draft_count
+            and not reason_counts["invalid_confirmed_trait_snapshot"]
+        ):
+            diagnostics["target_assessment_summary_v1"] = _target_assessment_summary(
+                case_trace, eligible_targets=set(baseline_by_digest),
+            )
         observation_journal.incomplete = observation_journal.incomplete or (
             model_completed_chunks != len(planned_chunks)
             or targeted_passes_completed != targeted_passes_scheduled
@@ -6612,6 +6619,74 @@ def _target_coverage_certificate(
         "processing": dict(processing), "alias_disposition": alias,
         "non_alias_blockers": sorted(blockers),
     }
+
+
+def _target_assessment_summary(
+    case_trace: list[dict[str, Any]], *, eligible_targets: set[str],
+) -> dict[str, str | int]:
+    """Summarize this run's eligible frozen targets before the processing limit."""
+    by_target: dict[str, str] = {}
+    for trace in case_trace:
+        target = trace["confirmed_candidate_id_sha256"]
+        if target not in eligible_targets:
+            continue
+        if target in by_target:
+            # A target with conflicting or duplicate records has no unique decision.
+            by_target[target] = "needs_review"
+        else:
+            by_target[target] = _target_assessment_bucket(trace)
+    counts = Counter(by_target.values())
+    return {
+        "schema_version": "character-target-assessment-summary-v1",
+        "total_targets": len(eligible_targets),
+        "conflict": counts["conflict"],
+        "no_issue": counts["no_issue"],
+        "no_matching_observation": counts["no_matching_observation"],
+        "needs_review": counts["needs_review"],
+        "unprocessed": len(eligible_targets) - len(by_target),
+    }
+
+
+def _target_assessment_bucket(trace: dict[str, Any]) -> str:
+    """Use the product's newly generated coverage and source-bound receipts."""
+    cert = trace.get("target_coverage")
+    if (
+        not cert
+        or cert["confirmed_candidate_id_sha256"] != trace["confirmed_candidate_id_sha256"]
+        or cert["comparison_key"] != trace["comparison_key"]
+    ):
+        return "needs_review"
+    if trace["prepare_reason"] == "no_matching_observation":
+        # This target cannot have a complete decision certificate. These three
+        # blockers describe the absent comparison itself. Any other blocker
+        # means we cannot claim the relevant material was searched completely.
+        alias = cert["alias_disposition"]
+        if (
+            trace["matched_observation_count"] == 0
+            and trace["material_coverage"] == "complete"
+            and trace["final_outcome"] == "unverifiable"
+            and not alias["possibly_target"] and not alias["unknown"]
+            and set(cert["non_alias_blockers"]) == {
+                "case_explanation_incomplete", "case_outcome_unverifiable",
+                "no_matching_observation",
+            }
+        ):
+            return "no_matching_observation"
+        return "needs_review"
+
+    outcome = trace["final_outcome"]
+    receipt = trace.get("reviewed_events")
+    if (
+        outcome in {"conflict", "no_issue"}
+        and (outcome != "conflict" or trace["visible"])
+        and cert["status"] == "complete"
+        and receipt
+        and receipt["confirmed_candidate_id_sha256"] == trace["confirmed_candidate_id_sha256"]
+        and receipt["comparison_key"] == trace["comparison_key"]
+        and {"B", "C"} <= {ref["role"] for ref in receipt["evidence_refs"]}
+    ):
+        return outcome
+    return "needs_review"
 
 
 def _case_trace_comparison_key(

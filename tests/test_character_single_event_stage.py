@@ -17,6 +17,7 @@ from app.character_consistency_stage import (
     _reviewed_event_group_id,
     _reviewed_events_receipt,
     _safe_case_trace,
+    _target_assessment_summary,
     _target_has_sufficient_recall_evidence,
     _to_issue,
     _target_coverage_certificate,
@@ -214,6 +215,7 @@ def test_actual_stage_single_action_calls_new_contract_and_emits_formal_receipt(
     assert result.issues[0].metadata["reviewed_events"] == trace["reviewed_events"]
     assert len(trace["reviewed_events"]["events"]) == 1
     assert trace["target_coverage"]["status"] == "complete"
+    assert result.diagnostics["target_assessment_summary_v1"]["conflict"] == 1
     assert result.issues[0].metadata["checker_version"] == CHARACTER_CONSISTENCY_CHECKER_VERSION
 
 
@@ -506,6 +508,7 @@ def test_complete_outside_scope_target_has_no_explanation_dependency_but_global_
     assert not result.issues and not result.review_clues
     trace = result.diagnostics["case_trace"][0]
     assert trace["final_outcome"] == "no_issue" and trace["promote_reason"] == "single_event_outside_comparison"
+    assert result.diagnostics["target_assessment_summary_v1"]["no_issue"] == 1
     assert trace["explanation_coverage"] == "not_run"
     assert result.diagnostics["outcome"] == "partial"
     assert result.diagnostics["reason_counts"]["explanation_review_not_run"] == 1
@@ -517,6 +520,25 @@ def test_complete_outside_scope_target_has_no_explanation_dependency_but_global_
     from app.narrative_context import payload_sha256
     assert requirement["reviewed_events_sha256"] == payload_sha256(trace["reviewed_events"])
     assert requirement["target_observation_pool_sha256"] == payload_sha256(trace["target_observation_pool"])
+
+
+def test_target_summary_counts_only_uniquely_bound_decisions(outside_scope_runtime_result):
+    result, _ = outside_scope_runtime_result
+    trace = result.diagnostics["case_trace"][0]
+    target = trace["confirmed_candidate_id_sha256"]
+    eligible = {target, "0" * 64}
+    for traces in (
+        [trace, trace],
+        [{**trace, "reviewed_events": None}],
+        [{**trace, "target_coverage": {**trace["target_coverage"], "status": "partial"}}],
+        [{**trace, "reviewed_events": {**trace["reviewed_events"], "evidence_refs": []}}],
+    ):
+        summary = _target_assessment_summary(traces, eligible_targets=eligible)
+        assert summary == {
+            "schema_version": "character-target-assessment-summary-v1",
+            "total_targets": 2, "needs_review": 1, "unprocessed": 1,
+            "conflict": 0, "no_issue": 0, "no_matching_observation": 0,
+        }
 
 
 @pytest.mark.parametrize("failure", ["material", "processing", "unreviewed", "missing_pool", "extra_pool_member"])

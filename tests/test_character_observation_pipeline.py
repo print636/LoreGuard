@@ -291,8 +291,10 @@ def test_baseline_limit_records_bounded_pairs_and_explicit_omitted_summary():
                                     narrative_context=_context(publication="draft"))
         run_id = _new_review(client, project["id"], document["id"])
         record = _record(evidence=line, polarity="negative", kind="preference_expression")
-        _, saved = _run_recorded(run_id, QueueProvider(_response(), _response(record), *[_response()] * 6),
-                                 character_consistency_max_candidates_per_run=1)
+        result, saved = _run_recorded(run_id, QueueProvider(_response(), _response(record), *[_response()] * 6),
+                                      character_consistency_max_candidates_per_run=1)
+        summary = result.diagnostics["target_assessment_summary_v1"]
+        assert summary["total_targets"] == 2 and summary["unprocessed"] == 1
         assert saved["recording"]["status"] == "partial"
         assert saved["recording"]["coverage"]["omitted_baseline_count"] == 1
         assert saved["recording"]["coverage"]["excluded_baseline_counts"] == {"baseline_limit": 1}

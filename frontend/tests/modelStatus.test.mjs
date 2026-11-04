@@ -53,20 +53,33 @@ function withAgent(overrides={}) {
   };
 }
 
-test('combined review coverage requires the character stage to complete on frozen input', () => {
-  const completeCharacter = {
+const completeCharacter = {
     enabled:true, outcome:'completed', reason_code:'completed',
     snapshot_bound:true, material_coverage:'complete',
     counts:{planned_chunks:2, model_called_chunks:2, model_completed_chunks:2,
       model_uncalled_chunks:0, model_incomplete_chunks:0},
+};
+const targetSummary = {
+  schema_version: 'character-target-assessment-summary-v1', total_targets: 2,
+  conflict: 1, no_issue: 1, no_matching_observation: 0, needs_review: 0, unprocessed: 0,
+};
+
+test('combined review coverage needs actual target judgments as well as frozen material processing', () => {
+  const judged = {
+    ...completeCharacter, target_assessment_summary_v1: targetSummary,
   };
+  const legacy = describeCombinedReviewStatus(complete, completeCharacter);
+  assert.equal(legacy.character.coverage, 'full');
+  assert.equal(legacy.coverage, 'unknown');
+  assert.match(legacy.choice, /未记录提交时是否勾选/);
+  assert.match(legacy.emptyCaveat, /无法确认哪些角色设定得到判断/);
   assert.equal(
-    describeCombinedReviewStatus(complete, completeCharacter).coverage,
+    describeCombinedReviewStatus(complete, judged).coverage,
     'full',
   );
   assert.match(
-    describeCombinedReviewStatus(complete, completeCharacter).label,
-    /角色审查完整/,
+    describeCombinedReviewStatus(complete, judged).assessment.detail,
+    /2 项角色设定.*1 项发现冲突，1 项未发现冲突/,
   );
   assert.match(
     describeCombinedReviewStatus(complete, completeCharacter).counts,
@@ -85,6 +98,58 @@ test('combined review coverage requires the character stage to complete on froze
     assert.match(result.label, /角色审查/);
     assert.match(result.emptyCaveat, /不能证明没有角色/);
   }
+});
+
+test('a validated target summary partitions the scope without increasing the formal issue count', () => {
+  const summary = {...targetSummary, total_targets: 6, no_matching_observation: 1, needs_review: 2, unprocessed: 1};
+  const view = describeCombinedReviewStatus(complete,
+    {...completeCharacter, target_assessment_summary_v1: summary},
+    {mode:'draft_review', character_review_enabled:true});
+  assert.match(view.choice, /提交时已勾选/);
+  assert.equal(view.coverage, 'partial');
+  assert.match(view.assessment.detail, /6 项角色设定.*1 项未匹配到新稿表现（尚无法判断），2 项证据不足或待确认，1 项未处理/);
+  assert.doesNotMatch(view.detail, /6 个问题|6 条问题|角色审查完整/);
+  assert.match(view.emptyCaveat, /未匹配到新稿表现/);
+});
+
+test('invalid, missing or unrecognized server summary never implies clean judgments', () => {
+  for (const summary of [
+    undefined, null, [], {...targetSummary, schema_version:'v2'},
+    {...targetSummary, total_targets: 3}, {...targetSummary, unprocessed: undefined},
+    {...targetSummary, conflict: 1.5}, {...targetSummary, needs_review: -1}, {...targetSummary, conflict: '1'},
+    {...targetSummary, conflict: Number.MAX_SAFE_INTEGER + 1, total_targets: Number.MAX_SAFE_INTEGER + 1},
+  ]) {
+    const view = describeCombinedReviewStatus(complete, {
+      ...completeCharacter, target_assessment_summary_v1: summary,
+      case_trace: [{ final_outcome:'no_issue', source:'model', visible:false }],
+    });
+    assert.equal(view.coverage, 'unknown');
+    assert.match(view.assessment.detail, /无法确认/);
+  }
+  const zero = describeCombinedReviewStatus(complete, {...completeCharacter,
+    target_assessment_summary_v1:{...targetSummary, total_targets:0, conflict:0, no_issue:0}});
+  assert.equal(zero.coverage, 'limited');
+  assert.match(zero.assessment.detail, /没有可与新稿对照/);
+});
+
+test('the frozen author choice, baseline-only scope and stage failures remain distinct', () => {
+  const off = {mode:'draft_review', character_review_enabled:false};
+  const disabled = {enabled:false, outcome:'disabled', reason_code:'feature_disabled'};
+  const view = describeCombinedReviewStatus(complete, disabled, off);
+  assert.match(view.choice, /提交时未勾选/);
+  assert.match(view.emptyCaveat, /本次未选择角色审查/);
+  assert.doesNotMatch(view.detail, /当前部署|发起新一轮/);
+  assert.equal(describeCombinedReviewStatus(complete, completeCharacter, off).coverage, 'unknown');
+  const baseline = describeCombinedReviewStatus(complete, completeCharacter,
+    {mode:'baseline_build', character_review_enabled:true});
+  assert.match(baseline.assessment.detail, /没有待对照的新稿/);
+  assert.notEqual(baseline.coverage, 'full');
+  const failure = describeCombinedReviewStatus(complete, {
+    ...completeCharacter, outcome:'partial', material_coverage:'partial', reason_counts:{targeted_pass_upstream_5xx:1},
+    target_assessment_summary_v1:{...targetSummary, total_targets:1, conflict:0, no_issue:0, needs_review:1},
+  });
+  assert.match(failure.detail, /模型服务出错.*发起新一轮校验/);
+  assert.match(failure.assessment.detail, /1 项证据不足或待确认/);
 });
 
 test('character coverage fails closed on contradictory or missing completion proof', () => {

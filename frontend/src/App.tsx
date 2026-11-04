@@ -1,6 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
-  describeCharacterReviewStage,
   describeCombinedReviewStatus,
   describeRepairStatus,
   describeReviewAgentStatus,
@@ -577,8 +576,9 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     () => describeCombinedReviewStatus(
       diagnostics.model,
       diagnostics.character_consistency,
+      runInfo?.review_batch,
     ),
-    [diagnostics.model, diagnostics.character_consistency],
+    [diagnostics.model, diagnostics.character_consistency, runInfo?.review_batch],
   );
   const currentProvisionalClueCount = provisionalClues.status === "ready" && provisionalClues.runId === run
     ? provisionalClues.items.length
@@ -625,10 +625,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const formalIssueEmptyText = runInfo?.status === "completed"
     ? `本次未生成正式一致性问题。${provisionalClueCaveat}${modelStatus.emptyCaveat ? ` ${modelStatus.emptyCaveat}` : ""}`
     : null;
-  const characterStageStatus = useMemo(
-    () => describeCharacterReviewStage(diagnostics.character_consistency),
-    [diagnostics.character_consistency],
-  );
+  const characterStageStatus = modelStatus.character;
   const repairStatus = useMemo(
     () => describeRepairStatus(diagnostics.model),
     [diagnostics.model],
@@ -2804,19 +2801,30 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   <button className="userGuideTrigger" type="button" onClick={(event) => openUserGuide("coverage", event.currentTarget)}>理解覆盖范围</button>
                 </div>
               </div>
-              {runInfo?.review_batch?.mode === "draft_review" && (
+              {runInfo && (runInfo.status === "completed" || runInfo.review_batch?.mode === "draft_review") && (
                 <section
-                  className={`reviewCoverage ${runInfo.review_batch.no_formal_context_expected ? "limited" : ""}`}
+                  className={`reviewCoverage ${runInfo.review_batch?.no_formal_context_expected ? "limited" : modelStatus.coverage}`}
                   aria-label="本次审查范围"
                 >
-                  <strong>{runInfo.review_batch.no_formal_context_expected ? "仅新稿自检" : "新稿审查"}</strong>
-                  <span>
-                    本次运行冻结 {runInfo.review_batch.target_document_ids?.length ?? 0} 份目标章节、
-                    {runInfo.review_batch.background_document_ids?.length ?? 0} 份正式背景。
-                    {runInfo.review_batch.no_formal_context_expected
-                      ? " 没有正式背景时不能据零问题断言角色 OOC 已通过；请结合角色覆盖诊断阅读结果。"
-                      : " 报告以冻结版本为准，不会用当前项目文档替换历史输入。"}
-                  </span>
+                  <strong>{runInfo.review_batch?.mode === "draft_review"
+                    ? runInfo.review_batch.no_formal_context_expected ? "仅新稿自检" : "新稿审查"
+                    : "本次审查范围"}</strong>
+                  {runInfo.review_batch?.mode === "draft_review" && (
+                    <span>
+                      {Array.isArray(runInfo.review_batch.target_document_ids) && Array.isArray(runInfo.review_batch.background_document_ids)
+                        ? `本次运行冻结 ${runInfo.review_batch.target_document_ids.length} 份目标章节、${runInfo.review_batch.background_document_ids.length} 份正式背景。`
+                        : "缺少完整的冻结文档清单。"}
+                      {runInfo.review_batch.no_formal_context_expected && " 没有正式背景时不能据零问题断言角色 OOC 已通过。"}
+                    </span>
+                  )}
+                  <span>{modelStatus.choice}</span>
+                  {runInfo.status === "completed" && <>
+                    <span>
+                      {characterStageStatus.label}。
+                      {characterStageStatus.coverage === "partial" && runInfo.review_batch?.character_review_enabled !== false && characterStageStatus.detail}
+                    </span>
+                    <span>{modelStatus.assessment.detail}</span>
+                  </>}
                 </section>
               )}
               <section className="clarifications workspaceView">
@@ -2831,7 +2839,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                 {clarifications.length === 0 && !busy && (
                   <div className="empty">
                     {runInfo?.status === "completed"
-                      ? `当前未发现需要作者补充的疑问。${modelStatus.emptyCaveat ? ` ${modelStatus.emptyCaveat}` : ""}`
+                      ? "本次没有列出需要作者补充的疑问。"
                       : "完成或恢复一次分析后，这里会单独显示待澄清项。"}
                   </div>
                 )}

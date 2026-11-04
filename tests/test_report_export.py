@@ -81,7 +81,7 @@ def test_markdown_export_zero_issues_does_not_claim_story_is_correct():
     assert "冻结输入清单" in content
 
 
-def _character_export(stage):
+def _character_export(stage, *, mode="draft_review"):
     return render_markdown_report(
         project_name="角色审查",
         run_id="character-run",
@@ -96,6 +96,7 @@ def _character_export(stage):
         latest_feedback={},
         clarifications=[],
         diagnostics={
+            "review_batch": {"mode": mode},
             "model": {"used": True, "partial_fallback": False},
             "character_consistency": stage,
         },
@@ -138,3 +139,59 @@ def test_markdown_export_reports_only_persisted_character_stage_state(stage, exp
     assert expected in content
     assert "SHOULD_NOT_EXPORT" not in content
     assert "0 条问题不代表故事绝对无误" in content
+
+
+def _summary_stage(**updates):
+    return {
+        "enabled": True, "snapshot_bound": True, "outcome": "partial",
+        "material_coverage": "partial", "explanation_coverage": "partial",
+        "target_assessment_summary_v1": {
+            "schema_version": "character-target-assessment-summary-v1",
+            "total_targets": 5, "conflict": 1, "no_issue": 1,
+            "no_matching_observation": 1, "needs_review": 1, "unprocessed": 1,
+        },
+        **updates,
+    }
+
+
+def test_export_separates_frozen_target_decisions_from_formal_issue_count():
+    stage = _summary_stage(case_trace=[{"text": "NEVER_EXPORT_CLUE_DETAIL"}])
+    output = _character_export(stage)
+    assert "本次对照范围共 5 项角色设定，其中 1 项发现冲突，1 项未发现冲突，1 项未匹配到新稿表现（尚无法判断），1 项证据不足或待确认，1 项未处理。" in output
+    assert "NEVER_EXPORT_CLUE_DETAIL" not in output
+    assert "一致性问题：0 条" in output
+
+
+@pytest.mark.parametrize("changes", [
+    {"schema_version": "unknown"}, {"total_targets": 6}, {"no_issue": True},
+    {"conflict": -1}, {"needs_review": "1"}, {"total_targets": 2**53},
+])
+def test_export_rejects_unverifiable_summary_counts(changes):
+    stage = _summary_stage()
+    stage["target_assessment_summary_v1"].update(changes)
+    assert "缺少可核对的逐项判断记录" in _character_export(stage)
+
+
+@pytest.mark.parametrize(("stage", "mode", "expected"), [
+    (_summary_stage(target_assessment_summary_v1=None), "draft_review", "缺少可核对的逐项判断记录"),
+    (_summary_stage(snapshot_bound=False), "draft_review", "缺少可核对的逐项判断记录"),
+    (_summary_stage(outcome="completed"), "draft_review", "缺少可核对的逐项判断记录"),
+    (_summary_stage(outcome="degraded"), "draft_review", "缺少可核对的逐项判断记录"),
+    (_summary_stage(counts={"planned_chunks": 2}), "draft_review", "缺少可核对的逐项判断记录"),
+    (_summary_stage(), "baseline_build", "没有待对照的新稿"),
+    (_summary_stage(outcome="disabled"), "draft_review", "没有执行新稿的角色设定对照"),
+    (_summary_stage(outcome="skipped"), "draft_review", "没有执行新稿的角色设定对照"),
+])
+def test_export_only_renders_counts_for_a_verifiable_draft_stage(stage, mode, expected):
+    content = _character_export(stage, mode=mode)
+    assert expected in content
+    assert "本次对照范围共" not in content
+
+
+def test_export_reports_empty_target_universe_separately_from_positive_judgments():
+    stage = _summary_stage()
+    summary = stage["target_assessment_summary_v1"]
+    summary.update({key: 0 for key in summary if key != "schema_version"})
+    output = _character_export(stage)
+    assert "本次没有可与新稿对照的角色设定" in output
+    assert "项未发现冲突" not in output

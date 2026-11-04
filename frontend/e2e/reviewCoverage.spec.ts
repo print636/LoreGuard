@@ -15,7 +15,11 @@ const completeModel = {
 
 type CharacterDiagnostic = Record<string, unknown>;
 
-async function mockCompletedRun(page: Page, state: { character: CharacterDiagnostic; unexpected: string[] }) {
+async function mockCompletedRun(page: Page, state: { character: CharacterDiagnostic; choice?: boolean; unexpected: string[] }) {
+  const selectedRun = state.choice === undefined ? run : {
+    ...run, review_batch: { mode: "draft_review", sensitivity: "balanced", target_document_ids: ["draft"],
+      background_document_ids: ["baseline"], character_review_enabled: state.choice },
+  };
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -41,7 +45,7 @@ async function mockCompletedRun(page: Page, state: { character: CharacterDiagnos
     }
     else if (path === "/api/v1/account/model-provider") response = {};
     else if (path === `/api/v1/projects/${projectId}/documents`) response = [];
-    else if (path === `/api/v1/projects/${projectId}/analysis-runs`) response = [run];
+    else if (path === `/api/v1/projects/${projectId}/analysis-runs`) response = [selectedRun];
     else if (path === `/api/v1/projects/${projectId}/run-catalog` && method === "GET") {
       const pageNumber = Number(url.searchParams.get("page") || 1);
       const pageSize = Number(url.searchParams.get("page_size") || 20);
@@ -55,7 +59,7 @@ async function mockCompletedRun(page: Page, state: { character: CharacterDiagnos
           frozen_document_count: 0, retried_from: null, batch_mode: null,
         })) };
     }
-    else if (path === `/api/v1/analysis-runs/${runId}`) response = run;
+    else if (path === `/api/v1/analysis-runs/${runId}`) response = selectedRun;
     else if (path === `/api/v1/analysis-runs/${runId}/issues`) response = [];
     else if (path === `/api/v1/analysis-runs/${runId}/records`) response = { records: [], warnings: [] };
     else if (path === `/api/v1/analysis-runs/${runId}/diagnostics`) response = {
@@ -130,3 +134,81 @@ test("contradictory completed stage cannot claim complete coverage", async ({ pa
   await expect(page.locator(".railCoverage")).toContainText("覆盖仍有限");
   expect(state.unexpected).toEqual([]);
 });
+
+const processedStage = {
+  enabled: true, snapshot_bound: true, outcome: "completed", material_coverage: "complete",
+  counts: { planned_chunks: 1, model_called_chunks: 1, model_completed_chunks: 1,
+    model_uncalled_chunks: 0, model_incomplete_chunks: 0 },
+};
+
+test("author report distinguishes a processed draft without a matching observation from a judged target", async ({ page }, testInfo) => {
+  const state = {
+    choice: true,
+    character: {
+      ...processedStage,
+      target_assessment_summary_v1: {
+        schema_version: "character-target-assessment-summary-v1", total_targets: 2,
+        conflict: 0, no_issue: 1, no_matching_observation: 1, needs_review: 0, unprocessed: 0,
+      },
+    }, unexpected: [] as string[],
+  };
+  await mockCompletedRun(page, state);
+  await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
+  const scope = page.getByRole("region", { name: "本次审查范围" });
+  await expect(scope).toContainText("提交时已勾选角色审查");
+  await expect(scope).toContainText("角色审查材料处理完成");
+  await expect(scope).toContainText("1 项未发现冲突，1 项未匹配到新稿表现");
+  await expect(page.getByRole("heading", { name: "正式一致性问题 0" })).toBeVisible();
+  await expect(page.locator(".issues .empty")).toContainText("1 项未匹配到新稿表现");
+  await expect(page.locator(".railCoverage")).toContainText("覆盖仍有限");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  for (const [width, height] of [[375, 812], [812, 375]]) {
+    await page.setViewportSize({ width, height });
+    await expect(scope).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
+      await scope.screenshot({ path: testInfo.outputPath(`target-summary-${width}.png`) });
+    }
+  }
+  expect(state.unexpected).toEqual([]);
+});
+
+test("a model service failure leaves the affected setting open in the completed report", async ({ page }) => {
+  const state = {
+    choice: true,
+    character: {
+      ...processedStage, outcome: "partial", material_coverage: "partial",
+      reason_counts: { upstream_5xx: 1, targeted_pass_upstream_5xx: 1 },
+      target_assessment_summary_v1: {
+        schema_version: "character-target-assessment-summary-v1", total_targets: 1,
+        conflict: 0, no_issue: 0, no_matching_observation: 0, needs_review: 1, unprocessed: 0,
+      },
+    }, unexpected: [] as string[],
+  };
+  await mockCompletedRun(page, state);
+  await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
+  const scope = page.getByRole("region", { name: "本次审查范围" });
+  await expect(scope).toContainText("模型服务出错");
+  await expect(scope).toContainText("服务恢复后发起新一轮校验");
+  await expect(page.locator(".issues .empty")).toContainText("1 项证据不足或待确认");
+  await expect(scope).not.toContainText("未发现冲突");
+  expect(state.unexpected).toEqual([]);
+});
+
+for (const optedOut of [true, false]) {
+  test(`author report preserves ${optedOut ? "explicit opt-out" : "historical unknown choice and judgments"}`, async ({ page }) => {
+    const state = {
+      choice: optedOut ? false : undefined,
+      character: optedOut ? { enabled: false, outcome: "disabled", reason_code: "feature_disabled" }
+        : { ...processedStage, case_trace: [{ final_outcome: "no_issue" }] },
+      unexpected: [] as string[],
+    };
+    await mockCompletedRun(page, state);
+    await page.goto(`/app/projects/${projectId}/runs/${runId}/report`);
+    const scope = page.getByRole("region", { name: "本次审查范围" });
+    await expect(scope).toContainText(optedOut ? "提交时未勾选" : "未记录提交时是否勾选");
+    await expect(page.locator(".issues .empty")).toContainText(optedOut ? "本次未选择角色审查" : "无法确认哪些角色设定得到判断");
+    await expect(scope).not.toContainText("角色审查完整");
+    expect(state.unexpected).toEqual([]);
+  });
+}

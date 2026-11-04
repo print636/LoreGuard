@@ -171,6 +171,7 @@ class QueueProvider:
 
 def test_empty_character_stage_has_empty_mismatch_diagnostics():
     diagnostics = failed_character_consistency_stage().diagnostics
+    assert "target_assessment_summary_v1" not in diagnostics
     assert diagnostics["evidence_mismatch_counts"] == {}
     assert diagnostics["evidence_mismatch_chunks"] == []
     assert diagnostics["evidence_mismatch_chunks_omitted_count"] == 0
@@ -1215,6 +1216,7 @@ def test_baseline_trace_flag_off_preserves_diagnostics_shape():
     assert result.diagnostics["outcome"] == "completed"
     assert "baseline_trace_chunks" not in result.diagnostics
     assert "baseline_trace_chunks_omitted_count" not in result.diagnostics
+    assert "target_assessment_summary_v1" not in result.diagnostics
 
 
 def test_baseline_trace_opt_in_does_not_change_extractor_result_or_retry():
@@ -3534,6 +3536,11 @@ def test_completed_empty_targeted_pass_does_not_manufacture_observation():
             "targeted_no_supported_observation"
         ] == 1
         assert result.diagnostics["case_trace"][0]["final_outcome"] == "unverifiable"
+        assert result.diagnostics["target_assessment_summary_v1"] == {
+            "schema_version": "character-target-assessment-summary-v1",
+            "total_targets": 1, "no_matching_observation": 1, "needs_review": 0,
+            "conflict": 0, "no_issue": 0, "unprocessed": 0,
+        }
         assert sum("角色草稿覆盖复核器" in system for system, _ in provider.calls) == 2
 
 
@@ -3633,6 +3640,8 @@ def test_targeted_pass_budget_rejection_is_partial_without_provider_call():
         assert counts["targeted_pass_attempted_count"] == 0
         assert counts["targeted_signal_added_count"] == 0
         assert result.diagnostics["material_coverage"] == "partial"
+        summary = result.diagnostics["target_assessment_summary_v1"]
+        assert summary["needs_review"] == 1 and summary["no_matching_observation"] == 0
         assert result.diagnostics["reason_counts"][
             "targeted_reviewer_budget_reserve"
         ] == 1
@@ -7865,6 +7874,7 @@ def test_empty_model_extraction_is_explicitly_partial_not_clean():
         assert result.diagnostics["outcome"] == "partial"
         assert result.diagnostics["material_coverage"] == "partial"
         assert result.diagnostics["reason_counts"]["no_draft_signals"] == 1
+        assert result.diagnostics["target_assessment_summary_v1"]["total_targets"] == 0
 
 
 def _confirmed_melon_project(client: TestClient) -> dict:
