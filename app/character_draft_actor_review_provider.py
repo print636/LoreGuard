@@ -42,6 +42,9 @@ from .character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13,
+    habit_action_path,
     SCOPED_DRAFT_DIRECTION_GUIDE,
     HABIT_CONTEXT_TARGET_GUIDE,
 )
@@ -229,6 +232,20 @@ TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_P
     ' "referent_relation":"<same|different|uncertain，仅 event_object 填写，axis_label 填 null>"},',
 )
 
+_HABIT_ACTION_STEP_GUIDE = (
+    "\n\n只对 binding_kind=habit_action_chain 的 item 增加 action_steps。它是主体承接的逐分句核对，不是自动同意。"
+    "basis_path_hints 中的 action_path 是从显名动作到目标事实的完整顺序，包括中间动作。"
+    "每一步必须独立阅读对应原文并给一项 "
+    '{"clause_id":"逐字回显该步ID","quote":"仅来自该步的短引文","actor":"target|other|unclear",'
+    '"actuality":"actual|non_actual|unclear","scene":"same|changed|unclear"}。'
+    "第一步引文须含实际行动人的姓名，后面每步引用做什么的原词。必须齐全、逐项按序；其它类型的 item 不输出 action_steps。"
+    "核对省略主语是否仍是显名角色、每步是否实际发生、是否在该句原有场景。传闻、委托给另一人、他人接手、"
+    "计划、问句、引语、换场或主体不清均不可签为同一角色的实际行动。scene 比较句内场景连续性，不比较作者习惯适用的场合。"
+    "目标结论只针对末分句，勿把前一动作的事实或另一行的主体借给本项；完整路径全部成立且其余语义槽满足时才能 supported。"
+)
+TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8 + _HABIT_ACTION_STEP_GUIDE
+TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10 + _HABIT_ACTION_STEP_GUIDE
+
 MAX_DRAFT_ACTOR_REVIEW_REPORTED_TOKENS = 1_000_000
 MAX_TARGET_BOUND_DRAFT_CONTRACT_ATTEMPTS = 2
 
@@ -352,6 +369,11 @@ def _target_bound_review_hints(
             "proposal_id": proposal.proposal_id,
             "required_basis_ids": basis_ids,
         }
+        if proposal.binding_kind == "habit_action_chain":
+            hint["action_path"] = [
+                {"clause_id": clause.support_id, "text": clause.text}
+                for clause in habit_action_path(request.lines, request.target, proposal)
+            ]
         if request.schema_version in {
             TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3,
             TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
@@ -399,6 +421,8 @@ def build_target_bound_draft_review_prompts(
         system = {
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11,
+            TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12,
+            TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
         }.get(requests[0].prompt_version, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8)
     elif requests[0].schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3:

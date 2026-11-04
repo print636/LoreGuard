@@ -38,6 +38,7 @@ from app.character_traits import (
     _validated_comparison_key,
 )
 from scripts.run_evidence_investigator_live import (
+    _HABIT_ACTION_REVIEW,
     _SCOPED_DRAFT_DIRECTION,
     _local_service_artifact_sha256,
     _safe_runtime_provenance as _safe_evidence_runtime_provenance,
@@ -141,6 +142,7 @@ _TARGET_BOUND_DRAFT_REVIEW_V2 = {
     ),
 }
 _TARGET_BOUND_DRAFT_REVIEW_V3 = {
+    **_HABIT_ACTION_REVIEW,
     **_SCOPED_DRAFT_DIRECTION,
     "target_bound_draft_review_schema_version": (
         "character-target-bound-draft-review-v4"

@@ -191,6 +191,40 @@ def test_scoped_draft_direction_reaches_only_enabled_purposes_and_is_metered(rev
     )
 
 
+@pytest.mark.parametrize("enabled", (False, True))
+def test_habit_action_reviews_use_the_metered_target_reviewer_only_when_enabled(enabled):
+    from app.character_draft_actor_review_provider import (
+        TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
+    )
+
+    settings = _settings(character_draft_actor_review_v1=True,
+                         character_target_bound_draft_review_v2=not enabled,
+                         character_target_bound_draft_review_v3=enabled)
+    sent = []
+
+    def respond(request):
+        sent.append(json.loads(request.content)["messages"][0]["content"])
+        return _response_http("{}")
+
+    accounting, usage = _http_accounting(settings, respond)
+    prompts = (TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13)
+    for system in prompts:
+        if enabled:
+            accounting.complete(system, "frozen observations")
+        else:
+            with pytest.raises(RuntimeError, match="unsupported character consistency provider purpose"):
+                accounting.complete(system, "frozen observations")
+        with pytest.raises(RuntimeError, match="unsupported character consistency provider purpose"):
+            accounting.complete(system + SCOPED_DRAFT_DIRECTION_GUIDE, "frozen observations")
+    assert sent == (list(prompts) if enabled else [])
+    assert usage.successful_calls == usage.logical_calls == len(sent)
+    assert usage.charged_tokens == sum(
+        estimate_issue_evidence_review_tokens(system, "frozen observations",
+                                              completion_reserve=settings.character_draft_actor_review_completion_tokens)
+        for system in sent
+    )
+
+
 @pytest.mark.parametrize("mutant", ["unknown", "prefix", "suffix", "wrong_parent", "targeted_parent", "repeat", "old_concat"])
 def test_audit_purpose_is_exact_not_substring_or_fallback(mutant):
     settings = _settings()

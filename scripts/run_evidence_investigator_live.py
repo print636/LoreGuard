@@ -546,7 +546,14 @@ _SCOPED_DRAFT_DIRECTION = {
     "scoped_draft_direction_version": "character-scoped-draft-direction-v1",
     "scoped_draft_direction_guide_sha256": "c8b6e937642ea73e2a644789b8ca4a4717ffc5522a358693d99224b55841b6c3",
 }
-_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS = _CHARACTER_SCOPED_OBJECT_KEYS | _SCOPED_DRAFT_DIRECTION.keys()
+_CHARACTER_SCOPED_DIRECTION_KEYS = _CHARACTER_SCOPED_OBJECT_KEYS | _SCOPED_DRAFT_DIRECTION.keys()
+_HABIT_ACTION_REVIEW = {
+    "habit_action_review_prompt_version": "character-target-bound-draft-review-prompt-v12",
+    "habit_action_review_prompt_sha256": "1a13760a78d8a7b2fff7d1b67808be87cdc44bd490c7883f3f7509ae58d893df",
+    "habit_action_claim_review_prompt_version": "character-target-bound-draft-review-prompt-v13",
+    "habit_action_claim_review_prompt_sha256": "c4587b9cbdd99e8ed5f9d6ca11c606d32dee926321062543f6e1e707732e1de5",
+}
+_CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS = _CHARACTER_SCOPED_DIRECTION_KEYS | _HABIT_ACTION_REVIEW.keys()
 _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_SCHEMA_VERSION = (
     "character-target-bound-draft-review-v2"
 )
@@ -3342,6 +3349,7 @@ def _valid_character_target_bound_draft_review_limits(
         _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_V3_KEYS,
         _CHARACTER_SCOPED_CLAIM_KEYS,
         _CHARACTER_SCOPED_OBJECT_KEYS,
+        _CHARACTER_SCOPED_DIRECTION_KEYS,
         _CHARACTER_TARGET_BOUND_DRAFT_REVIEW_KEYS,
     ):
         return False
@@ -3359,6 +3367,7 @@ def _valid_character_target_bound_draft_review_limits(
     for key, version in (
         (_PRIMARY_SCOPED_CLAIM_VERSION_KEY, _PRIMARY_SCOPED_CLAIM_VERSION),
         (_PRIMARY_SCOPED_OBJECT_VERSION_KEY, _PRIMARY_SCOPED_OBJECT_VERSION),
+        *_HABIT_ACTION_REVIEW.items(),
     ):
         if key in present and limits[key] != (version if enabled_v3 else None):
             return False

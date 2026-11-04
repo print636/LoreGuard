@@ -49,11 +49,17 @@ from .character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13,
     TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
 )
 from .character_explanation_review import (
     EXPLANATION_REVIEW_PROMPT_V2,
     EXPLANATION_REVIEW_SCHEMA_V2,
+)
+from .character_draft_actor_review_provider import (
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
 )
 from .embeddings import EmbeddingNotConfiguredError, OpenAICompatibleEmbeddingProvider
 from .evidence_chunks import EvidenceChunker
@@ -536,6 +542,18 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             ),
             "primary_scoped_object_review_prompt_version": (
                 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 if settings.character_target_bound_draft_review_v3 else None
+            ),
+            "habit_action_review_prompt_version": (
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12 if settings.character_target_bound_draft_review_v3 else None
+            ),
+            "habit_action_review_prompt_sha256": (
+                _fingerprint(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12) if settings.character_target_bound_draft_review_v3 else None
+            ),
+            "habit_action_claim_review_prompt_version": (
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13 if settings.character_target_bound_draft_review_v3 else None
+            ),
+            "habit_action_claim_review_prompt_sha256": (
+                _fingerprint(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13) if settings.character_target_bound_draft_review_v3 else None
             ),
             # Fixed capability shared by extraction and verification of author-defined axes.
             "scoped_draft_direction_version": SCOPED_DRAFT_DIRECTION_VERSION,

@@ -210,6 +210,9 @@ TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8 = (
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 = "character-target-bound-draft-review-prompt-v9"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10 = "character-target-bound-draft-review-prompt-v10"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 = "character-target-bound-draft-review-prompt-v11"
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12 = "character-target-bound-draft-review-prompt-v12"
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13 = "character-target-bound-draft-review-prompt-v13"
+_HABIT_ACTION_PROMPTS = {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13}
 HABIT_CONTEXT_TARGET_VERSION = "character-habit-context-target-v1"
 HABIT_CONTEXT_TARGET_GUIDE = (
     "habit_contexts 是作者确认的习惯适用场景，用来识别正在比较的行为，不是新稿证据。"
@@ -1692,6 +1695,7 @@ class TargetBoundDraftProposal(BaseModel):
         "narrator_explicit_attribution",
         "adjacent_zero_subject",
         "named_direct_speech",
+        "habit_action_chain",
     ]
     target_digest: str = Field(pattern=_TARGET_DIGEST)
     canonical_statement: str = Field(min_length=2, max_length=300)
@@ -1744,6 +1748,8 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
         "character-target-bound-draft-review-prompt-v9",
         "character-target-bound-draft-review-prompt-v10",
         "character-target-bound-draft-review-prompt-v11",
+        "character-target-bound-draft-review-prompt-v12",
+        "character-target-bound-draft-review-prompt-v13",
     ] = (
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
     )
@@ -1770,7 +1776,14 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
 
     @model_validator(mode="after")
     def validate_target_bound_request(self) -> "TargetBoundDraftReviewRequest":
-        if self.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11}:
+        if self.prompt_version in _HABIT_ACTION_PROMPTS:
+            if (
+                not self.target.habit_contexts or self.target.dimension != "contextual_behavior"
+                or (self.primary_claim is not None) != (self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13)
+                or self.primary_claim is not None and {"key_object", "include_previous_line"} & self.primary_claim.model_fields_set
+            ):
+                raise ValueError("target_bound_habit_claim_invalid")
+        elif self.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11}:
             if (
                 self.primary_claim is None
                 or (self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11) != ("key_object" in self.primary_claim.model_fields_set)
@@ -1791,6 +1804,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
             and self.prompt_version not in {
                 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
                 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11,
+                *_HABIT_ACTION_PROMPTS,
             }
         ):
             raise ValueError("target_bound_protocol_identity_invalid")
@@ -1843,7 +1857,9 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
                     or proposal.line_start != proposal.line_end or anchor.line_number != fact.line_number
                     or anchor.end_offset >= fact.start_offset
                 )
-                or proposal.binding_kind not in {"adjacent_zero_subject", "named_direct_speech"}
+                or proposal.binding_kind == "habit_action_chain"
+                and (self.prompt_version not in _HABIT_ACTION_PROMPTS or not habit_action_path(self.lines, self.target, proposal))
+                or proposal.binding_kind not in {"adjacent_zero_subject", "named_direct_speech", "habit_action_chain"}
                 and proposal.actor_anchor_id is not None
                 or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2
                 and proposal.binding_kind == "explicit_named_subject"
@@ -1903,6 +1919,15 @@ class ClaimObjectGrounding(BaseModel):
     antecedent_quote: str | None = Field(max_length=80)
 
 
+class HabitActionStep(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    clause_id: str = Field(pattern=_SUPPORT_ID)
+    quote: str = Field(min_length=1, max_length=160)
+    actor: Literal["target", "other", "unclear"]
+    actuality: Literal["actual", "non_actual", "unclear"]
+    scene: Literal["same", "changed", "unclear"]
+
+
 class TargetBoundDraftReviewItem(BaseModel):
     """Only enums and frozen IDs may cross back from the model."""
 
@@ -1942,11 +1967,12 @@ class TargetBoundDraftReviewItem(BaseModel):
     object_start_offset: int | None = Field(default=None, ge=0, le=20_000, strict=True)
     object_end_offset: int | None = Field(default=None, ge=1, le=20_000, strict=True)
     basis_ids: tuple[str, ...] = Field(max_length=MAX_DRAFT_ACTOR_CLAUSES)
+    action_steps: tuple[HabitActionStep, ...] | None = Field(default=None, max_length=3)
 
     @model_serializer(mode="wrap")
     def serialize_item(self, handler):
         data = handler(self)
-        for name in ("claim_digest", "claim_relation", "claim_object"):
+        for name in ("claim_digest", "claim_relation", "claim_object", "action_steps"):
             if name not in self.model_fields_set:
                 data.pop(name, None)
         return data
@@ -2147,6 +2173,58 @@ def _zero_subject_statement(
     return target.character + text
 
 
+_HABIT_CONTINUATION_FORM = re.compile(
+    r"^(?:(?:却|又|并|还|仍|随即|随后|接着|然后){0,2})"
+    r"(?:逐(?:一|项|件|个|条|页|批)|依次|故意|刻意|特意|亲手|顺手|随手|把|将)"
+)
+
+
+def habit_action_path(
+    lines: tuple[ScopeReviewLine, ...],
+    target: TargetBoundDraftReviewTarget,
+    proposal: TargetBoundDraftProposal,
+) -> tuple[ScopeReviewClause, ...]:
+    """An eligible proposal is still only a question about one frozen path."""
+    if not target.habit_contexts or proposal.line_start != proposal.line_end:
+        return ()
+    line = next((row for row in lines if row.line_number == proposal.line_start), None)
+    if line is None:
+        return ()
+    positions = {clause.support_id: i for i, clause in enumerate(line.clauses)}
+    start = positions.get(proposal.actor_anchor_id)
+    end = positions.get(proposal.fact_clause_id)
+    if start is None or end is None or not 1 <= end - start <= 2:
+        return ()
+    path = line.clauses[start:end + 1]
+    if proposal.canonical_statement != target.character + path[-1].text:
+        return ()
+    named = _canonical_named_statement(path[0], target)
+    if not named or named[1] != "explicit_named_subject":
+        return ()
+    for previous, current in zip(path, path[1:]):
+        # Only comma continuations inside one sentence. An unrestricted clause
+        # after a comma may start with a new name, speaker, scene or condition.
+        if line.text[previous.end_offset:current.start_offset].strip() not in {",", "，"}:
+            return ()
+        text = current.text
+        if (
+            _unsafe_target_clause(text) or _VOICE.search(text) or _JOINT.search(text)
+            or _BRANCH.search(text) or _TARGET_EXPLICIT_OTHER_ACTOR.match(text)
+            or _exact_actor_occurrences(text, target)
+        ):
+            return ()
+        opened = _HABIT_CONTINUATION_FORM.match(text)
+        if opened is not None:
+            tail = text[opened.end():]
+            if not tail or not opened.group().endswith(("把", "将")) and (
+                tail.startswith(_TARGET_ZERO_SUBJECT_OVERT_PRONOUNS) or _OTHER_SUBJECT.match(tail)
+            ):
+                return ()
+        elif _zero_subject_statement(current, target) is None:
+            return ()
+    return path
+
+
 def _target_bound_proposal_payload(
     proposal: TargetBoundDraftProposal | TargetBoundDraftReviewProposal,
 ) -> dict[str, object]:
@@ -2234,6 +2312,7 @@ def build_target_bound_draft_proposals(
     protocol_version: Literal["v2", "v3", "v4"] = "v2",
     allow_named_speech: bool = False,
     primary_claim_review: bool = False,
+    allow_habit_chain: bool = True,
 ) -> tuple[DraftActorClauseIndex, tuple[TargetBoundDraftProposal, ...]]:
     """Create bounded structural leads; this function never certifies semantics."""
 
@@ -2291,6 +2370,22 @@ def build_target_bound_draft_proposals(
     # actuality, axis/object and direction; adjacency is never treated as that
     # proof by itself.
     for position in named_positions:
+        if allow_habit_chain and protocol_version == "v4" and target.habit_contexts:
+            anchor = ordered[position]
+            for fact in ordered[position + 1:position + 3]:
+                statement = target.character + fact.text
+                if len(statement) > 300:
+                    break
+                candidate = TargetBoundDraftProposal(
+                    source_sha256=source.content_sha256, line_start=line_start, line_end=line_end,
+                    evidence=evidence, fact_clause_id=fact.support_id,
+                    actor_anchor_id=anchor.support_id, binding_kind="habit_action_chain",
+                    target_digest=digest, canonical_statement=statement,
+                )
+                if not habit_action_path(index.lines, target, candidate):
+                    break
+                proposals.append(candidate)
+            continue
         next_position = position + 1
         if next_position >= len(ordered):
             continue
@@ -2395,6 +2490,7 @@ def build_target_bound_draft_review_request(
     protocol_version: Literal["v2", "v3", "v4"] = "v2",
     allow_named_speech: bool = False,
     primary_claim: PrimaryDraftClaim | None = None,
+    allow_habit_chain: bool = True,
 ) -> TargetBoundDraftReviewRequest:
     if (
         not isinstance(index, DraftActorClauseIndex)
@@ -2413,6 +2509,7 @@ def build_target_bound_draft_review_request(
         protocol_version=protocol_version,
         allow_named_speech=allow_named_speech,
         primary_claim_review=primary_claim is not None,
+        allow_habit_chain=allow_habit_chain,
     )
     requested = {
         json.dumps(
@@ -2467,7 +2564,9 @@ def build_target_bound_draft_review_request(
         review_line_start=review_start,
         review_line_end=review_end,
     )
-    if primary_claim is not None:
+    if allow_habit_chain and protocol_version == "v4" and target.habit_contexts:
+        prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13 if primary_claim is not None else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12
+    elif primary_claim is not None:
         prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 if primary_claim.key_object else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10
     elif protocol_version == "v4":
         prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9 if allow_named_speech else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V8
@@ -2525,6 +2624,7 @@ def verify_target_bound_draft_review_source(
             line_start=line_start,
             line_end=line_end,
             primary_claim_review=expected_primary_claim is not None,
+            allow_habit_chain=request.prompt_version in _HABIT_ACTION_PROMPTS,
             allow_named_speech=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
             protocol_version=(
                 "v4"
@@ -2551,6 +2651,7 @@ def verify_target_bound_draft_review_source(
             frozen_content=frozen_content,
             expected_source=expected_source,
             primary_claim=expected_primary_claim,
+            allow_habit_chain=request.prompt_version in _HABIT_ACTION_PROMPTS,
             allow_named_speech=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
             protocol_version=(
                 "v4"
@@ -2975,6 +3076,25 @@ def evaluate_target_bound_draft_review(
     decisions: list[TargetBoundDraftReviewDecision] = []
     for proposal in request.proposals:
         item = returned[proposal.proposal_id]
+        if proposal.binding_kind == "habit_action_chain":
+            path = habit_action_path(request.lines, request.target, proposal)
+            steps = item.action_steps or ()
+            checked = (
+                bool(path) and len(steps) == len(path)
+                and all(step.clause_id == clause.support_id and step.quote.strip()
+                        and step.quote in clause.text for step, clause in zip(steps, path))
+                and bool(_exact_actor_occurrences(steps[0].quote, request.target))
+            )
+            if not checked or (item.verdict == "supported" and not all(
+                step.actor == "target" and step.actuality == "actual" and step.scene == "same"
+                for step in steps
+            )):
+                decisions.append(TargetBoundDraftReviewDecision(
+                    proposal_id=proposal.proposal_id, verdict="uncertain", reason="basis_invalid",
+                ))
+                continue
+        elif "action_steps" in item.model_fields_set:
+            return _uncertain_target_bound_review(request, "response_mismatch")
         claim_fields = {"claim_digest", "claim_relation"} & item.model_fields_set
         object_review = request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11
         if (

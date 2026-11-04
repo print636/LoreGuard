@@ -62,6 +62,8 @@ from .character_draft_actor_review_provider import (
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V10,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
 )
 from .character_drift import (
     CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
@@ -937,6 +939,11 @@ class _CharacterConsistencyAccountingProvider:
                 TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V11,
             }
             and self.settings.character_target_bound_draft_review_v3
+        ) or (
+            self.settings.character_target_bound_draft_review_v3 and system in {
+                TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12,
+                TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
+            }
         ):
             if self.draft_actor_review_provider is None:
                 bounded = self.fork_for_character_draft_actor_review(

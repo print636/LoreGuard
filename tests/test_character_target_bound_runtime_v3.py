@@ -58,6 +58,10 @@ def test_v3_runtime_identity_round_trips_strict_consumer():
         "target_bound_draft_review_prompt_version",
         "primary_scoped_claim_review_prompt_version",
         "primary_scoped_object_review_prompt_version",
+        "habit_action_review_prompt_version",
+        "habit_action_claim_review_prompt_version",
+        "habit_action_review_prompt_sha256",
+        "habit_action_claim_review_prompt_sha256",
         "scoped_draft_direction_version",
         "scoped_draft_direction_guide_sha256",
         "target_bound_draft_review_signal_prompt_version",
@@ -74,6 +78,11 @@ def test_v3_runtime_identity_tampering_is_rejected(field):
 def test_older_receipt_remains_readable_but_cannot_pass_current_live_preflight(previous_version):
     provenance = safe_runtime_provenance(_settings())
     limits = provenance["character_consistency_limits"]
+    from scripts.run_evidence_investigator_live import _HABIT_ACTION_REVIEW
+    for key in _HABIT_ACTION_REVIEW:
+        del limits[key]
+    assert _safe_runtime_provenance(provenance) == provenance
+    assert not _target_bound_semantic_v3_ready(limits)
     del limits["scoped_draft_direction_version"]
     del limits["scoped_draft_direction_guide_sha256"]
     if previous_version < 11:

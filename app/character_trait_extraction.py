@@ -2847,11 +2847,18 @@ class CharacterSignalExtractor:
                     parsed.model_copy(update={"attempt": attempted_calls}) if parsed is not None
                     else DraftSignalTraceAttemptV1(attempt=attempted_calls, observability="unavailable")
                 )
+            targeted_habit = bool(
+                target_bound_review_v3 and len(targets) == 1 and targets[0].habit_contexts
+                and targets[0].dimension == "contextual_behavior"
+            )
             if (
                 target_bound_review_v3
                 and not target_bound_review_performed
                 and not validation.signals
                 and not target_bound_signals
+                # An independent source discovery is not proof of equivalence
+                # to a rejected generated claim on the same line.
+                and not (targeted_habit and validation.failures)
             ):
                 assert isinstance(source_identity, ScopeReviewSourceIdentity)
                 assert isinstance(frozen_content, str)
@@ -3018,16 +3025,30 @@ class CharacterSignalExtractor:
                             and key not in draft_actor_rejected
                         ):
                             draft_actor_coverage_debt.add(key)
-            primary_recovery = bool(primary_value_targets) and (
-                package_attempt + 1 == settings.character_signal_package_max_attempts
-            )
-            if primary_recovery:
+            last_attempt = package_attempt + 1 == settings.character_signal_package_max_attempts
+            habit_debts = _habit_claim_debts(
+                validation, response_text, chunk, targets if targeted_habit else primary_value_targets,
+                source_identity, frozen_content, first_ordinal=target_ordinal if targeted_habit else 1,
+                allowed_ranges=allowed_targeted_evidence_ranges,
+            ) if not target_bound_review_performed else ()
+            primary_debts = ()
+            recovery_label = "primary_value"
+            if primary_value_targets and (last_attempt or habit_debts):
                 primary_debts, diagnostic_counts = _primary_value_debts(
                     validation, response_text, chunk, primary_value_targets,
                     source_identity, frozen_content,
                 )
+                if last_attempt:
+                    target_bound_reason_counts.update(diagnostic_counts)
+            # A single review batch has one protocol. Preserve the final-attempt
+            # schedule for existing scoped-axis records. Otherwise review the actual
+            # habit record now, before a regeneration can replace its claim.
+            if habit_debts and not primary_debts:
+                recovery_label = "habit_claim"
+                primary_debts = habit_debts
+            primary_recovery = bool(primary_debts) and (last_attempt or recovery_label == "habit_claim")
+            if primary_recovery:
                 validation = replace(validation, target_bound_draft_deferred=primary_debts)
-                target_bound_reason_counts.update(diagnostic_counts)
             if (
                 (target_bound_review_v2 or primary_recovery)
                 and validation.target_bound_draft_deferred
@@ -3040,6 +3061,10 @@ class CharacterSignalExtractor:
                     chunk=chunk,
                     deferred=validation.target_bound_draft_deferred,
                     primary_value_recovery=primary_recovery,
+                    accepted_target_windows=(
+                        {(row.evidence.line_start, row.evidence.line_end) for row in validation.signals}
+                        if targeted_habit and recovery_label == "habit_claim" else None
+                    ),
                     package_attempt=package_attempt + 1,
                     source_identity=source_identity,
                     frozen_content=frozen_content,
@@ -3069,17 +3094,17 @@ class CharacterSignalExtractor:
                     dict(target_review.reason_counts)
                 )
                 if primary_recovery:
-                    target_bound_reason_counts["primary_value_recovery_selected"] += len(
+                    target_bound_reason_counts[f"{recovery_label}_recovery_selected"] += len(
                         validation.target_bound_draft_deferred
                     )
                     if target_review.attempted_calls:
-                        target_bound_reason_counts["primary_value_recovery_calls"] += target_review.attempted_calls
+                        target_bound_reason_counts[f"{recovery_label}_recovery_calls"] += target_review.attempted_calls
                     if target_review.resolved_record_indices:
-                        target_bound_reason_counts["primary_value_recovery_supported"] += len(
+                        target_bound_reason_counts[f"{recovery_label}_recovery_supported"] += len(
                             target_review.resolved_record_indices
                         )
                     if target_review.unresolved_count:
-                        target_bound_reason_counts["primary_value_recovery_unresolved"] += target_review.unresolved_count
+                        target_bound_reason_counts[f"{recovery_label}_recovery_unresolved"] += target_review.unresolved_count
                 target_bound_slot_conflict_counts.update(
                     dict(target_review.slot_conflict_counts)
                 )
@@ -3366,6 +3391,9 @@ class CharacterSignalExtractor:
                     ),
                 )
 
+            if recovery_label == "habit_claim" and target_bound_review_performed:
+                # A different generation is not a certificate for any remaining sibling.
+                break
             verified_before_clean.extend(validation.signals)
             retry_categories = tuple(sorted((validation.reason_counts or {}).keys()))
             retry_failures = validation.failures
@@ -5144,6 +5172,71 @@ def _needs_primary_object_review(record: _RawCharacterSignal, target: CharacterS
     )
 
 
+def _habit_claim_debts(
+    validation: _ValidatedSignalPackage, response_text: str, chunk: CharacterSignalChunk,
+    targets: tuple[CharacterSignalTarget, ...],
+    source_identity: ScopeReviewSourceIdentity | HistoryReviewSourceIdentity | None,
+    frozen_content: str | None, *, first_ordinal: int | None,
+    allowed_ranges: tuple[tuple[int, int], ...],
+) -> tuple[_TargetBoundDraftDeferred, ...]:
+    """Keep failed observed actions attached to their original frozen target and record."""
+    if first_ordinal is None:
+        return ()
+    candidates = [(ordinal, target) for ordinal, target in enumerate(targets, first_ordinal)
+                  if target.dimension == "contextual_behavior" and target.habit_contexts]
+    if (not candidates or not validation.parsed or not validation.failures
+            or not _draft_actor_source_matches_chunk(source_identity, frozen_content, chunk)):
+        return ()
+    envelope = _ENVELOPE_ADAPTER.validate_json(response_text)
+    separately_reviewed = {item.record_index for item in validation.draft_actor_deferred}
+    debts = []
+    for failure in validation.failures:
+        if failure.record_index is None or failure.record_index in separately_reviewed or not (
+            failure.reason == "character_support"
+            or failure.statement_support_kind in {"lexical_polarity", "anchor_overlap"}
+        ):
+            continue
+        record = _RECORD_ADAPTER.validate_python(envelope.records[failure.record_index])
+        window = (record.source_line_start, record.source_line_end)
+        if (record.dimension != "contextual_behavior" or record.key_object.strip()
+                or record.stability not in {"temporary", "situational"}
+                or window[0] != window[1] or (allowed_ranges and window not in allowed_ranges)):
+            continue
+        try:
+            # Hard source, quote, joint-subject and occurrence gates still
+            # run. Only the rejected label/attribution can go to review.
+            signal = _bind_record(record, chunk, skip_draft_actor_attribution=True,
+                                  skip_lexical_polarity=True, defer_primary_anchor_overlap=True)
+        except (TypeError, ValueError):
+            continue
+        matches = [
+            (ordinal, target) for ordinal, target in candidates
+            if record.character in _target_actor_literals(target)
+            and record.polarity == target.requested_polarity
+            and target.comparison_key == stable_trait_identity(record.dimension, record.trait_key)
+            and not any(_ranges_overlap(window, excluded) for excluded in target.existing_evidence_ranges)
+        ]
+        if len(matches) != 1:
+            continue
+        ordinal, target = matches[0]
+        try:
+            index, proposals = build_target_bound_draft_proposals(
+                frozen_content, source_identity, _target_bound_review_target(target, target_ordinal=ordinal),
+                line_start=window[0], line_end=window[1], protocol_version="v4", primary_claim_review=True,
+            )
+        except (TypeError, ValueError):
+            continue
+        choices = tuple(p for p in proposals if p.evidence == record.evidence)
+        if not choices:
+            continue
+        debts.append(_TargetBoundDraftDeferred(
+            record_index=failure.record_index, record=record, preflight_signal=signal, index=index,
+            proposal=choices[0], alternatives=choices[1:], claim_review=True,
+            target=target, target_ordinal=ordinal, failure_reason=failure.reason,
+        ))
+    return tuple(debts)
+
+
 def _primary_value_debts(
     validation: _ValidatedSignalPackage, response_text: str, chunk: CharacterSignalChunk,
     targets: tuple[CharacterSignalTarget, ...],
@@ -5869,6 +5962,7 @@ def _review_target_bound_draft_candidates(
     chunk: CharacterSignalChunk,
     deferred: tuple[_TargetBoundDraftDeferred, ...],
     primary_value_recovery: bool = False,
+    accepted_target_windows: set[tuple[int, int]] | None = None,
     package_attempt: int = 1,
     source_identity: ScopeReviewSourceIdentity,
     frozen_content: str,
@@ -5896,6 +5990,10 @@ def _review_target_bound_draft_candidates(
     ] = {}
     claim_review = primary_value_recovery and any(item.claim_review for item in deferred)
     object_review = primary_value_recovery and any(item.object_review for item in deferred)
+    review_label = (
+        "habit" if all(item.target.dimension == "contextual_behavior" for item in deferred)
+        else "primary_value"
+    )
     try:
         grouped: dict[tuple[int, int, int, int], list[_TargetBoundDraftDeferred]] = defaultdict(list)
         for item in deferred:
@@ -5969,7 +6067,7 @@ def _review_target_bound_draft_candidates(
     slot_conflict_counts: Counter[TargetBoundSlotConflict] = Counter()
     failure_events: list[TargetBoundFailureEventV1] = []
     if claim_review and run.attempted_calls:
-        review_reasons["primary_value_claim_review_calls"] += run.attempted_calls
+        review_reasons[f"{review_label}_claim_review_calls"] += run.attempted_calls
     if object_review and run.attempted_calls:
         review_reasons["primary_value_object_review_calls"] += run.attempted_calls
     if run.failure_reason is not None:
@@ -6002,9 +6100,9 @@ def _review_target_bound_draft_candidates(
                     if run.failure_reason is None:
                         if all(item.different_claim_digest == digest for item in decisions):
                             rejected += 1
-                            review_reasons["primary_value_recovery_rejected"] += 1
+                            review_reasons[f"{review_label}_recovery_rejected"] += 1
                         else:
-                            review_reasons["primary_value_paraphrase_ambiguous_source"] += 1
+                            review_reasons[f"{review_label}_paraphrase_ambiguous_source"] += 1
                         for item in decisions:
                             slot_conflict_counts.update(item.slot_conflicts)
                     continue
@@ -6026,7 +6124,7 @@ def _review_target_bound_draft_candidates(
                     rejected += 1
                     if primary_value_recovery:
                         unresolved.add(item.record_index)
-                        review_reasons["primary_value_recovery_rejected"] += 1
+                        review_reasons[f"{review_label}_recovery_rejected"] += 1
                     else:
                         resolved.add(item.record_index)
                     continue
@@ -6057,10 +6155,18 @@ def _review_target_bound_draft_candidates(
                     unresolved.add(item.record_index)
                     review_reasons["target_bound_certificate_invalid"] += 1
                     continue
+                if accepted_target_windows is not None and signal.id not in signals:
+                    window = (signal.evidence.line_start, signal.evidence.line_end)
+                    if window in accepted_target_windows or len(accepted_target_windows) >= 3:
+                        unresolved.add(item.record_index)
+                        review_reasons["targeted_duplicate_evidence" if window in accepted_target_windows
+                                       else "targeted_record_limit"] += 1
+                        continue
+                    accepted_target_windows.add(window)
                 resolved.add(item.record_index)
                 signals.setdefault(signal.id, signal)
     if claim_review and resolved:
-        review_reasons["primary_value_claim_review_supported"] += len(resolved)
+        review_reasons[f"{review_label}_claim_review_supported"] += len(resolved)
     if object_review and resolved:
         review_reasons["primary_value_object_review_supported"] += len(resolved)
     unresolved.update(deferred_indices - resolved - unresolved)
@@ -7817,7 +7923,10 @@ def _bind_record(
         raise ValueError("key_object_support")
     if skip_lexical_polarity and (
         chunk.source_kind not in {"published_history", "draft"}
-        or record.dimension not in {"value", "behavior_boundary"}
+        or not (record.dimension in {"value", "behavior_boundary"} or (
+            defer_primary_anchor_overlap and chunk.source_kind == "draft"
+            and record.dimension == "contextual_behavior"
+        ))
         or record.source_line_start != record.source_line_end
         or support_index is not None
         or semantic_scope_v5
