@@ -5068,6 +5068,17 @@ def _target_bound_draft_deferred_candidate(
     )
 
 
+def _primary_value_other_gate_code(error: TypeError | ValueError) -> str:
+    """Keep only fixed binder reason codes in public counters."""
+    if isinstance(error, _StatementSupportFailure):
+        return error.kind if error.kind in get_args(StatementSupportFailureKind) else "unknown"
+    if isinstance(error, ValueError) and len(error.args) == 1:
+        reason = error.args[0]
+        if type(reason) is str and reason in _REJECTION_REASONS:
+            return reason
+    return "unknown"
+
+
 def _primary_value_debts(
     validation: _ValidatedSignalPackage, response_text: str, chunk: CharacterSignalChunk,
     targets: tuple[CharacterSignalTarget, ...],
@@ -5090,13 +5101,15 @@ def _primary_value_debts(
             continue
         if record.stability not in {"temporary", "situational"}:
             counts["primary_value_recovery_other_gate"] += 1
+            counts["primary_value_recovery_other_gate_stability"] += 1
             continue
         # Re-run all ordinary gates including actor, literal object, and statement
         # anchoring. Only the lexical polarity check that actually failed is deferred.
         try:
             preflight = _bind_record(record, chunk, skip_lexical_polarity=True)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             counts["primary_value_recovery_other_gate"] += 1
+            counts[f"primary_value_recovery_other_gate_{_primary_value_other_gate_code(exc)}"] += 1
             continue
         matched = [
             (ordinal, target) for ordinal, target in enumerate(targets, 1)

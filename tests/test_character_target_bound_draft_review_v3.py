@@ -59,8 +59,10 @@ from app.character_trait_extraction import (
     CharacterSignalExtractor,
     CharacterSignalTarget,
     _SignalValidationFailure,
+    _StatementSupportFailure,
     _TargetBoundDraftOutcome,
     _ValidatedSignalPackage,
+    _primary_value_other_gate_code,
     _resolve_completed_target_bound_discovery,
     _target_bound_review_target,
     stable_trait_identity,
@@ -1804,6 +1806,9 @@ def _scoped_rescue_target():
     ("timeout", 1, "target_bound_provider_timeout"),
     ("different_claim", 0, "primary_value_recovery_no_exact_proposal"),
     ("different_axis", 0, "primary_value_recovery_target_mismatch"),
+    ("stable", 0, "primary_value_recovery_other_gate_stability"),
+    ("weak_anchor", 0, "primary_value_recovery_other_gate_anchor_overlap"),
+    ("multiline", 0, "primary_value_recovery_other_gate_statement_support"),
     ("disabled", 0, None),
 ])
 def test_final_primary_value_recovery_requires_its_own_frozen_claim(scenario, calls, reason):
@@ -1820,6 +1825,13 @@ def test_final_primary_value_recovery_requires_its_own_frozen_claim(scenario, ca
         record["statement"] = "唐岫主动转卖救援优先物资"
     if scenario == "different_axis":
         record["trait_key"] = "other_axis"
+    if scenario == "stable":
+        record["stability"] = "stable"
+    if scenario == "weak_anchor":
+        record["statement"] = "唐岫将救援优先物资登记为跨城巡诊专用药箱"
+    if scenario == "multiline":
+        evidence += "\n夕阳落下。"
+        record.update(evidence=evidence, source_line_end=2)
     provider = _V3Provider(
         mode="timeout" if scenario == "timeout" else "supported",
         object_text="转卖给商贩", signal_records=[record],
@@ -1838,6 +1850,8 @@ def test_final_primary_value_recovery_requires_its_own_frozen_claim(scenario, ca
     assert result.diagnostics.reason_counts.get("primary_value_recovery_calls", 0) == calls
     if reason:
         assert result.diagnostics.reason_counts[reason] == 1
+        if reason.startswith("primary_value_recovery_other_gate_"):
+            assert result.diagnostics.reason_counts["primary_value_recovery_other_gate"] == 1
     if scenario == "supported":
         assert result.diagnostics.outcome == "completed"
         assert result.diagnostics.draft_trace.final_accepted_record_ordinals == (1,)
@@ -1845,6 +1859,11 @@ def test_final_primary_value_recovery_requires_its_own_frozen_claim(scenario, ca
     else:
         assert result.diagnostics.outcome in {"partial", "degraded"}
         assert not result.draft_observations
+
+
+def test_primary_value_other_gate_diagnostics_never_echo_unknown_exception_text():
+    assert _primary_value_other_gate_code(ValueError("private text")) == "unknown"
+    assert _primary_value_other_gate_code(_StatementSupportFailure("unregistered")) == "unknown"
 
 
 def test_v3_scoped_value_axis_is_bound_without_copying_baseline_object():
