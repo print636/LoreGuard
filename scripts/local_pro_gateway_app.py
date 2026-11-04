@@ -90,6 +90,7 @@ def create_app():
 
     class IsolatedSettings(config.Settings):
         model_config = SettingsConfigDict(env_file=None)
+        character_review_requires_opt_in = True
 
         @classmethod
         def settings_customise_sources(
@@ -109,6 +110,14 @@ def create_app():
         use_celery=False,
         openai_api_key="",
         enable_model_extraction=True,
+        enable_character_consistency=True,
+        character_scoped_axis_drift_v1=True,
+        character_signal_support_id_v4=True,
+        character_signal_semantic_scope_v5=True,
+        character_signal_scope_review_v1=True,
+        character_draft_actor_review_v1=True,
+        character_target_bound_draft_review_v3=True,
+        character_explanation_review_v1=True,
         account_model_local_key_path=str(account_key),
         local_model_gateway_enabled=True,
         local_model_gateway_origins="http://127.0.0.1:8317",

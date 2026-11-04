@@ -245,6 +245,75 @@ async function confirmation(page: Page, action: () => Promise<unknown>, accept: 
 function expectNoUnexpected(state: Fixture) { expect(state.unexpected).toEqual([]); }
 function expectNoAnalysis(state: Fixture) { expect(state.requests.filter((item) => item.startsWith("POST ") && /analysis-runs|inference|model-provider/u.test(item))).toEqual([]); }
 
+test("修订稿角色深度审查需逐次勾选，冻结基线失效后可改为普通复检", async ({ page }) => {
+  const state = fixture();
+  state.documents[0] = makeDocument("foundation-chapter-v2", "章节一.md", 2);
+  await mockApi(page, state);
+  let configured = true;
+  const source = { ...baseline(), mode: "draft_review", review_batch: {
+    mode: "draft_review", character_review_enabled: true, character_baseline_run_id: "character-baseline",
+  } };
+  const bodies: unknown[] = [];
+  const sourcePath = `/api/v1/analysis-runs/${runId}`;
+  await page.route("**/api/v1/account/model-provider", route => reply(route, {
+    configured, revision: 1, model: "fixture", base_url: "https://provider.example/v1", character_review_opt_in_available: true,
+  }));
+  await page.route(`**${root}/analysis-runs`, route => reply(route, [source]));
+  await page.route(`**${sourcePath}`, route => reply(route, source));
+  await page.route(`**${sourcePath}/rechecks`, async route => {
+    expect(route.request().method()).toBe("POST");
+    const body = route.request().postDataJSON();
+    bodies.push(body);
+    if (body) return reply(route, { detail: { code: "character_baseline_not_ready" } }, 409);
+    return reply(route, { id: "ordinary-recheck", project_id: projectA, baseline_run_id: runId }, 201);
+  });
+  await page.route("**/analysis-runs/ordinary-recheck/comparison?**", route => reply(route, {
+    status: "ready", project_id: projectA, baseline_run_id: runId, target_run_id: "ordinary-recheck",
+    summary: { no_longer_detected: 0, persisting: 0, new: 0, unverifiable: 0, total_target: 0, total_baseline: 0 },
+  }));
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const launchPath = `/app/projects/${projectA}/runs/${runId}/revise?step=run`;
+  await page.goto(launchPath);
+  const option = page.getByRole("checkbox", { name: "角色深度审查" });
+  const launch = page.getByRole("button", { name: "开始复检", exact: true });
+  await expect(option).toBeEnabled();
+  await expect(option).not.toBeChecked();
+  await expect(option).toHaveAccessibleDescription(/额外使用你的账户 API 额度/);
+  expect(await page.locator("form").filter({ has: option }).evaluate(form => form.scrollWidth <= form.clientWidth + 1)).toBe(true);
+  await launch.click();
+  await expect(page).toHaveURL(/recheck=ordinary-recheck/);
+  expect(bodies).toEqual([null]);
+  await page.goto(launchPath);
+  await expect(option).not.toBeChecked();
+  await option.check();
+  await launch.click();
+  await expect(page.getByRole("alert")).toContainText("角色基线已无法用于本次复检");
+  expect(bodies).toEqual([null, { character_review_enabled: true }]);
+  await option.uncheck();
+  await launch.click();
+  await expect(page).toHaveURL(/recheck=ordinary-recheck/);
+  expect(bodies).toEqual([null, { character_review_enabled: true }, null]);
+
+  configured = false;
+  await page.goto(launchPath);
+  await expect(option).toBeDisabled();
+  await expect(option).not.toBeChecked();
+  await expect(launch).toBeEnabled();
+  source.review_batch.character_review_enabled = false;
+  configured = true;
+  await page.reload();
+  await expect(launch).toBeEnabled();
+  await expect(option).toHaveCount(0);
+  await expect(page.getByText(/原审查没有可复用的角色基线/)).toBeVisible();
+  source.review_batch.character_review_enabled = true;
+  source.review_batch.character_baseline_run_id = "";
+  await page.reload();
+  await expect(page.getByText(/原审查没有可复用的角色基线/)).toBeVisible();
+  await expect(option).toHaveCount(0);
+  expectNoUnexpected(state);
+});
+
 test("01 修订上传响应丢失后同键同内容手动核对，不生成重复版本", async ({ page }) => {
   const state = fixture(); state.uploadMode = "unknown";
   await open(page, state);

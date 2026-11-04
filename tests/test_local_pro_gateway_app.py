@@ -14,6 +14,25 @@ import pytest
 REPOSITORY = Path(__file__).resolve().parents[1]
 
 
+def test_ordinary_deployment_rejects_requests_to_enable_the_local_profile():
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from app.main import app, write_limiter
+    from tests.test_review_batch import _document, _project
+
+    with (TestClient(app) as client, patch("app.main.dispatch_analysis") as dispatch,
+          patch.dict(write_limiter.events, clear=True)):
+        profile = client.get("/api/v1/account/model-provider").json()
+        assert "character_review_opt_in_available" not in profile
+        project = _project(client)["id"]
+        _document(client, project, name="profile.md", role="character_profile", publication="published")
+        response = client.post(f"/api/v1/projects/{project}/analysis-runs", json={
+            "mode": "baseline_build", "character_review_enabled": True,
+        })
+        assert response.status_code == 422
+        dispatch.assert_not_called()
+
+
 @pytest.mark.parametrize("runtime", ["", "relative/path"])
 def test_local_gateway_factory_rejects_missing_or_relative_runtime(monkeypatch, runtime):
     from scripts import local_pro_gateway_app
@@ -74,6 +93,8 @@ with TestClient(application, base_url="http://127.0.0.1:8787") as client:
     assert client.get("/api/v1/projects").status_code == 401
     assert client.get("/api/v1/account/model-provider").status_code == 401
     assert client.get("/health", headers={"Host": "untrusted.example"}).status_code == 400
+    from tests.test_local_pro_gateway_app import _exercise_author_review
+    _exercise_author_review(client)
 try:
     factory.create_app()
 except RuntimeError as failure:
@@ -99,7 +120,160 @@ print("isolated gateway application checks passed")
         env=environment,
         text=True,
         capture_output=True,
-        timeout=30,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
     assert "isolated gateway application checks passed" in result.stdout
+
+
+def _exercise_author_review(client):
+    """Use the actual factory, account, snapshots, worker and report with scripted HTTP."""
+    from unittest.mock import patch
+    import httpx
+    from app import service
+    from app.character_drift import CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
+    from app.character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
+    from app.character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
+    from app.character_trait_extraction import (
+        CHARACTER_SIGNAL_SYSTEM_PROMPT, build_formal_character_signal_system_prompt,
+    )
+    from app.model_extractor import SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT
+    from app.provider import OpenAICompatibleProvider
+    from tests.test_account_provider import register, save_provider
+    from tests.test_character_baseline_recovery import _record as formal_record
+    from tests.test_character_scope_review_pipeline import ReviewingProvider
+    from tests.test_character_consistency_stage import _confirm_only_candidate, _record, _response
+    from tests.test_character_single_event_stage import _RuntimeSingleEventProvider
+    from tests.test_review_batch import _document, _project
+
+    _, csrf = register(client)
+    client.headers.update({"X-CSRF-Token": csrf})
+    config_url = "/api/v1/account/model-provider"
+    assert client.get(config_url).json()["character_review_opt_in_available"] is True
+    project = _project(client)["id"]
+    runs_url = f"/api/v1/projects/{project}/analysis-runs"
+    profile = "祁雾一贯说话简短。"
+    draft = "祁雾在日常汇报时一口气说了很长一段话。"
+    profile_doc = _document(client, project, name="profile.md", role="character_profile",
+                            publication="published", content=profile)
+    draft_doc = _document(client, project, name="draft.md", role="chapter", publication="draft", content=draft)
+    baseline = {"mode": "baseline_build", "character_review_enabled": True}
+    assert client.post(runs_url, json=baseline).json()["detail"]["code"] == "character_review_model_unavailable"
+    assert save_provider(client, csrf, expected_revision=0, api_key="synthetic-only", model="mock-author",
+                         base_url="http://127.0.0.1:8317/v1").status_code == 200
+    formal_prompt = build_formal_character_signal_system_prompt(scope_review_v1=True)
+    formal = ReviewingProvider([formal_record(profile, character="祁雾", dimension="speech_pattern",
+                                              trait_key="concise_speech", key_object="")])
+    draft_response = _response(_record(character="祁雾", evidence=draft, polarity="negative", kind="speech_sample",
+                                       dimension="speech_pattern", trait_key="concise_speech"))
+    reviewer = _RuntimeSingleEventProvider()
+    calls = []
+
+    def respond(request):
+        assert request.url.host == "127.0.0.1" and request.url.port == 8317
+        body = json.loads(request.content)
+        assert body["model"] == "mock-author"
+        system, user = (message["content"] for message in body["messages"])
+        calls.append(system)
+        if system == SYSTEM_PROMPT:
+            content = '{"records":[]}'
+        elif system == BATCH_SYSTEM_PROMPT:
+            docs = json.loads(user.split("\n", 1)[1])["documents"]
+            content = json.dumps({"documents": [{"doc_ref": row["doc_ref"], "records": []} for row in docs]})
+        elif system in (formal_prompt, SCOPE_REVIEW_SYSTEM_PROMPT):
+            content = formal.complete(system, user).text
+        elif system in (EXPLANATION_REVIEW_SYSTEM_PROMPT, CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT):
+            content = reviewer.complete(system, user).text
+        elif system.startswith(CHARACTER_SIGNAL_SYSTEM_PROMPT):
+            content = draft_response
+        else:
+            raise AssertionError("Unexpected model contract in author workflow")
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}],
+                                         "usage": {"prompt_tokens": 17, "completion_tokens": 9}})
+
+    original_init = OpenAICompatibleProvider.__init__
+
+    def with_mock_transport(self, config=None, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(respond)
+        original_init(self, config, **kwargs)
+
+    with (
+        patch.object(OpenAICompatibleProvider, "__init__", with_mock_transport),
+        patch("app.main.dispatch_analysis", side_effect=service.execute_analysis),
+    ):
+        def start(payload, **options):
+            response = client.post(runs_url, json=payload, **options)
+            assert response.status_code == 202, response.text
+            return response.json()
+
+        default = start({})
+        assert default["review_batch"]["character_review_enabled"] is False
+        assert calls and set(calls) <= {SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT}
+        assert client.post(runs_url, json={"character_review_enabled": True}).status_code == 422
+        assert client.post(runs_url, json={**baseline, "character_review_enabled": "true"}).status_code == 422
+
+        created = start(baseline, headers={"Idempotency-Key": "baseline"})
+        baseline_id = created["id"]
+        assert created["review_batch"]["character_review_enabled"] is True
+        assert formal_prompt in calls and SCOPE_REVIEW_SYSTEM_PROMPT in calls
+        assert start(baseline, headers={"Idempotency-Key": "baseline"})["deduplicated"]
+        assert client.post(runs_url, json={"mode": "baseline_build"},
+                           headers={"Idempotency-Key": "baseline"}).status_code == 409
+        chosen = {"mode": "draft_review", "target_document_ids": [draft_doc["id"]]}
+        opted_in = {**chosen, "character_review_enabled": True, "character_baseline_run_id": baseline_id}
+        assert client.post(runs_url, json=opted_in).json()["detail"]["code"] == "character_baseline_not_ready"
+        _confirm_only_candidate(client, project, baseline_id)
+        calls.clear()
+        ordinary = start(chosen)
+        assert ordinary["review_batch"]["character_review_enabled"] is False
+        assert calls and set(calls) <= {SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT}
+        reviewed = start(opted_in)
+        assert reviewed["review_batch"]["character_baseline_run_id"] == baseline_id
+        assert calls.count(CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT) == 1
+        run_url = "/api/v1/analysis-runs/" + reviewed["id"]
+        assert client.get(run_url).json()["review_batch"]["character_review_enabled"] is True
+        worker = client.get(run_url + "/diagnostics").json()["runtime_provenance"]
+        api = client.get("/health").json()["runtime_provenance"]
+        assert worker["capabilities"] == api["capabilities"]
+        assert worker["character_consistency_limits"] == api["character_consistency_limits"]
+        assert worker["character_consistency_limits"]["drift_review_max_generations"] == 2
+        issues = client.get(run_url + "/issues").json()
+        issue, = issues
+        assert issue["metadata"]["reviewed_events"]
+        assert {row["document_id"] for row in issue["evidence"]} == {profile_doc["id"], draft_doc["id"]}
+        for index, citation in enumerate(issue["evidence"]):
+            response = client.get(run_url + "/evidence-preview", params={
+                "kind": "issue", "item_id": issue["id"], "evidence_index": index,
+            })
+            assert response.status_code == 200
+            expected = profile if citation["document_id"] == profile_doc["id"] else draft
+            assert [row["text"] for row in response.json()["lines"] if row["is_evidence"]] == [expected]
+        for payload in (chosen, opted_in):
+            with patch("app.main.dispatch_analysis", side_effect=RuntimeError("synthetic dispatch failure")):
+                failed = client.post(runs_url, json=payload)
+            assert failed.status_code == 503
+            calls.clear()
+            retry = client.post("/api/v1/analysis-runs/" + failed.json()["detail"]["run_id"] + "/retry")
+            assert retry.status_code == 202
+            enabled = payload is opted_in
+            assert retry.json()["review_batch"]["character_review_enabled"] is enabled
+            assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
+        # A new draft version requires a fresh choice, even after a paid review.
+        _document(client, project, name="draft.md", role="chapter", publication="draft",
+                  content=draft, replace_document_id=draft_doc["id"])
+        for source, choice in ((ordinary, None), (reviewed, None), (reviewed, True)):
+            calls.clear()
+            recheck_url = "/api/v1/analysis-runs/" + source["id"] + "/rechecks"
+            options = {} if choice is None else {
+                "json": {"character_review_enabled": True}, "headers": {"Idempotency-Key": "deep-recheck"},
+            }
+            recheck = client.post(recheck_url, **options)
+            assert recheck.status_code == 202, recheck.text
+            enabled = choice is True
+            assert recheck.json()["review_batch"]["character_review_enabled"] is enabled
+            assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
+        assert client.post(recheck_url, headers={"Idempotency-Key": "deep-recheck"}).status_code == 409
+        _document(client, project, name="profile.md", role="character_profile", publication="published",
+                  content=profile + "新设定。", replace_document_id=profile_doc["id"])
+        assert client.post(run_url + "/rechecks", json={"character_review_enabled": True}
+                           ).json()["detail"]["code"] == "character_baseline_not_ready"

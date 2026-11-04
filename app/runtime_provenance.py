@@ -298,6 +298,7 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "checker_version": "character-consistency-stage-v5",
             "drift_review_policy_version": CHARACTER_REVIEW_POLICY_VERSION,
             "drift_review_prompt_version": CHARACTER_REVIEW_PROMPT_VERSION,
+            "drift_review_max_generations": settings.character_drift_review_max_generations,
             "drift_review_schema_version": CHARACTER_REVIEW_SCHEMA_VERSION,
             "reviewed_events_schema_version": CHARACTER_REVIEWED_EVENTS_SCHEMA_VERSION,
             "ooc_protocol_version": CHARACTER_OOC_PROTOCOL_VERSION,

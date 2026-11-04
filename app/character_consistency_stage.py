@@ -2118,6 +2118,8 @@ class CharacterConsistencyStage:
         review_clues: list[ConsistencyIssue] = []
         drift_considered = 0
         drift_reviewed = 0
+        drift_correction_attempts = 0
+        drift_correction_recoveries = 0
         drift_unverifiable = 0
         drift_no_issue = 0
         drift_scope_skipped = 0
@@ -2793,6 +2795,9 @@ class CharacterConsistencyStage:
                     ).review(prepared)
                     usage.add(review.diagnostics)
                     drift_reviewed += review.diagnostics.attempted_calls
+                    if review.diagnostics.contract_failure is not None:
+                        drift_correction_attempts += int(review.diagnostics.attempted_calls == 2)
+                        drift_correction_recoveries += int(review.diagnostics.correction_status == "recovered")
                     if review.diagnostics.outcome == "completed":
                         successful_model_calls += 1
                     elif review.diagnostics.outcome in {"degraded", "skipped"}:
@@ -3084,6 +3089,8 @@ class CharacterConsistencyStage:
             ambiguous_alias_count=ambiguous_aliases,
             drift_considered=drift_considered,
             drift_reviewed=drift_reviewed,
+            drift_correction_attempted_call_count=drift_correction_attempts,
+            drift_correction_recovered_case_count=drift_correction_recoveries,
             drift_unverifiable=drift_unverifiable,
             drift_no_issue=drift_no_issue,
             drift_scope_skipped=drift_scope_skipped,
@@ -7748,6 +7755,10 @@ def _safe_case_trace(
         "review_outcome": (
             review.diagnostics.outcome if review is not None else "not_run"
         ),
+        **({
+            "review_contract_failure": review.diagnostics.contract_failure,
+            "review_correction_status": review.diagnostics.correction_status,
+        } if review is not None and review.diagnostics.contract_failure is not None else {}),
         "review_required": prepared.reviewer_eligible if prepared is not None else None,
         **({"unreviewed_observation_count": prepared.unreviewed_observation_count}
            if prepared is not None and prepared.unreviewed_observation_count > 0 else {}),

@@ -6435,7 +6435,7 @@ def test_approved_axis_primary_key_match_still_requires_clean_targeted_binding()
                 {
                     "verdict": "contradicts",
                     "explanation": "连续两次用奉承话术回避直说，与基线相反。",
-                    "citations": ["B1", "C1", "C2"],
+                    "citations": ["B01", "C01", "C02"],
                 },
                 ensure_ascii=False,
             ),

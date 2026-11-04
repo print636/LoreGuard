@@ -232,6 +232,8 @@ type RunInfo = RunUsageInfo & {
   mode?: "baseline_build" | "draft_review" | string | null;
   sensitivity?: "conservative" | "balanced" | "exploratory" | string | null;
   review_batch?: {
+    character_review_enabled?: boolean;
+    character_baseline_run_id?: string | null;
     mode: "baseline_build" | "draft_review" | string;
     sensitivity: "conservative" | "balanced" | "exploratory" | string;
     target_document_ids?: string[];
@@ -842,13 +844,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   }
   async function loadProviderHealth() {
     try {
-      setProviderConnection(
-        describeAccountProviderConnection(
-          parseAccountModelProvider(
-            await apiJson("/api/v1/account/model-provider"),
-          ),
-        ),
-      );
+      const profile = parseAccountModelProvider(await apiJson("/api/v1/account/model-provider"));
+      setProviderConnection({
+        ...describeAccountProviderConnection(profile),
+        characterReview: profile.characterReviewOptIn
+          ? (profile.configured ? "available" : "needs_account_model")
+          : undefined,
+      });
     } catch {
       setProviderConnection({
         ...unknownProviderConnection,
@@ -2374,6 +2376,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   projectLoading={projectLoading}
                   providerLabel={providerConnection.label}
                   providerTone={providerConnection.tone}
+                  characterReview={providerConnection.characterReview}
                   onStart={startGuidedReview}
                   onNavigate={navigateWorkspace}
                 />
@@ -2442,7 +2445,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                         }
                         onClick={retry}
                       >
-                        {retryState(runInfo).label}
+                        {retryState(runInfo).label}{runInfo.review_batch?.character_review_enabled && retryState(runInfo).allowed ? "（沿用角色审查，将使用账户 API 额度）" : ""}
                       </button>
                     )}
                 </div>
@@ -2774,6 +2777,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           {!routeProblem && activeView === "revision" && (
             <Suspense fallback={<section className="revisionReview workspaceView" aria-busy="true"><p>正在打开修订工作区…</p></section>}>
               <RevisionReview
+                characterReview={providerConnection.characterReview}
                 key={`${project}:${run}`}
                 projectId={project}
                 projectName={selectedProject?.name || ""}
@@ -2956,7 +2960,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   </div>
                 </div>
                 <p className="formalIssueIntro">
-                  正式报告问题仍需作者核对，不等于已证实冲突；角色漂移条目应同时核对既有设定与当前新稿两侧证据。单次反向行为、判断依据不足或未通过完整校验的模型提案留在下方的待复核区，不参与这里的数量、反馈和导出。
+                  查看角色问题时，请对照既有设定和新稿原文。即使只发生一次，证据完整且明确违背设定的行为也可以列为正式问题。仍有歧义的线索单列在待复核区。
                 </p>
                 {issues.length === 0 && !busy && (
                   <div className="empty">
@@ -3284,7 +3288,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   }
                   onClick={retry}
                 >
-                  {retryState(runInfo).label}
+                  {retryState(runInfo).label}{runInfo.review_batch?.character_review_enabled && retryState(runInfo).allowed ? "（沿用角色审查，将使用账户 API 额度）" : ""}
                 </button>
               )}
               <button onClick={() => navigateWorkspace("audit")}>运行审计</button>

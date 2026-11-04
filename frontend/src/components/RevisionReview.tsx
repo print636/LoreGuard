@@ -8,6 +8,7 @@ import {
   SESSION_EXPIRED_EVENT,
 } from "../api/client";
 import { documentRoles, type DocumentRole } from "../documentContext";
+import type { ProviderConnectionView } from "../providerConnection";
 import {
   comparisonBelongsToRevision,
   comparisonOutcomes,
@@ -59,6 +60,11 @@ type RevisionRun = {
   status: string;
   input_documents?: RunInputSnapshot[];
   input_snapshot_available?: boolean;
+  review_batch?: {
+    mode: string;
+    character_review_enabled?: boolean;
+    character_baseline_run_id?: string | null;
+  } | null;
 };
 
 type ComparisonIssue = RevisionIssue & { metadata?: unknown };
@@ -128,6 +134,7 @@ type RevisionReviewProps = {
   projectId: string;
   projectName: string;
   baselineRun: RevisionRun | null;
+  characterReview?: ProviderConnectionView["characterReview"];
   documents: RevisionDocument[];
   baselineIssues: RevisionIssue[];
   routeSearch: string;
@@ -258,6 +265,7 @@ export default function RevisionReview({
   projectId,
   projectName,
   baselineRun,
+  characterReview,
   documents,
   baselineIssues,
   routeSearch,
@@ -267,6 +275,9 @@ export default function RevisionReview({
   const route = useMemo(() => revisionRouteStateFromSearch(routeSearch), [routeSearch]);
   const baselineDocuments = baselineRun ? runSnapshotDocuments(baselineRun) : [];
   const baselineReady = baselineRun?.status === "completed" && baselineDocuments.length > 0;
+  const sourceBatch = baselineRun?.review_batch;
+  const hasCharacterBaseline = baselineReady && sourceBatch?.mode === "draft_review" &&
+    sourceBatch.character_review_enabled === true && Boolean(sourceBatch.character_baseline_run_id);
   const delta = useMemo(
     () => revisionDelta(baselineDocuments, documents),
     [baselineDocuments, documents],
@@ -676,8 +687,11 @@ export default function RevisionReview({
     updateRoute({ documentId: inferred }, true);
   }
 
-  async function startRecheck() {
-    if (!baselineRun || !recheckGuard.current.tryBegin()) return;
+  async function startRecheck(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!baselineRun || !baselineReady || !delta.changed || !recheckGuard.current.tryBegin()) return;
+    const deepReview = hasCharacterBaseline && characterReview === "available" &&
+      new FormData(event.currentTarget).has("character_review_enabled");
     try {
       setStarting(true);
       setProblem("");
@@ -686,7 +700,9 @@ export default function RevisionReview({
       setRecheckMessage("任务已提交，等待执行队列接收");
       const created = await apiJsonIdempotent<RecheckCreated>(
         recheckPath(baselineRun.id),
-        { method: "POST" },
+        deepReview
+          ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ character_review_enabled: true }) }
+          : { method: "POST" },
       );
       setNotice(
         created.deduplicated
@@ -695,7 +711,14 @@ export default function RevisionReview({
       );
       updateRoute({ step: "run", recheckRunId: created.id, page: 1 });
     } catch (error) {
-      setProblem(`无法启动复检：${errorCopy(error)}`);
+      const code = error instanceof ApiError ? (error.detail as { detail?: { code?: string } } | null)?.detail?.code : null;
+      if (deepReview && (code === "character_baseline_not_ready" || code === "character_formal_context_unconfirmed")) {
+        setProblem("角色基线已无法用于本次复检。你可以取消勾选角色深度审查，继续普通复检。");
+      } else if (deepReview && code === "character_review_model_unavailable") {
+        setProblem("账户模型暂不可用。请检查模型设置，或取消勾选角色深度审查后复检。");
+      } else {
+        setProblem(`无法启动复检：${errorCopy(error)}`);
+      }
     } finally {
       setStarting(false);
       recheckGuard.current.end();
@@ -978,12 +1001,33 @@ export default function RevisionReview({
               </div>
             </div>
           ) : (
-            <div className="revisionLaunch">
-              <p>{!baselineReady ? "基线运行缺少可复现输入，不能复检。" : !delta.changed ? "先上传新版本，再启动复检。" : "启动后可能调用模型并消耗 Token；重复提交会复用同一个复检运行。"}</p>
-              <button className="revisionPrimaryAction" type="button" disabled={!baselineReady || !delta.changed || starting} onClick={() => void startRecheck()}>
-                {starting ? "提交复检中…" : "开始复检"}
-              </button>
-            </div>
+            <form onSubmit={(event) => void startRecheck(event)}>
+              {hasCharacterBaseline && characterReview && (
+                <fieldset className="revisionVisualOptions">
+                  <legend>本次复检范围</legend>
+                  <label>
+                    <input type="checkbox" name="character_review_enabled"
+                      key={JSON.stringify([sourceBatch?.character_baseline_run_id, characterReview, activeDocuments.map(doc => doc.id)])}
+                      disabled={starting || !delta.changed || characterReview !== "available"}
+                      aria-describedby="recheck-character-cost" autoComplete="off" />
+                    角色深度审查
+                  </label>
+                  <small id="recheck-character-cost">{characterReview === "available"
+                    ? "沿用上次审查的角色基线，核对修订稿中的角色行为。勾选后将额外使用你的账户 API 额度，仅本次复检生效。"
+                    : "在模型设置中配置账户模型后，即可使用角色深度审查。现在可以继续普通复检。"}</small>
+                </fieldset>
+              )}
+              <div className="revisionLaunch">
+                <p>
+                  {baselineReady && characterReview && sourceBatch?.mode === "draft_review" && !hasCharacterBaseline &&
+                    "原审查没有可复用的角色基线，本次按普通复检运行。"}
+                  {!baselineReady ? "基线运行缺少可复现输入，不能复检。" : !delta.changed ? "先上传新版本，再启动复检。" : "复检可能调用模型并消耗 Token。"}
+                </p>
+                <button className="revisionPrimaryAction" type="submit" disabled={!baselineReady || !delta.changed || starting}>
+                  {starting ? "提交复检中…" : "开始复检"}
+                </button>
+              </div>
+            </form>
           )}
         </div>
       )}

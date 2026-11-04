@@ -59,6 +59,7 @@ const baselineRun = {
 };
 
 type MockState = {
+  accountDeepReview?: boolean;
   confirmed?: number;
   pending?: number;
   total?: number;
@@ -88,7 +89,10 @@ async function mockApi(page: Page, state: MockState) {
       user: { id: state.userId || "author", email: "", display_name: "作者" },
       workspace: { id: state.workspaceId || "workspace", name: "写作工作区", kind: "personal", role: "owner" },
     };
-    else if (path === "/api/v1/account/model-provider") body = {};
+    else if (path === "/api/v1/account/model-provider") body = state.accountDeepReview ? {
+      configured: true, revision: 1, base_url: "https://provider.example/v1",
+      model: "demo-model", character_review_opt_in_available: true,
+    } : {};
     else if (path === "/api/v1/project-catalog") {
       const items = [
         { id: projectId, name: "角色审查项目", description: "", created_at: now,
@@ -155,6 +159,34 @@ async function mockApi(page: Page, state: MockState) {
     await route.fulfill({ status: 200, json: body });
   });
 }
+
+test("角色深度审查由作者逐次勾选，提交只绑定本次确认的基线", async ({ page }) => {
+  const state: MockState = { accountDeepReview: true, posts: [], unexpected: [] };
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectId}/check`);
+  const review = page.locator(".guidedReviewLaunch");
+  const deep = review.getByRole("checkbox", { name: /角色深度审查/ });
+  const start = review.getByRole("button", { name: /^开始校验/ });
+  await review.getByRole("checkbox", { name: /第一章.md/ }).check();
+  await expect(deep).not.toBeChecked();
+  await start.click();
+  await expect.poll(() => state.posts.length).toBe(1);
+  expect(state.posts[0]).toEqual({ mode: "draft_review", sensitivity: "balanced", target_document_ids: ["draft-1"] });
+  await deep.focus();
+  await deep.press("Space");
+  await expect(deep).toBeChecked();
+  await page.reload();
+  await expect(deep).not.toBeChecked();
+  await deep.check();
+  await start.click();
+  await expect.poll(() => state.posts.length).toBe(2);
+  expect(state.posts[1]).toEqual({
+    mode: "draft_review", sensitivity: "balanced", target_document_ids: ["draft-1"],
+    character_review_enabled: true, character_baseline_run_id: baselineRun.id,
+  });
+  await expect(deep).not.toBeChecked();
+  expect(state.unexpected).toEqual([]);
+});
 
 test("超过百名角色且有待确认候选时仍可选择单章或批量审查，未确认候选不成权威", async ({ page }) => {
   const state: MockState = { posts: [], unexpected: [], statusRequests: [] };

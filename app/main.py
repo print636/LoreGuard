@@ -33,6 +33,7 @@ from .auth import (
 )
 from .account_provider import (
     NO_STORE_HEADERS as ACCOUNT_PROVIDER_NO_STORE_HEADERS,
+    ProviderRuntime,
     account_provider_runtime,
     bind_account_provider_to_run,
     router as account_provider_router,
@@ -410,9 +411,16 @@ class AnalysisRunIn(BaseModel):
         default=None, max_length=256
     )
     no_formal_context_expected: bool = Field(default=False, strict=True)
+    character_review_enabled: bool = Field(default=False, strict=True)
+    character_baseline_run_id: str | None = Field(default=None, min_length=1, max_length=36)
     sensitivity: Literal[
         "conservative", "balanced", "exploratory"
     ] = "balanced"
+
+
+class RecheckIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    character_review_enabled: bool = Field(default=False, strict=True)
 
 
 class PublishChapterIn(BaseModel):
@@ -551,7 +559,26 @@ def _review_batch_intent(payload: AnalysisRunIn) -> dict:
             422,
             "no_formal_context_expected 仅适用于显式指定目标的 draft_review",
         )
+    character_choice = {}
+    if settings.character_review_requires_opt_in:
+        character_choice["character_review_enabled"] = payload.character_review_enabled
+    elif "character_review_enabled" in payload.model_fields_set:
+        raise HTTPException(422, "此实例不支持逐次选择角色审查")
+    if payload.character_review_enabled and (
+        not settings.enable_character_consistency
+        or payload.mode == "full_review"
+        or payload.no_formal_context_expected
+        or (payload.mode == "draft_review" and not requested)
+    ):
+        raise HTTPException(422, "角色审查仅适用于建立基线或选择新稿对照基线")
+    if payload.character_review_enabled and payload.mode == "draft_review":
+        if not payload.character_baseline_run_id:
+            raise HTTPException(422, "请选择已就绪的角色基线")
+        character_choice["character_baseline_run_id"] = payload.character_baseline_run_id
+    elif payload.character_baseline_run_id is not None:
+        raise HTTPException(422, "仅在新稿启用角色审查时指定基线")
     return {
+        **character_choice,
         "mode": payload.mode,
         "sensitivity": payload.sensitivity,
         "requested_target_document_ids": requested,
@@ -801,6 +828,10 @@ def _review_batch_selection(
     selected = [
         row for row in documents if row.id in target_ids or row in backgrounds
     ]
+    if payload.character_review_enabled:
+        _require_character_review_sources(
+            db, project_id, payload, documents, metadata, backgrounds
+        )
     if payload.mode == "baseline_build" and not selected:
         raise HTTPException(
             409,
@@ -825,6 +856,75 @@ def _review_batch_selection(
         "target_selection_exclusions": target_selection_exclusions,
     }
     return selected, roles, coverage
+
+
+def _require_character_review_sources(
+    db,
+    project_id: str,
+    payload: AnalysisRunIn,
+    documents: list[DocumentRow],
+    metadata: dict[str, tuple[str, dict]],
+    backgrounds: list[DocumentRow],
+) -> None:
+    """Re-check the guided launcher's formal sources inside its write transaction."""
+    formal = {}
+    for document in documents:
+        role, narrative = metadata[document.id]
+        publication = narrative["publication_status"]
+        resolution = narrative["resolution_state"]
+        if role in {"canon", "character_profile"}:
+            if publication == "retired" and resolution == "confirmed":
+                continue
+        elif role != "chapter" or publication != "published":
+            continue
+        if classify_character_source_kind(role, resolution, publication) is None:
+            raise HTTPException(409, detail={"code": "character_formal_context_unconfirmed"})
+        if payload.mode == "draft_review":
+            formal[document.id] = (
+                document.version, role, payload_sha256(narrative), document_content_sha256(document.content)
+            )
+    if payload.mode == "baseline_build":
+        return
+    baseline = db.get(AnalysisRunRow, payload.character_baseline_run_id)
+    if (
+        not backgrounds
+        or baseline is None
+        or baseline.project_id != project_id
+        or baseline.batch_mode != "baseline_build"
+        or baseline.status != "completed"
+        or _character_coverage_for_run(db, baseline)[0] != "full"
+    ):
+        raise HTTPException(409, detail={"code": "character_baseline_not_ready"})
+    # Compare frozen identities without loading the baseline's full story text.
+    frozen = {
+        doc_id: (version, role, narrative_hash, content_hash)
+        for doc_id, version, role, narrative_hash, content_hash in db.execute(
+            select(
+                AnalysisRunInputRow.document_id, AnalysisRunInputRow.document_version,
+                AnalysisRunInputContextRow.document_role, AnalysisRunInputNarrativeContextRow.payload_sha256,
+                AnalysisRunInputRow.content_sha256,
+            )
+            .select_from(AnalysisRunInputRow)
+            .join(AnalysisRunInputContextRow, AnalysisRunInputContextRow.input_id == AnalysisRunInputRow.id)
+            .join(AnalysisRunInputNarrativeContextRow, AnalysisRunInputNarrativeContextRow.input_id == AnalysisRunInputRow.id)
+            .where(AnalysisRunInputRow.run_id == baseline.id, AnalysisRunInputContextRow.batch_role == "background")
+        )
+    }
+    confirmed = db.scalar(
+        select(CharacterTraitCandidateRow.id).where(
+            CharacterTraitCandidateRow.project_id == project_id,
+            CharacterTraitCandidateRow.review_state == "confirmed",
+        ).limit(1)
+    )
+    if formal != frozen or confirmed is None:
+        raise HTTPException(409, detail={"code": "character_baseline_not_ready"})
+
+
+def _frozen_character_choice(coverage: dict) -> dict:
+    return {
+        key: coverage[key]
+        for key in ("character_review_enabled", "character_baseline_run_id") if key in coverage
+    }
 
 
 def _issue_in_workspace(db, issue_id: str, workspace_id: str) -> IssueRow | None:
@@ -982,6 +1082,7 @@ def serialize_run(row: AnalysisRunRow, db=None) -> dict:
     )
     coverage = row.batch_coverage if isinstance(row.batch_coverage, dict) else {}
     payload["review_batch"] = {
+        **_frozen_character_choice(coverage),
         "mode": row.batch_mode or "full_review",
         "sensitivity": row.sensitivity or "balanced",
         "no_formal_context_expected": bool(
@@ -1725,6 +1826,7 @@ def _accepted_run_payload(db, run: AnalysisRunRow, *, created: bool) -> dict:
         "deduplicated": not created,
         "model_execution": _safe_run_provider_execution(run),
         "review_batch": {
+            **_frozen_character_choice(coverage),
             "mode": run.batch_mode or "full_review",
             "sensitivity": run.sensitivity or "balanced",
             "no_formal_context_expected": bool(
@@ -1749,6 +1851,7 @@ def _require_idempotency_operation(
     retried_from_run_id: str | None,
     recheck_baseline_run_id: str | None = None,
     review_batch_intent: dict | None = None,
+    recheck_character_review: bool | None = None,
 ) -> None:
     """Reject reuse of a project-scoped key for a different user intent."""
     execution = db.get(AnalysisRunExecutionRow, run.id)
@@ -1761,6 +1864,7 @@ def _require_idempotency_operation(
     actual_baseline = comparison.baseline_run_id if comparison else None
     coverage = run.batch_coverage if isinstance(run.batch_coverage, dict) else {}
     actual_intent = {
+        **_frozen_character_choice(coverage),
         "mode": run.batch_mode or "full_review",
         "sensitivity": run.sensitivity or "balanced",
         "requested_target_document_ids": coverage.get(
@@ -1770,9 +1874,15 @@ def _require_idempotency_operation(
             coverage.get("no_formal_context_expected", False)
         ),
     }
+    if settings.character_review_requires_opt_in:
+        actual_intent.setdefault("character_review_enabled", False)
     if (
         actual_source == retried_from_run_id
         and actual_baseline == recheck_baseline_run_id
+        and (
+            recheck_character_review is None
+            or coverage.get("character_review_enabled", False) is recheck_character_review
+        )
         and (
             review_batch_intent is None
             or actual_intent == review_batch_intent
@@ -1836,6 +1946,16 @@ def _dispatch_created_run(run_id: str) -> None:
             ) from None
         # A worker may have claimed the run in the narrow interval after a
         # transport-ambiguous dispatch.  Do not overwrite that durable state.
+
+
+def _require_character_review_provider(coverage: dict, runtime: ProviderRuntime) -> None:
+    if coverage.get("character_review_enabled") is True and (
+        not settings.character_review_requires_opt_in
+        or not settings.enable_character_consistency
+        or not runtime.available
+        or not runtime.config_id
+    ):
+        raise HTTPException(409, detail={"code": "character_review_model_unavailable"})
 
 
 def enforce_daily_model_budget(
@@ -5905,6 +6025,7 @@ def start_analysis(
         provider_runtime = account_provider_runtime(
             db, user_id=context.user_id, base_settings=settings
         )
+        _require_character_review_provider(coverage, provider_runtime)
         enforce_daily_model_budget(
             db,
             context.workspace_id,
@@ -6101,6 +6222,7 @@ def retry_run(
         provider_runtime = account_provider_runtime(
             db, user_id=context.user_id, base_settings=settings
         )
+        _require_character_review_provider(old.batch_coverage or {}, provider_runtime)
         enforce_daily_model_budget(
             db,
             context.workspace_id,
@@ -6138,6 +6260,7 @@ def retry_run(
 @app.post("/api/v1/analysis-runs/{baseline_run_id}/rechecks", status_code=202)
 def start_recheck(
     baseline_run_id: str,
+    payload: RecheckIn | None = None,
     idempotency_key_header: Annotated[
         str | None, Header(alias="Idempotency-Key", max_length=128)
     ] = None,
@@ -6150,6 +6273,21 @@ def start_recheck(
         baseline = _run_in_workspace(db, baseline_run_id, context.workspace_id)
         if baseline is None:
             raise HTTPException(404, "基准分析任务不存在")
+        character_choice = {}
+        if settings.character_review_requires_opt_in:
+            enabled = payload.character_review_enabled if payload else False
+            character_choice["character_review_enabled"] = enabled
+            if enabled:
+                source = baseline.batch_coverage or {}
+                if (
+                    baseline.batch_mode != "draft_review"
+                    or source.get("character_review_enabled") is not True
+                    or not source.get("character_baseline_run_id")
+                ):
+                    raise HTTPException(409, detail={"code": "character_baseline_not_ready"})
+                character_choice["character_baseline_run_id"] = source["character_baseline_run_id"]
+        elif payload and "character_review_enabled" in payload.model_fields_set:
+            raise HTTPException(422, "此实例不支持逐次选择角色审查")
         existing = _idempotent_run(db, baseline.project_id, idempotency_key)
         if existing is not None:
             _require_idempotency_operation(
@@ -6157,6 +6295,7 @@ def start_recheck(
                 existing,
                 retried_from_run_id=None,
                 recheck_baseline_run_id=baseline_run_id,
+                recheck_character_review=character_choice.get("character_review_enabled"),
             )
             comparison = db.scalar(
                 select(AnalysisRunComparisonRow).where(
@@ -6230,6 +6369,7 @@ def start_recheck(
                 )
             target_document_ids = [row.id for row in current_targets]
         recheck_request = AnalysisRunIn(
+            **character_choice,
             mode=batch_mode,
             sensitivity=sensitivity,
             target_document_ids=target_document_ids,
@@ -6274,6 +6414,7 @@ def start_recheck(
         provider_runtime = account_provider_runtime(
             db, user_id=context.user_id, base_settings=settings
         )
+        _require_character_review_provider(coverage, provider_runtime)
         enforce_daily_model_budget(
             db,
             context.workspace_id,
@@ -6342,6 +6483,7 @@ def start_recheck(
             row,
             retried_from_run_id=None,
             recheck_baseline_run_id=baseline_run_id,
+            recheck_character_review=character_choice.get("character_review_enabled"),
         )
         comparison = db.scalar(
             select(AnalysisRunComparisonRow).where(

@@ -23,6 +23,7 @@ export type ModelProviderTestView = {
 
 export type AccountModelProviderProfile = {
   configured: boolean;
+  characterReviewOptIn?: true;
   revision: number;
   baseUrl: string;
   model: string;
@@ -291,6 +292,7 @@ export function parseAccountModelProvider(payload: unknown): AccountModelProvide
   const lastTestPayload = objectValue(root.last_test);
   return {
     configured: root.configured,
+    ...(root.character_review_opt_in_available === true ? { characterReviewOptIn: true as const } : {}),
     revision,
     baseUrl,
     model,

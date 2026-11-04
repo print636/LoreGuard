@@ -403,6 +403,19 @@ def runtime_for_analysis_run(
     """Resolve exactly the provider revision frozen on a run."""
 
     settings = base_settings or get_settings()
+    coverage = run.batch_coverage if isinstance(run.batch_coverage, dict) else {}
+    if settings.character_review_requires_opt_in or "character_review_enabled" in coverage:
+        consented = (
+            settings.character_review_requires_opt_in
+            and coverage.get("character_review_enabled") is True
+            and (
+                run.batch_mode == "baseline_build"
+                or (run.batch_mode == "draft_review" and coverage.get("character_baseline_run_id")
+                    and not coverage.get("no_formal_context_expected"))
+            )
+        )
+        if not consented:
+            settings = settings.model_copy(update={"enable_character_consistency": False})
     identity = run.provider_identity if isinstance(run.provider_identity, dict) else None
     source = identity.get("source") if identity else None
     if run.provider_config_id is not None:
@@ -538,6 +551,9 @@ def _serialize(binding, row) -> dict[str, Any]:
         "enabled": bool(local_origins),
         "allowed_origins": list(local_origins),
     }
+    author_options = {}
+    if current_settings.character_review_requires_opt_in and current_settings.enable_character_consistency:
+        author_options["character_review_opt_in_available"] = True
     if row is None:
         return {
             "configured": False,
@@ -549,6 +565,7 @@ def _serialize(binding, row) -> dict[str, Any]:
             "last_test": None,
             "service_default_available": service_default_available,
             "local_gateway": local_gateway,
+            **author_options,
         }
     last_test_payload = _safe_last_test_payload(row.last_test_payload)
     return {
@@ -605,6 +622,7 @@ def _serialize(binding, row) -> dict[str, Any]:
         ),
         "service_default_available": service_default_available,
         "local_gateway": local_gateway,
+        **author_options,
     }
 
 

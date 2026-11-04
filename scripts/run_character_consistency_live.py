@@ -1431,6 +1431,18 @@ def _safe_case_trace_summary(row: dict[str, Any]) -> dict[str, Any]:
             "" if "confirmed_candidate_id_sha256" in row else None
         )
     scoped_review = _safe_scoped_axis_review(row.get("scoped_axis_review"))
+    failure, correction = row.get("review_contract_failure"), row.get("review_correction_status")
+    safe_correction = {}
+    if (
+        type(failure) is str and failure in {
+            "json", "schema", "policy", "partition", "citations", "comparison", "verdict", "explanation",
+        }
+        and type(correction) is str and correction in {
+            "token_budget", "deadline", "attempt_limit", "recovered", "invalid_response",
+            "provider_error", "response_too_large", "ineligible",
+        }
+    ):
+        safe_correction = {"review_contract_failure": failure, "review_correction_status": correction}
     return {
         "character_key": row.get("character_key"),
         "dimension": row.get("dimension"),
@@ -1447,6 +1459,7 @@ def _safe_case_trace_summary(row: dict[str, Any]) -> dict[str, Any]:
         "material_coverage": row.get("material_coverage"),
         "explanation_coverage": row.get("explanation_coverage"),
         "review_outcome": row.get("review_outcome"),
+        **safe_correction,
         "review_verdict": row.get("review_verdict"),
         "citation_roles": (
             sorted(value for value in roles if value in {"B", "C", "G", "X"})

@@ -115,8 +115,10 @@ def test_legacy_model_response_cannot_obtain_new_formal_eligibility():
     candidate = prepared()
     response = dict(verdict="contradicts", explanation="原文确有相反表现。", citations=["B01", "C01"])
     result, provider = review(candidate, response)
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
     assert result.diagnostics.outcome == "degraded"
+    assert result.diagnostics.contract_failure == "policy"
+    assert result.diagnostics.correction_status == "invalid_response"
     old_result = CharacterReviewResult(
         decision=ModelDriftDecision(**{**response, "citations": tuple(response["citations"])}),
         diagnostics=CharacterReviewDiagnostics(outcome="completed", reason="completed"),
@@ -354,3 +356,124 @@ def test_no_issue_cannot_hide_related_observations_cut_from_bounded_pool():
     assert promote_character_drift(candidate, result).reason == "single_event_unreviewed_observations"
     formal_result, _ = review(candidate, payload(*(event(f"C{i:02d}") for i in range(1, 7))))
     assert promote_character_drift(candidate, formal_result).outcome == "conflict"
+
+@pytest.mark.parametrize(("overrides", "category"), [
+    ({"events": [event("C02")]}, "partition"),
+    ({"policy_version": "private-value"}, "policy"),
+    ({"scope_applicability": None}, "policy"),
+    ({"unexpected": "private-value"}, "schema"),
+    ({"citations": ["B01", "private-value"]}, "citations"),
+    ({"events": [event("C01", actor_match="unclear")]}, "comparison"),
+    ({"events": [event("C01", verdict="needs_confirmation")]}, "verdict"),
+    ({"events": [event("C01", verdict="explained")], "verdict": "explained"}, "explanation"),
+])
+def test_v3_rejects_with_content_free_contract_categories(overrides, category):
+    malformed = payload(event("C01"), **overrides)
+    result, provider = review(prepared(), malformed, character_drift_review_max_generations=1)
+    assert len(provider.calls) == 1
+    assert result.decision is None
+    assert result.diagnostics.reason == "invalid_model_response"
+    assert result.diagnostics.contract_failure == category
+    assert "private-value" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize("verdict", ["insufficient_evidence", "needs_confirmation"])
+def test_valid_abstention_is_never_regenerated(verdict):
+    result, provider = review(prepared(), payload(event("C01", verdict=verdict), verdict=verdict))
+    assert result.decision.verdict == verdict
+    assert len(provider.calls) == 1
+    assert result.diagnostics.contract_failure is result.diagnostics.correction_status is None
+
+
+def test_correction_is_bounded_to_one_sanitized_reassessment_with_same_evidence():
+    from app.usage import estimate_issue_evidence_review_tokens
+
+    class Queue:
+        calls = []
+
+        def complete(self, system, user):
+            self.calls.append((system, user))
+            # An injected transport may return unparsed content.
+            text = ("private-invalid-json" if len(self.calls) == 1 else json.dumps(
+                payload(event("C01", verdict="needs_confirmation"), verdict="needs_confirmation")
+            ))
+            return SimpleNamespace(text=text, prompt_tokens=20, completion_tokens=7)
+
+    provider = Queue()
+    result = CharacterConsistencyReviewer(provider, settings=Settings(
+        _env_file=None, enable_character_consistency=True,
+    )).review(prepared())
+    assert result.decision.verdict == "needs_confirmation"
+    assert result.diagnostics.contract_failure == "json"
+    assert result.diagnostics.correction_status == "recovered"
+    assert result.diagnostics.attempted_calls == len(provider.calls) == 2
+    (system, original), (system2, corrected) = provider.calls
+    assert system == system2
+    assert json.loads(corrected) == {**json.loads(original), "contract_correction": "json"}
+    assert "private-invalid-json" not in corrected + result.model_dump_json()
+    assert result.diagnostics.prompt_tokens == 40
+    assert result.diagnostics.completion_tokens == 14
+    assert result.diagnostics.charged_tokens == sum(
+        estimate_issue_evidence_review_tokens(s, u, completion_reserve=704) for s, u in provider.calls
+    )
+
+
+def test_undecidable_comparison_is_not_regenerated():
+    result, provider = review(prepared(), payload(event("C01", trait_match="unclear")))
+    assert result.diagnostics.contract_failure == "comparison"
+    assert result.diagnostics.correction_status == "ineligible"
+    assert len(provider.calls) == 1
+
+
+def test_support_role_binding_and_required_context_are_visible_to_reviewer():
+    case = prepared(support=(support_for(1),)).case
+    candidate = prepare_character_drift(case.model_copy(update={
+        "baseline": case.baseline.model_copy(update={"contexts": ("交接委托时",)}),
+    }), review_policy=CHARACTER_REVIEW_POLICY_VERSION)
+    result, provider = review(candidate, payload(event("C01", verdict="explained"),
+        verdict="explained", citations=("B01", "C01", "X01")))
+    assert result.diagnostics.outcome == "completed"
+    system, user = provider.calls[0]
+    assert user["candidate"]["baseline_contexts"] == ["交接委托时"]
+    assert user["candidate"]["situation_match_required"] is True
+    assert user["candidate"]["object_match_required"] is False
+    assert [(r["id"], r["role"]) for r in user["evidence"]] == [
+        ("B01", "baseline"), ("C01", "current"), ("X01", "exception"),
+    ]
+    assert user["evidence"][-1]["applicable_observation_citations"] == ["C01"]
+    assert "P (possible_explanation)" in system
+    # The exact example must itself pass the real parser and validator.
+    sample = next(line for line in system.splitlines() if line.startswith("{"))
+    accepted, _ = review(candidate, json.loads(sample))
+    assert accepted.diagnostics.outcome == "completed"
+
+
+def test_unknown_provider_categories_and_oversized_output_are_not_regenerated():
+    for response, reason in [
+        (ProviderError("private-exception", category="private-category"), "provider_error"),
+        ("private-response" * 5000, "response_too_large"),
+    ]:
+        result, provider = review(prepared(), response)
+        assert result.diagnostics.reason == reason
+        assert result.diagnostics.contract_failure is result.diagnostics.correction_status is None
+        assert len(provider.calls) == 1
+        assert "private-" not in result.model_dump_json()
+
+
+def test_correction_provider_setup_failure_keeps_initial_charge_and_clue():
+    class FailingCorrectionFork(Provider):
+        def fork_for_character_consistency(self, *, remaining_deadline_seconds=None, **kwargs):
+            if remaining_deadline_seconds is not None:
+                raise RuntimeError("private-setup-error")
+            return self
+
+    provider = FailingCorrectionFork({"unexpected": "field"})
+    settings = Settings(_env_file=None, enable_character_consistency=True)
+    case = prepared()
+    result = CharacterConsistencyReviewer(provider, settings=settings).review(case)
+    assert result.diagnostics.correction_status == "provider_error"
+    assert result.diagnostics.reason == "invalid_model_response"
+    assert result.diagnostics.attempted_calls == len(provider.calls) == 1
+    assert result.diagnostics.charged_tokens >= 40
+    assert promote_character_drift(case, result).outcome == "unverifiable"
+    assert "private-setup-error" not in result.model_dump_json()

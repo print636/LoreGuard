@@ -86,6 +86,8 @@ export type NarrativeContextDraft = {
 export type AnalysisRunRequest = {
   mode: ReviewMode;
   sensitivity: ReviewSensitivity;
+  character_review_enabled?: true;
+  character_baseline_run_id?: string;
   target_document_ids?: string[];
   no_formal_context_expected?: boolean;
 };

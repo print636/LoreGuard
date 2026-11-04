@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiJson } from "../../api/client";
 import type { WorkspaceView } from "../../routing";
+import type { ProviderConnectionView } from "../../providerConnection";
 import {
   fetchCharacterBaselineStatus,
   hasReadyCharacterBaseline,
@@ -34,6 +35,7 @@ type Props = {
   projectLoading: boolean;
   providerLabel: string;
   providerTone: string;
+  characterReview?: ProviderConnectionView["characterReview"];
   onStart: (request: AnalysisRunRequest) => Promise<void>;
   onNavigate: (view: WorkspaceView) => void;
 };
@@ -89,6 +91,7 @@ export default function GuidedReviewLaunch({
   projectLoading,
   providerLabel,
   providerTone,
+  characterReview,
   onStart,
   onNavigate,
 }: Props) {
@@ -102,6 +105,7 @@ export default function GuidedReviewLaunch({
   const [action, setAction] = useState<"baseline" | "review" | null>(null);
   const [actionError, setActionError] = useState("");
   const [reviewError, setReviewError] = useState("");
+  const [deepReviewSelection, setDeepReviewSelection] = useState<string | null>(null);
   const [statusRefresh, setStatusRefresh] = useState(0);
   const preflightControllerRef = useRef<AbortController | null>(null);
   const [profiles, setProfiles] = useState<ProfileState>({
@@ -205,17 +209,26 @@ export default function GuidedReviewLaunch({
     !profilesLoading &&
     !profiles.error &&
     hasReadyCharacterBaseline(currentBaselineRun, status);
+  const deepReviewKey = characterReview === "available" && profilesReady && currentBaselineRun
+    ? JSON.stringify([storageKey, currentBaselineRun.id])
+    : null;
+  const deepReviewChecked = deepReviewKey !== null && deepReviewSelection === deepReviewKey;
+  useEffect(() => { setDeepReviewSelection(null); }, [deepReviewKey]);
+  const baselineActionDisabled = busy || Boolean(action) || characterReview === "needs_account_model";
   const formalFallbackAvailable = contextsReady && !profilesReady &&
     (!currentBaselineRun || !profilesLoading);
   const draftsReady = (profilesReady || draftOnlyAvailable || formalFallbackAvailable) &&
     documentState.confirmedDrafts.length > 0;
 
   async function startBaseline() {
-    if (!contextsReady || busy || action) return;
+    if (!contextsReady || baselineActionDisabled) return;
     try {
       setAction("baseline");
       setActionError("");
-      await onStart(analysisRunRequest("baseline_build", sensitivity));
+      await onStart({
+        ...analysisRunRequest("baseline_build", sensitivity),
+        ...(characterReview === "available" ? { character_review_enabled: true } : {}),
+      });
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "角色基线任务没有启动，请重试。");
     } finally {
@@ -231,7 +244,8 @@ export default function GuidedReviewLaunch({
     try {
       setAction("review");
       setReviewError("");
-      if (draftOnlyAvailable || formalFallbackAvailable) {
+      const basicWithFormal = formalFallbackAvailable || (Boolean(characterReview) && profilesReady && !deepReviewChecked);
+      if (draftOnlyAvailable || basicWithFormal) {
         let freshDocuments: GuidedDocument[];
         try {
           freshDocuments = await apiJson<GuidedDocument[]>(
@@ -248,7 +262,7 @@ export default function GuidedReviewLaunch({
           setReviewError("项目已有正式资料或待确认的正式资料，本次没有启动自检。请刷新项目并先确认资料、建立角色基线。");
           return;
         }
-        if (formalFallbackAvailable && !formalBackgroundStillCurrent(documents, freshDocuments)) {
+        if (basicWithFormal && !formalBackgroundStillCurrent(documents, freshDocuments)) {
           setReviewError("正式背景的版本或确认状态已变化，本次没有启动任务。请刷新项目并重新核对资料。");
           return;
         }
@@ -279,7 +293,11 @@ export default function GuidedReviewLaunch({
           setReviewError("角色基线状态已变化，本次没有启动任务。请核对上方角色档案状态后再校验。");
           return;
         }
-        await onStart(analysisRunRequest("draft_review", sensitivity, selectedDraftIds));
+        setDeepReviewSelection(null);
+        await onStart({
+          ...analysisRunRequest("draft_review", sensitivity, selectedDraftIds),
+          ...(deepReviewChecked ? { character_review_enabled: true, character_baseline_run_id: currentBaselineRun.id } : {}),
+        });
       }
     } catch (error) {
       const payload = error instanceof ApiError && error.detail && typeof error.detail === "object"
@@ -288,9 +306,16 @@ export default function GuidedReviewLaunch({
       const detail = payload?.detail && typeof payload.detail === "object"
         ? payload.detail as { code?: unknown }
         : null;
-      setReviewError(detail?.code === "formal_context_present"
-        ? "项目新增了正式资料，本次没有启动自检。请刷新项目、确认正式资料后再审查。"
-        : error instanceof Error ? error.message : "新稿审查没有启动，请重试。");
+      if (detail?.code === "character_review_model_unavailable") {
+        setReviewError("账户模型配置已变化。请检查模型设置，或关闭角色深度审查后重试。");
+      } else if (detail?.code === "character_baseline_not_ready" || detail?.code === "character_formal_context_unconfirmed") {
+        setReviewError("正式资料或已确认的角色设定已变化。请重新核对后再开始角色深度审查。");
+        setStatusRefresh(count => count + 1);
+      } else {
+        setReviewError(detail?.code === "formal_context_present"
+          ? "项目新增了正式资料，本次没有启动自检。请刷新项目、确认正式资料后再审查。"
+          : error instanceof Error ? error.message : "新稿审查没有启动，请重试。");
+      }
     } finally {
       if (preflightControllerRef.current === controller) {
         preflightControllerRef.current = null;
@@ -379,6 +404,12 @@ export default function GuidedReviewLaunch({
                 : "AI 从正式资料归纳候选；只有你确认的条目才进入角色档案。"}</p></div>
               <b>{profilesReady ? "已就绪" : contextsReady ? "可选增强" : "待确认资料"}</b>
             </header>
+            {characterReview === "available" && contextsReady && (
+              <p className="stageNotice">建立或重新建立基线会调用你的账户模型。候选设定由你逐条确认。</p>
+            )}
+            {characterReview === "needs_account_model" && contextsReady && (
+              <p className="stageNotice warning">建立角色基线需要账户模型。<button type="button" onClick={() => onNavigate("provider")}>前往模型设置</button></p>
+            )}
             {!contextsReady ? (
               <p className="stageNotice">完成上一步后才能开始角色归纳，页面不会绕过未确认上下文。</p>
             ) : !currentBaselineRun ? (
@@ -388,7 +419,7 @@ export default function GuidedReviewLaunch({
                     ? "正式资料的版本或上下文已变化，旧角色基线不再匹配当前冻结输入，请重新建立。"
                     : "正式资料只作为背景输入，不会被当作本次待审新稿。"}
                 </p>
-                <button className="quietPrimary" type="button" disabled={busy || Boolean(action)} onClick={() => void startBaseline()}>
+                <button className="quietPrimary" type="button" disabled={baselineActionDisabled} onClick={() => void startBaseline()}>
                   {action === "baseline" ? "正在启动…" : baselineRunCompleted ? "重新建立角色基线" : "建立角色基线"}
                 </button>
               </>
@@ -402,17 +433,17 @@ export default function GuidedReviewLaunch({
             ) : !status || status.baseline_run_id !== currentBaselineRun.id || status.baseline_run_status !== "completed" ? (
               <>
                 <p className="stageNotice warning">角色基线汇总并非来自当前冻结资料的完整运行，不能用于解锁新稿审查。</p>
-                <button className="quietPrimary" type="button" disabled={busy || Boolean(action)} onClick={() => void startBaseline()}>重新建立角色基线</button>
+                <button className="quietPrimary" type="button" disabled={baselineActionDisabled} onClick={() => void startBaseline()}>重新建立角色基线</button>
               </>
             ) : status.model_coverage !== "full" ? (
               <>
                 <p className="stageNotice warning">角色审查覆盖不完整（{status.model_coverage}），不会把已有少量结果当作完整基线。</p>
-                <button className="quietPrimary" type="button" disabled={busy || Boolean(action)} onClick={() => void startBaseline()}>重新建立角色基线</button>
+                <button className="quietPrimary" type="button" disabled={baselineActionDisabled} onClick={() => void startBaseline()}>重新建立角色基线</button>
               </>
             ) : status.readiness !== "ready" ? (
               <>
                 <p className="stageNotice warning">角色基线尚未就绪（{status.readiness}），不会把未知状态当作可用档案。</p>
-                <button className="quietPrimary" type="button" disabled={busy || Boolean(action)} onClick={() => void startBaseline()}>重新建立角色基线</button>
+                <button className="quietPrimary" type="button" disabled={baselineActionDisabled} onClick={() => void startBaseline()}>重新建立角色基线</button>
               </>
             ) : confirmedItems === 0 ? (
               <>
@@ -483,6 +514,23 @@ export default function GuidedReviewLaunch({
                     </label>
                   ))}
                 </fieldset>
+                {characterReview && profilesReady && (
+                  <fieldset>
+                    <legend>本次审查范围</legend>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={deepReviewChecked}
+                        disabled={!deepReviewKey || busy || Boolean(action)}
+                        onChange={event => setDeepReviewSelection(event.target.checked ? deepReviewKey : null)}
+                        aria-describedby="deep-review-cost"
+                      />
+                      <span><b>角色深度审查</b><small id="deep-review-cost">{characterReview === "needs_account_model"
+                        ? "先在模型设置中保存账户 API Key，即可核对角色设定与新稿行为。"
+                        : "对照已确认的设定、剧情经历和新稿行为，将额外使用你的账户 API 额度。仅本次生效。"}</small></span>
+                    </label>
+                  </fieldset>
+                )}
                 <button
                   className="startValidation"
                   type="button"

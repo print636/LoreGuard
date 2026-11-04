@@ -3,6 +3,7 @@ type JsonObject = Record<string, unknown>;
 export type ProviderConnectionTone = 'neutral' | 'ready' | 'warning' | 'error';
 
 export type ProviderConnectionView = {
+  characterReview?: 'available' | 'needs_account_model';
   tone: ProviderConnectionTone;
   label: string;
   detail: string;

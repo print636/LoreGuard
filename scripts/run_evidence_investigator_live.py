@@ -361,10 +361,11 @@ _CHARACTER_SIGNAL_FULL_LINE_ECHO_KEY = "signal_full_line_echo_v2"
 _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS = {
     "checker_version": "character-consistency-stage-v5",
     "drift_review_policy_version": "single-clear-event-v3",
-    "drift_review_prompt_version": "character-single-event-review-prompt-v1",
+    "drift_review_prompt_version": "character-single-event-review-prompt-v2",
     "drift_review_schema_version": "character-single-event-review-v1",
     "reviewed_events_schema_version": "character-reviewed-events-v1",
 }
+_CHARACTER_REVIEW_MAX_GENERATIONS = "drift_review_max_generations"
 _CHARACTER_BASELINE_COVERAGE_KEYS = frozenset({
     "baseline_coverage_recovery_schema_version",
     "baseline_coverage_recovery_prompt_sha256",
@@ -390,7 +391,19 @@ def _safe_character_review_extensions(value: object) -> dict[str, Any] | None:
         return None
     if coverage_keys not in (set(), set(_CHARACTER_BASELINE_COVERAGE_KEYS)):
         return None
-    if event_keys and any(value[key] != version for key, version in _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS.items()):
+    if event_keys:
+        expected = dict(_CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS)
+        if _CHARACTER_REVIEW_MAX_GENERATIONS in value:
+            limit = value[_CHARACTER_REVIEW_MAX_GENERATIONS]
+            if type(limit) is not int or not 1 <= limit <= 2:
+                return None
+            event_keys.add(_CHARACTER_REVIEW_MAX_GENERATIONS)
+        else:
+            # V1 never issued corrective generations or recorded this bound.
+            expected["drift_review_prompt_version"] = "character-single-event-review-prompt-v1"
+        if any(value[key] != version for key, version in expected.items()):
+            return None
+    elif _CHARACTER_REVIEW_MAX_GENERATIONS in value:
         return None
     if coverage_keys:
         enabled = all(value.get(key) is True for key in (
@@ -3489,6 +3502,7 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             | _CHARACTER_EXPLANATION_REVIEW_KEYS
             | _CHARACTER_OOC_PROTOCOL_KEYS
             | _CHARACTER_SINGLE_EVENT_REVIEW_VERSIONS.keys()
+            | {_CHARACTER_REVIEW_MAX_GENERATIONS}
             | _CHARACTER_BASELINE_COVERAGE_KEYS
             | {_CHARACTER_SCOPED_AXIS_DRIFT_KEY}
         ) not in {

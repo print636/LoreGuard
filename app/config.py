@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Literal
+from typing import ClassVar, Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, ValidationError, field_validator, model_validator
@@ -258,6 +258,9 @@ class Settings(BaseSettings):
     # resource ceilings, so enabling it cannot silently borrow the evidence
     # reviewer's budget or change that reviewer's behavior.
     enable_character_consistency: bool = False
+    # Only the isolated author factory requires explicit per-run consent. This
+    # profile marker cannot be enabled by dotenv or by a request.
+    character_review_requires_opt_in: ClassVar[bool] = False
     character_consistency_sensitivity: Literal[
         "conservative", "balanced", "exploratory"
     ] = "balanced"
@@ -407,6 +410,7 @@ class Settings(BaseSettings):
     character_drift_timeout_seconds: float = Field(
         default=30.0, gt=0, le=30.0
     )
+    character_drift_review_max_generations: int = Field(default=2, ge=1, le=2)
     character_drift_max_attempts: int = Field(default=2, ge=1, le=4)
     character_drift_total_deadline_seconds: float = Field(
         default=60.0, gt=0, le=60.0

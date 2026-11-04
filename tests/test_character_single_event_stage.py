@@ -44,9 +44,10 @@ from app.character_scope_review import ScopeReviewSourceIdentity
 from app.config import Settings
 from app.main import app, write_limiter
 from app.runtime_provenance import safe_runtime_provenance
+from app.service import CharacterConsistencyUsageAccumulator, _CharacterConsistencyAccountingProvider
 from tests.test_character_consistency_stage import (
     QueueProvider, _confirmed_speech_project, _context, _create_document,
-    _new_run, _record, _response, _run_stage,
+    _new_run, _record, _response, _run_stage, _settings,
     _confirm_only_candidate,
 )
 from tests.test_character_target_coverage import _fixture
@@ -186,20 +187,25 @@ class _RuntimeSingleEventProvider(QueueProvider):
         return super().complete(system, user)
 
 
-def test_actual_stage_single_action_calls_new_contract_and_emits_formal_receipt():
+def _single_action_run(client, provider_class=_RuntimeSingleEventProvider):
     profile = "祁雾说话始终简短，这是她稳定的说话方式。"
     draft = "祁雾在日常汇报时一口气说了很长一段话。"
+    project = _confirmed_speech_project(client)
+    _create_document(client, project["id"], name="draft.md", role="chapter", content=draft,
+                     narrative_context=_context(publication="draft"))
+    provider = provider_class(
+        _response(_record(character="祁雾", evidence=profile, polarity="positive", kind="explicit_declaration",
+                          dimension="speech_pattern", trait_key="concise_speech", statement="说话始终简短")),
+        _response(_record(character="祁雾", evidence=draft, polarity="negative", kind="speech_sample",
+                          dimension="speech_pattern", trait_key="concise_speech")),
+    )
+    return _new_run(client, project["id"]), provider
+
+
+def test_actual_stage_single_action_calls_new_contract_and_emits_formal_receipt():
     with TestClient(app) as client:
-        project = _confirmed_speech_project(client)
-        _create_document(client, project["id"], name="draft.md", role="chapter", content=draft,
-                         narrative_context=_context(publication="draft"))
-        provider = _RuntimeSingleEventProvider(
-            _response(_record(character="祁雾", evidence=profile, polarity="positive", kind="explicit_declaration",
-                              dimension="speech_pattern", trait_key="concise_speech", statement="说话始终简短")),
-            _response(_record(character="祁雾", evidence=draft, polarity="negative", kind="speech_sample",
-                              dimension="speech_pattern", trait_key="concise_speech")),
-        )
-        result = _run_stage(_new_run(client, project["id"]), provider, character_explanation_review_v1=True)
+        run_id, provider = _single_action_run(client)
+        result = _run_stage(run_id, provider, character_explanation_review_v1=True)
     assert len(result.issues) == 1 and not result.review_clues
     assert sum(system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT for system, _ in provider.calls) == 1
     trace = result.diagnostics["case_trace"][0]
@@ -209,6 +215,109 @@ def test_actual_stage_single_action_calls_new_contract_and_emits_formal_receipt(
     assert len(trace["reviewed_events"]["events"]) == 1
     assert trace["target_coverage"]["status"] == "complete"
     assert result.issues[0].metadata["checker_version"] == CHARACTER_CONSISTENCY_CHECKER_VERSION
+
+
+@pytest.mark.parametrize(("correction", "expected_calls"), [
+    ("recovered", 2), ("invalid_response", 2), ("attempt_limit", 1),
+    ("token_budget", 1), ("cancelled", 1),
+])
+def test_stage_contract_correction_preserves_accounting_and_frozen_evidence(correction, expected_calls):
+    from scripts.run_character_consistency_live import _safe_case_trace_summary
+
+    class ContractProvider(_RuntimeSingleEventProvider):
+        def complete(self, system, user):
+            if system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT and (
+                "contract_correction" not in json.loads(user) or correction == "invalid_response"
+            ):
+                self.calls.append((system, user))
+                return SimpleNamespace(
+                    text="malformed raw-model sentinel",
+                    prompt_tokens=7900 if correction == "token_budget" else 17,
+                    completion_tokens=9,
+                )
+            return super().complete(system, user)
+
+    cancelled = RuntimeError("cancel before correction")
+    settings = {
+        "character_explanation_review_v1": True,
+        "character_drift_review_max_generations": 1 if correction == "attempt_limit" else 2,
+    }
+    ledger = CharacterConsistencyUsageAccumulator()
+    with TestClient(app) as client:
+        run_id, model = _single_action_run(client, ContractProvider)
+        provider = _CharacterConsistencyAccountingProvider(
+            _settings(**settings), ledger, signal_provider=model, drift_provider=model,
+        )
+
+        def checkpoint():
+            if correction == "cancelled" and any(
+                system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT for system, _ in model.calls
+            ):
+                raise cancelled
+
+        if correction == "cancelled":
+            with pytest.raises(RuntimeError) as caught:
+                _run_stage(run_id, provider, checkpoint=checkpoint, **settings)
+            assert caught.value is cancelled
+        else:
+            result = _run_stage(run_id, provider, checkpoint=checkpoint, **settings)
+
+    assert sum(system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT for system, _ in model.calls) == expected_calls
+    assert ledger.logical_calls == len(model.calls)
+    if correction == "cancelled":
+        assert ledger.safe_dict(terminal_status="cancelled")["charged_tokens"] > 0
+        return
+    usage = result.diagnostics["usage"]
+    assert usage["attempted_calls"] == ledger.logical_calls
+    assert result.prompt_tokens == ledger.prompt_tokens
+    assert result.completion_tokens == ledger.completion_tokens
+    assert result.charged_tokens == ledger.charged_tokens
+    counts = result.diagnostics["counts"]
+    assert counts["planned_chunks"] == counts["model_called_chunks"] == counts["model_completed_chunks"] == 2
+    assert counts["drift_reviewed"] == expected_calls
+    assert counts["drift_correction_attempted_call_count"] == expected_calls - 1
+    assert counts["drift_correction_recovered_case_count"] == int(correction == "recovered")
+    trace = result.diagnostics["case_trace"][0]
+    assert trace["review_contract_failure"] == "json"
+    assert trace["review_correction_status"] == correction
+    summary = _safe_case_trace_summary(trace)
+    assert summary["review_contract_failure"] == "json" and summary["review_correction_status"] == correction
+    assert "sentinel" not in json.dumps(result.diagnostics)
+    assert "review_contract_failure" not in _safe_case_trace_summary({**trace, "review_contract_failure": ["raw"]})
+    if correction == "recovered":
+        assert trace["final_outcome"] == "conflict"
+        assert result.issues[0].metadata["reviewed_events"] == trace["reviewed_events"]
+    else:
+        assert not result.issues and "reviewed_events" not in trace
+        assert trace["review_outcome"] == "degraded"
+        assert result.diagnostics["reason_counts"]["review_invalid_model_response"] == 1
+
+
+def test_stage_limits_primary_correction_to_remaining_run_tokens():
+    class InvalidPrimaryProvider(_RuntimeSingleEventProvider):
+        def complete(self, system, user):
+            if system == CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT:
+                self.calls.append((system, user))
+                return SimpleNamespace(text="{", prompt_tokens=17, completion_tokens=9)
+            return super().complete(system, user)
+
+    with TestClient(app) as client:
+        # Measure an admitted first pass through extraction, explanation and review,
+        # then allow only that charge and a small rounding margin for the whole run.
+        reference_id, reference_model = _single_action_run(client, InvalidPrimaryProvider)
+        reference = _run_stage(
+            reference_id, reference_model, character_explanation_review_v1=True,
+            character_drift_review_max_generations=1,
+        )
+        assert reference.diagnostics["case_trace"][0]["review_correction_status"] == "attempt_limit"
+        run_id, model = _single_action_run(client, InvalidPrimaryProvider)
+        limited = _run_stage(
+            run_id, model, character_explanation_review_v1=True,
+            remaining_run_tokens=reference.charged_tokens + 10,
+        )
+    assert limited.diagnostics["case_trace"][0]["review_correction_status"] == "token_budget"
+    assert limited.diagnostics["counts"]["drift_reviewed"] == 1
+    assert limited.charged_tokens <= reference.charged_tokens + 10
 
 
 def test_provenance_records_runtime_policy_and_preserves_explicit_smaller_limits():
@@ -224,6 +333,30 @@ def test_provenance_records_runtime_policy_and_preserves_explicit_smaller_limits
     assert limits["drift_token_budget"] == 1200 and limits["drift_max_completion_tokens"] == 1000
     with pytest.raises(ValidationError):
         Settings(_env_file=None, character_drift_max_completion_tokens=4001)
+
+
+def test_primary_generation_limit_and_prompt_identity_round_trip_for_old_and_current_runs():
+    from scripts.run_character_axis_live import _safe_character_runtime_provenance
+    from scripts.run_evidence_investigator_live import _safe_runtime_provenance
+    from tests.test_runtime_provenance import configured_settings
+
+    provenance = safe_runtime_provenance(configured_settings())
+    limits = provenance["character_consistency_limits"]
+    assert limits["drift_review_prompt_version"] == "character-single-event-review-prompt-v2"
+    assert limits["drift_review_max_generations"] == 2
+    for bound in (1, 2, 0, 3, True, "2"):
+        limits["drift_review_max_generations"] = bound
+        valid = type(bound) is int and bound in (1, 2)
+        assert (_safe_runtime_provenance(provenance) == provenance) == valid
+        assert (_safe_character_runtime_provenance(provenance) is not None) == valid
+    del limits["drift_review_max_generations"]
+    assert _safe_runtime_provenance(provenance) is None
+    limits["drift_review_prompt_version"] = "character-single-event-review-prompt-v1"
+    assert _safe_runtime_provenance(provenance) == provenance
+    assert _safe_character_runtime_provenance(provenance)["character_consistency_limits"] == limits
+    limits["drift_review_max_generations"] = 1
+    assert _safe_runtime_provenance(provenance) is None
+    assert _safe_character_runtime_provenance(provenance) is None
 
 
 def test_stage_recovery_attempt_is_shared_across_formal_document_chunks(monkeypatch):
