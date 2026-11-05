@@ -1,7 +1,7 @@
 """Only an opted-in author draft runs the longer scene checks."""
 import pytest
 
-from app.config import HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, Settings
+from app.config import CLAIM_RESOLUTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, Settings
 from app.db import AnalysisRunRow
 from app.service import (
     CharacterConsistencyUsageAccumulator, _CharacterConsistencyAccountingProvider,
@@ -120,6 +120,30 @@ def test_object_chain_requires_its_frozen_version_and_habit_authorization(change
     assert stage._character_habit_object_chain_v1 is enabled
     assert base._character_habit_object_chain_v1 is False
     assert "_character_habit_object_chain_v1" not in stage.model_dump()
+
+
+@pytest.mark.parametrize(("changes", "enabled"), [
+    ({}, False),  # An older V15 run must not gain another verification call.
+    ({"claim_resolution_policy": CLAIM_RESOLUTION_POLICY_V1}, True),
+    ({"claim_resolution_policy": "unknown"}, False),
+    ({"claim_resolution_policy": CLAIM_RESOLUTION_POLICY_V1, "habit_object_chain_policy": None}, False),
+    ({"claim_resolution_policy": CLAIM_RESOLUTION_POLICY_V1, "character_review_enabled": False}, False),
+    ({"claim_resolution_policy": CLAIM_RESOLUTION_POLICY_V1, "habit_scene_policy": None}, False),
+])
+def test_claim_resolution_requires_its_frozen_version_and_object_chain_authorization(changes, enabled):
+    base, stage = local_run(coverage_changes={
+        "habit_object_chain_policy": HABIT_OBJECT_CHAIN_POLICY_V1, **changes,
+    })
+    assert stage._character_claim_resolution_v1 is enabled
+    assert base._character_claim_resolution_v1 is False
+    assert "_character_claim_resolution_v1" not in stage.model_dump()
+
+
+def test_claim_resolution_private_override_cannot_upgrade_an_old_run():
+    base, _ = local_run()
+    base._character_claim_resolution_v1 = True
+    run = AnalysisRunRow(sensitivity="balanced", batch_coverage={})
+    assert not _character_stage_settings_for_run(base, run)._character_claim_resolution_v1
 
 
 def test_object_chain_exact_purpose_uses_existing_bounded_call_and_accounting():

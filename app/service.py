@@ -15,7 +15,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select, update
 
 from .config import (
     HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS,
-    HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, get_settings,
+    CLAIM_RESOLUTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, get_settings,
 )
 from .account_provider import runtime_for_analysis_run
 from .character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
@@ -54,6 +54,8 @@ from .character_consistency_stage import (
     failed_character_consistency_stage,
 )
 from .character_observations import CharacterObservationRecorder
+from .character_claim_resolution import CLAIM_RESOLUTION_KEY
+from .character_claim_resolution_storage import validate_claim_resolution_payload
 from .character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from .character_history_semantic_review import HISTORY_REVIEW_SYSTEM_PROMPT
@@ -3195,6 +3197,9 @@ def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
     stage._character_habit_object_chain_v1 = (
         stage._character_habit_scene_scheduling_v1 and coverage.get("habit_object_chain_policy") == HABIT_OBJECT_CHAIN_POLICY_V1
     )
+    stage._character_claim_resolution_v1 = (
+        stage._character_habit_object_chain_v1 and coverage.get("claim_resolution_policy") == CLAIM_RESOLUTION_POLICY_V1
+    )
     return stage
 
 
@@ -3352,6 +3357,12 @@ def execute_analysis(
                     ),
                 )
                 character_stage_db.raise_if_ownership_lost()
+                claim_resolution = validate_claim_resolution_payload(
+                    character_stage_db, run=run,
+                    payload=character_stage_result.diagnostics.get(CLAIM_RESOLUTION_KEY),
+                )
+                if claim_resolution is not None:
+                    character_stage_result.diagnostics[CLAIM_RESOLUTION_KEY] = claim_resolution
             except (AnalysisCancelled, WorkerLeaseLost):
                 raise
             except Exception:

@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from .narrative_context import payload_sha256
+from .character_claim_resolution import ClaimPackageState, PendingMaterialClaim, claim_resolution_target_sha256
 
 MATERIAL_REVIEW_KEY = "material_review_v1"
 MATERIAL_REVIEW_SCHEMA = "character-material-review-v1"
@@ -54,6 +55,25 @@ class DraftMaterialTracker:
     omitted: int = 0
     captured: bool = False
     pending_response: bool = False
+    claim_resolution_enabled: bool = False
+    claim_state: ClaimPackageState = field(default_factory=ClaimPackageState)
+    final_review_reasons: dict[int, MaterialReason] = field(default_factory=dict)
+
+    def remember_review(self, response: str, outcome) -> None:
+        if not self.claim_resolution_enabled:
+            return
+        self.final_review_reasons.update(getattr(outcome, "material_reasons", ()))
+        try:
+            records = json.loads(response)["records"]
+        except (ValueError, KeyError, TypeError):
+            return
+        for proof in getattr(outcome, "claim_certificates", ()):
+            index = proof["record_index"]
+            if not isinstance(records, list) or not 0 <= index < len(records) or not self._location(records[index]):
+                continue
+            key = payload_sha256({"source": self.source.content_sha256, "document": self.source.document_id,
+                                  "record": records[index]})
+            self.claim_state.certificates.append({**proof, "primary_claim_sha256": key})
 
     def _location(self, raw: object) -> dict:
         if not isinstance(raw, dict) or not isinstance(self.content, str) or self.source is None:
@@ -72,7 +92,7 @@ class DraftMaterialTracker:
             return {}
         return dict(line_start=start, line_end=end, text_sha256=hashlib.sha256(text.encode()).hexdigest())
 
-    def capture(self, response: str, validation) -> None:
+    def capture(self, response: str, validation, *, package_attempt: int = 1) -> None:
         """Only the post-correction validation of this attempt is current."""
         self.captured = True
         self.pending_response = False
@@ -109,7 +129,7 @@ class DraftMaterialTracker:
         }
         for failure in failures:
             gap = DraftMaterialGap(
-                reason=material_reason(failure.reason),
+                reason=self.final_review_reasons.get(failure.record_index, material_reason(failure.reason)),
                 claim_digest=keys.get(failure.record_index),
                 **locations.get(failure.record_index, {}),
             )
@@ -119,6 +139,25 @@ class DraftMaterialTracker:
             else:
                 self.omitted += 1
         self.gaps = tuple(remaining.values())
+        if self.claim_resolution_enabled:
+            self.claim_state.enumeration_complete = bool(
+                validation.parsed and trace is not None and len(trace.events) == len(records)
+                and len(keys) == len(records) and not any(f.record_index is None for f in failures)
+            )
+            for deferred in validation.target_bound_draft_deferred:
+                key = keys.get(deferred.record_index)
+                if (key is None or not deferred.claim_review or not deferred.object_review
+                        or deferred.target.dimension != "contextual_behavior" or not deferred.target.habit_contexts):
+                    continue
+                # The target model is already frozen on the generated proposal;
+                # constructing its review identity does not adjudicate the claim.
+                from .character_trait_extraction import _target_bound_review_target
+                target = _target_bound_review_target(deferred.target, target_ordinal=deferred.target_ordinal)
+                self.claim_state.pending[key] = PendingMaterialClaim(
+                    key, deferred, package_attempt, claim_resolution_target_sha256(target),
+                )
+            self.claim_state.pending = {k: v for k, v in self.claim_state.pending.items() if k not in self.resolved}
+            self.final_review_reasons.clear()
 
     def finish(self, result):
         if result.diagnostics.outcome == "completed":
@@ -130,9 +169,13 @@ class DraftMaterialTracker:
             if not gaps and not omitted:
                 reason = "processing_incomplete" if self.captured else "response_unavailable"
                 gaps = (DraftMaterialGap(reason=reason),)
+        self.claim_state.gaps, self.claim_state.omitted_count = gaps, omitted
+        if self.pending_response:
+            self.claim_state.enumeration_complete = False
         return result.model_copy(update={
             "material_gaps": gaps, "material_gaps_omitted": omitted,
             "material_resolved_claims": tuple(sorted(self.resolved)),
+            **({"claim_resolution_state": self.claim_state} if self.claim_resolution_enabled else {}),
         })
 
 
@@ -163,9 +206,12 @@ class MaterialGapLedger:
     entries: list[dict] = field(default_factory=list)
     resolved: set[str] = field(default_factory=set)
     omitted_count: int = 0
+    scoped_resolution: bool = False
+    resolved_scopes: set[tuple[str, str, str]] = field(default_factory=set)
 
     def add(self, result, source, phase: MaterialPhase, target_key=None) -> None:
-        self.resolved.update(getattr(result, "material_resolved_claims", ()))
+        if not self.scoped_resolution:
+            self.resolved.update(getattr(result, "material_resolved_claims", ()))
         gaps = getattr(result, "material_gaps", None)
         if gaps is None:
             gaps = () if result.diagnostics.outcome == "completed" else (
@@ -175,7 +221,10 @@ class MaterialGapLedger:
         for gap in gaps:
             if gap.claim_digest is not None:
                 self.resolved.discard(gap.claim_digest)
-                self.entries = [row for row in self.entries if row.get("claim_digest") != gap.claim_digest]
+                self.entries = [row for row in self.entries if row.get("claim_digest") != gap.claim_digest
+                                or self.scoped_resolution and (
+                                    row["source_input_id"] != source.input_id or row["phase"] != phase
+                                    or row.get("target_key") != target_key)]
             if len(self.entries) >= 128:
                 self.omitted_count += 1
                 continue
@@ -190,11 +239,18 @@ class MaterialGapLedger:
                  target_key, draft_document_ids: set[str], case_reasons: set[str]) -> dict:
         current = [row for row in reviewed_events["evidence_refs"] if row["role"] == "C"]
         grouped = {}
-        for entry in self.entries:
+        seen_claims = set()
+        for entry in reversed(self.entries) if self.scoped_resolution else self.entries:
             if (entry["source_document_id"] not in draft_document_ids
                     or entry.get("target_key") is not None and entry["target_key"] != target_key
-                    or entry.get("claim_digest") in self.resolved):
+                    or entry.get("claim_digest") in self.resolved
+                    or (entry["source_input_id"], candidate_id, entry.get("claim_digest")) in self.resolved_scopes):
                 continue
+            claim_key = (entry["source_input_id"], entry.get("claim_digest"))
+            if self.scoped_resolution and claim_key[1] is not None:
+                if claim_key in seen_claims:
+                    continue
+                seen_claims.add(claim_key)
             data = {k: v for k, v in entry.items() if k not in {"claim_digest", "target_key"}}
             located = "line_start" in data and "text_sha256" in data
             data["location"] = "located" if located else "unknown"

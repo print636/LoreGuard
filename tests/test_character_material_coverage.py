@@ -165,3 +165,26 @@ def test_partial_regeneration_keeps_old_unresolved_claim_and_exact_acceptance_cl
     assert len(partial.material_gaps) == 1
     assert key in partial.material_resolved_claims
     assert partial.material_gaps[0].claim_digest != key
+
+
+def test_scoped_resolution_does_not_erase_the_same_raw_claim_for_another_target():
+    source = _draft_source(SOURCE)
+    value = tracker(SOURCE)
+    capture(value, [record("廖辰捏碎珍珠")], [(0, "statement_support")])
+    unresolved = value.finish(_partial_result())
+    key = unresolved.material_gaps[0].claim_digest
+    first_target, second_target = ("廖辰", "first"), ("廖辰", "second")
+    ledger = MaterialGapLedger(scoped_resolution=True)
+    ledger.add(unresolved, source, "primary_extraction")
+    ledger.add(unresolved, source, "targeted_recall", first_target)
+    # A later targeted copy must not overwrite the original cross-target debt.
+    assert len(ledger.entries) == 2
+    ledger.add(_result().model_copy(update={"material_resolved_claims": (key,), "material_gaps": ()}),
+               source, "targeted_verification", first_target)
+    ledger.resolved_scopes.add((source.input_id, "first-candidate", key))
+    def final(candidate, target):
+        return ledger.for_case(case_id="case", candidate_id=candidate, reviewed_events=receipt(source),
+                               target_key=target, draft_document_ids={source.document.id}, case_reasons=set())
+    assert not final("first-candidate", first_target)["gaps"]
+    other = final("second-candidate", second_target)
+    assert len(other["gaps"]) == 1 and other["gaps"][0]["phase"] == "primary_extraction"

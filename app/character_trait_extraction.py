@@ -21,6 +21,7 @@ from pydantic import (
 )
 
 from .character_material_coverage import DraftMaterialGap, DraftMaterialTracker
+from .character_claim_resolution import claim_resolution_target_sha256, text_sha256
 from .config import HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS, Settings, get_settings
 from .character_scope_failure import ScopeProviderFailureSeriesV1
 from .character_scope_review import (
@@ -1561,6 +1562,7 @@ class CharacterSignalExtractionResult(BaseModel):
     material_gaps: tuple[DraftMaterialGap, ...] | None = Field(default=None, exclude=True)
     material_gaps_omitted: int = Field(default=0, ge=0, exclude=True)
     material_resolved_claims: tuple[str, ...] = Field(default=(), exclude=True)
+    claim_resolution_state: Any = Field(default=None, exclude=True)
     # For the candidate-lines verification pass only. None means unobserved.
     verification_primary_attempts: tuple[DraftSignalTraceAttemptV1, ...] | None = Field(
         default=None, exclude=True, max_length=2
@@ -1682,6 +1684,8 @@ class _TargetBoundDraftOutcome:
     reason_counts: tuple[tuple[str, int], ...] = ()
     slot_conflict_counts: tuple[tuple[TargetBoundSlotConflict, int], ...] = ()
     failure_events: tuple[TargetBoundFailureEventV1, ...] = ()
+    claim_certificates: tuple[dict, ...] = ()
+    material_reasons: tuple[tuple[int, str], ...] = ()
     attempted_calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -2249,7 +2253,8 @@ class CharacterSignalExtractor:
                 )
         coverage_enabled = baseline_coverage_recovery and formal_scope_v5 and support_index is not None
         material_tracker = (
-            DraftMaterialTracker(source_identity, frozen_content, chunk)
+            DraftMaterialTracker(source_identity, frozen_content, chunk,
+                                 claim_resolution_enabled=self.settings._character_claim_resolution_v1)
             if chunk.source_kind == "draft" else None
         )
         result = self._extract_with_prompt(
@@ -2450,7 +2455,8 @@ class CharacterSignalExtractor:
             _VerificationDispatch() if target_bound_review_v3 and candidate_evidence_ranges else None
         )
         material_tracker = (
-            DraftMaterialTracker(source_identity, frozen_content, chunk)
+            DraftMaterialTracker(source_identity, frozen_content, chunk,
+                                 claim_resolution_enabled=self.settings._character_claim_resolution_v1)
             if chunk.source_kind == "draft" else None
         )
         result = self._extract_with_prompt(
@@ -2672,6 +2678,8 @@ class CharacterSignalExtractor:
             target_bound_reason_counts.update(dict(outcome.reason_counts))
             target_bound_slot_conflict_counts.update(dict(outcome.slot_conflict_counts))
             target_bound_failure_events.extend(outcome.failure_events)
+            if material_tracker is not None:
+                material_tracker.remember_review(response_text, outcome)
 
         def validate_response(
             response_text: Any,
@@ -3239,7 +3247,7 @@ class CharacterSignalExtractor:
                     )
             validation_attempts.append(validation)
             if material_tracker is not None:
-                material_tracker.capture(response_text, validation)
+                material_tracker.capture(response_text, validation, package_attempt=package_attempt + 1)
             if validation.complete:
                 clean = tuple({
                     signal.id: signal
@@ -6320,6 +6328,8 @@ def _review_target_bound_draft_candidates(
     ambiguous_claim_digests: set[str] = set()
     slot_conflict_counts: Counter[TargetBoundSlotConflict] = Counter()
     failure_events: list[TargetBoundFailureEventV1] = []
+    claim_certificates: list[dict] = []
+    material_reasons: dict[int, str] = {}
     for batch, run in batches:
         batch_indices = set().union(*(
             indices_by_digest[target_bound_draft_review_request_digest(entry.request)] for entry in batch
@@ -6369,6 +6379,11 @@ def _review_target_bound_draft_candidates(
                             ambiguous_claim_digests.add(request_digest)
                         for item in decisions:
                             slot_conflict_counts.update(item.slot_conflicts)
+                        undecided = tuple(item for item in decisions if item.different_claim_digest != digest)
+                        reason = ("object_unverified" if len(undecided) == 1
+                                  and undecided[0].slot_conflicts == ("object_span",) else "record_unverified")
+                        for record_index in indices_by_digest[request_digest]:
+                            material_reasons[record_index] = reason
                     continue
                 decisions = supported
             elif entry.expected_primary_claim and len(decisions) == 1 and decisions[0].reason == "reviewer_uncertain":
@@ -6396,6 +6411,9 @@ def _review_target_bound_draft_candidates(
                     continue
                 if decision.verdict != "supported":
                     unresolved.add(item.record_index)
+                    material_reasons[item.record_index] = (
+                        "object_unverified" if decision.slot_conflicts == ("object_span",) else "record_unverified"
+                    )
                     # A homogeneous provider/protocol failure is already
                     # counted once for every affected debt above.  Its
                     # synthetic per-item uncertain decisions must not double
@@ -6432,6 +6450,17 @@ def _review_target_bound_draft_candidates(
                     accepted_target_windows.add(window)
                 resolved.add(item.record_index)
                 signals.setdefault(signal.id, signal)
+                if entry.expected_primary_claim is not None:
+                    claim_certificates.append(dict(
+                        record_index=item.record_index, source_input_id=request.run_input_id,
+                        source_document_id=request.document_id, source_content_sha256=request.content_sha256,
+                        target_sha256=claim_resolution_target_sha256(request.target),
+                        review_claim_sha256=entry.expected_primary_claim.claim_digest,
+                        request_sha256=request_digest, proposal_id=proposal.proposal_id,
+                        observation_id=signal.id, line_start=signal.evidence.line_start,
+                        line_end=signal.evidence.line_end, text_sha256=text_sha256(signal.evidence.text),
+                        observation_statement_sha256=text_sha256(signal.statement),
+                    ))
     if claim_review and resolved:
         review_reasons[f"{review_label}_claim_review_supported"] += len(resolved)
     if object_review and resolved:
@@ -6446,6 +6475,7 @@ def _review_target_bound_draft_candidates(
     return _TargetBoundDraftOutcome(
         signals=tuple(signals.values()),
         resolved_record_indices=frozenset(resolved),
+        claim_certificates=tuple(claim_certificates), material_reasons=tuple(material_reasons.items()),
         unresolved_record_indices=frozenset(unresolved),
         source_recall_candidates=(
             _habit_source_recall_candidates(batches, ambiguous_claim_digests)
@@ -6459,6 +6489,26 @@ def _review_target_bound_draft_candidates(
         prompt_tokens=sum(run.prompt_tokens for run in completed_runs),
         completion_tokens=sum(run.completion_tokens for run in completed_runs),
         charged_tokens=sum(run.charged_tokens for run in completed_runs),
+    )
+
+
+def review_original_material_claim(
+    pending, *, chunk: CharacterSignalChunk, source_identity: ScopeReviewSourceIdentity,
+    frozen_content: str, provider: _ChatProvider, settings: Settings, token_budget: int,
+) -> _TargetBoundDraftOutcome:
+    """One new bounded adjudication of the unchanged original claim, never regeneration."""
+    if not settings._character_claim_resolution_v1 or not settings._character_habit_object_chain_v1:
+        return _TargetBoundDraftOutcome(reason_counts=(("claim_resolution_disabled", 1),))
+    if (not isinstance(pending.deferred, _TargetBoundDraftDeferred)
+            or pending.deferred.index.source != source_identity
+            or not _draft_actor_source_matches_chunk(source_identity, frozen_content, chunk)):
+        return _TargetBoundDraftOutcome(reason_counts=(("claim_resolution_source_mismatch", 1),))
+    return _review_target_bound_draft_candidates(
+        chunk=chunk, deferred=(pending.deferred,), primary_value_recovery=True,
+        package_attempt=pending.package_attempt, source_identity=source_identity,
+        frozen_content=frozen_content, provider=provider, settings=settings,
+        token_budget=token_budget, remaining_deadline_seconds=HABIT_SCENE_CALL_TIMEOUT_SECONDS,
+        monotonic=time.perf_counter,
     )
 
 

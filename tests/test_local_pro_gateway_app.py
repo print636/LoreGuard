@@ -131,7 +131,7 @@ def _exercise_author_review(client):
     from unittest.mock import patch
     import httpx
     from app import service
-    from app.config import HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1
+    from app.config import CLAIM_RESOLUTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1
     from app.db import AnalysisRunRow, SessionLocal
     from app.character_drift import CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
     from app.character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
@@ -264,6 +264,8 @@ def _exercise_author_review(client):
         assert all(frozen_scene_policy(run) is None for run in (default, ordinary, created))
         assert frozen_scene_policy(reviewed, "habit_object_chain_policy") == HABIT_OBJECT_CHAIN_POLICY_V1
         assert all(frozen_scene_policy(run, "habit_object_chain_policy") is None for run in (default, ordinary, created))
+        assert frozen_scene_policy(reviewed, "claim_resolution_policy") == CLAIM_RESOLUTION_POLICY_V1
+        assert all(frozen_scene_policy(run, "claim_resolution_policy") is None for run in (default, ordinary, created))
         assert reviewed["review_batch"]["character_baseline_run_id"] == baseline_id
         assert calls.count(CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT) == 1
         run_url = "/api/v1/analysis-runs/" + reviewed["id"]
@@ -299,8 +301,9 @@ def _exercise_author_review(client):
             with SessionLocal() as db:
                 failed_run = db.get(AnalysisRunRow, failed.json()["detail"]["run_id"])
                 assert failed_run.batch_coverage.get("habit_object_chain_policy") == (HABIT_OBJECT_CHAIN_POLICY_V1 if enabled else None)
+                assert failed_run.batch_coverage.get("claim_resolution_policy") == (CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
                 # Replay a genuine older snapshot shape after the application has upgraded.
-                failed_run.batch_coverage = {key: value for key, value in failed_run.batch_coverage.items() if key != "habit_object_chain_policy"}
+                failed_run.batch_coverage = {key: value for key, value in failed_run.batch_coverage.items() if key not in {"habit_object_chain_policy", "claim_resolution_policy"}}
                 db.commit()
             calls.clear()
             retry = client.post("/api/v1/analysis-runs/" + failed.json()["detail"]["run_id"] + "/retry")
@@ -308,6 +311,7 @@ def _exercise_author_review(client):
             assert retry.json()["review_batch"]["character_review_enabled"] is enabled
             assert frozen_scene_policy(retry.json()) == (HABIT_SCENE_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(retry.json(), "habit_object_chain_policy") is None
+            assert frozen_scene_policy(retry.json(), "claim_resolution_policy") is None
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
         # A new draft version requires a fresh choice, even after a paid review.
         _document(client, project, name="draft.md", role="chapter", publication="draft",
@@ -324,6 +328,7 @@ def _exercise_author_review(client):
             assert recheck.json()["review_batch"]["character_review_enabled"] is enabled
             assert frozen_scene_policy(recheck.json()) == (HABIT_SCENE_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "habit_object_chain_policy") == (HABIT_OBJECT_CHAIN_POLICY_V1 if enabled else None)
+            assert frozen_scene_policy(recheck.json(), "claim_resolution_policy") == (CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
         assert client.post(recheck_url, headers={"Idempotency-Key": "deep-recheck"}).status_code == 409
         _document(client, project, name="profile.md", role="character_profile", publication="published",

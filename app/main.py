@@ -23,7 +23,8 @@ from sqlalchemy.orm import load_only
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
-from .config import HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, get_settings
+from .config import CLAIM_RESOLUTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, get_settings
+from .character_claim_resolution import CLAIM_RESOLUTION_KEY
 from .auth import (
     AuthContext,
     ExactOriginMiddleware,
@@ -862,6 +863,7 @@ def _review_batch_selection(
         coverage["habit_scene_policy"] = HABIT_SCENE_POLICY_V1
         coverage["habit_scope_policy"] = HABIT_SCOPE_POLICY_V1
         coverage["habit_object_chain_policy"] = HABIT_OBJECT_CHAIN_POLICY_V1
+        coverage["claim_resolution_policy"] = CLAIM_RESOLUTION_POLICY_V1
     return selected, roles, coverage
 
 
@@ -7178,11 +7180,14 @@ def _public_diagnostics_payload(payload: object) -> dict:
         return {}
     public = {
         key: value for key, value in payload.items()
-        if key != PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY
+        if key not in {PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY, CLAIM_RESOLUTION_KEY}
     }
     stage = public.get("character_consistency")
-    if isinstance(stage, dict) and HABIT_SCOPE_REFS_KEY in stage:
-        public["character_consistency"] = {k: v for k, v in stage.items() if k != HABIT_SCOPE_REFS_KEY}
+    if isinstance(stage, dict):
+        public["character_consistency"] = {
+            k: v for k, v in stage.items()
+            if k not in {HABIT_SCOPE_REFS_KEY, CLAIM_RESOLUTION_KEY}
+        }
     return public
 
 

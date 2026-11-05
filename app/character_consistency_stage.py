@@ -36,6 +36,7 @@ from .character_drift import (
     validated_reviewed_events,
 )
 from .character_material_coverage import MATERIAL_REVIEW_KEY, MaterialGapLedger
+from .character_claim_resolution import CLAIM_RESOLUTION_KEY, ClaimResolutionManager
 from .character_habit_scope_review import habit_scope_windows, review_habit_scope
 from .character_explanation_review import (
     ExplanationBaselineSummary,
@@ -736,7 +737,8 @@ class CharacterConsistencyStage:
             )
 
         usage = _Usage()
-        material_ledger = MaterialGapLedger()
+        material_ledger = MaterialGapLedger(scoped_resolution=settings._character_claim_resolution_v1)
+        claim_resolution = ClaimResolutionManager()
         reason_counts: Counter[str] = Counter()
         evidence_mismatch_counts: Counter[str] = Counter()
         scope_review_slot_conflict_counts: Counter[str] = Counter()
@@ -1444,6 +1446,8 @@ class CharacterConsistencyStage:
             )
             for signal in extraction.signals:
                 observation_journal.capture(signal)
+            if settings._character_claim_resolution_v1 and source.source_kind == "draft":
+                claim_resolution.capture_primary(source, chunk, extraction)
             if baseline_coverage_enabled:
                 coverage = extraction.diagnostics.baseline_coverage_trace
                 if coverage is not None and coverage.attempted_calls > 0:
@@ -1688,6 +1692,8 @@ class CharacterConsistencyStage:
                 )
                 for signal in targeted.signals:
                     observation_journal.capture(signal)
+                if settings._character_claim_resolution_v1:
+                    claim_resolution.capture_targeted(source, chunk, target, targeted)
                 record_draft_trace(
                     "targeted_recall", targeted,
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
@@ -1915,6 +1921,8 @@ class CharacterConsistencyStage:
                 )
                 for signal in verification.signals:
                     observation_journal.capture(signal)
+                if settings._character_claim_resolution_v1:
+                    claim_resolution.capture_targeted(source, chunk, target, verification)
                 record_verification(target_index, target, candidate_ranges, truncated_lines, "extractor", verification)
                 record_draft_trace(
                     "targeted_verification", verification,
@@ -2006,6 +2014,21 @@ class CharacterConsistencyStage:
                             "draft_preference_coverage_incomplete",
                         )
 
+        if settings._character_claim_resolution_v1:
+            def admit_resolved_claim(signal, source, target):
+                signal = _signal_bound_to_target_character(signal, target=target, alias_map=alias_map)
+                observation_journal.capture(signal)
+                if signal.id not in all_signals:
+                    all_signals[signal.id] = signal
+                    reason_counts["claim_resolution_observation_added"] += 1
+                return all_signals.get(signal.id) == signal
+
+            claim_resolution.reconcile(
+                baselines=review_baselines, provider=self.provider, settings=settings,
+                budget=lambda: max(0, stage_budget - usage.charged_tokens - targeted_reviewer_reserve_tokens),
+                charge=usage.add, checkpoint=self.checkpoint, admit=admit_resolved_claim,
+                ledger=material_ledger, reasons=reason_counts,
+            )
         signals = tuple(all_signals.values())
         # Count final server-deduplicated signals, not per-chunk clean model
         # records. The extractor's local observation count remains diagnostic.
@@ -2432,7 +2455,9 @@ class CharacterConsistencyStage:
                         "case_observation_source_unavailable"
                     )
                     continue
-                if planned_count <= 0 or completed_count != planned_count:
+                if planned_count <= 0 or (completed_count != planned_count and not claim_resolution.repairs_document(
+                    document_id, baseline_row.candidate_id, planned_count - completed_count,
+                )):
                     case_material_reasons.add(
                         "case_draft_package_incomplete"
                     )
@@ -2448,11 +2473,10 @@ class CharacterConsistencyStage:
                     case_material_reasons.add(
                         "case_baseline_context_incomplete"
                     )
-                case_material_reasons.update(
-                    target_material_gaps.get(
-                        (document_id, case_target_identity), set()
-                    )
-                )
+                targeted_reasons = set(target_material_gaps.get((document_id, case_target_identity), set()))
+                if claim_resolution.repairs_targeted(source.input_id, baseline_row.candidate_id):
+                    targeted_reasons -= {"targeted_package_incomplete", "semantic_binding_unresolved"}
+                case_material_reasons.update(targeted_reasons)
             case_material_coverage: Literal["complete", "partial"] = (
                 "partial" if case_material_reasons else "complete"
             )
@@ -3270,6 +3294,8 @@ class CharacterConsistencyStage:
         )
         if habit_scope_refs:
             diagnostics["habit_scope_refs_v1"] = habit_scope_refs
+        if claim_payload := claim_resolution.payload():
+            diagnostics[CLAIM_RESOLUTION_KEY] = claim_payload
         if settings.character_target_bound_draft_review_v3 and eligible_draft_count:
             diagnostics["targeted_verification_trace_v1"] = {
                 "schema_version": "targeted-verification-trace-v1",
