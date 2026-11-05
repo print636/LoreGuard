@@ -2784,6 +2784,21 @@ def _competing_antecedent(text: str, quote: str) -> bool:
     return bool(re.match(conjunction, after) or re.search(conjunction + r"[^，。]{0,5}$", before))
 
 
+def _habit_object_head_preserved(raw: str, quote: str, clause_text: str) -> bool:
+    """Keep the whole claimed noun at the head of the quoted source phrase.
+
+    The reviewer's same-object judgment remains necessary. A literal occurrence
+    as a possessor (``object 的 label``) cannot establish the affected object,
+    and a claim's qualifiers must not disappear when grounding its object.
+    """
+    if not raw or quote.count(raw) != 1 or not quote.endswith(raw):
+        return False
+    _, _, after = clause_text.partition(quote)
+    if after.startswith("的"):
+        return False
+    return True
+
+
 def _valid_habit_object_path(
     request: TargetBoundDraftReviewRequest,
     proposal: TargetBoundDraftReviewProposal,
@@ -2816,13 +2831,7 @@ def _valid_habit_object_path(
         if not (step.grounding == "explicit" and step.quote == first.quote
                 or step.grounding == "reference" and _OBJECT_REFERENCE.fullmatch(step.quote)):
             return False
-    raw = request.primary_claim.key_object
-    if not raw or raw not in first.quote:
-        # Reuse V14's conservative synonym boundary: a named object elsewhere
-        # cannot be replaced with another object or a missing qualifier.
-        if not raw or first.quote in raw or any(raw in clause.text for clause in path):
-            return False
-    return raw == first.quote or request.primary_claim.statement.count(raw) == 1
+    return _habit_object_head_preserved(request.primary_claim.key_object, first.quote, path[0].text)
 
 
 def valid_primary_object_grounding(

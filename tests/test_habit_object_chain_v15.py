@@ -145,6 +145,54 @@ def test_multiple_source_objects_do_not_form_a_unique_antecedent():
     assert all(d.verdict != "supported" for d in evaluate(request, source, response_items(request), text).decisions)
 
 
+def qualified_object_certificate(phrase, raw="器材箱", *, omitted=True, quote=None):
+    text = CONTENT.replace("接过器材箱", "接过" + phrase)
+    source, request = make_request(text)
+    claim = request.primary_claim.model_copy(update={
+        "key_object": raw,
+        "statement": TAIL if omitted else "廖辰未清点" + raw + "便发货",
+    })
+    request = request.model_copy(update={"primary_claim": claim})
+    assert verify_target_bound_draft_review_source(request, source, frozen_content=text, expected_primary_claim=claim)
+    items = response_items(request)
+    item = next(item for item in items if item["verdict"] == "supported")
+    obj = item["claim_object"]
+    obj["antecedent_quote"] = obj["object_steps"][0]["quote"] = quote or phrase
+    return source, request, items, text
+
+
+@pytest.mark.parametrize("omitted", [False, True])
+@pytest.mark.parametrize("phrase", ["器材箱", "新送来的器材箱", "三件器材箱"])
+def test_complete_object_phrase_does_not_require_repeating_object_in_claim_statement(phrase, omitted):
+    source, request, items, text = qualified_object_certificate(phrase, omitted=omitted)
+    evaluated = evaluate(request, source, items, text)
+    supported = [d for d in evaluated.decisions if d.verdict == "supported"]
+    assert len(supported) == 1
+    assert supported[0].verified_object.antecedent_quote == phrase
+    assert request.primary_claim.statement == (TAIL if omitted else "廖辰未清点器材箱便发货")
+
+
+@pytest.mark.parametrize("omitted", [False, True])
+@pytest.mark.parametrize("phrase,raw,quote", [
+    ("器材箱的标签", "器材箱", None),
+    ("器材箱包装", "器材箱", None),
+    ("器材箱的标签", "器材箱", "器材箱"),
+    ("工具箱", "器材箱", None),
+    ("器材箱", "新送来的器材箱", None),
+    ("新送来的器材箱", "旧器材箱", None),
+])
+def test_object_head_guard_rejects_possessions_changed_objects_and_lost_qualifiers(phrase, raw, quote, omitted):
+    source, request, items, text = qualified_object_certificate(phrase, raw, omitted=omitted, quote=quote)
+    assert all(d.verdict != "supported" for d in evaluate(request, source, items, text).decisions)
+
+
+def test_qualified_object_with_unconfirmed_middle_step_still_cannot_be_supported():
+    source, request, items, text = qualified_object_certificate("新送来的器材箱")
+    item = next(item for item in items if item["verdict"] == "supported")
+    item["claim_object"]["object_steps"][1]["referent_relation"] = "uncertain"
+    assert all(d.verdict != "supported" for d in evaluate(request, source, items, text).decisions)
+
+
 def test_old_request_and_response_never_gain_the_new_semantics():
     source, old = make_request(enabled=False)
     _, new = make_request()
