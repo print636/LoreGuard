@@ -198,7 +198,7 @@ def review_habit_scope(
     })
     try:
         bounded = _bounded_provider(provider or OpenAICompatibleProvider(scoped), scoped, stage="drift",
-                                    remaining_deadline_seconds=60)
+                                    remaining_deadline_seconds=settings.character_drift_total_deadline_seconds)
     except (TypeError, ValueError, RuntimeError):
         return [], CharacterReviewDiagnostics(outcome="skipped", reason="provider_unavailable")
     try:

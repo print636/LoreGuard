@@ -793,6 +793,9 @@ class ModelEnhancedExtractor:
             "charged_tokens": 0,
             "provider_calls": [],
         }
+        self._model_safe_accounting = dict.fromkeys(
+            ("logical_calls", "prompt_tokens", "completion_tokens", "charged_tokens"), 0
+        )
 
     def _monotonic(self) -> float:
         clock = getattr(self.provider, "monotonic", time.perf_counter)
@@ -819,10 +822,39 @@ class ModelEnhancedExtractor:
             "charged_tokens": 0,
             "provider_calls": [],
         }
+        self._model_safe_accounting = dict.fromkeys(
+            ("logical_calls", "prompt_tokens", "completion_tokens", "charged_tokens"), 0
+        )
 
     def review_agent_safe_accounting(self) -> dict[str, Any]:
         """Return content-free call accounting, including interrupted calls."""
         return deepcopy(self._review_agent_safe_accounting)
+
+    def _account_model_response(self, response: Any, estimate: int) -> None:
+        """Retain reported extraction/repair usage before any later checkpoint."""
+        prompt = getattr(response, "prompt_tokens", None)
+        completion = getattr(response, "completion_tokens", None)
+        if any(type(value) is not int or value < 0 for value in (prompt, completion, estimate)):
+            return
+        accounting = self._model_safe_accounting
+        accounting["logical_calls"] += 1
+        accounting["prompt_tokens"] += prompt
+        accounting["completion_tokens"] += completion
+        accounting["charged_tokens"] += max(prompt + completion, estimate)
+
+    def interrupted_model_safe_accounting(self) -> dict[str, Any]:
+        """Aggregate returned main/repair calls and the independent Agent ledger.
+
+        This is an interruption lower bound, not an additional charge on top
+        of a returned PipelineResult. No prompts, responses or per-call data
+        are retained here; a failed call without reported usage adds nothing.
+        """
+        return {
+            "schema_version": "model-extraction-accounting-v1",
+            **{key: value + self._review_agent_safe_accounting[key]
+               for key, value in self._model_safe_accounting.items()},
+            "provider_calls": None,
+        }
 
     def conservative_run_token_debit(self) -> int:
         """Return the run-local admission debit after a completed extraction.
@@ -1184,6 +1216,7 @@ class ModelEnhancedExtractor:
             response = self._bounded_repair_provider().complete(
                 REPAIR_SYSTEM_PROMPT, user_prompt
             )
+            self._account_model_response(response, estimate)
             accounting_execution.record_provider_call(
                 getattr(response, "telemetry", None),
                 succeeded=True,
@@ -1581,6 +1614,7 @@ class ModelEnhancedExtractor:
             self._checkpoint()
             first_execution.attempted_chunks = 1
             response = self.provider.complete(BATCH_SYSTEM_PROMPT, user_prompt)
+            self._account_model_response(response, estimated_tokens)
             first_execution.record_provider_call(
                 getattr(response, "telemetry", None), succeeded=True
             )
@@ -1973,6 +2007,7 @@ class ModelEnhancedExtractor:
                     SYSTEM_PROMPT,
                     user_prompt,
                 )
+                self._account_model_response(response, estimated_tokens)
                 execution.record_provider_call(
                     getattr(response, "telemetry", None), succeeded=True
                 )

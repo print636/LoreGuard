@@ -7,6 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
+from .execution_timing import ExecutionDeadline
+
 
 HABIT_SCENE_POLICY_V1 = "habit-scene-windows-v1"
 HABIT_SCOPE_POLICY_V1 = "habit-scope-review-v1"
@@ -200,6 +202,10 @@ class Settings(BaseSettings):
     # Relays that implement this extension may opt in explicitly.
     provider_thinking_mode: Literal["disabled", "enabled"] | None = None
     provider_total_deadline_seconds: float | None = Field(default=None, gt=0)
+    # Only the isolated local factory opts into the longer quality profile.
+    execution_timing_profile: Literal["legacy", "local_quality"] = "legacy"
+    analysis_run_timeout_seconds: float | None = Field(default=None, gt=0, le=2400)
+    _execution_deadline: ExecutionDeadline | None = PrivateAttr(default=None)
     provider_max_completion_tokens: int | None = Field(default=None, gt=0)
     # Tightly bound successful upstream response bodies independently of model
     # token controls, which compatible relays may ignore. ``None`` disables
@@ -328,7 +334,7 @@ class Settings(BaseSettings):
         default=32_768, ge=1_024, le=32_768
     )
     character_signal_scope_review_timeout_seconds: float = Field(
-        default=30.0, gt=0, le=30.0
+        default=30.0, gt=0, le=180.0
     )
     character_signal_scope_review_max_attempts: int = Field(default=1, ge=1, le=4)
     # Optional semantic review of a published-history signal rejected only by
@@ -345,7 +351,7 @@ class Settings(BaseSettings):
         default=32_768, ge=1_024, le=32_768
     )
     character_history_semantic_review_timeout_seconds: float = Field(
-        default=30.0, gt=0, le=30.0
+        default=30.0, gt=0, le=180.0
     )
     character_history_semantic_review_max_attempts: int = Field(
         default=1, ge=1, le=1
@@ -374,7 +380,7 @@ class Settings(BaseSettings):
         default=32_768, ge=1_024, le=32_768
     )
     character_draft_actor_review_timeout_seconds: float = Field(
-        default=30.0, gt=0, le=30.0
+        default=30.0, gt=0, le=180.0
     )
     character_draft_actor_review_max_attempts: int = Field(
         default=1, ge=1, le=1
@@ -398,7 +404,7 @@ class Settings(BaseSettings):
         default=12, ge=1, le=12
     )
     character_signal_timeout_seconds: float = Field(
-        default=30.0, gt=0, le=30.0
+        default=30.0, gt=0, le=180.0
     )
     character_signal_max_attempts: int = Field(default=2, ge=1, le=4)
     # Logical full-package generations are separate from transport retries.
@@ -406,7 +412,13 @@ class Settings(BaseSettings):
     # rejects the first complete response.
     character_signal_package_max_attempts: int = Field(default=2, ge=1, le=2)
     character_signal_total_deadline_seconds: float = Field(
-        default=60.0, gt=0, le=120.0
+        default=60.0, gt=0, le=360.0
+    )
+    character_habit_scene_timeout_seconds: float = Field(
+        default=HABIT_SCENE_CALL_TIMEOUT_SECONDS, gt=0, le=180.0
+    )
+    character_habit_scene_total_deadline_seconds: float = Field(
+        default=HABIT_SCENE_PACKAGE_DEADLINE_SECONDS, gt=0, le=360.0
     )
     # One logical signal extraction may generate at most two complete packages.
     # This budget spans that whole regeneration cycle; it is independent from
@@ -429,12 +441,12 @@ class Settings(BaseSettings):
         default=8_000, ge=256, le=8_000
     )
     character_drift_timeout_seconds: float = Field(
-        default=30.0, gt=0, le=30.0
+        default=30.0, gt=0, le=180.0
     )
     character_drift_review_max_generations: int = Field(default=2, ge=1, le=2)
     character_drift_max_attempts: int = Field(default=2, ge=1, le=4)
     character_drift_total_deadline_seconds: float = Field(
-        default=60.0, gt=0, le=60.0
+        default=60.0, gt=0, le=360.0
     )
     character_drift_max_completion_tokens: int = Field(
         default=2_500, ge=64, le=4_000

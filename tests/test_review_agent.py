@@ -1504,7 +1504,14 @@ class ReviewAgentIntegrationTests(unittest.TestCase):
             accounting["charged_tokens"],
         )
         pipeline = AnalysisPipeline(extractor=extractor)
-        self.assertEqual(accounting, pipeline.interrupted_model_usage())
+        interrupted = pipeline.interrupted_model_usage()
+        self.assertEqual("model-extraction-accounting-v1", interrupted["schema_version"])
+        self.assertEqual((22, 14, 2), (
+            interrupted["prompt_tokens"], interrupted["completion_tokens"], interrupted["logical_calls"],
+        ))
+        self.assertEqual((11, 7, 1), (
+            accounting["prompt_tokens"], accounting["completion_tokens"], accounting["logical_calls"],
+        ))
         # This scripted provider has no telemetry object. Missing telemetry is
         # explicit, never filled with fake zero-valued calls.
         self.assertIsNone(accounting["provider_calls"])

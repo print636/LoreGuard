@@ -84,6 +84,10 @@ assert settings.enable_model_extraction is True
 assert settings.enable_review_agent is False
 assert settings.enable_embeddings is False
 assert settings.use_celery is False
+assert settings.execution_timing_profile == "local_quality"
+assert settings.provider_timeout_seconds == 180
+assert settings.provider_total_deadline_seconds == 360
+assert settings.analysis_run_timeout_seconds == 2400
 assert str(Path(sys.argv[2]) / "loreguard-data") in settings.account_model_local_key_path
 with TestClient(application, base_url="http://127.0.0.1:8787") as client:
     health = client.get("/health")
@@ -110,6 +114,8 @@ print("isolated gateway application checks passed")
         "DATABASE_URL": "not-a-database",
         "OPENAI_API_KEY": "synthetic-must-not-inherit",
         "ACCOUNT_MODEL_KEYRING_FILE": str(tmp_path / "must-not-read.key"),
+        "PROVIDER_TIMEOUT_SECONDS": "1",
+        "ANALYSIS_RUN_TIMEOUT_SECONDS": "1",
     }
     # Python on Windows needs the system directory; this is not an app setting.
     if "SYSTEMROOT" in os.environ:
@@ -221,6 +227,10 @@ def _exercise_author_review(client):
             return response.json()
 
         default = start({})
+        assert frozen_scene_policy(default, "execution_limits") == {
+            "schema_version": "execution-limits-v1", "read_seconds": 180,
+            "logical_seconds": 360, "run_seconds": 2400,
+        }
         assert default["review_batch"]["character_review_enabled"] is False
         assert calls and set(calls) <= {SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT}
         assert client.post(runs_url, json={"character_review_enabled": True}).status_code == 422
@@ -239,6 +249,8 @@ def _exercise_author_review(client):
         # existing write-rate window, then restore that window unchanged.
         with patch.dict(write_limiter.events, clear=True):
             for override in (
+                {"execution_limits": {"run_seconds": 99999}},
+                {"analysis_run_timeout_seconds": 99999},
                 {"_character_habit_action_selection_v1": True},
                 {"habit_action_selection_policy": HABIT_ACTION_SELECTION_POLICY_V1},
                 {"batch_coverage": {"habit_action_selection_policy": HABIT_ACTION_SELECTION_POLICY_V1}},
@@ -324,7 +336,7 @@ def _exercise_author_review(client):
                 assert failed_run.batch_coverage.get("habit_action_selection_policy") == (HABIT_ACTION_SELECTION_POLICY_V1 if enabled else None)
                 assert failed_run.batch_coverage.get("selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V3 if enabled else None)
                 # Replay a genuine older snapshot shape after the application has upgraded.
-                failed_run.batch_coverage = {key: value for key, value in failed_run.batch_coverage.items() if key not in {"habit_object_chain_policy", "claim_resolution_policy", "habit_action_selection_policy", "selected_claim_resolution_policy"}}
+                failed_run.batch_coverage = {key: value for key, value in failed_run.batch_coverage.items() if key not in {"habit_object_chain_policy", "claim_resolution_policy", "habit_action_selection_policy", "selected_claim_resolution_policy", "execution_limits"}}
                 db.commit()
             calls.clear()
             retry = client.post("/api/v1/analysis-runs/" + failed.json()["detail"]["run_id"] + "/retry")
@@ -335,6 +347,7 @@ def _exercise_author_review(client):
             assert frozen_scene_policy(retry.json(), "claim_resolution_policy") is None
             assert frozen_scene_policy(retry.json(), "habit_action_selection_policy") is None
             assert frozen_scene_policy(retry.json(), "selected_claim_resolution_policy") is None
+            assert frozen_scene_policy(retry.json(), "execution_limits") is None
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
         # Earlier frozen runs retain their routing version after upgrade.
         with patch.dict(write_limiter.events, clear=True):
@@ -367,6 +380,7 @@ def _exercise_author_review(client):
             assert frozen_scene_policy(recheck.json(), "claim_resolution_policy") == (CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "habit_action_selection_policy") == (HABIT_ACTION_SELECTION_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V3 if enabled else None)
+            assert frozen_scene_policy(recheck.json(), "execution_limits")["run_seconds"] == 2400
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
         repeated = client.post(recheck_url, headers={"Idempotency-Key": "deep-recheck"})
         assert repeated.status_code == 409, repeated.text

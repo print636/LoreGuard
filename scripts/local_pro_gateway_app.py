@@ -86,6 +86,7 @@ def create_app():
         _no_reparse(path)
 
     from app import config
+    from app.execution_timing import local_quality_timing_overrides
     from pydantic_settings import SettingsConfigDict
 
     class IsolatedSettings(config.Settings):
@@ -100,6 +101,7 @@ def create_app():
             return (init_settings,)
 
     settings = IsolatedSettings(
+        **local_quality_timing_overrides(),
         _env_file=None,
         deployment_environment="local",
         auth_mode="required",

@@ -14,7 +14,6 @@ from uuid import uuid4
 from sqlalchemy import and_, delete, exists, func, or_, select, update
 
 from .config import (
-    HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS,
     CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings,
 )
 from .account_provider import runtime_for_analysis_run
@@ -122,6 +121,10 @@ from .narrative_context import (
     payload_sha256,
 )
 from .runtime_provenance import safe_runtime_provenance
+from .execution_timing import (
+    EXECUTION_LIMITS_KEY, AnalysisDeadlineExceeded, ExecutionDeadline,
+    settings_for_execution_limits,
+)
 from .run_comparison import mark_comparison_unverifiable, materialize_run_comparison
 from .time_utils import utc_now_naive
 from .usage import configured_cost_usd, estimate_issue_evidence_review_tokens
@@ -145,6 +148,7 @@ INTERNAL_ANALYSIS_ERROR = (
 DISPATCH_FAILED_ERROR = (
     "ANALYSIS_DISPATCH_FAILED: 分析任务未能进入执行队列；输入快照已保留，可安全重试"
 )
+ANALYSIS_TIMEOUT_ERROR = "审查已超时，可稍后重试；输入与已记录用量已保留。"
 
 _SAFE_INTERRUPTED_PROVIDER_CATEGORIES = {
     "success",
@@ -204,6 +208,8 @@ def safe_persisted_analysis_error(value: object) -> str | None:
         return INTERNAL_ANALYSIS_ERROR
     if message == DISPATCH_FAILED_ERROR:
         return DISPATCH_FAILED_ERROR
+    if message == ANALYSIS_TIMEOUT_ERROR:
+        return ANALYSIS_TIMEOUT_ERROR
     return INTERNAL_ANALYSIS_ERROR
 
 
@@ -452,7 +458,7 @@ class _CharacterConsistencyAccountingProvider:
             # the opted-in scene reviewer from the same authenticated account
             # before that cap is applied. Injected transports keep their limits.
             self._habit_scene_provider = OpenAICompatibleProvider(settings.model_copy(update={
-                "provider_timeout_seconds": HABIT_SCENE_CALL_TIMEOUT_SECONDS,
+                "provider_timeout_seconds": settings.character_habit_scene_timeout_seconds,
             }))
         if signal_provider is None or drift_provider is None:
             base = OpenAICompatibleProvider(settings)
@@ -781,8 +787,8 @@ class _CharacterConsistencyAccountingProvider:
             package_cap = self.settings.character_signal_total_deadline_seconds
             call_cap = min(self.settings.character_draft_actor_review_timeout_seconds, self.settings.provider_timeout_seconds)
             if habit_scene:
-                package_cap = HABIT_SCENE_PACKAGE_DEADLINE_SECONDS
-                call_cap = HABIT_SCENE_CALL_TIMEOUT_SECONDS
+                package_cap = self.settings.character_habit_scene_total_deadline_seconds
+                call_cap = self.settings.character_habit_scene_timeout_seconds
             deadline = min(
                 value
                 for value in (
@@ -2365,6 +2371,24 @@ def _interrupted_review_agent_usage(pipeline) -> dict | None:
         return None
     if not isinstance(source, dict):
         return None
+    if source.get("schema_version") == "model-extraction-accounting-v1":
+        # This aggregate already includes the extractor's Agent. Revalidate
+        # counters only; never persist caller-provided telemetry or content.
+        run_budget = max(1, int(get_settings().per_run_token_budget))
+        token_limit = min(_SIGNED_64_MAX // 4, run_budget * 4)
+        counters = {
+            key: _optional_nonnegative_int(source.get(key), maximum=(
+                min(run_budget, 100_000) if key == "logical_calls" else token_limit
+            )) for key in ("logical_calls", "prompt_tokens", "completion_tokens", "charged_tokens")
+        }
+        if (any(value is None for value in counters.values()) or not counters["logical_calls"]
+                or counters["charged_tokens"] < counters["prompt_tokens"] + counters["completion_tokens"]):
+            return None
+        return {
+            "completeness": "lower_bound", "scope": "model_extraction_and_agent_completed_calls",
+            "terminal_status": "cancelled", **counters,
+            "charged_token_semantics": "heuristic_or_reported_internal_debit", "provider_calls": None,
+        }
     limits = _interrupted_usage_limits()
     counters = {
         "logical_calls": _optional_nonnegative_int(
@@ -3273,8 +3297,17 @@ def execute_analysis(
     issue_review_usage = IssueEvidenceReviewUsageAccumulator()
     character_usage_tracker = CharacterConsistencyUsageAccumulator()
     previous_usage: dict | None = None
-    try:
+    execution_deadline = None
+    completed_pipeline_usage = None
+
+    def checkpoint():
+        # Ownership/cancellation retain precedence over the timing failure.
         _checkpoint(run_id, token, heartbeat)
+        if execution_deadline is not None:
+            execution_deadline.checkpoint()
+
+    try:
+        checkpoint()
         with SessionLocal() as db:
             documents, input_metadata = _load_verified_snapshot(db, run_id)
             run = db.get(AnalysisRunRow, run_id)
@@ -3283,7 +3316,18 @@ def execute_analysis(
             provider_runtime = runtime_for_analysis_run(
                 db, run, base_settings=get_settings()
             )
-            settings = provider_runtime.settings
+            settings = settings_for_execution_limits(
+                provider_runtime.settings, (run.batch_coverage or {}).get(EXECUTION_LIMITS_KEY)
+            )
+            if settings.analysis_run_timeout_seconds is not None:
+                if run.started_at is None:
+                    raise ValueError("analysis start time is unavailable")
+                elapsed = max(0.0, (utc_now_naive() - run.started_at).total_seconds())
+                execution_deadline = ExecutionDeadline.from_remaining(
+                    settings.analysis_run_timeout_seconds - elapsed
+                )
+                settings._execution_deadline = execution_deadline
+                checkpoint()
             previous_diagnostic = db.get(AnalysisDiagnosticRow, run_id)
             if previous_diagnostic and isinstance(previous_diagnostic.payload, dict):
                 candidate_usage = previous_diagnostic.payload.get("usage_accounting")
@@ -3301,14 +3345,22 @@ def execute_analysis(
                 pipeline = AnalysisPipeline()
 
             def on_stage(stage: str, progress: int, message: str) -> None:
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
                 emit(db, run_id, stage, progress, message)
 
             result = pipeline.run(
                 documents,
                 on_stage=on_stage,
-                checkpoint=lambda: _checkpoint(run_id, token, heartbeat),
+                checkpoint=checkpoint,
             )
+            if result.prompt_tokens or result.completion_tokens:
+                completed_pipeline_usage = {
+                    "completeness": "lower_bound", "scope": "completed_pipeline_reported_usage",
+                    "terminal_status": "failed", "logical_calls": 0,
+                    "prompt_tokens": result.prompt_tokens, "completion_tokens": result.completion_tokens,
+                    "charged_tokens": result.prompt_tokens + result.completion_tokens,
+                    "charged_token_semantics": "heuristic_or_reported_internal_debit", "provider_calls": None,
+                }
             result.diagnostics["account_provider_execution"] = {
                 "identity": provider_runtime.identity,
                 "available": provider_runtime.available,
@@ -3326,7 +3378,7 @@ def execute_analysis(
                     else "provider_unavailable"
                 ),
             }
-            _checkpoint(run_id, token, heartbeat)
+            checkpoint()
             review_result = None
             baseline_reported_tokens = (
                 result.prompt_tokens + result.completion_tokens
@@ -3366,7 +3418,7 @@ def execute_analysis(
                 worker_token=token,
             )
             if settings.enable_character_consistency:
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
                 _emit_owned(
                     db,
                     run_id,
@@ -3384,9 +3436,7 @@ def execute_analysis(
                         character_stage_settings,
                         character_usage_tracker,
                     ),
-                    checkpoint=lambda: _checkpoint(
-                        run_id, token, heartbeat
-                    ),
+                    checkpoint=checkpoint,
                     observation_recorder=CharacterObservationRecorder(),
                     observation_applicable=run.batch_mode != "baseline_build",
                 )
@@ -3410,7 +3460,7 @@ def execute_analysis(
                 )
                 if claim_resolution is not None:
                     character_stage_result.diagnostics[CLAIM_RESOLUTION_KEY] = claim_resolution
-            except (AnalysisCancelled, WorkerLeaseLost):
+            except (AnalysisCancelled, WorkerLeaseLost, AnalysisDeadlineExceeded):
                 raise
             except Exception:
                 character_stage_result = failed_character_consistency_stage()
@@ -3485,7 +3535,7 @@ def execute_analysis(
                     or character_stage_result.model_used
                     or character_usage_tracker.successful_calls > 0
                 )
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
                 _emit_owned(
                     db,
                     run_id,
@@ -3498,7 +3548,7 @@ def execute_analysis(
                         else "角色一致性阶段未追加问题或已安全降级"
                     ),
                 )
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
             frozen_bundle = None
             if (
                 settings.enable_evidence_investigator
@@ -3519,7 +3569,7 @@ def execute_analysis(
                     frozen_bundle = None
 
             if settings.enable_evidence_investigator:
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
                 _emit_owned(
                     db,
                     run_id,
@@ -3559,7 +3609,7 @@ def execute_analysis(
                     investigator_diagnostics = dict(
                         investigator_runtime_result.diagnostics
                     )
-                except (AnalysisCancelled, WorkerLeaseLost):
+                except (AnalysisCancelled, WorkerLeaseLost, AnalysisDeadlineExceeded):
                     raise
                 except Exception:
                     # Provider, RAG, promotion, and integration defects are
@@ -3595,7 +3645,7 @@ def execute_analysis(
                 investigator_diagnostics["usage"] = (
                     completed_investigator_usage
                 )
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
                 _emit_owned(
                     db,
                     run_id,
@@ -3636,7 +3686,7 @@ def execute_analysis(
                         ] = investigator_diagnostics
                         accepted_candidates = promotion.accepted_candidates
                         added_issues = len(promotion.added_issues)
-                    except (AnalysisCancelled, WorkerLeaseLost):
+                    except (AnalysisCancelled, WorkerLeaseLost, AnalysisDeadlineExceeded):
                         raise
                     except Exception:
                         investigator_diagnostics.update(
@@ -3658,7 +3708,7 @@ def execute_analysis(
                 result.completion_tokens += (
                     investigator_usage.completion_tokens
                 )
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
                 _emit_owned(
                     db,
                     run_id,
@@ -3672,7 +3722,7 @@ def execute_analysis(
                         else "确定性复核未追加问题，基线结果保持原样"
                     ),
                 )
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
 
             _enforce_draft_issue_boundary(
                 result,
@@ -3712,7 +3762,7 @@ def execute_analysis(
             }
 
             if settings.enable_issue_evidence_review:
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
                 _emit_owned(
                     db,
                     run_id,
@@ -3732,7 +3782,7 @@ def execute_analysis(
                     review_result = IssueEvidenceReviewer(
                         session_factory=SessionLocal,
                         settings=settings,
-                        checkpoint=lambda: _checkpoint(run_id, token, heartbeat),
+                        checkpoint=lambda: checkpoint(),
                         usage_accounting=issue_review_usage.record,
                     ).review(
                         documents=frozen_bundle.evidence_documents,
@@ -3746,7 +3796,7 @@ def execute_analysis(
                             - investigator_usage.charged_tokens,
                         ),
                     )
-                except (AnalysisCancelled, WorkerLeaseLost):
+                except (AnalysisCancelled, WorkerLeaseLost, AnalysisDeadlineExceeded):
                     raise
                 except Exception:
                     # The reviewer is an optional annotation path.  Its own
@@ -3768,7 +3818,7 @@ def execute_analysis(
                     # not expose the immediate accounting callback.
                     result.prompt_tokens += review_result.prompt_tokens
                     result.completion_tokens += review_result.completion_tokens
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
                 _emit_owned(
                     db,
                     run_id,
@@ -3786,7 +3836,7 @@ def execute_analysis(
                         else "证据复核未生成注释，规则问题保持原样"
                     ),
                 )
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
             current_optional_usage = _merge_usage_accounting(
                 character_usage,
                 _merge_usage_accounting(
@@ -3808,6 +3858,7 @@ def execute_analysis(
                     result.completion_tokens += int(
                         previous_usage["completion_tokens"]
                     )
+            checkpoint()
             report_started = perf_counter()
             db.execute(delete(IssueRow).where(IssueRow.run_id == run_id))
             db.execute(
@@ -3926,6 +3977,8 @@ def execute_analysis(
             cost = configured_cost_usd(
                 result.prompt_tokens, result.completion_tokens, get_settings()
             )
+            if execution_deadline is not None:
+                execution_deadline.checkpoint()
             completed = db.execute(
                 update(AnalysisRunRow)
                 .where(
@@ -3944,7 +3997,7 @@ def execute_analysis(
             ).rowcount
             if completed != 1:
                 db.rollback()
-                _checkpoint(run_id, token, heartbeat)
+                checkpoint()
                 raise WorkerLeaseLost("run could not be completed by this worker")
 
             # Comparison depends on the final diagnostics and on the guarded
@@ -3998,6 +4051,8 @@ def execute_analysis(
                 )
                 .values(worker_token=None, lease_expires_at=None)
             )
+            if execution_deadline is not None:
+                execution_deadline.checkpoint()
             db.commit()
     except AnalysisCancelled:
         interrupted_usage = _combined_interrupted_usage(
@@ -4050,21 +4105,30 @@ def execute_analysis(
             return
         except WorkerLeaseLost:
             return
-        public_error = safe_analysis_error(exc)
-        if finalize_failure:
+        timed_out = isinstance(exc, AnalysisDeadlineExceeded) or (
+            execution_deadline is not None and execution_deadline.remaining_seconds() <= 0
+        )
+        public_error = ANALYSIS_TIMEOUT_ERROR if timed_out else safe_analysis_error(exc)
+        if finalize_failure or timed_out:
             interrupted_usage = _combined_interrupted_usage(
-                pipeline,
+                None if timed_out and completed_pipeline_usage is not None else pipeline,
                 investigator_usage,
                 issue_review_usage,
                 terminal_status="failed",
                 character_usage=character_usage_tracker,
             )
+            if timed_out and completed_pipeline_usage is not None:
+                # Pipeline totals already include its Agent; add optional usage once.
+                interrupted_usage = _merge_usage_accounting(
+                    completed_pipeline_usage,
+                    interrupted_usage, terminal_status="failed",
+                )
             _finalize_terminal(
                 run_id,
                 token,
                 "failed",
                 error=public_error,
-                message="分析失败，可调用重试接口恢复",
+                message=ANALYSIS_TIMEOUT_ERROR if timed_out else "分析失败，可调用重试接口恢复",
                 interrupted_usage=interrupted_usage,
             )
         else:
@@ -4081,6 +4145,8 @@ def execute_analysis(
                 public_error,
                 interrupted_usage=interrupted_usage,
             )
+        if timed_out:
+            return
         if raise_on_failure:
             raise
     finally:

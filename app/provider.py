@@ -490,6 +490,9 @@ class OpenAICompatibleProvider:
         tool_contract: bool = False,
     ) -> tuple[_ParsedResponse, int, int, ProviderCallTelemetry]:
         attempts: list[ProviderAttemptTelemetry] = []
+        execution_deadline = self.settings._execution_deadline
+        if execution_deadline is not None:
+            execution_deadline.checkpoint()
         try:
             # Reapply the exact-origin SSRF boundary at the final transport
             # edge. Account configurations are validated when saved, but a
@@ -576,6 +579,11 @@ class OpenAICompatibleProvider:
             if self.settings.provider_total_deadline_seconds is not None
             else None
         )
+        if execution_deadline is not None:
+            # Translate the shared clock once; retries and nested provider
+            # forks never receive a fresh run allowance.
+            run_deadline = self.monotonic() + execution_deadline.remaining_seconds()
+            deadline = min(deadline, run_deadline) if deadline is not None else run_deadline
         last_failure: _Failure | None = None
 
         with httpx.Client(

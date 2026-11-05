@@ -129,14 +129,18 @@ class AnalysisPipeline:
         self.retriever = retriever
 
     def interrupted_model_usage(self) -> dict | None:
-        """Return content-free Agent accounting after an interrupted run.
+        """Return reported extraction/repair/Agent usage after interruption.
 
         Completed runs use ``PipelineResult`` as their accounting boundary.
-        This narrow escape hatch exists only because cooperative cancellation
-        can happen immediately after an upstream Agent response and before a
-        ``PipelineResult`` exists.  The service revalidates and labels this as
-        an incomplete lower bound before persisting it.
+        A post-response checkpoint can stop extraction before PipelineResult
+        exists. The new extractor ledger includes its Agent exactly once;
+        custom/legacy extractors retain their existing Agent-only fallback.
+        The service validates either ledger before persisting a lower bound.
         """
+        getter = getattr(self.extractor, "interrupted_model_safe_accounting", None)
+        if callable(getter):
+            accounting = getter()
+            return accounting if isinstance(accounting, dict) else None
         getter = getattr(self.extractor, "review_agent_safe_accounting", None)
         if not callable(getter):
             return None

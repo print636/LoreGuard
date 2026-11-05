@@ -61,7 +61,7 @@ def review_selected_original_claim(pending, origin, *, chunk, source_identity, f
         _TargetBoundDraftOutcome, _bind_target_bound_draft_certificate, _draft_actor_source_matches_chunk,
     )
     from .character_draft_actor_review_provider import TargetBoundDraftReviewBatchEntry, run_target_bound_draft_review
-    from .config import HABIT_SCENE_CALL_TIMEOUT_SECONDS
+    from .execution_timing import remaining_execution_seconds
     policy = settings._character_selected_claim_resolution_policy
     if not (policy in {SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3} and settings._character_claim_resolution_v1
             and settings._character_habit_action_selection_v1
@@ -78,7 +78,8 @@ def review_selected_original_claim(pending, origin, *, chunk, source_identity, f
         (TargetBoundDraftReviewBatchEntry(request=request, expected_source=source_identity, frozen_content=frozen_content,
                                          expected_primary_claim=request.original_claim),),
         provider=provider, token_budget=token_budget, completion_reserve=settings.character_draft_actor_review_completion_tokens,
-        timeout_seconds=HABIT_SCENE_CALL_TIMEOUT_SECONDS, remaining_deadline_seconds=HABIT_SCENE_CALL_TIMEOUT_SECONDS,
+        timeout_seconds=settings.character_habit_scene_timeout_seconds,
+        remaining_deadline_seconds=remaining_execution_seconds(settings, settings.character_habit_scene_timeout_seconds),
         max_response_bytes=settings.character_draft_actor_review_max_response_bytes, max_attempts=1, habit_scene_policy=True,
     )
     usage = {key: getattr(run, key) for key in ("attempted_calls", "prompt_tokens", "completion_tokens", "charged_tokens")}

@@ -35,6 +35,7 @@
 ## 进度与质量验证
 
 - [当前阶段状态](current-stage-status.md)：优先查阅的现状与剩余工作入口。
+- [常用能力覆盖与阶段验收](core-capability-readiness.md)：区分已有功能、工程验证与真实效果，按普通场景成组检查。
 - [人工封闭评测协议](character-ooc-closed-evaluation-v1.md)：独立标注与质量验收方法；协议不等于已取得成绩。
 - [系统端到端验证](system-e2e.md)：工程链路验证，不替代开放文本质量评测。
 - [ConStory-Bench 参考边界](constory-bench-boundary.md)：外部参考、原创材料与评测口径。

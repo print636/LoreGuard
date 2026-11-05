@@ -159,6 +159,7 @@ from .provider import (
 from .rate_limit import SlidingWindowLimiter, WriteRateLimitMiddleware
 from .report_export import render_markdown_report
 from .runtime_provenance import safe_runtime_provenance
+from .execution_timing import EXECUTION_LIMITS_KEY, execution_limits_payload
 from .run_comparison import (
     MATCHER_VERSION,
     build_input_diff,
@@ -6080,6 +6081,9 @@ def start_analysis(
             project_id=project_id,
             payload=request,
         )
+        timing = execution_limits_payload(settings)
+        if timing is not None:
+            coverage[EXECUTION_LIMITS_KEY] = timing
         provider_runtime = account_provider_runtime(
             db, user_id=context.user_id, base_settings=settings
         )
@@ -6443,6 +6447,9 @@ def start_recheck(
             payload=recheck_request,
         )
         coverage["recheck_baseline_run_id"] = baseline_run_id
+        timing = execution_limits_payload(settings)
+        if timing is not None:
+            coverage[EXECUTION_LIMITS_KEY] = timing
         try:
             baseline_signature = frozen_run_source_signature(
                 db, baseline_run_id

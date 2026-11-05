@@ -294,7 +294,7 @@ def extract_selected_actions(chunk, target, *, target_ordinal, source_identity, 
         _bind_target_bound_draft_certificate,
     )
     from .character_material_coverage import DraftMaterialGap
-    from .config import HABIT_SCENE_PACKAGE_DEADLINE_SECONDS, HABIT_SCENE_CALL_TIMEOUT_SECONDS
+    from .execution_timing import remaining_execution_seconds
     from .character_draft_actor_review_provider import (
         TargetBoundDraftReviewBatchEntry, run_target_bound_draft_review,
     )
@@ -326,7 +326,7 @@ def extract_selected_actions(chunk, target, *, target_ordinal, source_identity, 
             and settings._character_habit_scene_scheduling_v1):
         return finish("habit_selection_disabled")
     started = monotonic()
-    deadline = HABIT_SCENE_PACKAGE_DEADLINE_SECONDS
+    deadline = remaining_execution_seconds(settings, settings.character_habit_scene_total_deadline_seconds)
     try:
         window, omitted = select_action_window(source=source_identity, frozen_content=frozen_content,
             target=_target_bound_review_target(target, target_ordinal=target_ordinal),
@@ -364,7 +364,7 @@ def extract_selected_actions(chunk, target, *, target_ordinal, source_identity, 
         (TargetBoundDraftReviewBatchEntry(request=request, expected_source=source_identity, frozen_content=frozen_content),),
         provider=provider, token_budget=max(0, settings.character_signal_token_budget - usage["charged_tokens"]),
         completion_reserve=settings.character_draft_actor_review_completion_tokens,
-        timeout_seconds=HABIT_SCENE_CALL_TIMEOUT_SECONDS,
+        timeout_seconds=settings.character_habit_scene_timeout_seconds,
         remaining_deadline_seconds=deadline - (monotonic() - started),
         max_response_bytes=settings.character_draft_actor_review_max_response_bytes, max_attempts=1,
         habit_scene_policy=True, monotonic=monotonic,

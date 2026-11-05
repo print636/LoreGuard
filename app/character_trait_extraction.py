@@ -22,7 +22,8 @@ from pydantic import (
 
 from .character_material_coverage import DraftMaterialGap, DraftMaterialTracker
 from .character_claim_resolution import claim_resolution_target_sha256, text_sha256
-from .config import HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS, SELECTED_CLAIM_RESOLUTION_POLICY_V3, Settings, get_settings
+from .config import SELECTED_CLAIM_RESOLUTION_POLICY_V3, Settings, get_settings
+from .execution_timing import remaining_execution_seconds
 from .character_scope_failure import ScopeProviderFailureSeriesV1
 from .character_scope_review import (
     BasisInvalidSubtype,
@@ -4866,10 +4867,10 @@ def _failed_package_result(
 
 
 def _effective_signal_deadline(settings: Settings, *, habit_package: bool = False) -> float:
-    values = [HABIT_SCENE_PACKAGE_DEADLINE_SECONDS if habit_package else float(settings.character_signal_total_deadline_seconds)]
+    values = [settings.character_habit_scene_total_deadline_seconds if habit_package else float(settings.character_signal_total_deadline_seconds)]
     if settings.provider_total_deadline_seconds is not None:
         values.append(float(settings.provider_total_deadline_seconds))
-    return min(values)
+    return remaining_execution_seconds(settings, min(values))
 
 
 def _estimated_scope_review_reserve(
@@ -6230,11 +6231,11 @@ def _run_target_bound_review_batches(
                 runs.append((group, "deadline" if remaining <= 0 else "scene_time_insufficient"))
                 continue
             unserved = max(1, first_wave - ordinal)
-            # Reserve half a full window (30s) when splitting. Tolerance
+            # Reserve half a configured window when splitting. Tolerance
             # avoids losing a whole share to subsecond scheduling overhead;
             # the actual slice still cannot exceed the real remaining time.
-            viable = min(unserved, max(1, int((remaining + 0.1) // (HABIT_SCENE_CALL_TIMEOUT_SECONDS / 2))))
-            remaining = min(HABIT_SCENE_CALL_TIMEOUT_SECONDS, remaining / viable)
+            viable = min(unserved, max(1, int((remaining + 0.1) // (settings.character_habit_scene_timeout_seconds / 2))))
+            remaining = min(settings.character_habit_scene_timeout_seconds, remaining / viable)
             timeout = remaining
         try:
             run = run_target_bound_draft_review(
@@ -6541,7 +6542,7 @@ def review_original_material_claim(
         chunk=chunk, deferred=(pending.deferred,), primary_value_recovery=True,
         package_attempt=pending.package_attempt, source_identity=source_identity,
         frozen_content=frozen_content, provider=provider, settings=settings,
-        token_budget=token_budget, remaining_deadline_seconds=HABIT_SCENE_CALL_TIMEOUT_SECONDS,
+        token_budget=token_budget, remaining_deadline_seconds=settings.character_habit_scene_timeout_seconds,
         monotonic=time.perf_counter,
     )
 
@@ -11322,6 +11323,10 @@ def _bounded_provider(
     stage: Literal["signal", "drift"],
     remaining_deadline_seconds: float | None = None,
 ) -> _ChatProvider:
+    if settings._execution_deadline is not None:
+        remaining_deadline_seconds = remaining_execution_seconds(
+            settings, remaining_deadline_seconds if remaining_deadline_seconds is not None else float("inf")
+        )
     fork = getattr(provider, "fork_for_character_consistency", None)
     if callable(fork):
         bounded_wrapper = fork(
@@ -11371,7 +11376,8 @@ def _bounded_provider(
             "enable_issue_evidence_review": False,
             "enable_evidence_investigator": False,
             "enable_character_consistency": True,
-            "provider_timeout_seconds": min(timeout, *deadline_caps),
+            "provider_timeout_seconds": min(timeout, settings.provider_timeout_seconds,
+                                            provider.settings.provider_timeout_seconds, *deadline_caps),
             "provider_total_deadline_seconds": min(deadline_caps),
             "provider_max_attempts": attempts,
             "provider_max_completion_tokens": min(completion_caps),
