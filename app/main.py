@@ -23,7 +23,7 @@ from sqlalchemy.orm import load_only
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
-from .config import CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings
+from .config import CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings
 from .character_claim_resolution import CLAIM_RESOLUTION_KEY
 from .auth import (
     AuthContext,
@@ -867,6 +867,7 @@ def _review_batch_selection(
         coverage["claim_resolution_policy"] = CLAIM_RESOLUTION_POLICY_V1
         coverage["habit_action_selection_policy"] = HABIT_ACTION_SELECTION_POLICY_V1
         coverage["selected_claim_resolution_policy"] = SELECTED_CLAIM_RESOLUTION_POLICY_V3
+        coverage["target_focus_policy"] = CHARACTER_TARGET_FOCUS_POLICY_V1
     return selected, roles, coverage
 
 
@@ -6581,7 +6582,7 @@ def _serialize_issue(row: IssueRow | None) -> dict | None:
         "evidence": row.evidence,
         "suggestion": row.suggestion,
         "metadata": (
-            {key: value for key, value in row.extra.items() if key != MATERIAL_REVIEW_KEY}
+            _without_private_character_metadata({key: value for key, value in row.extra.items() if key != MATERIAL_REVIEW_KEY})
             if isinstance(row.extra, dict) else row.extra
         ),
     }
@@ -7184,6 +7185,19 @@ def get_diagnostics(
         }
 
 
+def _without_private_character_metadata(payload):
+    """Private review references may occur inside nested per-case traces."""
+    if isinstance(payload, dict):
+        return {
+            key: _without_private_character_metadata(value)
+            for key, value in payload.items()
+            if key not in {"target_focus_review_v1", "failure_diagnostic_v1"}
+        }
+    if isinstance(payload, list):
+        return [_without_private_character_metadata(value) for value in payload]
+    return payload
+
+
 def _public_diagnostics_payload(payload: object) -> dict:
     if not isinstance(payload, dict):
         return {}
@@ -7197,7 +7211,7 @@ def _public_diagnostics_payload(payload: object) -> dict:
             k: v for k, v in stage.items()
             if k not in {HABIT_SCOPE_REFS_KEY, CLAIM_RESOLUTION_KEY}
         }
-    return public
+    return _without_private_character_metadata(public)
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/provisional-clues")

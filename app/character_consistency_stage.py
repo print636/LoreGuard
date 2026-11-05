@@ -34,7 +34,10 @@ from .character_drift import (
     prepare_character_drift,
     promote_character_drift,
     validated_reviewed_events,
+    target_focus_review_receipt,
+    with_target_focus,
 )
+from .character_target_focus import TARGET_FOCUS_POLICY_V1, TARGET_FOCUS_REVIEW_KEY
 from .character_material_coverage import MATERIAL_REVIEW_KEY, MaterialGapLedger
 from .character_claim_resolution import CLAIM_RESOLUTION_KEY, ClaimResolutionManager
 from .character_habit_scope_review import habit_scope_windows, review_habit_scope
@@ -967,6 +970,7 @@ class CharacterConsistencyStage:
                 baselines=review_baselines,
                 authority_baselines=authority_baselines,
                 authorized_aliases_by_character=aliases_by_character,
+                target_focus_policy=settings._character_target_focus_policy,
             )
             server_contexts[source.document.id] = context
             context_eligible_traits += context.eligible_traits
@@ -2561,6 +2565,7 @@ class CharacterConsistencyStage:
             prepared = prepare_character_drift(
                 case, review_policy=CHARACTER_REVIEW_POLICY_VERSION
             )
+            prepared = with_target_focus(prepared, settings._character_target_focus_policy)
             if prepared.matching_observations:
                 explanation_review_required_cases += 1
                 if not settings.character_explanation_review_v1:
@@ -2867,6 +2872,7 @@ class CharacterConsistencyStage:
                 prepared = prepare_character_drift(
                     case, review_policy=CHARACTER_REVIEW_POLICY_VERSION
                 )
+                prepared = with_target_focus(prepared, settings._character_target_focus_policy)
             drift_considered += 1
             if prepared.unreviewed_observation_count > 0:
                 partial = True
@@ -3481,6 +3487,7 @@ class CharacterConsistencyStage:
                         "valid_until_release_ordinal"
                     ),
                     evidence=evidence,
+                    target_support_bindings_v1=payload.get("target_support_bindings_v1"),
                     approved_axis_id=payload.get("approved_axis_id"),
                     approved_axis_version=payload.get("approved_axis_version"),
                     approved_axis_display_name=payload.get("approved_axis_display_name"),
@@ -4066,6 +4073,7 @@ def _safe_server_context(
     baselines: list[BaselineEntry] | tuple[BaselineEntry, ...] = (),
     authority_baselines: list[BaselineEntry] | tuple[BaselineEntry, ...] | None = None,
     authorized_aliases_by_character: dict[str, tuple[str, ...]] | None = None,
+    target_focus_policy: str | None = None,
 ) -> _SafeServerContext:
     """Build a bounded, content-free alignment hint for draft extraction.
 
@@ -4253,10 +4261,12 @@ def _safe_server_context(
             "trait_key": trait_key,
             "comparison_key": comparison_key,
             **({"key_object": key_object} if key_object else {}),
+            **({"confirmed_target_statement": baseline_hint}
+               if target_focus_policy == TARGET_FOCUS_POLICY_V1 else {}),
         }
         for (
             character, dimension, trait_key, comparison_key, _, key_object,
-            _, _, _, _,
+            baseline_hint, _, _, _,
         ) in selected
     ]
 
@@ -7059,6 +7069,7 @@ def _to_issue(
     if (completed_review and prepared.review_policy == CHARACTER_REVIEW_POLICY_VERSION
             and reviewed_events is None):
         raise ValueError("completed character review has no frozen reviewed-event receipt")
+    focus_receipt = target_focus_review_receipt(prepared, review)
     return ConsistencyIssue(
         category=IssueCategory.character_drift,
         severity=severity,
@@ -7068,7 +7079,10 @@ def _to_issue(
             if conflict
             else f"{prepared.case.baseline.character}的角色表现需要确认"
         ),
-        explanation=promoted.explanation,
+        explanation=(
+            f"本次对照设定：{prepared.case.baseline.statement}\n{promoted.explanation}"
+            if prepared.target_focus is not None else promoted.explanation
+        ),
         evidence=evidence,
         suggestion=_SUGGESTION,
         metadata={
@@ -7112,6 +7126,7 @@ def _to_issue(
                if prepared.unreviewed_observation_count > 0 else {}),
             **({"review_policy": prepared.review_policy} if prepared.review_policy is not None else {}),
             **({"reviewed_events": reviewed_events} if reviewed_events is not None else {}),
+            **({TARGET_FOCUS_REVIEW_KEY: focus_receipt} if focus_receipt is not None else {}),
             **({"server_evidence_pair": server_pair} if server_pair is not None else {}),
             **(
                 {"review_citation_refs": list(cited_refs)}
@@ -7931,6 +7946,7 @@ def _safe_case_trace(
         if prepared is not None and prepared.review_policy == CHARACTER_REVIEW_POLICY_VERSION
         and target_observations is not None else None
     )
+    focus_receipt = target_focus_review_receipt(prepared, review) if prepared is not None else None
     return {
         "character_key": _safe_trace_identifier(character_key, max_chars=64),
         "dimension": baseline.dimension,
@@ -7986,6 +8002,7 @@ def _safe_case_trace(
         **({"review_policy": prepared.review_policy}
            if prepared is not None and prepared.review_policy is not None else {}),
         **({"reviewed_events": reviewed_events} if reviewed_events is not None else {}),
+        **({TARGET_FOCUS_REVIEW_KEY: focus_receipt} if focus_receipt is not None else {}),
         **({"target_observation_pool": target_pool} if target_pool is not None else {}),
         "review_verdict": decision.verdict if decision is not None else None,
         "citation_roles": roles,

@@ -24,6 +24,10 @@ from .character_trait_extraction import (
     trait_keys_compatible,
 )
 from .config import Settings, get_settings
+from .character_target_focus import (
+    TARGET_FOCUS_POLICY_V1, TARGET_FOCUS_REVIEW_INSTRUCTIONS,
+    TargetFocus, TargetFocusCheck, build_target_focus, validate_focus_check,
+)
 from .domain import EvidenceSpan
 from .provider import OpenAICompatibleProvider, ProviderError
 from .usage import estimate_issue_evidence_review_tokens
@@ -111,6 +115,7 @@ class ConfirmedTraitSnapshot(BaseModel):
     valid_until_release_ordinal: int | None = Field(default=None, ge=0)
     confirmed: Literal[True] = True
     evidence: tuple[EvidenceSpan, ...] = Field(min_length=1, max_length=12)
+    target_support_bindings_v1: dict | None = Field(default=None, exclude=True)
     approved_axis_id: str | None = None
     approved_axis_version: int | None = Field(default=None, ge=1, strict=True)
     approved_axis_display_name: str | None = Field(default=None, min_length=1, max_length=80)
@@ -379,6 +384,7 @@ class PreparedCharacterDrift(BaseModel):
     reason: str
     review_policy: Literal["single-clear-event-v3"] | None = Field(default=None, exclude=True)
     unreviewed_observation_count: int = Field(default=0, ge=0, exclude=True)
+    target_focus: TargetFocus | None = Field(default=None, exclude=True)
 
 
 class ScopedObservationApplicability(BaseModel):
@@ -429,6 +435,7 @@ class ReviewedNarrativeEvent(BaseModel):
     context_checks: tuple[HabitContextCheck, ...] | None = Field(
         default=None, min_length=1, max_length=8, exclude=True,
     )
+    target_focus: TargetFocusCheck | None = Field(default=None, exclude=True)
 
 
 class ModelDriftDecision(BaseModel):
@@ -452,6 +459,9 @@ class ModelDriftDecision(BaseModel):
     policy_version: Literal["single-clear-event-v3"] | None = Field(default=None, exclude=True)
     events: tuple[ReviewedNarrativeEvent, ...] | None = Field(
         default=None, min_length=1, max_length=8, exclude=True,
+    )
+    target_focus_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude=True,
     )
 
 
@@ -591,6 +601,28 @@ CHARACTER_HABIT_CONTEXT_REVIEW_SYSTEM_PROMPT = CHARACTER_SINGLE_EVENT_REVIEW_SYS
 情境习惯审查扩展（character-habit-context-review-v1）：每个 event 必须额外提供 context_checks。对本组每个 C 独立填写一次 {"citation":"C01","relation":"same","quote":"该 C 原文中的短引文"}。比较作者已确认的 baseline_contexts 和 B 原文所限定的场合，与这个 C 实际发生的场合。根据具体动作或同义改述可判 same，明确是别的场合才判 different，无法确定、缺少已确认情境或仅是设想则判 unclear。不要要求新稿复用设定用词。quote 须逐字取自对应 C 的 text（最多96字），用以定位支持判断的动作、场景或承接线索；unclear 可给空串。不得把 summary 或另一场景的描写当作本条证据。
 同一事件紧邻的下一行明确延续前一条 C 的场景时，可在该行的检查中添加 continues_from 指向同组、同文稿、紧邻前一行且自己有直接场景证据的 C。仍须引用当前行支持实际承接的原句；相邻或主角相同本身不证明延续，换场时要分别审查。只给一次直接承接，不串联推测。事件的 situation_match 由组内检查决定：全部 same 才用 same，全部 different 才用 different，其余均用 unclear。整组情境未确定时不能声称组内行为违反习惯。不要把多个独立事件拼成一组，也不要为了定性而拆分同一事件。
 """
+
+
+CHARACTER_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT = (
+    CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT + TARGET_FOCUS_REVIEW_INSTRUCTIONS
+)
+CHARACTER_HABIT_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT = (
+    CHARACTER_HABIT_CONTEXT_REVIEW_SYSTEM_PROMPT + TARGET_FOCUS_REVIEW_INSTRUCTIONS
+)
+
+
+def with_target_focus(
+    candidate: PreparedCharacterDrift, policy: str | None,
+) -> PreparedCharacterDrift:
+    if policy is None:
+        return candidate
+    if policy != TARGET_FOCUS_POLICY_V1 or candidate.review_policy != CHARACTER_REVIEW_POLICY_VERSION:
+        raise ValueError("unsupported target focus policy")
+    baseline = candidate.case.baseline
+    return candidate.model_copy(update={"target_focus": build_target_focus(
+        candidate_id=baseline.id, statement=baseline.statement, contexts=baseline.contexts,
+        evidence=baseline.evidence, support_bindings=baseline.target_support_bindings_v1,
+    )})
 
 
 def _is_scoped_approved_axis(baseline: ConfirmedTraitSnapshot) -> bool:
@@ -1137,6 +1169,9 @@ class CharacterConsistencyReviewer:
     def review(self, candidate: PreparedCharacterDrift) -> CharacterReviewResult:
         settings = self.settings
         single_event_policy = candidate.review_policy == CHARACTER_REVIEW_POLICY_VERSION
+        focus_enabled = settings._character_target_focus_policy == TARGET_FOCUS_POLICY_V1
+        if focus_enabled != (candidate.target_focus is not None):
+            return _review_result("skipped", "target_focus_policy_mismatch")
         habit_context_review = single_event_policy and candidate.case.baseline.dimension == "contextual_behavior"
         scoped_axis = _is_scoped_approved_axis(candidate.case.baseline)
         multi_event_review = (
@@ -1150,6 +1185,9 @@ class CharacterConsistencyReviewer:
             system_prompt = CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT
         if single_event_policy:
             system_prompt = (
+                CHARACTER_HABIT_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT
+                if focus_enabled and habit_context_review else
+                CHARACTER_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT if focus_enabled else
                 CHARACTER_HABIT_CONTEXT_REVIEW_SYSTEM_PROMPT
                 if habit_context_review else CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
             )
@@ -1171,6 +1209,10 @@ class CharacterConsistencyReviewer:
             # The output contract grows with the bounded C pool. An explicit
             # cap too small for the contract must fail before provider work.
             per_observation = 352 if habit_context_review else 320
+            if focus_enabled:
+                # Same logical request, with source quotes and the explicit
+                # target relation accounted for before admission.
+                per_observation += 256
             completion_reserve = 384 + per_observation * len(candidate.matching_observations)
             if completion_reserve > min(
                 settings.character_drift_max_completion_tokens,
@@ -1253,6 +1295,10 @@ class CharacterConsistencyReviewer:
                     ),
                 },
                 "evidence": evidence_rows,
+                **({
+                    "target_focus": candidate.target_focus.model_dump(mode="json"),
+                    "target_focus_sha256": candidate.target_focus.digest,
+                } if candidate.target_focus is not None else {}),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -1566,7 +1612,8 @@ def _parse_primary_decision(
     if candidate.review_policy == CHARACTER_REVIEW_POLICY_VERSION:
         _validate_single_event_decision(candidate, decision, allowed)
         return decision
-    if decision.policy_version is not None or decision.events is not None:
+    if (decision.policy_version is not None or decision.events is not None
+            or "target_focus_sha256" in decision.model_fields_set):
         raise ValueError("unexpected_review_policy")
     scoped_axis = _is_scoped_approved_axis(candidate.case.baseline)
     _validate_decision(
@@ -2978,6 +3025,15 @@ def _validate_single_event_decision(
         }
     ):
         raise _InvalidEventDecision("policy")
+    focus = candidate.target_focus
+    if focus is None:
+        if ("target_focus_sha256" in decision.model_fields_set
+                or any("target_focus" in event.model_fields_set for event in decision.events)):
+            raise _InvalidEventDecision("policy")
+    elif decision.target_focus_sha256 != focus.digest or any(
+        event.target_focus is None for event in decision.events
+    ):
+        raise _InvalidEventDecision("policy")
     cited = set(decision.citations)
     if len(cited) != len(decision.citations) or not cited <= allowed:
         raise _InvalidEventDecision("citations")
@@ -2991,6 +3047,16 @@ def _validate_single_event_decision(
     selected = []
     for event in decision.events:
         _validate_habit_context_checks(candidate, event)
+        if focus is not None:
+            try:
+                validate_focus_check(
+                    event.target_focus, verdict=event.verdict, trait_match=event.trait_match,
+                    current_citations=event.current_citations,
+                    current={f"C{i:02d}": row.evidence for i, row in enumerate(
+                        candidate.matching_observations, start=1)},
+                )
+            except (ValueError, KeyError, TypeError) as exc:
+                raise _InvalidEventDecision("comparison") from exc
         labels = set(event.current_citations)
         if labels & cited_current:
             if not labels <= cited_current:
@@ -3041,6 +3107,37 @@ def validated_reviewed_events(
     except (TypeError, ValueError, ValidationError):
         return ()
     return review.decision.events or ()
+
+
+def target_focus_review_receipt(
+    candidate: PreparedCharacterDrift, review: CharacterReviewResult | None,
+) -> dict | None:
+    """Private content-free account of the validated target comparison."""
+    focus = candidate.target_focus
+    events = validated_reviewed_events(candidate, review)
+    if focus is None or not events:
+        return None
+    current = {f"C{i:02d}": row.evidence for i, row in enumerate(
+        candidate.matching_observations, start=1)}
+    return {
+        "schema_version": "character-target-focus-review-v1",
+        "policy": focus.policy,
+        "target_focus_sha256": focus.digest,
+        "candidate_id_sha256": hashlib.sha256(focus.candidate_id.encode("utf-8")).hexdigest(),
+        "statement_sha256": hashlib.sha256(focus.statement.encode("utf-8")).hexdigest(),
+        "source_sha256": list(focus.source_sha256),
+        "binding_status": focus.binding_status,
+        "target_assertions": [row.model_dump(exclude={"text"}) for row in focus.target_assertions],
+        "events": [{
+            "current_citations": list(event.current_citations),
+            "target_relation": event.target_focus.target_relation,
+            "opposition_basis": event.target_focus.opposition_basis,
+            "counterevidence_refs": validate_focus_check(
+                event.target_focus, verdict=event.verdict, trait_match=event.trait_match,
+                current_citations=event.current_citations, current=current,
+            ),
+        } for event in events],
+    }
 
 
 def _explanation_fragments_may_share_event(

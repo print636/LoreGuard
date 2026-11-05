@@ -138,9 +138,10 @@ def _exercise_author_review(client):
     import httpx
     from app import service
     from app.main import write_limiter
-    from app.config import CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3
-    from app.db import AnalysisRunRow, SessionLocal
-    from app.character_drift import CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
+    from app.config import CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3
+    from app.db import AnalysisRunRow, AnalysisRunCharacterTraitInputRow, IssueRow, SessionLocal
+    from sqlalchemy import select
+    from app.character_drift import CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT, CHARACTER_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT
     from app.character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
     from app.character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
     from app.character_trait_extraction import (
@@ -201,6 +202,16 @@ def _exercise_author_review(client):
             content = json.dumps({"documents": [{"doc_ref": row["doc_ref"], "records": []} for row in docs]})
         elif system in (formal_prompt, SCOPE_REVIEW_SYSTEM_PROMPT):
             content = formal.complete(system, user).text
+        elif system == CHARACTER_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT:
+            value = json.loads(reviewer.complete(CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT, user).text)
+            request = json.loads(user)
+            value["target_focus_sha256"] = request["target_focus_sha256"]
+            for event in value["events"]:
+                citation = event["current_citations"][0]
+                quote = next(row["text"] for row in request["evidence"] if row["id"] == citation)
+                event["target_focus"] = {"target_relation": "contradicts", "opposition_basis": "explicit",
+                                         "counterevidence": [{"citation": citation, "quote": quote}]}
+            content = json.dumps(value, ensure_ascii=False)
         elif system in (EXPLANATION_REVIEW_SYSTEM_PROMPT, CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT):
             content = reviewer.complete(system, user).text
         elif system.startswith(CHARACTER_SIGNAL_SYSTEM_PROMPT):
@@ -257,6 +268,9 @@ def _exercise_author_review(client):
                 {"_character_selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V3},
                 {"selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V3},
                 {"batch_coverage": {"selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V3}},
+                {"_character_target_focus_policy": CHARACTER_TARGET_FOCUS_POLICY_V1},
+                {"target_focus_policy": CHARACTER_TARGET_FOCUS_POLICY_V1},
+                {"batch_coverage": {"target_focus_policy": CHARACTER_TARGET_FOCUS_POLICY_V1}},
             ):
                 assert client.post(runs_url, json={**chosen, **override}).status_code == 422
         assert len(calls) == before_private_override
@@ -297,8 +311,10 @@ def _exercise_author_review(client):
         assert all(frozen_scene_policy(run, "habit_action_selection_policy") is None for run in (default, ordinary, created))
         assert frozen_scene_policy(reviewed, "selected_claim_resolution_policy") == SELECTED_CLAIM_RESOLUTION_POLICY_V3
         assert all(frozen_scene_policy(run, "selected_claim_resolution_policy") is None for run in (default, ordinary, created))
+        assert frozen_scene_policy(reviewed, "target_focus_policy") == CHARACTER_TARGET_FOCUS_POLICY_V1
+        assert all(frozen_scene_policy(run, "target_focus_policy") is None for run in (default, ordinary, created))
         assert reviewed["review_batch"]["character_baseline_run_id"] == baseline_id
-        assert calls.count(CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT) == 1
+        assert calls.count(CHARACTER_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT) == 1
         run_url = "/api/v1/analysis-runs/" + reviewed["id"]
         recovered = client.get(run_url).json()
         assert recovered["status"] == "completed" and recovered["id"] != interrupted["id"]
@@ -316,6 +332,13 @@ def _exercise_author_review(client):
         issues = client.get(run_url + "/issues").json()
         issue, = issues
         assert issue["metadata"]["reviewed_events"]
+        assert "target_focus_review_v1" not in issue["metadata"]
+        assert "target_focus_review_v1" not in json.dumps(client.get(run_url + "/diagnostics").json())
+        with SessionLocal() as db:
+            persisted = db.get(IssueRow, issue["id"])
+            frozen = db.scalar(select(AnalysisRunCharacterTraitInputRow).where(AnalysisRunCharacterTraitInputRow.run_id == reviewed["id"]))
+            assert persisted.extra["target_focus_review_v1"]
+            assert frozen.payload["value"] in issue["explanation"]
         assert {row["document_id"] for row in issue["evidence"]} == {profile_doc["id"], draft_doc["id"]}
         for index, citation in enumerate(issue["evidence"]):
             response = client.get(run_url + "/evidence-preview", params={
@@ -335,8 +358,9 @@ def _exercise_author_review(client):
                 assert failed_run.batch_coverage.get("claim_resolution_policy") == (CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
                 assert failed_run.batch_coverage.get("habit_action_selection_policy") == (HABIT_ACTION_SELECTION_POLICY_V1 if enabled else None)
                 assert failed_run.batch_coverage.get("selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V3 if enabled else None)
+                assert failed_run.batch_coverage.get("target_focus_policy") == (CHARACTER_TARGET_FOCUS_POLICY_V1 if enabled else None)
                 # Replay a genuine older snapshot shape after the application has upgraded.
-                failed_run.batch_coverage = {key: value for key, value in failed_run.batch_coverage.items() if key not in {"habit_object_chain_policy", "claim_resolution_policy", "habit_action_selection_policy", "selected_claim_resolution_policy", "execution_limits"}}
+                failed_run.batch_coverage = {key: value for key, value in failed_run.batch_coverage.items() if key not in {"habit_object_chain_policy", "claim_resolution_policy", "habit_action_selection_policy", "selected_claim_resolution_policy", "target_focus_policy", "execution_limits"}}
                 db.commit()
             calls.clear()
             retry = client.post("/api/v1/analysis-runs/" + failed.json()["detail"]["run_id"] + "/retry")
@@ -347,6 +371,7 @@ def _exercise_author_review(client):
             assert frozen_scene_policy(retry.json(), "claim_resolution_policy") is None
             assert frozen_scene_policy(retry.json(), "habit_action_selection_policy") is None
             assert frozen_scene_policy(retry.json(), "selected_claim_resolution_policy") is None
+            assert frozen_scene_policy(retry.json(), "target_focus_policy") is None
             assert frozen_scene_policy(retry.json(), "execution_limits") is None
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
         # Earlier frozen runs retain their routing version after upgrade.
@@ -380,8 +405,9 @@ def _exercise_author_review(client):
             assert frozen_scene_policy(recheck.json(), "claim_resolution_policy") == (CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "habit_action_selection_policy") == (HABIT_ACTION_SELECTION_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V3 if enabled else None)
+            assert frozen_scene_policy(recheck.json(), "target_focus_policy") == (CHARACTER_TARGET_FOCUS_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "execution_limits")["run_seconds"] == 2400
-            assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
+            assert (CHARACTER_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT in calls) is enabled
         repeated = client.post(recheck_url, headers={"Idempotency-Key": "deep-recheck"})
         assert repeated.status_code == 409, repeated.text
         _document(client, project, name="profile.md", role="character_profile", publication="published",

@@ -18,6 +18,7 @@ HABIT_ACTION_SELECTION_POLICY_V1 = "habit-action-selection-v1"
 SELECTED_CLAIM_RESOLUTION_POLICY_V1 = "selected-claim-resolution-v1"
 SELECTED_CLAIM_RESOLUTION_POLICY_V2 = "selected-claim-resolution-v2"
 SELECTED_CLAIM_RESOLUTION_POLICY_V3 = "selected-claim-resolution-v3"
+CHARACTER_TARGET_FOCUS_POLICY_V1 = "character-target-focus-v1"
 HABIT_SCENE_CALL_TIMEOUT_SECONDS = 60.0
 HABIT_SCENE_PACKAGE_DEADLINE_SECONDS = 180.0
 
@@ -288,6 +289,7 @@ class Settings(BaseSettings):
     _character_claim_resolution_v1: bool = PrivateAttr(default=False)
     _character_habit_action_selection_v1: bool = PrivateAttr(default=False)
     _character_selected_claim_resolution_policy: str | None = PrivateAttr(default=None)
+    _character_target_focus_policy: str | None = PrivateAttr(default=None)
     character_consistency_sensitivity: Literal[
         "conservative", "balanced", "exploratory"
     ] = "balanced"

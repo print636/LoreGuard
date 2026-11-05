@@ -17,7 +17,7 @@ from app.character_consistency_stage import (
 from app.character_observations import CharacterObservationRecorder, project_character_observations
 from app.character_trait_extraction import CharacterSignal
 from app.db import (
-    AnalysisRunRow, AnalysisRunInputRow, CharacterObservationRecordingRow,
+    AnalysisDiagnosticRow, AnalysisRunRow, AnalysisRunInputRow, CharacterObservationRecordingRow,
     CharacterTraitCandidateRow, AnalysisRunCharacterTraitInputRow, SessionLocal,
 )
 from app.domain import EvidenceSpan
@@ -250,9 +250,18 @@ def test_worker_writer_failure_is_explicit_and_never_complete():
             execute_analysis(run_id, raise_on_failure=True)
         with SessionLocal() as db:
             assert db.get(CharacterObservationRecordingRow, run_id).status == "failed"
+            stored = db.get(AnalysisDiagnosticRow, run_id).payload["character_consistency"]
+            assert stored["outcome"] == "degraded"
+            assert stored["failure_diagnostic_v1"] == {
+                "schema_version": "character-failure-diagnostic-v1",
+                "stage": "character_observation_recording",
+                "exception_type": "RuntimeError",
+            }
+            assert "private database defect" not in json.dumps(stored)
         diagnostics = client.get(f"/api/v1/analysis-runs/{run_id}/diagnostics").json()
         recording = diagnostics["character_consistency"]["observation_recording"]
         assert recording == {"status": "failed", "reason_code": "observation_recording_failed"}
+        assert "failure_diagnostic_v1" not in diagnostics["character_consistency"]
         assert "private database defect" not in json.dumps(diagnostics)
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .character_target_focus import TARGET_FOCUS_POLICY_V1, TARGET_FOCUS_SIGNAL_INSTRUCTIONS
+
 import hashlib
 import json
 import re
@@ -2280,6 +2282,10 @@ class CharacterSignalExtractor:
                         CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
                         if draft_actor_review_v1 else ""
                     )
+                    + (TARGET_FOCUS_SIGNAL_INSTRUCTIONS
+                       if chunk.source_kind == "draft"
+                       and self.settings._character_target_focus_policy == TARGET_FOCUS_POLICY_V1
+                       else "")
                 )
             ),
             user_prompt=(
@@ -2486,6 +2492,9 @@ class CharacterSignalExtractor:
                     CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1
                     if draft_actor_review_v1 else ""
                 )
+                + (TARGET_FOCUS_SIGNAL_INSTRUCTIONS
+                   if self.settings._character_target_focus_policy == TARGET_FOCUS_POLICY_V1
+                   else "")
             ),
             user_prompt=targeted_prompt,
             targets=targets,

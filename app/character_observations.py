@@ -331,7 +331,16 @@ def project_character_observations(db: Session, run: AnalysisRunRow, *, offset: 
                 baseline = baselines.get(reference["input_id"])
                 if baseline is None or _baseline(baseline) != reference or _hash(baseline.payload) != reference["payload_sha256"]:
                     raise CharacterObservationIntegrityError("character observation baseline integrity mismatch")
-                decisions.append({**decision, "baseline": {**reference, "payload": baseline.payload}})
+                public_baseline = {
+                    key: value for key, value in baseline.payload.items()
+                    if key != "target_support_bindings_v1"
+                }
+                decisions.append({**decision, "baseline": {
+                    **reference, "payload": public_baseline,
+                    # This digest describes the public body, while persisted
+                    # observation references keep the complete private digest.
+                    "payload_sha256": _hash(public_baseline),
+                }})
             else:
                 decisions.append(decision)
         public_payload = {key: value for key, value in row.payload.items() if key != "selected_action_origin"}

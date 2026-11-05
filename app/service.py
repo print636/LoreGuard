@@ -14,7 +14,7 @@ from uuid import uuid4
 from sqlalchemy import and_, delete, exists, func, or_, select, update
 
 from .config import (
-    CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings,
+    CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings,
 )
 from .account_provider import runtime_for_analysis_run
 from .character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
@@ -42,6 +42,7 @@ from .character_traits import (
     candidate_snapshot_comparison_key,
     candidate_snapshot_key_object,
     candidate_snapshot_payload,
+    formal_target_fingerprint_matches,
     _validated_comparison_key,
     latest_confirm_reviews,
     verified_character_trait_review_chain,
@@ -53,6 +54,8 @@ from .character_consistency_stage import (
     failed_character_consistency_stage,
 )
 from .character_observations import CharacterObservationRecorder
+from .character_support_bindings import verify_stored_support_bindings
+from .character_target_focus import TARGET_FOCUS_SIGNAL_INSTRUCTIONS
 from .character_claim_resolution import CLAIM_RESOLUTION_KEY
 from .character_claim_resolution_storage import validate_claim_resolution_payload
 from .character_action_selection import (
@@ -87,6 +90,8 @@ from .character_drift import (
     CHARACTER_REVIEW_SYSTEM_PROMPT,
     CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT,
     CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT,
+    CHARACTER_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT,
+    CHARACTER_HABIT_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT,
 )
 from .character_trait_extraction import (
     CHARACTER_SIGNAL_CORE_SCOPE_PROMPT_V3,
@@ -906,6 +911,15 @@ class _CharacterConsistencyAccountingProvider:
             allowed_targeted_systems.update(
                 base + CHARACTER_SIGNAL_DRAFT_ACTOR_PROMPT_V1 for base in targeted_bases
             )
+        if self.settings._character_target_focus_policy == CHARACTER_TARGET_FOCUS_POLICY_V1:
+            # Only this exact extension of an already authorized extraction
+            # purpose can use the signal budget; meter/send the full prompt.
+            allowed_primary_systems |= {
+                base + TARGET_FOCUS_SIGNAL_INSTRUCTIONS for base in allowed_primary_systems
+            }
+            allowed_targeted_systems |= {
+                base + TARGET_FOCUS_SIGNAL_INSTRUCTIONS for base in allowed_targeted_systems
+            }
         # A frozen author-axis target may extend these specific review prompts.
         # Send and meter the original, including the guide.
         target_review_system = system.removesuffix(SCOPED_DRAFT_DIRECTION_GUIDE)
@@ -1059,6 +1073,12 @@ class _CharacterConsistencyAccountingProvider:
         elif system == HABIT_SCOPE_SYSTEM_PROMPT and self.settings._character_habit_scope_review_v1:
             if self.settings.character_drift_max_completion_tokens > 512 or self.settings.character_drift_max_attempts != 1:
                 raise RuntimeError("habit scope review requires a bounded provider")
+            provider = self.drift_provider
+            completion_reserve = self.settings.character_drift_max_completion_tokens
+        elif system in {
+            CHARACTER_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT,
+            CHARACTER_HABIT_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT,
+        } and self.settings._character_target_focus_policy == CHARACTER_TARGET_FOCUS_POLICY_V1:
             provider = self.drift_provider
             completion_reserve = self.settings.character_drift_max_completion_tokens
         elif system in {
@@ -1423,6 +1443,34 @@ def _confirmed_trait_snapshot_payload(db, candidate, review) -> dict[str, Any]:
     return payload
 
 
+def _target_support_snapshot_fields(db, candidate) -> dict[str, Any]:
+    """Freeze verified target coordinates; old or invalid bindings stay absent."""
+    if candidate.support_binding_mode != "required_v1":
+        return {}
+    source_run = db.get(AnalysisRunRow, candidate.source_run_id)
+    if source_run is None or source_run.project_id != candidate.project_id:
+        return {}
+    try:
+        input_ids = {item["input_id"] for item in candidate.evidence}
+        frozen = {
+            row.id: row for row in db.scalars(select(AnalysisRunInputRow).where(
+                AnalysisRunInputRow.run_id == candidate.source_run_id,
+                AnalysisRunInputRow.id.in_(input_ids),
+            )).all()
+        }
+        if set(frozen) != input_ids:
+            return {}
+        binding = verify_stored_support_bindings(
+            candidate.support_bindings_v1, candidate.support_bindings_sha256,
+            evidence=candidate.evidence, frozen_by_id=frozen,
+        )
+        if binding is not None and formal_target_fingerprint_matches(candidate, binding, db=db):
+            return {"target_support_bindings_v1": binding}
+    except (KeyError, TypeError, ValueError, AttributeError):
+        pass
+    return {}
+
+
 def _historical_trait_snapshot_payload(candidate, review, db=None) -> dict[str, Any]:
     """Snapshot a formerly confirmed, explicitly version-bounded profile row."""
 
@@ -1540,6 +1588,8 @@ def _capture_confirmed_traits(
             if candidate.review_state == "confirmed"
             else _historical_trait_snapshot_payload(candidate, review, db=db)
         )
+        if isinstance(run.batch_coverage, dict) and run.batch_coverage.get("target_focus_policy") == CHARACTER_TARGET_FOCUS_POLICY_V1:
+            payload.update(_target_support_snapshot_fields(db, candidate))
         db.add(
             AnalysisRunCharacterTraitInputRow(
                 run_id=run.id,
@@ -1837,7 +1887,7 @@ def run_input_metadata(db, run_id: str) -> list[dict]:
     ]
 
 
-def run_trait_snapshot_metadata(db, run_id: str) -> dict:
+def run_trait_snapshot_metadata(db, run_id: str, *, source_comparison: bool = False) -> dict:
     rows = list(
         db.scalars(
             select(AnalysisRunCharacterTraitInputRow)
@@ -1850,7 +1900,11 @@ def run_trait_snapshot_metadata(db, run_id: str) -> dict:
             {
                 "candidate_id": row.candidate_id,
                 "candidate_lock_version": row.candidate_lock_version,
-                "payload_sha256": row.payload_sha256,
+                "payload_sha256": (
+                    payload_sha256({key: value for key, value in row.payload.items() if key != "target_support_bindings_v1"})
+                    if source_comparison and isinstance(row.payload, dict) and "target_support_bindings_v1" in row.payload
+                    else row.payload_sha256
+                ),
                 "ordinal": row.ordinal,
             }
             for row in rows
@@ -1878,7 +1932,9 @@ def run_narrative_context_fingerprint(db, run_id: str) -> str:
 
 def frozen_run_source_signature(db, run_id: str) -> str:
     documents = run_input_metadata(db, run_id)
-    traits = run_trait_snapshot_metadata(db, run_id)
+    # New private provenance is not a change to the author's source. Keep the
+    # complete snapshot digest everywhere else, including storage references.
+    traits = run_trait_snapshot_metadata(db, run_id, source_comparison=True)
     return payload_sha256(
         {
             "documents": [
@@ -3233,6 +3289,24 @@ def _verified_character_review_clues(
     return tuple(accepted), rejected + max(0, len(clues) - 256)
 
 
+def _safe_character_failure(exc: Exception, *, stage: str) -> dict[str, str]:
+    # Do not persist exception messages, repr, traceback, module paths or
+    # arbitrary user-defined class names: any of those can contain source/key data.
+    known_types = {
+        "AssertionError", "AttributeError", "IndexError", "KeyError", "LookupError",
+        "RuntimeError", "TypeError", "ValueError", "OverflowError", "OSError",
+        "TimeoutError", "ValidationError", "IntegrityError", "OperationalError",
+        "ProgrammingError", "StatementError", "SQLAlchemyError",
+        "CharacterObservationIntegrityError",
+    }
+    exception_type = type(exc).__name__
+    return {
+        "schema_version": "character-failure-diagnostic-v1",
+        "stage": stage,
+        "exception_type": exception_type if exception_type in known_types else "OtherException",
+    }
+
+
 def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
     """Create an immutable per-run sensitivity view without mutating globals."""
 
@@ -3270,6 +3344,12 @@ def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
         selected_policy if stage._character_claim_resolution_v1 and stage._character_habit_action_selection_v1
         and selected_policy in (SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2,
                                 SELECTED_CLAIM_RESOLUTION_POLICY_V3) else None
+    )
+    stage._character_target_focus_policy = (
+        CHARACTER_TARGET_FOCUS_POLICY_V1
+        if stage._character_selected_claim_resolution_policy is not None
+        and coverage.get("target_focus_policy") == CHARACTER_TARGET_FOCUS_POLICY_V1
+        else None
     )
     return stage
 
@@ -3411,6 +3491,7 @@ def execute_analysis(
             )
             character_stage_result = None
             character_stage = None
+            character_failure_stage = "character_stage_initialization"
             character_review_clues = ()
             character_stage_db = CharacterConsistencyDatabase(
                 SessionLocal,
@@ -3440,6 +3521,7 @@ def execute_analysis(
                     observation_recorder=CharacterObservationRecorder(),
                     observation_applicable=run.batch_mode != "baseline_build",
                 )
+                character_failure_stage = "character_stage_execution"
                 character_stage_result = character_stage.run(
                     character_stage_db,
                     run_id=run_id,
@@ -3454,6 +3536,7 @@ def execute_analysis(
                     ),
                 )
                 character_stage_db.raise_if_ownership_lost()
+                character_failure_stage = "character_claim_resolution_validation"
                 claim_resolution = validate_claim_resolution_payload(
                     character_stage_db, run=run,
                     payload=character_stage_result.diagnostics.get(CLAIM_RESOLUTION_KEY),
@@ -3462,14 +3545,17 @@ def execute_analysis(
                     character_stage_result.diagnostics[CLAIM_RESOLUTION_KEY] = claim_resolution
             except (AnalysisCancelled, WorkerLeaseLost, AnalysisDeadlineExceeded):
                 raise
-            except Exception:
+            except Exception as exc:
                 character_stage_result = failed_character_consistency_stage()
+                recording_failed = character_stage is not None and getattr(character_stage, "observation_recording_failed", False)
+                character_stage_result.diagnostics["failure_diagnostic_v1"] = _safe_character_failure(
+                    exc, stage="character_observation_recording" if recording_failed else character_failure_stage,
+                )
                 character_stage_result.diagnostics["observation_recording"] = {
                     "status": "failed",
                     "reason_code": (
                         "observation_recording_failed"
-                        if character_stage is not None
-                        and getattr(character_stage, "observation_recording_failed", False)
+                        if recording_failed
                         else "character_stage_failed"
                     ),
                 }
@@ -3518,10 +3604,13 @@ def execute_analysis(
                             combined_issues,
                             documents,
                         )
-                    except Exception:
+                    except Exception as exc:
                         result.diagnostics[
                             "character_consistency"
                         ] = failed_character_consistency_stage().diagnostics
+                        result.diagnostics["character_consistency"]["failure_diagnostic_v1"] = _safe_character_failure(
+                            exc, stage="character_result_provenance",
+                        )
                     else:
                         result.issues = combined_issues
                         result.diagnostics["provenance"] = combined_provenance
