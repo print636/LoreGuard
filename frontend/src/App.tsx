@@ -110,6 +110,7 @@ import {
 import { documentNameKey, initialLibraryState } from "./features/documents/libraryModel";
 import EvidenceReader from "./features/evidence/EvidenceReader";
 import type { EvidenceKind, EvidenceSelection } from "./features/evidence/evidenceReaderModel";
+import MaterialReviewDetails from "./features/evidence/MaterialReviewDetails";
 import UserGuide from "./features/help/UserGuide";
 import type { UserGuideTopicId } from "./features/help/userGuideContent";
 import { useQuickTextDraft } from "./features/drafts/useQuickTextDraft";
@@ -1724,7 +1725,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
 
   function openEvidenceReader(kind: EvidenceKind, itemId: string, evidenceIndex: number, expected: Evidence, trigger: HTMLButtonElement, expectedVersion?: number) {
     if (!project || !run || projectLoading || routeProblem || runInfo?.id !== run || runInfo.project_id !== project || runInfo.status !== "completed") return;
-    if ((kind === "review_clue" || kind === "habit_scope") && (reviewClues.status !== "ready" || reviewClues.runId !== run)) return;
+    if ((kind === "review_clue" || kind === "habit_scope" || kind === "material_gap") && (reviewClues.status !== "ready" || reviewClues.runId !== run)) return;
     if (kind === "provisional_clue" && (provisionalClues.status !== "ready" || provisionalClues.runId !== run)) return;
     setEvidenceReaderSelection({
       scope: evidenceReaderScope, trigger,
@@ -3176,6 +3177,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                                   </blockquote>
                                 ))}
                               </div>
+                              {clue.material_review && <MaterialReviewDetails review={clue.material_review} evidence={clue.evidence}
+                                onOpen={(kind, index, span, trigger) => openEvidenceReader(kind, clue.id, index, span, trigger)} />}
                             </li>
                           ))}
                         </ol>

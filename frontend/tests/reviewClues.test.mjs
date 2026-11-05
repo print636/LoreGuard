@@ -88,3 +88,26 @@ test("review clues use the run scoped endpoint", async (context) => {
   const result = await fetchReviewClues("run one");
   assert.equal(result.items.length, 1);
 });
+
+test("material review binds comparisons to clue evidence and keeps unknown gaps unlocated", () => {
+  const review = {
+    comparisons: [{ evidence_indices: [1], opinion: "contradicts" }],
+    gaps: [{ index: 0, count: 2, reason: "statement_unverified", location: "unknown", relation: "unknown" }],
+    omitted_count: 1, total_count: 3,
+  };
+  const normalize = material_review => normalizeReviewClueResult({
+    items: [{ ...clue, material_review }], truncated: false,
+  });
+  const result = normalize(review);
+  assert.equal(result.items.length, 1);
+  assert.deepEqual(result.items[0].material_review, review);
+  for (const invalid of [
+    { ...review, comparisons: [{ evidence_indices: [8], opinion: "contradicts" }] },
+    { ...review, gaps: [{ ...review.gaps[0], evidence: clue.evidence[1] }] },
+    { ...review, total_count: 4 },
+  ]) {
+    const projected = normalize(invalid);
+    assert.equal(projected.items[0].material_review, undefined);
+    assert.equal(projected.items[0].id, clue.id);
+  }
+});

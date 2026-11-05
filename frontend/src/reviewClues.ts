@@ -9,10 +9,28 @@ export type ReviewClue = {
   title: string;
   explanation: string;
   evidence: [Evidence, Evidence, ...Evidence[]];
+  material_review?: MaterialReview;
   metadata: {
     final_outcome: "needs_confirmation" | "unverifiable";
     review_reason: string;
   };
+};
+
+export type MaterialReview = {
+  comparisons: Array<{
+    evidence_indices: number[];
+    opinion: "contradicts" | "explained" | "needs_confirmation" | "insufficient_evidence";
+  }>;
+  gaps: Array<{
+    index: number;
+    count: number;
+    reason: "actor_unverified" | "statement_unverified" | "object_unverified" | "source_unverified" | "record_unverified" | "response_unavailable" | "processing_incomplete";
+    location: "located" | "unknown";
+    relation: "overlap" | "elsewhere" | "unknown";
+    evidence?: Evidence;
+  }>;
+  omitted_count: number;
+  total_count: number;
 };
 
 export type ReviewClueResult = {
@@ -104,6 +122,49 @@ function habitScopeNotes(value: unknown): HabitScopeNote[] {
   return notes;
 }
 
+function materialReview(value: unknown, evidence: Evidence[]): MaterialReview | undefined {
+  const raw = record(value);
+  if (!raw || !Array.isArray(raw.comparisons) || !raw.comparisons.length || raw.comparisons.length > 8 ||
+      !Array.isArray(raw.gaps) || raw.gaps.length > 12 ||
+      !Number.isSafeInteger(raw.omitted_count) || Number(raw.omitted_count) < 0 ||
+      !Number.isSafeInteger(raw.total_count) || Number(raw.total_count) < 1) return;
+  try {
+    const comparisons = raw.comparisons.map(value => {
+      const comparison = record(value);
+      if (!comparison || !Array.isArray(comparison.evidence_indices) || !comparison.evidence_indices.length ||
+          comparison.evidence_indices.length > 8 ||
+          new Set(comparison.evidence_indices).size !== comparison.evidence_indices.length ||
+          comparison.evidence_indices.some(i => !Number.isSafeInteger(i) || Number(i) < 0 || Number(i) >= evidence.length) ||
+          !["contradicts", "explained", "needs_confirmation", "insufficient_evidence"].includes(String(comparison.opinion))) {
+        throw new TypeError("比较范围无法核对");
+      }
+      return { evidence_indices: comparison.evidence_indices as number[], opinion: comparison.opinion as MaterialReview["comparisons"][number]["opinion"] };
+    });
+    const seen = new Set<number>();
+    const gaps = raw.gaps.map(value => {
+      const gap = record(value);
+      if (!gap || !Number.isSafeInteger(gap.index) || Number(gap.index) < 0 || Number(gap.index) > 11 || seen.has(Number(gap.index)) ||
+          !Number.isSafeInteger(gap.count) || Number(gap.count) < 1 ||
+          !["actor_unverified", "statement_unverified", "object_unverified", "source_unverified", "record_unverified", "response_unavailable", "processing_incomplete"].includes(String(gap.reason)) ||
+          !["located", "unknown"].includes(String(gap.location)) || !["overlap", "elsewhere", "unknown"].includes(String(gap.relation)) ||
+          (gap.location === "unknown" && (gap.relation !== "unknown" || gap.evidence !== undefined)) ||
+          (gap.location === "located" && gap.relation === "unknown")) {
+        throw new TypeError("待核清材料范围无法核对");
+      }
+      seen.add(Number(gap.index));
+      return {
+        index: gap.index as number, count: gap.count as number, reason: gap.reason as MaterialReview["gaps"][number]["reason"],
+        location: gap.location as "located" | "unknown", relation: gap.relation as MaterialReview["gaps"][number]["relation"],
+        ...(gap.location === "located" ? { evidence: evidenceSpan(gap.evidence) } : {}),
+      };
+    });
+    if (gaps.reduce((sum, gap) => sum + gap.count, 0) + Number(raw.omitted_count) !== raw.total_count) return;
+    return { comparisons, gaps, omitted_count: raw.omitted_count as number, total_count: raw.total_count as number };
+  } catch {
+    return;
+  }
+}
+
 export function normalizeReviewClueResult(payload: unknown): ReviewClueResult {
   const source = record(payload);
   if (
@@ -150,6 +211,7 @@ export function normalizeReviewClueResult(payload: unknown): ReviewClueResult {
     ) {
       throw new TypeError("角色审查线索的双侧证据不可指向同一位置");
     }
+    const review = materialReview(clue.material_review, evidence);
     return {
       id,
       report_class: "review_clue",
@@ -157,6 +219,7 @@ export function normalizeReviewClueResult(payload: unknown): ReviewClueResult {
       title: requiredText(clue.title, "title", 300),
       explanation: requiredText(clue.explanation, "explanation", 4_000),
       evidence,
+      ...(review ? { material_review: review } : {}),
       metadata: {
         final_outcome: metadata.final_outcome,
         review_reason: requiredText(metadata.review_reason, "review_reason", 128),

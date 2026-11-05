@@ -110,6 +110,7 @@ from .report_evidence_preview import (
     build_report_evidence_preview,
     project_habit_scope_notes,
 )
+from .report_material_review import MATERIAL_REVIEW_KEY, project_material_review
 from .docx_import import DocxImportError, extract_docx_text
 from .document_upload_receipts import (
     find_upload_receipt,
@@ -6567,7 +6568,10 @@ def _serialize_issue(row: IssueRow | None) -> dict | None:
         "explanation": row.explanation,
         "evidence": row.evidence,
         "suggestion": row.suggestion,
-        "metadata": row.extra,
+        "metadata": (
+            {key: value for key, value in row.extra.items() if key != MATERIAL_REVIEW_KEY}
+            if isinstance(row.extra, dict) else row.extra
+        ),
     }
 
 
@@ -6943,6 +6947,9 @@ def get_review_clues(
                 continue
             valid_count += 1
             if len(items) < 64:
+                material_review = project_material_review(db, run, row)
+                if material_review is not None:
+                    payload["material_review"] = material_review
                 items.append(payload)
         response.headers["Cache-Control"] = "private, no-store"
         scope_notes = project_habit_scope_notes(db, run, context.workspace_id)

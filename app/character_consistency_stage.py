@@ -35,6 +35,7 @@ from .character_drift import (
     promote_character_drift,
     validated_reviewed_events,
 )
+from .character_material_coverage import MATERIAL_REVIEW_KEY, MaterialGapLedger
 from .character_habit_scope_review import habit_scope_windows, review_habit_scope
 from .character_explanation_review import (
     ExplanationBaselineSummary,
@@ -735,6 +736,7 @@ class CharacterConsistencyStage:
             )
 
         usage = _Usage()
+        material_ledger = MaterialGapLedger()
         reason_counts: Counter[str] = Counter()
         evidence_mismatch_counts: Counter[str] = Counter()
         scope_review_slot_conflict_counts: Counter[str] = Counter()
@@ -1141,7 +1143,13 @@ class CharacterConsistencyStage:
             chunk: object,
             chunk_ordinal: int,
             target_ordinal: int | None = None,
+            material_target: CharacterSignalTarget | None = None,
         ) -> None:
+            if source.source_kind == "draft":
+                material_ledger.add(
+                    extraction, source, phase,
+                    _target_hint_identity(material_target) if material_target is not None else None,
+                )
             nonlocal evidence_mismatch_chunks_omitted
             nonlocal failure_diagnostic_chunks_omitted
             diagnostics = getattr(extraction, "diagnostics", None)
@@ -1697,7 +1705,7 @@ class CharacterConsistencyStage:
                 record_extraction_failure_diagnostics(
                     "targeted_recall", targeted,
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
-                    target_ordinal=target_index + 1,
+                    target_ordinal=target_index + 1, material_target=target,
                 )
                 record_target_bound_slot_conflicts(targeted)
                 targeted_passes_attempted += targeted.diagnostics.attempted_calls
@@ -1925,7 +1933,7 @@ class CharacterConsistencyStage:
                 record_extraction_failure_diagnostics(
                     "targeted_verification", verification,
                     source=source, chunk=chunk, chunk_ordinal=chunk_ordinal,
-                    target_ordinal=target_index + 1,
+                    target_ordinal=target_index + 1, material_target=target,
                 )
                 record_target_bound_slot_conflicts(verification)
                 targeted_passes_attempted += verification.diagnostics.attempted_calls
@@ -2998,6 +3006,14 @@ class CharacterConsistencyStage:
                 frozen_by_document=frozen_by_document,
                 comparison_key=_case_trace_comparison_key(baseline, baseline_entry),
             )
+            if finding.metadata.get("reviewed_events") is not None:
+                finding.metadata[MATERIAL_REVIEW_KEY] = material_ledger.for_case(
+                    case_id=case_id, candidate_id=baseline_row.candidate_id,
+                    reviewed_events=finding.metadata["reviewed_events"],
+                    target_key=case_target_identity,
+                    draft_document_ids=relevant_draft_document_ids,
+                    case_reasons=case_material_reasons,
+                )
             if promoted.outcome == "conflict":
                 issues.append(finding)
             else:

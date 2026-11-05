@@ -15,6 +15,7 @@ from .character_consistency_stage import (
 from .character_traits import TraitEvidenceInput
 from .character_draft_actor_review import valid_habit_contexts
 from .narrative_context import classify_character_source_kind, payload_sha256
+from .report_material_review import project_material_review
 from .db import (
     AnalysisDiagnosticRow,
     AnalysisRunCharacterTraitInputRow,
@@ -32,7 +33,7 @@ from .service import (
 )
 
 
-EvidencePreviewKind = Literal["issue", "review_clue", "provisional_clue", "habit_scope"]
+EvidencePreviewKind = Literal["issue", "review_clue", "provisional_clue", "habit_scope", "material_gap"]
 HABIT_SCOPE_REFS_KEY = "habit_scope_refs_v1"
 NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 NOT_FOUND_MESSAGE = "报告证据不存在"
@@ -332,6 +333,35 @@ def _provisional_reference(db, run: AnalysisRunRow, item_id: str, evidence_index
     return reference, source
 
 
+def _material_gap_reference(db, run, item_id, evidence_index, safe_review_clue_payload):
+    row = db.scalar(select(IssueRow).where(
+        IssueRow.run_id == run.id, IssueRow.id == item_id, IssueRow.report_class == "review_clue",
+    ))
+    if row is None:
+        _not_found()
+    try:
+        documents, _ = _load_verified_snapshot(db, run.id)
+        verified = _character_review_snapshot_evidence_index(db, run.id)
+    except (RuntimeError, TypeError, ValueError, AttributeError):
+        _snapshot_unavailable()
+    if safe_review_clue_payload(
+        row, legacy_frozen_documents=documents,
+        legacy_source_index=_character_review_source_index(documents),
+        confirmed_trait_evidence_by_candidate=verified,
+    ) is None:
+        _not_found()
+    review = project_material_review(db, run, row)
+    gap = next((gap for gap in review["gaps"] if gap["index"] == evidence_index), None) if review else None
+    if gap is None or gap["location"] != "located":
+        _not_found()
+    reference = _reference(gap["evidence"])
+    source = db.scalar(select(AnalysisRunInputRow).where(
+        AnalysisRunInputRow.run_id == run.id,
+        AnalysisRunInputRow.document_id == reference["document_id"],
+    ))
+    return reference, source
+
+
 def build_report_evidence_preview(
     db, run: AnalysisRunRow, *, workspace_id: str, kind: EvidencePreviewKind,
     item_id: str, evidence_index: int, offset: int | None, limit: int,
@@ -341,6 +371,8 @@ def build_report_evidence_preview(
     binding = None
     if kind == "provisional_clue":
         reference, source = _provisional_reference(db, run, item_id, evidence_index)
+    elif kind == "material_gap":
+        reference, source = _material_gap_reference(db, run, item_id, evidence_index, safe_review_clue_payload)
     elif kind == "habit_scope":
         note = next((n for n in _habit_scope_notes(db, run, workspace_id) if n.public["id"] == item_id), None)
         if note is None or evidence_index not in (0, 1):

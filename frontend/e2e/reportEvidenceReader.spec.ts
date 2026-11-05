@@ -12,7 +12,7 @@ const reviewClueId = "71475dcc-1d0c-4dd2-a014-06941adf1bf3";
 const provisionalClueId = `pc_${"a".repeat(32)}`;
 const now = "2026-10-02T00:00:00Z";
 const screenshotFolder = `${process.env.LOREGUARD_E2E_SCREENSHOT_DIR ?? "../artifacts/playwright/screenshots"}/report-evidence-v1`;
-type EvidenceKind = "issue" | "review_clue" | "provisional_clue" | "habit_scope";
+type EvidenceKind = "issue" | "review_clue" | "provisional_clue" | "habit_scope" | "material_gap";
 type Evidence = { document_id: string; document_name: string; line_start: number; line_end: number; text: string };
 
 function draftEvidence(activeRunId = runId): Evidence {
@@ -36,6 +36,17 @@ const habitScopeNote = {
     { ...traitEvidence, text: "林澈登台演说前总会手握木柄。" },
     { ...draftEvidence(), text: "林澈用木柄抬起门栓。" },
   ],
+};
+const materialGapEvidence = {
+  ...draftEvidence(), line_start: 1, line_end: 1, text: "上午，林澈把练习道具交给讲师，独自留在教室。",
+};
+const materialReview = {
+  comparisons: [{ evidence_indices: [1], opinion: "contradicts" }],
+  gaps: [
+    { index: 0, count: 1, reason: "statement_unverified", location: "located", relation: "elsewhere", evidence: materialGapEvidence },
+    { index: 1, count: 2, reason: "processing_incomplete", location: "unknown", relation: "unknown" },
+  ],
+  omitted_count: 0, total_count: 3,
 };
 
 function primaryIssue(activeRunId = runId) {
@@ -98,7 +109,7 @@ function documents(activeProjectId: string) {
 function initialState() {
   return {
     previews: [] as URL[], requests: [] as string[], writes: [] as string[], unexpected: [] as string[],
-    failures: 0, excerptOnly: false,
+    failures: 0, excerptOnly: false, materialReview: false,
     delayedRunId: "", releaseDelayed: undefined as (() => void) | undefined, delayedSettled: false,
   };
 }
@@ -110,7 +121,8 @@ function previewPayload(url: URL, activeRunId: string, state: MockState) {
   const evidenceIndex = Number(url.searchParams.get("evidence_index") || 0);
   const traitSource = (kind === "issue" && itemId === traitIssueId && evidenceIndex === 0)
     || ((kind === "review_clue" || kind === "habit_scope") && evidenceIndex === 0);
-  const evidence = kind === "habit_scope" ? habitScopeNote.evidence[evidenceIndex]
+  const evidence = kind === "material_gap" ? materialGapEvidence
+    : kind === "habit_scope" ? habitScopeNote.evidence[evidenceIndex]
     : traitSource ? traitEvidence : draftEvidence(activeRunId);
   const sourceRunId = traitSource ? baselineRunId : activeRunId;
   const lineCount = traitSource ? 24 : 300;
@@ -200,7 +212,7 @@ async function mockApi(page: Page, state: MockState) {
       else if (endpoint === "records") body = { records: [], warnings: [] };
       else if (endpoint === "diagnostics") body = {};
       else if (endpoint === "clarifications") body = [];
-      else if (endpoint === "review-clues") body = { items: activeRunId === runId ? [reviewClue] : [], truncated: false, unavailable_count: 0,
+      else if (endpoint === "review-clues") body = { items: activeRunId === runId ? [{ ...reviewClue, ...(state.materialReview ? { material_review: materialReview } : {}) }] : [], truncated: false, unavailable_count: 0,
         ...(activeRunId === runId ? { habit_scope_notes: [habitScopeNote] } : {}) };
       else if (endpoint === "provisional-clues") body = { items: activeRunId === runId ? [provisionalClue] : [], truncated: false };
       else if (endpoint === "evidence-preview") {
@@ -359,6 +371,38 @@ test("作者能单独核对习惯的适用情境与本段用途，两侧引用�
     expect(state.previews.at(-1)?.searchParams.get("evidence_index")).toBe(String(index));
     await dialog.press("Escape");
   }
+  await expect(page.getByRole("heading", { name: "待复核线索 2" })).toBeVisible();
+  await expect(page.locator(".issues article")).toHaveCount(2);
+  assertReadingOnly(state);
+});
+
+test("作者查看已比较的事件和另处待核清材料，未知缺口按数量说明", async ({ page }) => {
+  const state = initialState();
+  state.materialReview = true;
+  await page.setViewportSize({ width: 375, height: 800 });
+  await openReport(page, state);
+  const details = page.locator(".materialReviewDetails");
+  await expect(details.getByRole("heading", { name: "本次比较" })).toBeVisible();
+  await expect(details).toContainText("模型认为这件事与已确认设定相悖");
+  await expect(details).toContainText("仍有 3 项材料核验未完成");
+  await expect(details).toContainText("其中 2 项未能定位到具体原文");
+  await expect(details.locator(".materialGap")).toHaveCount(1);
+  await expect(details).not.toContainText("statement_unverified");
+  const dialog = page.getByRole("dialog", { name: "分析时原文" });
+  await details.locator(".materialComparisonList button").click();
+  await expect(dialog.locator(".evidenceReaderLines .referenced")).toContainText(draftEvidence().text);
+  await dialog.press("Escape");
+  const gap = details.locator(".materialGap");
+  await gap.locator("summary").click();
+  await expect(gap).toContainText("另一个原文位置仍未核清，尚未排除它对本次比较的影响");
+  await expect(gap.locator("blockquote")).toContainText(materialGapEvidence.text);
+  await gap.getByRole("button", { name: "查看分析时原文" }).click();
+  await expect(dialog.locator(".evidenceReaderHeaderSummary")).toContainText("待核清材料");
+  await expect(dialog.locator(".evidenceReaderLines .referenced")).toContainText(materialGapEvidence.text);
+  expect(state.previews.at(-1)?.searchParams.get("kind")).toBe("material_gap");
+  expect(state.previews.at(-1)?.searchParams.get("item_id")).toBe(reviewClueId);
+  expect(state.previews.at(-1)?.searchParams.get("evidence_index")).toBe("0");
+  await dialog.press("Escape");
   await expect(page.getByRole("heading", { name: "待复核线索 2" })).toBeVisible();
   await expect(page.locator(".issues article")).toHaveCount(2);
   assertReadingOnly(state);

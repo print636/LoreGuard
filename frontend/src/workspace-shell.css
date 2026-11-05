@@ -553,6 +553,13 @@ body {
 .habitScopeNotes .provisionalClueList blockquote { border-color: var(--line-strong); }
 .habitScopeNotes .provisionalClueList blockquote b { color: var(--text); }
 .habitScopeNotes h3, .habitScopeNotes li { overflow-wrap: anywhere; }
+.materialReviewDetails { margin-top: 18px; padding-top: 6px; border-top: 1px solid var(--line); color: var(--text-2); overflow-wrap: anywhere; }
+.materialReviewDetails h5 { margin: 14px 0 8px; color: var(--text); font-size: 14px; }
+.materialReviewDetails p { margin: 8px 0; line-height: 1.7; }
+.materialComparisonList { margin: 0; padding: 0; list-style: none; }
+.provisionalClueList .materialComparisonList li { padding: 0 0 8px; border: 0; }
+.materialGap { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); }
+.materialGap summary { min-height: 44px; align-content: center; color: var(--text); cursor: pointer; line-height: 1.7; }
 .reviewClueEvidence { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .reviewClueEvidence blockquote:nth-child(n + 3) { grid-column: 1 / -1; }
 .provisionalClueList + .provisionalClueNotice { margin-top: 14px; }

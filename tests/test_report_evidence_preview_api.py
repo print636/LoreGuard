@@ -16,7 +16,9 @@ from app.character_consistency_stage import (
     PROVISIONAL_DRAFT_CLUES_PAYLOAD_KEY,
     ProvisionalDraftClue,
     _provisional_clue_id,
+    _reviewed_event_group_id,
 )
+from app.character_material_coverage import material_review_payload
 from app.db import (
     AnalysisDiagnosticRow,
     AnalysisRunCharacterTraitInputRow,
@@ -309,6 +311,110 @@ def test_report_categories_keep_their_existing_status_and_feedback_boundary(evid
         assert db.scalars(select(FeedbackRow)).all() == []
         assert db.get(CharacterTraitCandidateRow, state.candidate.id).review_state == "confirmed"
         assert db.get(AnalysisRunRow, state.run.id).status == "completed"
+
+
+def _attach_material_review(state):
+    with state.sessions() as db:
+        row = db.get(IssueRow, state.trait_review.id)
+        row.evidence = [_span(state.original, 2), _span(state.frozen, 16)]
+        refs = []
+        for index, (role, source) in enumerate((("B", state.replacement), ("C", state.frozen))):
+            span = row.evidence[index]
+            refs.append({
+                "handle": role + "01", "role": role, "evidence_index": index, "response_index": index,
+                "source_input_id_sha256": _hash(source.id), "document_name": source.document_name,
+                "document_version": source.document_version, "content_sha256": source.content_sha256,
+                "line_start": span["line_start"], "line_end": span["line_end"], "text_sha256": _hash(span["text"]),
+                **({"observation_id_sha256": "a" * 64} if role == "C" else {}),
+            })
+        receipt = {
+            "schema_version": "character-reviewed-events-v1", "assessment_policy": "single-clear-event-v3",
+            "review_schema_version": "character-single-event-review-v1",
+            "confirmed_candidate_id_sha256": _hash(state.candidate.id), "comparison_key": "reading_fixture",
+            "evidence_refs": refs, "events": [{
+                "event_group_id": _reviewed_event_group_id(_hash(state.candidate.id), "reading_fixture", [refs[1]]),
+                "current_citations": ["C01"], "verdict": "contradicts", "actor_match": "same",
+                "trait_match": "same", "actuality": "actual", "object_match": "not_applicable",
+                "situation_match": "not_applicable",
+            }],
+        }
+        gap = {
+            "phase": "primary_extraction", "reason": "statement_unverified", "count": 2,
+            "location": "located", "relation": "elsewhere", "source_input_id": state.frozen.id,
+            "source_document_id": state.frozen.document_id, "source_content_sha256": state.frozen.content_sha256,
+            "line_start": 14, "line_end": 14, "text_sha256": _hash(state.frozen.content.splitlines()[13]),
+        }
+        ledger = material_review_payload(
+            case_id="cdc_" + "b" * 32, candidate_id=state.candidate.id, reviewed_events=receipt,
+            gaps=[gap, {"phase": "case_coverage", "reason": "processing_incomplete",
+                        "location": "unknown", "relation": "unknown", "count": 1}],
+            omitted_count=2,
+        )
+        row.extra = {
+            **row.extra, "evidence_binding": "review_citations_v1", "review_reason": "material_coverage_incomplete",
+            "reviewed_events": receipt, "review_citation_refs": [
+                {key: ref[key] for key in ("handle", "role", "evidence_index", "response_index")} for ref in refs
+            ], "material_review_v1": ledger,
+        }
+        db.commit()
+        return row.extra, gap
+
+
+def test_material_review_keeps_opinion_and_unresolved_sources_in_one_read_only_clue(evidence_api):
+    state = evidence_api
+    _attach_material_review(state)
+    with _read_only(state):
+        response = state.client.get(f"/api/v1/analysis-runs/{state.run.id}/review-clues")
+    assert response.status_code == 200
+    item = next(row for row in response.json()["items"] if row["id"] == state.trait_review.id)
+    assert item["report_class"] == "review_clue" and item["metadata"]["final_outcome"] == "needs_confirmation"
+    assert "material_review_v1" not in item["metadata"]
+    review = item["material_review"]
+    assert review["comparisons"] == [{"evidence_indices": [1], "opinion": "contradicts"}]
+    assert review["total_count"] == 5 and review["omitted_count"] == 2
+    located, unknown = review["gaps"]
+    assert located["count"] == 2 and located["relation"] == "elsewhere"
+    assert located["evidence"]["text"] == state.frozen.content.splitlines()[13]
+    assert unknown == {"index": 1, "count": 1, "reason": "processing_incomplete", "location": "unknown", "relation": "unknown"}
+    preview = _get(state, kind="material_gap", item=state.trait_review, evidence_index=0)
+    assert preview.status_code == 200 and preview.json()["reference"]["text"] == located["evidence"]["text"]
+    assert preview.headers["Cache-Control"] == "no-store"
+    assert _get(state, kind="material_gap", item=state.trait_review, evidence_index=1).status_code == 404
+    assert _get(state, kind="material_gap", item=state.trait_review, run=state.foreign_run).status_code == 404
+    assert _get(state, kind="material_gap", item=state.formal).status_code == 404
+
+
+def test_material_gap_corruption_never_creates_a_source_location_or_hides_the_clue(evidence_api):
+    state = evidence_api
+    metadata, gap = _attach_material_review(state)
+    receipt = metadata["reviewed_events"]
+    for replacement in (
+        {**gap, "source_input_id": state.foreign.id, "source_document_id": state.foreign.document_id,
+         "source_content_sha256": state.foreign.content_sha256},
+        {**gap, "text_sha256": "0" * 64},
+        {**gap, "source_document_id": []},
+        {**gap, "line_start": 16, "line_end": 16},
+    ):
+        with state.sessions() as db:
+            row = db.get(IssueRow, state.trait_review.id)
+            row.extra = {**metadata, "material_review_v1": material_review_payload(
+                case_id="cdc_" + "b" * 32, candidate_id=state.candidate.id, reviewed_events=receipt,
+                gaps=[replacement],
+            )}
+            db.commit()
+        response = state.client.get(f"/api/v1/analysis-runs/{state.run.id}/review-clues")
+        item = next(row for row in response.json()["items"] if row["id"] == state.trait_review.id)
+        failed = item["material_review"]["gaps"][0]
+        assert failed["location"] == "unknown" and "evidence" not in failed
+        assert state.foreign.content not in response.text
+        assert _get(state, kind="material_gap", item=state.trait_review).status_code == 404
+    with state.sessions() as db:
+        row = db.get(IssueRow, state.trait_review.id)
+        row.extra = {**metadata, "material_review_v1": {**metadata["material_review_v1"], "payload_sha256": "0" * 64}}
+        db.commit()
+    response = state.client.get(f"/api/v1/analysis-runs/{state.run.id}/review-clues")
+    item = next(row for row in response.json()["items"] if row["id"] == state.trait_review.id)
+    assert "material_review" not in item and item["report_class"] == "review_clue"
 
 
 def test_habit_scope_note_requires_both_owned_frozen_sources_and_bound_action(evidence_api):

@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from .character_material_coverage import DraftMaterialGap, DraftMaterialTracker
 from .config import HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS, Settings, get_settings
 from .character_scope_failure import ScopeProviderFailureSeriesV1
 from .character_scope_review import (
@@ -1556,6 +1557,9 @@ class CharacterSignalExtractionResult(BaseModel):
         default=(), exclude=True
     )
     diagnostics: CharacterSignalDiagnostics
+    material_gaps: tuple[DraftMaterialGap, ...] | None = Field(default=None, exclude=True)
+    material_gaps_omitted: int = Field(default=0, ge=0, exclude=True)
+    material_resolved_claims: tuple[str, ...] = Field(default=(), exclude=True)
     # For the candidate-lines verification pass only. None means unobserved.
     verification_primary_attempts: tuple[DraftSignalTraceAttemptV1, ...] | None = Field(
         default=None, exclude=True, max_length=2
@@ -2243,8 +2247,12 @@ class CharacterSignalExtractor:
                     "skipped", reason_counts={"support_index_invalid": 1}
                 )
         coverage_enabled = baseline_coverage_recovery and formal_scope_v5 and support_index is not None
+        material_tracker = (
+            DraftMaterialTracker(source_identity, frozen_content, chunk)
+            if chunk.source_kind == "draft" else None
+        )
         result = self._extract_with_prompt(
-            chunk,
+            chunk, material_tracker=material_tracker,
             system_prompt=(
                 (
                     build_formal_character_signal_system_prompt(scope_review_v1=scope_review_v1)
@@ -2280,6 +2288,8 @@ class CharacterSignalExtractor:
             baseline_coverage_recovery=coverage_enabled,
             baseline_coverage_recovery_already_used=baseline_coverage_recovery_already_used,
         )
+        if material_tracker is not None:
+            result = material_tracker.finish(result)
         if coverage_enabled and result.diagnostics.baseline_coverage_trace is None:
             represented = _represented_baseline_assertions(result.signals, support_index)
             return result.model_copy(update={"diagnostics": result.diagnostics.model_copy(update={
@@ -2438,8 +2448,12 @@ class CharacterSignalExtractor:
         dispatch = (
             _VerificationDispatch() if target_bound_review_v3 and candidate_evidence_ranges else None
         )
+        material_tracker = (
+            DraftMaterialTracker(source_identity, frozen_content, chunk)
+            if chunk.source_kind == "draft" else None
+        )
         result = self._extract_with_prompt(
-            chunk,
+            chunk, material_tracker=material_tracker,
             system_prompt=(
                 TARGETED_CHARACTER_SIGNAL_SYSTEM_PROMPT
                 + (SCOPED_DRAFT_DIRECTION_GUIDE if any(
@@ -2462,6 +2476,7 @@ class CharacterSignalExtractor:
             source_identity=source_identity,
             frozen_content=frozen_content,
         )
+        result = material_tracker.finish(result)
         if dispatch is None:
             return result
         return result.model_copy(update={
@@ -2493,6 +2508,7 @@ class CharacterSignalExtractor:
         frozen_content: str | None = None,
         baseline_coverage_recovery: bool = False,
         baseline_coverage_recovery_already_used: bool = False,
+        material_tracker: DraftMaterialTracker | None = None,
     ) -> CharacterSignalExtractionResult:
         settings = self.settings
         trace_index = (
@@ -2676,7 +2692,7 @@ class CharacterSignalExtractor:
                 ),
                 scope_review_v1=scope_review_v1,
                 support_trace_enabled=trace_index is not None,
-                draft_trace_enabled=draft_trace_enabled or verification_dispatch is not None,
+                draft_trace_enabled=draft_trace_enabled or verification_dispatch is not None or material_tracker is not None,
                 history_review_v1=history_review_v1,
                 history_supported_record_indices=history_supported,
                 draft_actor_review_v1=draft_actor_review_v1,
@@ -2809,6 +2825,8 @@ class CharacterSignalExtractor:
                 )
                 self.provider = call_provider
             attempted_calls += 1
+            if material_tracker is not None:
+                material_tracker.pending_response = True
             if verification_dispatch is not None:
                 verification_dispatch.primary_attempts.append(DraftSignalTraceAttemptV1(
                     attempt=attempted_calls, observability="no_response",
@@ -3217,6 +3235,8 @@ class CharacterSignalExtractor:
                         draft_trace_attempt=validation.draft_trace_attempt,
                     )
             validation_attempts.append(validation)
+            if material_tracker is not None:
+                material_tracker.capture(response_text, validation)
             if validation.complete:
                 clean = tuple({
                     signal.id: signal

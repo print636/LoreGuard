@@ -36,8 +36,8 @@ export default function EvidenceReader({ selection, trigger, onClose }: Props) {
   const current = isCurrentEvidenceRequest(reading.request, request) ? reading : null;
   const preview = current?.status === "ready" ? current.preview : null;
   const busy = !current || current.status === "loading";
-  const categoryLabel = { issue: "正式问题", review_clue: "待复核", provisional_clue: "未验证", habit_scope: "情境说明" }[selection.kind];
-  const pending = selection.kind === "review_clue" || selection.kind === "provisional_clue";
+  const categoryLabel = { issue: "正式问题", review_clue: "待复核", provisional_clue: "未验证", habit_scope: "情境说明", material_gap: "待核清材料" }[selection.kind];
+  const pending = selection.kind === "review_clue" || selection.kind === "provisional_clue" || selection.kind === "material_gap";
   const headerSummary = preview
     ? `冻结 v${preview.source.document_version} · ${preview.source.provenance === "run_input" ? "本次输入" : "既有设定"} · ${categoryLabel}${preview.source.availability === "excerpt_only" ? " · 仅摘录" : ""}`
     : `${categoryLabel} · ${busy ? "来源读取中" : "来源未核验"}`;
