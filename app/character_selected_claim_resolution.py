@@ -4,11 +4,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .character_draft_actor_review import (
-    SelectedOriginalClaim, TargetBoundDraftReviewRequest,
-    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17,
+    SelectedOriginalClaim, SelectedObjectOriginalClaim, TargetBoundDraftReviewRequest,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18,
     target_bound_draft_review_request_digest, verify_target_bound_draft_review_source,
 )
 from .character_claim_resolution import claim_resolution_target_sha256, text_sha256
+from .config import SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2
 
 
 @dataclass(frozen=True)
@@ -24,12 +25,12 @@ def selected_origin_payload(request, proposal) -> dict:
                 path_ids=list(proposal.path_ids), window_ids=list(request.selection_window_ids))
 
 
-def build_selected_claim_review_request(pending, origin, *, source_identity, frozen_content):
+def build_selected_claim_review_request(pending, origin, *, source_identity, frozen_content, protocol_version="v17"):
     from .character_trait_extraction import _primary_claim_identity, _target_bound_review_target
     from .character_action_selection import ActionChoice, _selection_binding
     request = origin.request
-    if (request.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16
-            or pending.deferred.record.key_object != ""
+    if (protocol_version not in {"v17", "v18"} or request.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16
+            or protocol_version == "v17" and pending.deferred.record.key_object != ""
             or pending.deferred.index.source != source_identity
             or claim_resolution_target_sha256(request.target) != pending.target_sha256
             or not verify_target_bound_draft_review_source(request, source_identity, frozen_content=frozen_content)):
@@ -42,10 +43,11 @@ def build_selected_claim_review_request(pending, origin, *, source_identity, fro
         raise ValueError("selected_claim_source_mismatch")
     original = _primary_claim_identity(pending.deferred, pending.package_attempt, source_identity,
         _target_bound_review_target(pending.deferred.target, target_ordinal=pending.deferred.target_ordinal), object_review=False)
-    claim = SelectedOriginalClaim(**{**original.model_dump(), "key_object": record.key_object})
+    claim_type = SelectedObjectOriginalClaim if record.key_object else SelectedOriginalClaim
+    claim = claim_type(**{**original.model_dump(), "key_object": record.key_object})
     choice = ActionChoice(fact_clause_id=proposal.fact_clause_id, actor_anchor_id=proposal.actor_anchor_id, path_ids=proposal.path_ids)
     data = request.model_dump(mode="python")
-    data.update(prompt_version=TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, original_claim=claim,
+    data.update(prompt_version=TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18 if protocol_version == "v18" else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, original_claim=claim,
                 origin_request_sha256=target_bound_draft_review_request_digest(request), origin_observation_id=origin.signal.id,
                 proposals=(proposal,), selection_digest=_selection_binding(source_identity, request.target_digest,
                     request.selection_window_ids, (choice,)))
@@ -58,13 +60,15 @@ def review_selected_original_claim(pending, origin, *, chunk, source_identity, f
     )
     from .character_draft_actor_review_provider import TargetBoundDraftReviewBatchEntry, run_target_bound_draft_review
     from .config import HABIT_SCENE_CALL_TIMEOUT_SECONDS
-    if not (settings._character_selected_claim_resolution_v1 and settings._character_claim_resolution_v1
+    policy = settings._character_selected_claim_resolution_policy
+    if not (policy in {SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2} and settings._character_claim_resolution_v1
             and settings._character_habit_action_selection_v1):
         return _TargetBoundDraftOutcome(reason_counts=(("selected_claim_resolution_disabled", 1),))
     if not _draft_actor_source_matches_chunk(source_identity, frozen_content, chunk):
         return _TargetBoundDraftOutcome(reason_counts=(("selected_claim_origin_invalid", 1),))
     try:
-        request = build_selected_claim_review_request(pending, origin, source_identity=source_identity, frozen_content=frozen_content)
+        request = build_selected_claim_review_request(pending, origin, source_identity=source_identity, frozen_content=frozen_content,
+            protocol_version="v18" if policy == SELECTED_CLAIM_RESOLUTION_POLICY_V2 else "v17")
     except (ValueError, TypeError, StopIteration):
         return _TargetBoundDraftOutcome(reason_counts=(("selected_claim_origin_invalid", 1),))
     run = run_target_bound_draft_review(

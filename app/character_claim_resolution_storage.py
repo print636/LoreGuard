@@ -21,7 +21,7 @@ from .character_observations import validate_selected_action_origin, CharacterOb
 from .domain import EvidenceSpan
 from .config import (
     CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1,
-    HABIT_OBJECT_CHAIN_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1,
+    HABIT_OBJECT_CHAIN_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2,
 )
 from .db import (
     AnalysisRunCharacterTraitInputRow, AnalysisRunInputRow, AnalysisRunRow,
@@ -59,7 +59,7 @@ class _Receipt(_Binding):
 
 
 class _SelectedReceipt(_Receipt):
-    method: Literal["selected_claim_recheck"]
+    method: Literal["selected_claim_recheck", "selected_claim_recheck_v2"]
     origin_request_sha256: Digest
     origin_observation_id: str = Field(pattern=r"^cs_[a-f0-9]{32}$")
     fact_clause_id: str = Field(pattern=r"^L[1-9][0-9]{0,7}:A[1-9][0-9]{0,2}$")
@@ -218,7 +218,10 @@ def validate_claim_resolution_payload(db, *, run: AnalysisRunRow, payload: objec
         if isinstance(item, _SelectedReceipt):
             _require(
                 coverage.get("habit_action_selection_policy") == HABIT_ACTION_SELECTION_POLICY_V1
-                and coverage.get("selected_claim_resolution_policy") == SELECTED_CLAIM_RESOLUTION_POLICY_V1
+                and coverage.get("selected_claim_resolution_policy") == {
+                    "selected_claim_recheck": SELECTED_CLAIM_RESOLUTION_POLICY_V1,
+                    "selected_claim_recheck_v2": SELECTED_CLAIM_RESOLUTION_POLICY_V2,
+                }[item.method]
             )
             _validate_origin(db, run=run, item=item, source=source, baseline=baseline, final_value=value)
         receipts[item.id] = item

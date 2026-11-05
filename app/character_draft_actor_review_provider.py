@@ -48,6 +48,7 @@ from .character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18,
     habit_action_path,
     SCOPED_DRAFT_DIRECTION_GUIDE,
     HABIT_CONTEXT_TARGET_GUIDE,
@@ -323,6 +324,16 @@ TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_P
     "本版本仍须给完整来源对象及逐步同指；原key为空不免除对象核实，也不允许猜出不在原文中的对象。"
 )
 
+TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V18 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17 + (
+    "\n\n本版本original_claim.key_object可以为空或非空，必须保持原值，不得用已选路径的物件替换、扩写或缩短原key。"
+    "每项额外且必须输出original_object_relation=same|different|uncertain|unspecified，独立比较原key与claim_object核实的完整实际受事。"
+    "非空原key的数量、性质、归属、用途等全部限定都须得到来源支持；允许有依据的同义和指代承接，不要求重复相同字词。"
+    "same表示完整原key确实指向该路径中同一受事；不能仅因词面相含、同类、同场或同一行而判same。"
+    "原key指向另一个对象为different，限定或同指不能确认则uncertain，非空原key不允许unspecified。"
+    "原key为空只填unspecified；这不免除完整来源物件与每步同指核实，也不赋予原主张等价或唯一对应。"
+    "只有非空key的same或空key的unspecified，加上equivalent、窗口内unique及所有原有语义/来源条件成立，才能supported。"
+)
+
 MAX_DRAFT_ACTOR_REVIEW_REPORTED_TOKENS = 1_000_000
 MAX_TARGET_BOUND_DRAFT_CONTRACT_ATTEMPTS = 2
 HABIT_OBJECT_CHAIN_MAX_COMPLETION_TOKENS = 4_096
@@ -332,7 +343,7 @@ def habit_object_chain_completion_reserve(
     requests: tuple[TargetBoundDraftReviewRequest, ...], configured: int,
 ) -> int:
     """Reserve the new wire fields before admission; historical prompts keep their cap."""
-    if not requests or any(request.prompt_version not in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17} for request in requests):
+    if not requests or any(request.prompt_version not in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18} for request in requests):
         return configured
     proposals = sum(len(request.proposals) for request in requests)
     steps = sum(
@@ -526,6 +537,7 @@ def build_target_bound_draft_review_prompts(
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V16,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17,
+            TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V18,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
         }.get(requests[0].prompt_version, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8)
     elif requests[0].schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3:
@@ -1026,6 +1038,7 @@ def run_target_bound_draft_review(
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16,
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17,
+        TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18,
     } for request in requests):
         raise ValueError("habit scene policy requires a contextual habit review")
     expected_sources = tuple(entry.expected_source for entry in entries)
@@ -1082,7 +1095,7 @@ def run_target_bound_draft_review(
     total_completion_tokens = 0
     total_charged_tokens = 0
 
-    replay_limit = 1 if any(r.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17} for r in requests) else MAX_TARGET_BOUND_DRAFT_CONTRACT_ATTEMPTS
+    replay_limit = 1 if any(r.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18} for r in requests) else MAX_TARGET_BOUND_DRAFT_CONTRACT_ATTEMPTS
     for replay_attempt in range(replay_limit):
         estimate = estimate_issue_evidence_review_tokens(
             system, user, completion_reserve=completion_reserve

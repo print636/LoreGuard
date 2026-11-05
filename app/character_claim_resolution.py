@@ -77,6 +77,7 @@ class ClaimResolutionManager:
             CharacterSignalChunk, _target_bound_review_target, review_original_material_claim, stable_trait_identity,
         )
         from .character_scope_review import ScopeReviewSourceIdentity
+        from .config import SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2
 
         attempted_targets = set()
         for source, chunk, state in self.primary:
@@ -127,23 +128,26 @@ class ClaimResolutionManager:
                                for _, admitted in results for signal in admitted):
                         continue
                     origin = None
-                    if not original.deferred.record.key_object:
-                        if not settings._character_selected_claim_resolution_v1 or origin_admitted is None:
+                    selected_policy = settings._character_selected_claim_resolution_policy
+                    prefer_selected = selected_policy == SELECTED_CLAIM_RESOLUTION_POLICY_V2
+                    if prefer_selected or not original.deferred.record.key_object:
+                        if selected_policy not in {SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2}:
                             continue
                         origins = [cert for result, admitted in results for cert in result.selected_action_certificates
-                                   if cert.signal.id in {s.id for s in admitted} and origin_admitted(cert.signal)
+                                   if cert.signal.id in {s.id for s in admitted} and origin_admitted is not None and origin_admitted(cert.signal)
                                    and cert.signal.evidence.line_start == gap.line_start
                                    and cert.signal.evidence.line_end == gap.line_end]
                         if not origins:
                             reasons["selected_claim_origin_unavailable"] += 1
-                            continue
+                            if not prefer_selected:
+                                continue
                         # Literal correspondence can prioritize a question; it
                         # cannot discharge the claim or replace the new review.
                         statement = original.deferred.record.statement
                         origins.sort(key=lambda cert: not any(p.proposal_id == cert.proposal_id and (
                             p.canonical_statement == statement or any(c.support_id == p.fact_clause_id and c.text == statement
                                 for line in cert.request.lines for c in line.clauses)) for p in cert.request.proposals))
-                        origin = origins[0]
+                        origin = origins[0] if origins else None
                     attempted_targets.add(row.candidate_id)
                     checkpoint()
                     available = budget()
@@ -176,7 +180,8 @@ class ClaimResolutionManager:
                             admitted_ids.add(signal.id)
                     for proof in review.claim_certificates:
                         if proof["target_sha256"] == identity and proof["observation_id"] in admitted_ids:
-                            known[key] = (proof, "selected_claim_recheck" if origin is not None else "original_claim_recheck")
+                            method = ("selected_claim_recheck_v2" if prefer_selected else "selected_claim_recheck") if origin is not None else "original_claim_recheck"
+                            known[key] = (proof, method)
                     if key not in known:
                         reasons["claim_resolution_unresolved"] += 1
                 scope_receipts = []

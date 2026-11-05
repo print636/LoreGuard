@@ -216,6 +216,7 @@ TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14 = "character-target-bound-draft-review-prom
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15 = "character-target-bound-draft-review-prompt-v15"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16 = "character-target-bound-draft-review-prompt-v16"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17 = "character-target-bound-draft-review-prompt-v17"
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18 = "character-target-bound-draft-review-prompt-v18"
 _HABIT_ACTION_PROMPTS = {
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
@@ -1748,6 +1749,11 @@ class SelectedOriginalClaim(PrimaryDraftClaim):
     key_object: Literal[""] = ""
 
 
+class SelectedObjectOriginalClaim(PrimaryDraftClaim):
+    """An original supplied object, retained without discovery normalization."""
+    key_object: str = Field(min_length=1, max_length=80)
+
+
 class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -1775,6 +1781,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
         "character-target-bound-draft-review-prompt-v15",
         "character-target-bound-draft-review-prompt-v16",
         "character-target-bound-draft-review-prompt-v17",
+        "character-target-bound-draft-review-prompt-v18",
     ] = (
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
     )
@@ -1793,7 +1800,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
     primary_claim: PrimaryDraftClaim | None = None
     selection_window_ids: tuple[str, ...] | None = Field(default=None, min_length=1, max_length=3)
     selection_digest: str | None = Field(default=None, pattern=_SHA256)
-    original_claim: SelectedOriginalClaim | None = None
+    original_claim: SelectedOriginalClaim | SelectedObjectOriginalClaim | None = None
     origin_request_sha256: str | None = Field(default=None, pattern=_SHA256)
     origin_observation_id: str | None = Field(default=None, pattern=r"^cs_[a-f0-9]{32}$")
 
@@ -1809,9 +1816,10 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
 
     @model_validator(mode="after")
     def validate_target_bound_request(self) -> "TargetBoundDraftReviewRequest":
-        if self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17:
+        if self.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18}:
             if (self.original_claim is None or self.original_claim.include_previous_line
-                    or not self.origin_request_sha256 or not self.origin_observation_id):
+                    or not self.origin_request_sha256 or not self.origin_observation_id
+                    or self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17 and self.original_claim.key_object != ""):
                 raise ValueError("selected_original_claim_required")
             from .character_action_selection import validate_selected_request_structure
             validate_selected_request_structure(self)
@@ -2014,6 +2022,7 @@ class TargetBoundDraftReviewItem(BaseModel):
     claim_digest: str | None = Field(default=None, pattern=_SHA256)
     claim_relation: Literal["equivalent", "different", "uncertain"] | None = None
     claim_mapping: Literal["unique", "multiple", "none", "uncertain"] | None = None
+    original_object_relation: Literal["same", "different", "uncertain", "unspecified"] | None = None
     claim_object: ClaimObjectGrounding | None = None
     verdict: TargetBoundReviewVerdict
     actor: Literal["proposed", "other", "ambiguous"]
@@ -2050,7 +2059,7 @@ class TargetBoundDraftReviewItem(BaseModel):
     @model_serializer(mode="wrap")
     def serialize_item(self, handler):
         data = handler(self)
-        for name in ("claim_digest", "claim_relation", "claim_mapping", "claim_object", "action_steps"):
+        for name in ("claim_digest", "claim_relation", "claim_mapping", "original_object_relation", "claim_object", "action_steps"):
             if name not in self.model_fields_set:
                 data.pop(name, None)
         return data
@@ -2718,7 +2727,7 @@ def verify_target_bound_draft_review_source(
 ) -> bool:
     if not isinstance(request, TargetBoundDraftReviewRequest):
         raise TypeError("target bound draft request is invalid")
-    expected_claim = request.original_claim if request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17 else request.primary_claim
+    expected_claim = request.original_claim if request.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18} else request.primary_claim
     if expected_primary_claim != expected_claim:
         return False
     if any(
@@ -2726,7 +2735,7 @@ def verify_target_bound_draft_review_source(
         for name in ScopeReviewSourceIdentity.model_fields
     ):
         return False
-    if request.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17}:
+    if request.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18}:
         from .character_action_selection import verify_selected_review_source
         return verify_selected_review_source(request, expected_source, frozen_content)
     try:
@@ -3272,7 +3281,8 @@ def evaluate_target_bound_draft_review(
     basis = required_target_bound_draft_basis_ids(request)
     allowed = set(basis)
     decisions: list[TargetBoundDraftReviewDecision] = []
-    effective_claim = request.original_claim if request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17 else request.primary_claim
+    selected_claim_review = request.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18}
+    effective_claim = request.original_claim if selected_claim_review else request.primary_claim
     for proposal in request.proposals:
         item = returned[proposal.proposal_id]
         if proposal.binding_kind in {"habit_action_chain", "selected_action_path"}:
@@ -3304,13 +3314,15 @@ def evaluate_target_bound_draft_review(
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17,
+            TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18,
         }
         if (
             ("claim_object" in item.model_fields_set) != object_review
-            or item.claim_object is not None and request.prompt_version not in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17} and (
+            or item.claim_object is not None and request.prompt_version not in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18} and (
                 item.claim_object.grounding == "action_path" or "object_steps" in item.claim_object.model_fields_set
             )
-            or (request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17) != ("claim_mapping" in item.model_fields_set)
+            or selected_claim_review != ("claim_mapping" in item.model_fields_set)
+            or (request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18) != ("original_object_relation" in item.model_fields_set)
             or effective_claim is None and claim_fields
             or effective_claim is not None and (
                 item.claim_digest != effective_claim.claim_digest or item.claim_relation is None
@@ -3331,7 +3343,7 @@ def evaluate_target_bound_draft_review(
             continue
         if item.verdict == "supported":
             conflicts = _target_bound_supported_conflicts(request, proposal, item)
-            if request.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17}:
+            if request.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18}:
                 from .character_action_selection import valid_selected_object_grounding
                 object_grounded = valid_selected_object_grounding(request, proposal, item.claim_object)
             else:
@@ -3339,8 +3351,12 @@ def evaluate_target_bound_draft_review(
             if not object_grounded:
                 conflicts = tuple(dict.fromkeys((*conflicts, "object_span")))
             if effective_claim is not None and (item.claim_relation != "equivalent" or
-                    request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17 and item.claim_mapping != "unique"):
+                    selected_claim_review and item.claim_mapping != "unique"):
                 conflicts = tuple(dict.fromkeys((*conflicts, "statement_relation")))
+            if request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V18 and item.original_object_relation != (
+                "same" if effective_claim.key_object else "unspecified"
+            ):
+                conflicts = tuple(dict.fromkeys((*conflicts, "object_span")))
             observed_object: str | None = None
             object_basis_id: str | None = None
             if (

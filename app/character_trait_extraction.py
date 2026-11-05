@@ -2258,7 +2258,7 @@ class CharacterSignalExtractor:
         material_tracker = (
             DraftMaterialTracker(source_identity, frozen_content, chunk,
                                  claim_resolution_enabled=self.settings._character_claim_resolution_v1,
-                                 selected_claim_resolution_enabled=self.settings._character_selected_claim_resolution_v1)
+                                 selected_claim_resolution_enabled=self.settings._character_selected_claim_resolution_policy is not None)
             if chunk.source_kind == "draft" else None
         )
         result = self._extract_with_prompt(
@@ -2469,7 +2469,7 @@ class CharacterSignalExtractor:
         material_tracker = (
             DraftMaterialTracker(source_identity, frozen_content, chunk,
                                  claim_resolution_enabled=self.settings._character_claim_resolution_v1,
-                                 selected_claim_resolution_enabled=self.settings._character_selected_claim_resolution_v1)
+                                 selected_claim_resolution_enabled=self.settings._character_selected_claim_resolution_policy is not None)
             if chunk.source_kind == "draft" else None
         )
         result = self._extract_with_prompt(
@@ -6095,7 +6095,7 @@ def _bind_target_bound_draft_certificate(
     else:
         observed_object = target.key_object
     evidence_start = proposal.line_start
-    selected_protocol = request.prompt_version in {"character-target-bound-draft-review-prompt-v16", "character-target-bound-draft-review-prompt-v17"}
+    selected_protocol = request.prompt_version in {"character-target-bound-draft-review-prompt-v16", "character-target-bound-draft-review-prompt-v17", "character-target-bound-draft-review-prompt-v18"}
     if expected_primary_claim is not None and expected_primary_claim.key_object or selected_protocol:
         grounded = decision.verified_object
         if selected_protocol:

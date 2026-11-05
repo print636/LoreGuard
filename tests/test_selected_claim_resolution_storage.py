@@ -9,6 +9,7 @@ from app.character_action_selection import (
     select_action_window, selection_request_digest,
 )
 from app.character_claim_resolution import CLAIM_RESOLUTION_SCHEMA
+from app.config import SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2
 from app.character_claim_resolution_storage import ClaimResolutionIntegrityError, validate_claim_resolution_payload
 from app.character_draft_actor_review import target_bound_draft_review_request_digest
 from app.character_observations import CharacterObservationRecorder, ObservationMatchDecision, project_character_observations
@@ -24,11 +25,11 @@ from tests.test_selected_claim_resolution_policy import POLICIES
 from tests.test_report_evidence_preview_api import evidence_api, _read_only
 
 
-def _stored_selected(db, *, workspace_id=None):
+def _stored_selected(db, *, workspace_id=None, policy=SELECTED_CLAIM_RESOLUTION_POLICY_V1):
     project, run, source = seed(db, **({"workspace_id": workspace_id} if workspace_id else {}))
     source.content = "林舟接过餐盘，把它推开。"
     source.content_sha256 = _hash(source.content)
-    run.batch_coverage = {"character_review_enabled": True, **POLICIES}
+    run.batch_coverage = {"character_review_enabled": True, **POLICIES, "selected_claim_resolution_policy": policy}
     frozen, _ = baseline(db, project, run)
     target = _target(character="林舟", dimension="contextual_behavior", trait_key="进食选择",
         comparison_key="contextual_behavior:进食选择", key_object="", baseline_hint="林舟用餐时习惯检查餐盘",
@@ -53,7 +54,9 @@ def _stored_selected(db, *, workspace_id=None):
     binding = dict(source_input_id=source.id, source_document_id=source.document_id, source_content_sha256=source.content_sha256,
         confirmed_candidate_id=frozen.candidate_id, confirmed_payload_sha256=frozen.payload_sha256,
         target_sha256=payload_sha256(target.model_dump(mode="json", exclude={"target_ordinal"})))
-    receipt = dict(**binding, id="cr_" + "0" * 64, method="selected_claim_recheck", primary_claim_sha256="1" * 64,
+    receipt = dict(**binding, id="cr_" + "0" * 64,
+        method="selected_claim_recheck" if policy == SELECTED_CLAIM_RESOLUTION_POLICY_V1 else "selected_claim_recheck_v2",
+        primary_claim_sha256="1" * 64,
         review_claim_sha256="2" * 64, request_sha256="3" * 64, proposal_id=proposal.proposal_id,
         observation_id=admitted.observation_id, line_start=1, line_end=1, text_sha256=_hash(admitted.evidence.text),
         observation_statement_sha256=_hash(admitted.statement), origin_request_sha256=origin["request_sha256"],
@@ -64,8 +67,9 @@ def _stored_selected(db, *, workspace_id=None):
     return run, admitted, payload
 
 
-def test_selected_receipt_uses_persisted_origin_and_public_observation_has_no_private_hash(db):
-    run, admitted, payload = _stored_selected(db)
+@pytest.mark.parametrize("policy", [SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2])
+def test_selected_receipt_uses_persisted_origin_and_public_observation_has_no_private_hash(db, policy):
+    run, admitted, payload = _stored_selected(db, policy=policy)
     assert validate_claim_resolution_payload(db, run=run, payload=payload) == payload
     stored = db.get(CharacterObservationRow, (run.id, admitted.observation_id))
     assert stored.payload["selected_action_origin"] == admitted.selected_action_origin.model_dump(mode="json")
@@ -74,6 +78,14 @@ def test_selected_receipt_uses_persisted_origin_and_public_observation_has_no_pr
     assert "selected_action_origin" not in public and "payload_sha256" not in public
     assert public["statement"] == admitted.statement
     assert public["target_bound_object_basis_id"] is None
+
+
+@pytest.mark.parametrize("policy", [SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2])
+def test_selected_receipt_method_cannot_cross_frozen_policy_versions(db, policy):
+    run, _, payload = _stored_selected(db, policy=policy)
+    payload["receipts"][0]["method"] = "selected_claim_recheck_v2" if policy == SELECTED_CLAIM_RESOLUTION_POLICY_V1 else "selected_claim_recheck"
+    with pytest.raises(ClaimResolutionIntegrityError):
+        validate_claim_resolution_payload(db, run=run, payload=_seal(payload))
 
 
 @pytest.mark.parametrize("mutation", ["missing_origin", "wrong_origin", "wrong_request", "wrong_fact", "old_method",
@@ -107,7 +119,7 @@ def test_selected_receipt_cannot_resolve_by_format_or_unrelated_origin(db, mutat
 def test_private_origin_stays_out_of_observation_api_diagnostics_and_export(evidence_api):
     state = evidence_api
     with state.sessions() as db:
-        run, admitted, payload = _stored_selected(db, workspace_id=state.workspace.id)
+        run, admitted, payload = _stored_selected(db, workspace_id=state.workspace.id, policy=SELECTED_CLAIM_RESOLUTION_POLICY_V2)
         run.status = "completed"
         db.add(AnalysisDiagnosticRow(run_id=run.id, payload={"character_consistency": {"claim_resolution_v1": payload}}))
         db.commit()

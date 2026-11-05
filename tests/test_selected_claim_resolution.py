@@ -13,10 +13,13 @@ from app.character_draft_actor_review import (
     TargetBoundDraftReviewRequest, evaluate_target_bound_draft_review,
     target_bound_draft_review_request_digest, verify_target_bound_draft_review_source,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17,
 )
 from app.character_draft_actor_review_provider import (
-    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V18,
 )
+from app.config import SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2
 from app.character_material_coverage import DraftMaterialGap, MaterialGapLedger
 from app.character_scope_review import ScopeReviewSourceIdentity
 from app.character_selected_claim_resolution import build_selected_claim_review_request
@@ -35,32 +38,37 @@ RAW = dict(record(STATEMENT), character=TARGET.character, trait_key=TARGET.trait
            context=CONTEXT, evidence=CONTENT)
 
 
-def settings():
+def settings(policy=SELECTED_CLAIM_RESOLUTION_POLICY_V1):
     config = selection_settings().model_copy(update={"character_signal_package_max_attempts": 1})
-    config._character_claim_resolution_v1 = config._character_selected_claim_resolution_v1 = True
+    config._character_claim_resolution_v1 = True
+    config._character_selected_claim_resolution_policy = policy
     return config
 
 
 class SelectedClaimProvider(SelectionProvider):
-    def __init__(self, *, damage=None):
+    def __init__(self, *, damage=None, key_object=""):
         super().__init__()
         self.damage = damage
+        self.raw = {**RAW, "key_object": key_object}
         self.original_requests, self.resolution_requests = [], []
 
     def complete(self, system, user):
         if system in {HABIT_ACTION_SELECTION_SYSTEM_PROMPT_V1, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V16}:
             return super().complete(system, user)
         self.calls.append(system)
-        if system in {TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17}:
+        if system in {TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15,
+                      TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V18}:
             batch = json.loads(user.split("：\n", 1)[1])
             responses = []
             for window in batch["windows"]:
                 request = TargetBoundDraftReviewRequest.model_validate_json(json.dumps(window["request"]))
-                if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13:
+                if system in {TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15}:
                     self.original_requests.append(request)
                     items = [_item(request, p, verdict="rejected", object_relation="not_applicable",
                         observation_kind="action", axis_relation="different", polarity_relation="neutral",
                         claim_digest=request.primary_claim.claim_digest, claim_relation="different") for p in request.proposals]
+                    if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15:
+                        for item in items: item["claim_object"] = None
                 else:
                     self.resolution_requests.append(request)
                     items = v17_items(request, damage=self.damage)
@@ -69,7 +77,7 @@ class SelectedClaimProvider(SelectionProvider):
             response = dict(schema_version="character-target-bound-draft-review-batch-v4",
                             batch_digest=batch["batch_digest"], responses=responses)
         else:
-            response = {"records": [RAW]}
+            response = {"records": [self.raw]}
         return SimpleNamespace(text=json.dumps(response, ensure_ascii=False), prompt_tokens=11, completion_tokens=7)
 
 
@@ -77,6 +85,12 @@ def v17_items(request, *, damage=None):
     items = review_items(request, damaged=damage)
     for item in items:
         item.update(claim_digest=request.original_claim.claim_digest, claim_relation="equivalent", claim_mapping="unique")
+        if request.prompt_version.endswith("-v18"):
+            item["original_object_relation"] = "same" if request.original_claim.key_object else "unspecified"
+            if damage in {"original_different", "original_uncertain", "original_unspecified", "original_same"}:
+                item["original_object_relation"] = damage.removeprefix("original_")
+            elif damage == "original_missing":
+                item.pop("original_object_relation")
         if damage in {"multiple", "uncertain", "none"}:
             item["claim_mapping"] = damage
         elif damage == "different_claim":
@@ -88,14 +102,13 @@ def v17_items(request, *, damage=None):
     return items
 
 
-def paired(*, damage=None, enabled=True):
-    config = settings()
-    config._character_selected_claim_resolution_v1 = enabled
+def paired(*, damage=None, enabled=True, policy=SELECTED_CLAIM_RESOLUTION_POLICY_V1, key_object=""):
+    config = settings(policy if enabled else None)
     source = _draft_source(CONTENT)
     chunk = CharacterSignalChunk(source.document.id, source.document.name, CONTENT, 1, "draft")
     identity = ScopeReviewSourceIdentity(run_input_id=source.input_id, document_id=source.document.id,
         document_version=source.document_version, content_sha256=source.content_sha256)
-    provider = SelectedClaimProvider(damage=damage)
+    provider = SelectedClaimProvider(damage=damage, key_object=key_object)
     extractor = CharacterSignalExtractor(provider, settings=config)
     primary = extractor.extract(chunk, primary_value_targets=(TARGET,), source_identity=identity, frozen_content=CONTENT)
     targeted = extractor.extract_targeted(chunk, (TARGET,), target_ordinal=1,
@@ -202,6 +215,68 @@ def test_unavailable_origin_or_incomplete_material_does_not_repair_coverage(prob
         assert not pair[4].resolution_requests
 
 
+@pytest.mark.parametrize("key_object", ["", "麦克风"])
+def test_v2_prioritizes_the_admitted_path_and_preserves_the_complete_original_key(key_object):
+    pair = paired(policy=SELECTED_CLAIM_RESOLUTION_POLICY_V2, key_object=key_object)
+    manager, _, admitted, charges, _ = reconcile(pair)
+    request, = pair[4].resolution_requests
+    assert request.prompt_version.endswith("-v18")
+    assert request.original_claim.key_object == key_object
+    assert request.original_claim.statement == pair[4].original_requests[0].primary_claim.statement == STATEMENT
+    assert request.original_claim.claim_digest == pair[4].original_requests[0].primary_claim.claim_digest
+    assert request.proposals[0].fact_clause_id == "L1:A3"
+    assert admitted[0].key_object == OBJECT and len(charges) == 1
+    assert manager.receipts[0]["method"] == "selected_claim_recheck_v2"
+    assert manager.receipts[0]["primary_claim_sha256"] == pair[2].material_gaps[0].claim_digest
+    assert manager.scopes[0]["status"] == "complete"
+    assert len(pair[4].original_requests) == 1  # No second legacy proposal request.
+    if key_object:
+        with pytest.raises(ValidationError):
+            TargetBoundDraftReviewRequest.model_validate_json(request.model_copy(update={
+                "prompt_version": TARGET_BOUND_DRAFT_REVIEW_PROMPT_V17}).model_dump_json())
+
+
+def test_v18_protocol_accepts_semantically_verified_alias_without_a_new_literal_gate():
+    """Protocol fixture only: legacy primary currently does not retain this alias."""
+    from app.character_selected_claim_resolution import review_selected_original_claim
+    from app.narrative_context import payload_sha256
+    pair = paired(policy=SELECTED_CLAIM_RESOLUTION_POLICY_V2, key_object="麦克风")
+    pending = next(iter(pair[2].claim_resolution_state.pending.values()))
+    original_record = pending.deferred.record.model_copy(update={"key_object": "话筒"})
+    # Supply a retained original at this module's boundary, not an assertion
+    # that upstream extraction currently admits or retains nonliteral aliases.
+    raw_key = payload_sha256({"source": pair[0].content_sha256, "document": pair[0].document.id,
+                              "record": {**pair[4].raw, "key_object": "话筒"}})
+    pending = replace(pending, stable_key=raw_key, deferred=replace(pending.deferred, record=original_record))
+    origin = pair[3].selected_action_certificates[0]
+    identity = ScopeReviewSourceIdentity(**{k: getattr(origin.request, k) for k in ScopeReviewSourceIdentity.model_fields})
+    outcome = review_selected_original_claim(pending, origin, chunk=pair[1], source_identity=identity,
+        frozen_content=CONTENT, provider=pair[4], settings=pair[5], token_budget=40000)
+    request, = pair[4].resolution_requests
+    assert request.original_claim.key_object == "话筒" and "话筒" not in CONTENT
+    assert outcome.signals[0].key_object == OBJECT and outcome.claim_certificates
+    assert not pair[2].material_resolved_claims  # No manager/admit or coverage proof in this fixture.
+
+
+@pytest.mark.parametrize("key_object,damage", [("麦克风", "original_different"), ("麦克风", "original_uncertain"),
+    ("麦克风", "original_unspecified"), ("麦克风", "original_missing"), ("麦克风", "multiple"),
+    ("", "original_same"), ("", "object_quote")])
+def test_v18_requires_original_object_semantics_and_never_falls_back_after_review(key_object, damage):
+    pair = paired(policy=SELECTED_CLAIM_RESOLUTION_POLICY_V2, key_object=key_object, damage=damage)
+    manager, _, admitted, charges, _ = reconcile(pair)
+    assert not manager.receipts and not admitted and manager.scopes[0]["status"] == "partial"
+    assert len(pair[4].resolution_requests) == len(pair[4].original_requests) == len(charges) == 1
+
+
+@pytest.mark.parametrize("policy,origin_ok", [(SELECTED_CLAIM_RESOLUTION_POLICY_V1, True),
+    (SELECTED_CLAIM_RESOLUTION_POLICY_V2, False)])
+def test_old_policy_or_unadmitted_origin_keeps_the_legacy_nonempty_claim_route(policy, origin_ok):
+    pair = paired(policy=policy, key_object="麦克风")
+    manager, _, _, _, _ = reconcile(pair, origin_ok=origin_ok)
+    assert not pair[4].resolution_requests and len(pair[4].original_requests) == 2
+    assert not manager.receipts and manager.scopes[0]["status"] == "partial"
+
+
 def test_shared_target_limit_and_cancellation_preserve_unresolved_claims():
     pair = paired()
     state = pair[2].claim_resolution_state
@@ -222,7 +297,9 @@ def test_shared_target_limit_and_cancellation_preserve_unresolved_claims():
     assert len(pair[4].resolution_requests) == 1
 
 
-def test_native_service_persists_selected_claim_proof_and_origin_without_rewriting_history():
+@pytest.mark.parametrize("policy,key_object", [(SELECTED_CLAIM_RESOLUTION_POLICY_V1, ""),
+    (SELECTED_CLAIM_RESOLUTION_POLICY_V2, "麦克风")])
+def test_native_service_persists_selected_claim_proof_and_origin_without_rewriting_history(policy, key_object):
     """Real authorization/orchestration/journal/storage; deterministic model fixture."""
     from fastapi.testclient import TestClient
     from sqlalchemy import func, select
@@ -253,15 +330,16 @@ def test_native_service_persists_selected_claim_proof_and_origin_without_rewriti
                 return SimpleNamespace(text=json.dumps(value, ensure_ascii=False), prompt_tokens=11, completion_tokens=7)
             if "character_profile" in user and system not in {HABIT_ACTION_SELECTION_SYSTEM_PROMPT_V1,
                     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V16,
-                    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17}:
+                    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17,
+                    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V18}:
                 return SimpleNamespace(text=_response(formal), prompt_tokens=11, completion_tokens=7)
             return super().complete(system, user)
 
     write_limiter.events.clear()
-    provider, captured, errors = NativeProvider(), [], []
+    provider, captured, errors = NativeProvider(key_object=key_object), [], []
     original_run = CharacterConsistencyStage.run
     def observed_run(stage, *args, **kwargs):
-        assert stage.settings._character_selected_claim_resolution_v1
+        assert stage.settings._character_selected_claim_resolution_policy == policy
         stage.provider = _CharacterConsistencyAccountingProvider(stage.settings, stage.provider.usage,
             signal_provider=provider, drift_provider=provider)
         try: result = original_run(stage, *args, **kwargs)
@@ -298,7 +376,7 @@ def test_native_service_persists_selected_claim_proof_and_origin_without_rewriti
                 "habit_object_chain_policy": HABIT_OBJECT_CHAIN_POLICY_V1,
                 "habit_action_selection_policy": HABIT_ACTION_SELECTION_POLICY_V1,
                 "claim_resolution_policy": CLAIM_RESOLUTION_POLICY_V1,
-                "selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V1}
+                "selected_claim_resolution_policy": policy}
             db.commit()
         native = AuthorSettings(_env_file=None, **{**settings().model_dump(),
             "provider_runtime_config_id": config_id, "provider_runtime_user_id": owner,
@@ -321,6 +399,7 @@ def test_native_service_persists_selected_claim_proof_and_origin_without_rewriti
             assert value["key_object"] == OBJECT and value["evidence"]["text"] == CONTENT
             origin = value["selected_action_origin"]
             receipt, = payload["receipts"]
+            assert receipt["method"] == ("selected_claim_recheck_v2" if policy == SELECTED_CLAIM_RESOLUTION_POLICY_V2 else "selected_claim_recheck")
             assert origin["request_sha256"] == receipt["origin_request_sha256"]
             assert receipt["origin_observation_id"] == receipt["observation_id"] == value["observation_id"]
             assert receipt["confirmed_candidate_id"] == candidate_id

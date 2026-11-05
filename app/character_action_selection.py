@@ -387,7 +387,7 @@ def extract_selected_actions(chunk, target, *, target_ordinal, source_identity, 
                 try:
                     signal = _bind_target_bound_draft_certificate(request=request, proposal=proposal, decision=decision,
                         target=target, chunk=chunk, source_identity=source_identity, frozen_content=frozen_content)
-                    if settings._character_selected_claim_resolution_v1:
+                    if settings._character_selected_claim_resolution_policy is not None:
                         from .character_selected_claim_resolution import SelectedActionCertificate, selected_origin_payload
                         signal = signal.model_copy(update={"selected_action_origin": selected_origin_payload(request, proposal)})
                         selected_certificates.append(SelectedActionCertificate(request, proposal.proposal_id, signal))
