@@ -22,11 +22,20 @@ def text_sha256(text: str) -> str:
 
 @dataclass(frozen=True)
 class PendingMaterialClaim:
-    """A validated original record retained only in this worker's memory."""
+    """An unresolved original record retained only in this worker's memory."""
     stable_key: str
-    deferred: object
+    deferred: object | None
     package_attempt: int
     target_sha256: str
+    retained: object | None = None
+
+    def __post_init__(self):
+        if (self.deferred is None) == (self.retained is None):
+            raise ValueError("original claim must have exactly one retention basis")
+
+    @property
+    def original(self):
+        return self.retained if self.retained is not None else self.deferred
 
 
 @dataclass
@@ -77,7 +86,7 @@ class ClaimResolutionManager:
             CharacterSignalChunk, _target_bound_review_target, review_original_material_claim, stable_trait_identity,
         )
         from .character_scope_review import ScopeReviewSourceIdentity
-        from .config import SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2
+        from .config import SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3
 
         attempted_targets = set()
         for source, chunk, state in self.primary:
@@ -121,6 +130,8 @@ class ClaimResolutionManager:
                 for key, original in pending.items():
                     if key in known or row.candidate_id in attempted_targets:
                         continue
+                    if original.retained is not None and settings._character_selected_claim_resolution_policy != SELECTED_CLAIM_RESOLUTION_POLICY_V3:
+                        continue
                     gap = gaps[key]
                     # Overlap selects a useful question only. The original
                     # claim still needs its own complete, unique certificate.
@@ -129,9 +140,9 @@ class ClaimResolutionManager:
                         continue
                     origin = None
                     selected_policy = settings._character_selected_claim_resolution_policy
-                    prefer_selected = selected_policy == SELECTED_CLAIM_RESOLUTION_POLICY_V2
-                    if prefer_selected or not original.deferred.record.key_object:
-                        if selected_policy not in {SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2}:
+                    prefer_selected = selected_policy in {SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3}
+                    if prefer_selected or not original.original.record.key_object:
+                        if selected_policy not in {SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3}:
                             continue
                         origins = [cert for result, admitted in results for cert in result.selected_action_certificates
                                    if cert.signal.id in {s.id for s in admitted} and origin_admitted is not None and origin_admitted(cert.signal)
@@ -139,11 +150,11 @@ class ClaimResolutionManager:
                                    and cert.signal.evidence.line_end == gap.line_end]
                         if not origins:
                             reasons["selected_claim_origin_unavailable"] += 1
-                            if not prefer_selected:
+                            if not prefer_selected or original.retained is not None:
                                 continue
                         # Literal correspondence can prioritize a question; it
                         # cannot discharge the claim or replace the new review.
-                        statement = original.deferred.record.statement
+                        statement = original.original.record.statement
                         origins.sort(key=lambda cert: not any(p.proposal_id == cert.proposal_id and (
                             p.canonical_statement == statement or any(c.support_id == p.fact_clause_id and c.text == statement
                                 for line in cert.request.lines for c in line.clauses)) for p in cert.request.proposals))

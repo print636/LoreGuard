@@ -3,7 +3,7 @@ import pytest
 
 from app.config import (
     CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1,
-    HABIT_OBJECT_CHAIN_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2,
+    HABIT_OBJECT_CHAIN_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3,
 )
 from app.db import AnalysisRunRow
 from app.service import (
@@ -35,7 +35,7 @@ def _stage(policy=SELECTED_CLAIM_RESOLUTION_POLICY_V1, **updates):
 
 
 @pytest.mark.parametrize("missing", [None, *POLICIES, "habit_scene_policy", "character_review_enabled"])
-@pytest.mark.parametrize("policy", [SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2])
+@pytest.mark.parametrize("policy", [SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3])
 def test_new_policy_requires_both_old_capabilities_and_fresh_frozen_authorization(missing, policy):
     policies = {**POLICIES, "selected_claim_resolution_policy": policy, **({missing: None} if missing else {})}
     base, stage = local_run(coverage_changes=policies)
@@ -53,6 +53,7 @@ def test_old_retry_cannot_inherit_a_process_private_override():
 @pytest.mark.parametrize(("policy", "prompt"), [
     (SELECTED_CLAIM_RESOLUTION_POLICY_V1, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17),
     (SELECTED_CLAIM_RESOLUTION_POLICY_V2, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V18),
+    (SELECTED_CLAIM_RESOLUTION_POLICY_V3, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V18),
 ])
 def test_exact_purpose_requires_its_policy_version_every_gate_and_existing_accounting(policy, prompt):
     stage = _stage(policy)
@@ -88,7 +89,7 @@ def test_exact_purpose_requires_its_policy_version_every_gate_and_existing_accou
     assert usage.logical_calls == 2
 
 
-@pytest.mark.parametrize("policy", [SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2])
+@pytest.mark.parametrize("policy", [SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3])
 def test_selected_claim_transport_stays_single_and_honors_outer_capacity(policy):
     stage = _stage(policy, provider_max_completion_tokens=1024)
     bounded = _CharacterConsistencyAccountingProvider(stage, CharacterConsistencyUsageAccumulator()).fork_for_habit_scene_review(

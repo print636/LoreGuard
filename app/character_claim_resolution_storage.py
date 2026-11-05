@@ -21,7 +21,7 @@ from .character_observations import validate_selected_action_origin, CharacterOb
 from .domain import EvidenceSpan
 from .config import (
     CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1,
-    HABIT_OBJECT_CHAIN_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2,
+    HABIT_OBJECT_CHAIN_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3,
 )
 from .db import (
     AnalysisRunCharacterTraitInputRow, AnalysisRunInputRow, AnalysisRunRow,
@@ -218,9 +218,9 @@ def validate_claim_resolution_payload(db, *, run: AnalysisRunRow, payload: objec
         if isinstance(item, _SelectedReceipt):
             _require(
                 coverage.get("habit_action_selection_policy") == HABIT_ACTION_SELECTION_POLICY_V1
-                and coverage.get("selected_claim_resolution_policy") == {
-                    "selected_claim_recheck": SELECTED_CLAIM_RESOLUTION_POLICY_V1,
-                    "selected_claim_recheck_v2": SELECTED_CLAIM_RESOLUTION_POLICY_V2,
+                and coverage.get("selected_claim_resolution_policy") in {
+                    "selected_claim_recheck": (SELECTED_CLAIM_RESOLUTION_POLICY_V1,),
+                    "selected_claim_recheck_v2": (SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3),
                 }[item.method]
             )
             _validate_origin(db, run=run, item=item, source=source, baseline=baseline, final_value=value)

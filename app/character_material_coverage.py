@@ -157,6 +157,23 @@ class DraftMaterialTracker:
                 self.claim_state.pending[key] = PendingMaterialClaim(
                     key, deferred, package_attempt, claim_resolution_target_sha256(target),
                 )
+            from .character_retained_habit_claims import MAX_RETAINED_HABIT_CLAIMS
+            for retained in getattr(validation, "retained_habit_claims", ()):
+                key = keys.get(retained.record_index)
+                if key is None or key not in remaining or key in self.claim_state.pending:
+                    continue
+                if sum(item.retained is not None for item in self.claim_state.pending.values()) >= MAX_RETAINED_HABIT_CLAIMS:
+                    # The unretained record still has a gap; it is unknown to
+                    # the resolver and must not yield a complete final scope.
+                    self.claim_state.enumeration_complete = False
+                    continue
+                from .character_trait_extraction import _target_bound_review_target
+                target = _target_bound_review_target(retained.target, target_ordinal=retained.target_ordinal)
+                self.claim_state.pending[key] = PendingMaterialClaim(
+                    key, None, package_attempt, claim_resolution_target_sha256(target), retained=retained,
+                )
+            if getattr(validation, "retained_habit_claims_omitted", 0):
+                self.claim_state.enumeration_complete = False
             self.claim_state.pending = {k: v for k, v in self.claim_state.pending.items() if k not in self.resolved}
             self.final_review_reasons.clear()
 

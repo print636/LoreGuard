@@ -15,7 +15,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select, update
 
 from .config import (
     HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS,
-    CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, get_settings,
+    CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings,
 )
 from .account_provider import runtime_for_analysis_run
 from .character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
@@ -1011,6 +1011,7 @@ class _CharacterConsistencyAccountingProvider:
             (system, self.settings._character_selected_claim_resolution_policy) in {
                 (TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17, SELECTED_CLAIM_RESOLUTION_POLICY_V1),
                 (TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V18, SELECTED_CLAIM_RESOLUTION_POLICY_V2),
+                (TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V18, SELECTED_CLAIM_RESOLUTION_POLICY_V3),
             }
             and self.settings.character_target_bound_draft_review_v3
             and self.settings._character_habit_scene_scheduling_v1
@@ -3243,7 +3244,8 @@ def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
     selected_policy = coverage.get("selected_claim_resolution_policy")
     stage._character_selected_claim_resolution_policy = (
         selected_policy if stage._character_claim_resolution_v1 and stage._character_habit_action_selection_v1
-        and selected_policy in (SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2) else None
+        and selected_policy in (SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2,
+                                SELECTED_CLAIM_RESOLUTION_POLICY_V3) else None
     )
     return stage
 

@@ -132,7 +132,7 @@ def _exercise_author_review(client):
     import httpx
     from app import service
     from app.main import write_limiter
-    from app.config import CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2
+    from app.config import CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3
     from app.db import AnalysisRunRow, SessionLocal
     from app.character_drift import CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
     from app.character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
@@ -242,9 +242,9 @@ def _exercise_author_review(client):
                 {"_character_habit_action_selection_v1": True},
                 {"habit_action_selection_policy": HABIT_ACTION_SELECTION_POLICY_V1},
                 {"batch_coverage": {"habit_action_selection_policy": HABIT_ACTION_SELECTION_POLICY_V1}},
-                {"_character_selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V2},
-                {"selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V2},
-                {"batch_coverage": {"selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V2}},
+                {"_character_selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V3},
+                {"selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V3},
+                {"batch_coverage": {"selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V3}},
             ):
                 assert client.post(runs_url, json={**chosen, **override}).status_code == 422
         assert len(calls) == before_private_override
@@ -283,7 +283,7 @@ def _exercise_author_review(client):
         assert all(frozen_scene_policy(run, "claim_resolution_policy") is None for run in (default, ordinary, created))
         assert frozen_scene_policy(reviewed, "habit_action_selection_policy") == HABIT_ACTION_SELECTION_POLICY_V1
         assert all(frozen_scene_policy(run, "habit_action_selection_policy") is None for run in (default, ordinary, created))
-        assert frozen_scene_policy(reviewed, "selected_claim_resolution_policy") == SELECTED_CLAIM_RESOLUTION_POLICY_V2
+        assert frozen_scene_policy(reviewed, "selected_claim_resolution_policy") == SELECTED_CLAIM_RESOLUTION_POLICY_V3
         assert all(frozen_scene_policy(run, "selected_claim_resolution_policy") is None for run in (default, ordinary, created))
         assert reviewed["review_batch"]["character_baseline_run_id"] == baseline_id
         assert calls.count(CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT) == 1
@@ -322,7 +322,7 @@ def _exercise_author_review(client):
                 assert failed_run.batch_coverage.get("habit_object_chain_policy") == (HABIT_OBJECT_CHAIN_POLICY_V1 if enabled else None)
                 assert failed_run.batch_coverage.get("claim_resolution_policy") == (CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
                 assert failed_run.batch_coverage.get("habit_action_selection_policy") == (HABIT_ACTION_SELECTION_POLICY_V1 if enabled else None)
-                assert failed_run.batch_coverage.get("selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V2 if enabled else None)
+                assert failed_run.batch_coverage.get("selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V3 if enabled else None)
                 # Replay a genuine older snapshot shape after the application has upgraded.
                 failed_run.batch_coverage = {key: value for key, value in failed_run.batch_coverage.items() if key not in {"habit_object_chain_policy", "claim_resolution_policy", "habit_action_selection_policy", "selected_claim_resolution_policy"}}
                 db.commit()
@@ -336,18 +336,19 @@ def _exercise_author_review(client):
             assert frozen_scene_policy(retry.json(), "habit_action_selection_policy") is None
             assert frozen_scene_policy(retry.json(), "selected_claim_resolution_policy") is None
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
-        # An actual v1 frozen run retains its routing version after upgrade.
+        # Earlier frozen runs retain their routing version after upgrade.
         with patch.dict(write_limiter.events, clear=True):
-            with patch("app.main.dispatch_analysis", side_effect=RuntimeError("synthetic dispatch failure")):
-                failed = client.post(runs_url, json=opted_in)
-            assert failed.status_code == 503
-            with SessionLocal() as db:
-                failed_run = db.get(AnalysisRunRow, failed.json()["detail"]["run_id"])
-                failed_run.batch_coverage = {**failed_run.batch_coverage, "selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V1}
-                db.commit()
-            retry = client.post("/api/v1/analysis-runs/" + failed.json()["detail"]["run_id"] + "/retry")
-            assert retry.status_code == 202, retry.text
-            assert frozen_scene_policy(retry.json(), "selected_claim_resolution_policy") == SELECTED_CLAIM_RESOLUTION_POLICY_V1
+            for policy in (SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2):
+                with patch("app.main.dispatch_analysis", side_effect=RuntimeError("synthetic dispatch failure")):
+                    failed = client.post(runs_url, json=opted_in)
+                assert failed.status_code == 503
+                with SessionLocal() as db:
+                    failed_run = db.get(AnalysisRunRow, failed.json()["detail"]["run_id"])
+                    failed_run.batch_coverage = {**failed_run.batch_coverage, "selected_claim_resolution_policy": policy}
+                    db.commit()
+                retry = client.post("/api/v1/analysis-runs/" + failed.json()["detail"]["run_id"] + "/retry")
+                assert retry.status_code == 202, retry.text
+                assert frozen_scene_policy(retry.json(), "selected_claim_resolution_policy") == policy
         # A new draft version requires a fresh choice, even after a paid review.
         _document(client, project, name="draft.md", role="chapter", publication="draft",
                   content=draft, replace_document_id=draft_doc["id"])
@@ -365,7 +366,7 @@ def _exercise_author_review(client):
             assert frozen_scene_policy(recheck.json(), "habit_object_chain_policy") == (HABIT_OBJECT_CHAIN_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "claim_resolution_policy") == (CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "habit_action_selection_policy") == (HABIT_ACTION_SELECTION_POLICY_V1 if enabled else None)
-            assert frozen_scene_policy(recheck.json(), "selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V2 if enabled else None)
+            assert frozen_scene_policy(recheck.json(), "selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V3 if enabled else None)
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
         repeated = client.post(recheck_url, headers={"Idempotency-Key": "deep-recheck"})
         assert repeated.status_code == 409, repeated.text

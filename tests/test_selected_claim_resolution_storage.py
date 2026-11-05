@@ -9,7 +9,7 @@ from app.character_action_selection import (
     select_action_window, selection_request_digest,
 )
 from app.character_claim_resolution import CLAIM_RESOLUTION_SCHEMA
-from app.config import SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2
+from app.config import SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3
 from app.character_claim_resolution_storage import ClaimResolutionIntegrityError, validate_claim_resolution_payload
 from app.character_draft_actor_review import target_bound_draft_review_request_digest
 from app.character_observations import CharacterObservationRecorder, ObservationMatchDecision, project_character_observations
@@ -67,7 +67,7 @@ def _stored_selected(db, *, workspace_id=None, policy=SELECTED_CLAIM_RESOLUTION_
     return run, admitted, payload
 
 
-@pytest.mark.parametrize("policy", [SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2])
+@pytest.mark.parametrize("policy", [SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3])
 def test_selected_receipt_uses_persisted_origin_and_public_observation_has_no_private_hash(db, policy):
     run, admitted, payload = _stored_selected(db, policy=policy)
     assert validate_claim_resolution_payload(db, run=run, payload=payload) == payload
@@ -80,7 +80,7 @@ def test_selected_receipt_uses_persisted_origin_and_public_observation_has_no_pr
     assert public["target_bound_object_basis_id"] is None
 
 
-@pytest.mark.parametrize("policy", [SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2])
+@pytest.mark.parametrize("policy", [SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3])
 def test_selected_receipt_method_cannot_cross_frozen_policy_versions(db, policy):
     run, _, payload = _stored_selected(db, policy=policy)
     payload["receipts"][0]["method"] = "selected_claim_recheck_v2" if policy == SELECTED_CLAIM_RESOLUTION_POLICY_V1 else "selected_claim_recheck"
@@ -119,7 +119,7 @@ def test_selected_receipt_cannot_resolve_by_format_or_unrelated_origin(db, mutat
 def test_private_origin_stays_out_of_observation_api_diagnostics_and_export(evidence_api):
     state = evidence_api
     with state.sessions() as db:
-        run, admitted, payload = _stored_selected(db, workspace_id=state.workspace.id, policy=SELECTED_CLAIM_RESOLUTION_POLICY_V2)
+        run, admitted, payload = _stored_selected(db, workspace_id=state.workspace.id, policy=SELECTED_CLAIM_RESOLUTION_POLICY_V3)
         run.status = "completed"
         db.add(AnalysisDiagnosticRow(run_id=run.id, payload={"character_consistency": {"claim_resolution_v1": payload}}))
         db.commit()

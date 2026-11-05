@@ -19,7 +19,7 @@ from app.character_draft_actor_review_provider import (
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V18,
 )
-from app.config import SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2
+from app.config import SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3
 from app.character_material_coverage import DraftMaterialGap, MaterialGapLedger
 from app.character_scope_review import ScopeReviewSourceIdentity
 from app.character_selected_claim_resolution import build_selected_claim_review_request
@@ -298,7 +298,7 @@ def test_shared_target_limit_and_cancellation_preserve_unresolved_claims():
 
 
 @pytest.mark.parametrize("policy,key_object", [(SELECTED_CLAIM_RESOLUTION_POLICY_V1, ""),
-    (SELECTED_CLAIM_RESOLUTION_POLICY_V2, "麦克风")])
+    (SELECTED_CLAIM_RESOLUTION_POLICY_V2, "麦克风"), (SELECTED_CLAIM_RESOLUTION_POLICY_V3, "话筒")])
 def test_native_service_persists_selected_claim_proof_and_origin_without_rewriting_history(policy, key_object):
     """Real authorization/orchestration/journal/storage; deterministic model fixture."""
     from fastapi.testclient import TestClient
@@ -387,6 +387,10 @@ def test_native_service_persists_selected_claim_proof_and_origin_without_rewriti
         assert captured, errors
         result, = captured
         assert len(provider.selection_requests) == len(provider.review_requests) == len(provider.resolution_requests) == 1
+        if policy == SELECTED_CLAIM_RESOLUTION_POLICY_V3:
+            assert not provider.original_requests
+            assert provider.resolution_requests[0].original_claim.key_object == key_object
+            assert result.diagnostics["reason_counts"]["habit_source_claim_retained"] == 1
         assert result.diagnostics["counts"]["model_incomplete_chunks"] == 1
         assert result.diagnostics["case_trace"][0]["material_coverage"] == "complete"
         assert not result.issues and len(result.review_clues) == 1  # Main review still controls the verdict.
@@ -399,7 +403,7 @@ def test_native_service_persists_selected_claim_proof_and_origin_without_rewriti
             assert value["key_object"] == OBJECT and value["evidence"]["text"] == CONTENT
             origin = value["selected_action_origin"]
             receipt, = payload["receipts"]
-            assert receipt["method"] == ("selected_claim_recheck_v2" if policy == SELECTED_CLAIM_RESOLUTION_POLICY_V2 else "selected_claim_recheck")
+            assert receipt["method"] == ("selected_claim_recheck" if policy == SELECTED_CLAIM_RESOLUTION_POLICY_V1 else "selected_claim_recheck_v2")
             assert origin["request_sha256"] == receipt["origin_request_sha256"]
             assert receipt["origin_observation_id"] == receipt["observation_id"] == value["observation_id"]
             assert receipt["confirmed_candidate_id"] == candidate_id

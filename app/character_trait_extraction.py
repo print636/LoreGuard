@@ -22,7 +22,7 @@ from pydantic import (
 
 from .character_material_coverage import DraftMaterialGap, DraftMaterialTracker
 from .character_claim_resolution import claim_resolution_target_sha256, text_sha256
-from .config import HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS, Settings, get_settings
+from .config import HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS, SELECTED_CLAIM_RESOLUTION_POLICY_V3, Settings, get_settings
 from .character_scope_failure import ScopeProviderFailureSeriesV1
 from .character_scope_review import (
     BasisInvalidSubtype,
@@ -1622,6 +1622,8 @@ class _ValidatedSignalPackage:
     history_deferred: tuple[_HistorySemanticDeferred, ...] = ()
     draft_actor_deferred: tuple[_DraftActorDeferred, ...] = ()
     target_bound_draft_deferred: tuple[_TargetBoundDraftDeferred, ...] = ()
+    retained_habit_claims: tuple = ()
+    retained_habit_claims_omitted: int = 0
 
     @property
     def complete(self) -> bool:
@@ -3258,6 +3260,19 @@ class CharacterSignalExtractor:
                         support_trace_attempt=validation.support_trace_attempt,
                         draft_trace_attempt=validation.draft_trace_attempt,
                     )
+            if (habit_stage == "primary" and settings._character_selected_claim_resolution_policy == SELECTED_CLAIM_RESOLUTION_POLICY_V3
+                    and settings._character_claim_resolution_v1 and settings._character_habit_action_selection_v1
+                    and settings._character_habit_object_chain_v1):
+                from .character_retained_habit_claims import collect_retained_habit_claims
+                retained, omitted = collect_retained_habit_claims(
+                    validation, response_text, chunk=chunk, targets=primary_value_targets,
+                    source_identity=source_identity, frozen_content=frozen_content,
+                )
+                validation = replace(validation, retained_habit_claims=retained, retained_habit_claims_omitted=omitted)
+                if retained:
+                    target_bound_reason_counts["habit_source_claim_retained"] += len(retained)
+                if omitted:
+                    target_bound_reason_counts["habit_source_claim_retention_omitted"] += omitted
             validation_attempts.append(validation)
             if material_tracker is not None:
                 material_tracker.capture(response_text, validation, package_attempt=package_attempt + 1)

@@ -31,7 +31,7 @@ from .character_draft_actor_review import (
 from .character_scope_review import ScopeReviewSourceIdentity
 from .config import (
     CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1,
-    HABIT_OBJECT_CHAIN_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2,
+    HABIT_OBJECT_CHAIN_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3,
 )
 from .time_utils import utc_now_naive
 
@@ -251,7 +251,8 @@ class CharacterObservationRecorder:
                         or coverage.get("claim_resolution_policy") != CLAIM_RESOLUTION_POLICY_V1
                         or coverage.get("habit_action_selection_policy") != HABIT_ACTION_SELECTION_POLICY_V1
                         or coverage.get("selected_claim_resolution_policy") not in (
-                            SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2)):
+                            SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2,
+                            SELECTED_CLAIM_RESOLUTION_POLICY_V3)):
                     raise CharacterObservationIntegrityError("character observation selected origin unauthorized")
                 validate_selected_action_origin(observation.selected_action_origin, source=source,
                     target=observation.target_bound_target, evidence=evidence,
