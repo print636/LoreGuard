@@ -1563,6 +1563,7 @@ class CharacterSignalExtractionResult(BaseModel):
     material_gaps_omitted: int = Field(default=0, ge=0, exclude=True)
     material_resolved_claims: tuple[str, ...] = Field(default=(), exclude=True)
     claim_resolution_state: Any = Field(default=None, exclude=True)
+    selection_only: bool = Field(default=False, exclude=True)
     # For the candidate-lines verification pass only. None means unobserved.
     verification_primary_attempts: tuple[DraftSignalTraceAttemptV1, ...] | None = Field(
         default=None, exclude=True, max_length=2
@@ -2316,6 +2317,7 @@ class CharacterSignalExtractor:
         candidate_evidence_ranges: tuple[tuple[int, int], ...] = (),
         source_identity: ScopeReviewSourceIdentity | None = None,
         frozen_content: str | None = None,
+        checkpoint=None,
     ) -> CharacterSignalExtractionResult:
         """Run at most one caller-controlled, content-free targeted draft pass."""
 
@@ -2435,6 +2437,13 @@ class CharacterSignalExtractor:
                 # targets must never be repaired or interpreted by the model.
                 return skipped("targeted_invalid_targets")
             identities.add(identity)
+        if (self.settings._character_habit_action_selection_v1 and len(targets) == 1
+                and targets[0].dimension == "contextual_behavior" and targets[0].habit_contexts):
+            from .character_action_selection import extract_selected_actions
+            return extract_selected_actions(chunk, targets[0], target_ordinal=target_ordinal,
+                source_identity=source_identity, frozen_content=frozen_content, provider=self._base_provider,
+                settings=self.settings, candidate_ranges=candidate_evidence_ranges, checkpoint=checkpoint,
+                monotonic=self._monotonic)
         try:
             targeted_prompt = _targeted_chunk_prompt(
                 chunk,
@@ -6082,9 +6091,15 @@ def _bind_target_bound_draft_certificate(
     else:
         observed_object = target.key_object
     evidence_start = proposal.line_start
-    if expected_primary_claim is not None and expected_primary_claim.key_object:
+    selected_protocol = request.prompt_version == "character-target-bound-draft-review-prompt-v16"
+    if expected_primary_claim is not None and expected_primary_claim.key_object or selected_protocol:
         grounded = decision.verified_object
-        if not valid_primary_object_grounding(request, proposal, grounded):
+        if selected_protocol:
+            from .character_action_selection import valid_selected_object_grounding
+            object_valid = valid_selected_object_grounding(request, proposal, grounded)
+        else:
+            object_valid = valid_primary_object_grounding(request, proposal, grounded)
+        if not object_valid:
             raise ValueError("semantic_binding_unresolved")
         observed_object = grounded.antecedent_quote or grounded.fact_quote
         if grounded.antecedent_clause_id:
@@ -6096,7 +6111,7 @@ def _bind_target_bound_draft_certificate(
     signal = CharacterSignal(
         id=_target_bound_signal_id(
             chunk=chunk, target=target, proposal=proposal,
-            habit_event_object=observed_object if expected_primary_claim and expected_primary_claim.key_object
+            habit_event_object=observed_object if (expected_primary_claim and expected_primary_claim.key_object or selected_protocol)
             and target.dimension == "contextual_behavior" else "",
         ),
         character=target.character,

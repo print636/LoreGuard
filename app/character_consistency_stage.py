@@ -1673,6 +1673,7 @@ class CharacterConsistencyStage:
                 ).extract_targeted(
                     targeted_chunk,
                     (target,),
+                    **({"checkpoint": self.checkpoint} if settings._character_habit_action_selection_v1 else {}),
                     **(
                         {"target_ordinal": target_index + 1}
                         if (
@@ -1731,7 +1732,8 @@ class CharacterConsistencyStage:
                 if targeted.diagnostics.outcome == "completed":
                     targeted_passes_completed += 1
                     successful_model_calls += 1
-                    completed_targets.append((target_index, target))
+                    if not targeted.selection_only:
+                        completed_targets.append((target_index, target))
                     if not targeted.signals:
                         targeted_empty_passes += 1
                         first_empty_targets.append(target)
@@ -1751,6 +1753,13 @@ class CharacterConsistencyStage:
                         mark_target_material_gap(
                             source, target, "semantic_binding_unresolved"
                         )
+                if targeted.selection_only:
+                    # A bounded discovery is not an exhaustive recall certificate.
+                    # Keep actual claim debts with their original owners; do not
+                    # manufacture a permanent target debt from selection itself.
+                    chunk_targets_complete = False
+                    partial = True
+                    reason_counts["habit_selection_not_exhaustive"] += 1
                 for signal in targeted.signals:
                     signal = _signal_bound_to_target_character(
                         signal, target=target, alias_map=alias_map

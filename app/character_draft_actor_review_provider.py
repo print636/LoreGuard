@@ -46,6 +46,7 @@ from .character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16,
     habit_action_path,
     SCOPED_DRAFT_DIRECTION_GUIDE,
     HABIT_CONTEXT_TARGET_GUIDE,
@@ -286,6 +287,26 @@ TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_P
     "explicit 与 unique_reference 不提供 object_steps；rejected/uncertain 仍可 claim_object:null。"
 )
 
+TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V16 = TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8 + (
+    "\n\n本版本核实模型从冻结窗口选出的 selected_action_path；选择不证明事实、完整覆盖或唯一原主张映射。"
+    "没有primary_claim，不输出claim_digest或claim_relation。逐项独立核实原文中的角色、事实性、受事、方向及撤销。"
+    "允许同句有依据的省略主语与受事，不要求特定动作词或否定句式；不得把未做的事改成已做。"
+    "场合是否适用作者习惯交后续主审；不能因用途不同就虚构行为，也不把任何行为直接当作冲突。"
+    "每项额外且必须输出action_steps与claim_object，除这两项外沿用上述字段。"
+    "action_steps对basis_path_hints.action_path每步按序给出{clause_id,quote,actor,actuality,scene}："
+    "quote只引用该步原文，首步含授权角色；actor=target|other|unclear，actuality=actual|non_actual|unclear，"
+    "scene=same|changed|unclear。每步全部target/actual/same才可supported。"
+    "claim_object核实完整实际受事，role=event_object、referent_relation=same才支持。"
+    "事实分句显名受事时grounding=explicit，fact_quote引用完整受事，antecedent_clause_id/antecedent_quote为null，不输出object_steps。"
+    "连续承接时grounding=action_path，首步完整显名受事作为antecedent_quote及其clause_id；"
+    "object_steps对全路径每步给出{clause_id,quote,grounding,referent_relation}。首步explicit引用完整受事，"
+    "后续每步可以explicit引用同一完整词组、reference引用实际代词，或omitted引用该分句完整原文；"
+    "omitted必须独立证明本步省略受事仍是首步同一对象，不能凭邻接推定。"
+    "fact_quote等于末步quote，各步referent_relation=same|different|uncertain，全部same才支持。"
+    "保留数量、性质、归属、用途，不把接收人、所属物、别的对象、多候选对象或换人换场视为同指。"
+    "rejected/uncertain可claim_object:null。action_steps仍须完整给出；不确定必须保留，不补造原文。"
+)
+
 MAX_DRAFT_ACTOR_REVIEW_REPORTED_TOKENS = 1_000_000
 MAX_TARGET_BOUND_DRAFT_CONTRACT_ATTEMPTS = 2
 HABIT_OBJECT_CHAIN_MAX_COMPLETION_TOKENS = 4_096
@@ -295,12 +316,13 @@ def habit_object_chain_completion_reserve(
     requests: tuple[TargetBoundDraftReviewRequest, ...], configured: int,
 ) -> int:
     """Reserve the new wire fields before admission; historical prompts keep their cap."""
-    if not requests or any(request.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15 for request in requests):
+    if not requests or any(request.prompt_version not in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16} for request in requests):
         return configured
     proposals = sum(len(request.proposals) for request in requests)
     steps = sum(
+        len(proposal.path_ids or ()) if proposal.binding_kind == "selected_action_path" else
         len(habit_action_path(request.lines, request.target, proposal, allow_object_chain=True))
-        for request in requests for proposal in request.proposals if proposal.binding_kind == "habit_action_chain"
+        for request in requests for proposal in request.proposals if proposal.binding_kind in {"habit_action_chain", "selected_action_path"}
     )
     # Envelope/digests, one decision per proposal, and both actor and object
     # paths. This is a local JSON allowance, not a provider tokenizer estimate.
@@ -432,6 +454,9 @@ def _target_bound_review_hints(
                 for clause in habit_action_path(request.lines, request.target, proposal,
                                                allow_object_chain=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15)
             ]
+        elif proposal.binding_kind == "selected_action_path":
+            from .character_action_selection import selected_action_path
+            hint["action_path"] = [{"clause_id": c.support_id, "text": c.text} for c in selected_action_path(request, proposal)]
         if request.schema_version in {
             TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3,
             TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V4,
@@ -483,6 +508,7 @@ def build_target_bound_draft_review_prompts(
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15,
+            TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V16,
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9: TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V9,
         }.get(requests[0].prompt_version, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V8)
     elif requests[0].schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V3:
@@ -981,6 +1007,7 @@ def run_target_bound_draft_review(
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13,
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
+        TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16,
     } for request in requests):
         raise ValueError("habit scene policy requires a contextual habit review")
     expected_sources = tuple(entry.expected_source for entry in entries)
@@ -1037,7 +1064,8 @@ def run_target_bound_draft_review(
     total_completion_tokens = 0
     total_charged_tokens = 0
 
-    for replay_attempt in range(MAX_TARGET_BOUND_DRAFT_CONTRACT_ATTEMPTS):
+    replay_limit = 1 if any(r.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16 for r in requests) else MAX_TARGET_BOUND_DRAFT_CONTRACT_ATTEMPTS
+    for replay_attempt in range(replay_limit):
         estimate = estimate_issue_evidence_review_tokens(
             system, user, completion_reserve=completion_reserve
         )
@@ -1168,7 +1196,7 @@ def run_target_bound_draft_review(
         )
         if (
             (contract_failure is not None or object_span_replay)
-            and replay_attempt + 1 < MAX_TARGET_BOUND_DRAFT_CONTRACT_ATTEMPTS
+            and replay_attempt + 1 < replay_limit
         ):
             continue
 

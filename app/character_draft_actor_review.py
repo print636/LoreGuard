@@ -214,6 +214,7 @@ TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12 = "character-target-bound-draft-review-prom
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13 = "character-target-bound-draft-review-prompt-v13"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14 = "character-target-bound-draft-review-prompt-v14"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15 = "character-target-bound-draft-review-prompt-v15"
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16 = "character-target-bound-draft-review-prompt-v16"
 _HABIT_ACTION_PROMPTS = {
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
@@ -1701,9 +1702,18 @@ class TargetBoundDraftProposal(BaseModel):
         "adjacent_zero_subject",
         "named_direct_speech",
         "habit_action_chain",
+        "selected_action_path",
     ]
     target_digest: str = Field(pattern=_TARGET_DIGEST)
     canonical_statement: str = Field(min_length=2, max_length=300)
+    path_ids: tuple[str, ...] | None = Field(default=None, min_length=1, max_length=3)
+
+    @model_serializer(mode="wrap")
+    def serialize_selected_path(self, handler):
+        value = handler(self)
+        if self.path_ids is None:
+            value.pop("path_ids", None)
+        return value
 
 
 class TargetBoundDraftReviewProposal(TargetBoundDraftProposal):
@@ -1757,6 +1767,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
         "character-target-bound-draft-review-prompt-v13",
         "character-target-bound-draft-review-prompt-v14",
         "character-target-bound-draft-review-prompt-v15",
+        "character-target-bound-draft-review-prompt-v16",
     ] = (
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
     )
@@ -1773,16 +1784,29 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
     )
 
     primary_claim: PrimaryDraftClaim | None = None
+    selection_window_ids: tuple[str, ...] | None = Field(default=None, min_length=1, max_length=3)
+    selection_digest: str | None = Field(default=None, pattern=_SHA256)
 
     @model_serializer(mode="wrap")
     def serialize_request(self, handler):
         data = handler(self)
         if self.primary_claim is None:
             data.pop("primary_claim", None)  # Preserve legacy wire bytes and digests.
+        for name in ("selection_window_ids", "selection_digest"):
+            if getattr(self, name) is None:
+                data.pop(name, None)
         return data
 
     @model_validator(mode="after")
     def validate_target_bound_request(self) -> "TargetBoundDraftReviewRequest":
+        if self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16:
+            from .character_action_selection import validate_selected_request_structure
+            validate_selected_request_structure(self)
+            return self
+        if self.selection_window_ids is not None or self.selection_digest is not None or any(
+            p.path_ids is not None or p.binding_kind == "selected_action_path" for p in self.proposals
+        ):
+            raise ValueError("target_bound_selected_protocol_required")
         if self.prompt_version in _HABIT_ACTION_PROMPTS:
             if (
                 not self.target.habit_contexts or self.target.dimension != "contextual_behavior"
@@ -2286,7 +2310,7 @@ def _target_bound_proposal_payload(
 ) -> dict[str, object]:
     return {
         name: getattr(proposal, name)
-        for name in TargetBoundDraftProposal.model_fields
+        for name in TargetBoundDraftProposal.model_fields if name != "path_ids" or proposal.path_ids is not None
     }
 
 
@@ -2681,6 +2705,9 @@ def verify_target_bound_draft_review_source(
         for name in ScopeReviewSourceIdentity.model_fields
     ):
         return False
+    if request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16:
+        from .character_action_selection import verify_selected_review_source
+        return verify_selected_review_source(request, expected_source, frozen_content)
     try:
         if hashlib.sha256(frozen_content.encode("utf-8")).hexdigest() != request.content_sha256:
             return False
@@ -3226,9 +3253,13 @@ def evaluate_target_bound_draft_review(
     decisions: list[TargetBoundDraftReviewDecision] = []
     for proposal in request.proposals:
         item = returned[proposal.proposal_id]
-        if proposal.binding_kind == "habit_action_chain":
-            path = habit_action_path(request.lines, request.target, proposal,
-                                     allow_object_chain=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15)
+        if proposal.binding_kind in {"habit_action_chain", "selected_action_path"}:
+            if proposal.binding_kind == "selected_action_path":
+                from .character_action_selection import selected_action_path
+                path = selected_action_path(request, proposal)
+            else:
+                path = habit_action_path(request.lines, request.target, proposal,
+                                         allow_object_chain=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15)
             steps = item.action_steps or ()
             checked = (
                 bool(path) and len(steps) == len(path)
@@ -3249,10 +3280,11 @@ def evaluate_target_bound_draft_review(
         claim_fields = {"claim_digest", "claim_relation"} & item.model_fields_set
         object_review = request.prompt_version in {
             TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
+            TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16,
         }
         if (
             ("claim_object" in item.model_fields_set) != object_review
-            or item.claim_object is not None and request.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15 and (
+            or item.claim_object is not None and request.prompt_version not in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16} and (
                 item.claim_object.grounding == "action_path" or "object_steps" in item.claim_object.model_fields_set
             )
             or request.primary_claim is None and claim_fields
@@ -3275,7 +3307,12 @@ def evaluate_target_bound_draft_review(
             continue
         if item.verdict == "supported":
             conflicts = _target_bound_supported_conflicts(request, proposal, item)
-            if object_review and not valid_primary_object_grounding(request, proposal, item.claim_object):
+            if request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V16:
+                from .character_action_selection import valid_selected_object_grounding
+                object_grounded = valid_selected_object_grounding(request, proposal, item.claim_object)
+            else:
+                object_grounded = not object_review or valid_primary_object_grounding(request, proposal, item.claim_object)
+            if not object_grounded:
                 conflicts = tuple(dict.fromkeys((*conflicts, "object_span")))
             if request.primary_claim is not None and item.claim_relation != "equivalent":
                 conflicts = tuple(dict.fromkeys((*conflicts, "statement_relation")))
