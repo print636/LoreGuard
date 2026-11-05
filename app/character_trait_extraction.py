@@ -48,6 +48,7 @@ from .character_draft_actor_review import (
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13,
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
     valid_habit_contexts,
     SCOPED_DRAFT_DIRECTION_GUIDE,
     has_object_reference,
@@ -2915,6 +2916,7 @@ class CharacterSignalExtractor:
                     validation, response_text, chunk, targets, source_identity, frozen_content,
                     first_ordinal=target_ordinal, allowed_ranges=allowed_targeted_evidence_ranges,
                     counts=target_bound_reason_counts, stage=habit_stage,
+                    allow_object_chain=settings._character_habit_object_chain_v1,
                 )
             elif targeted_habit and validation.failures:
                 target_bound_reason_counts[f"habit_gate_{habit_stage}_review_used"] += 1
@@ -3091,6 +3093,7 @@ class CharacterSignalExtractor:
                         validation, response_text, chunk, primary_value_targets, source_identity, frozen_content,
                         first_ordinal=1, allowed_ranges=allowed_targeted_evidence_ranges,
                         counts=target_bound_reason_counts, stage=habit_stage,
+                        allow_object_chain=settings._character_habit_object_chain_v1,
                     )
                 elif validation.failures and any(t.habit_contexts for t in primary_value_targets):
                     target_bound_reason_counts[f"habit_gate_{habit_stage}_review_used"] += 1
@@ -5278,6 +5281,7 @@ def _habit_claim_debts(
     frozen_content: str | None, *, first_ordinal: int | None,
     allowed_ranges: tuple[tuple[int, int], ...],
     counts: Counter[str], stage: Literal["primary", "targeted", "verify"],
+    allow_object_chain: bool = False,
 ) -> tuple[_TargetBoundDraftDeferred, ...]:
     """Keep failed observed actions attached to their original frozen target and record."""
     def gate(code: str) -> None:
@@ -5376,6 +5380,7 @@ def _habit_claim_debts(
             index, proposals = build_target_bound_draft_proposals(
                 frozen_content, source_identity, _target_bound_review_target(target, target_ordinal=ordinal),
                 line_start=window[0], line_end=window[1], protocol_version="v4", primary_claim_review=True,
+                allow_object_chain=allow_object_chain and object_review,
             )
         except (TypeError, ValueError):
             gate("proposal_invalid")
@@ -6148,6 +6153,7 @@ def _run_target_bound_review_batches(
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12,
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13,
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
+        TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
     }
     if sum(len(entry.request.proposals) for entry in entries) > MAX_DRAFT_ACTOR_REVIEW_ITEMS:
         raise ValueError("target_bound_batch_too_large")
@@ -6278,6 +6284,8 @@ def _review_target_bound_draft_candidates(
                 protocol_version="v4" if primary_value_recovery else "v2",
                 allow_named_speech=primary_value_recovery and not claim_review,
                 primary_claim=claim,
+                allow_object_chain=(settings._character_habit_object_chain_v1 and review_label == "habit"
+                                    and claim is not None and bool(claim.key_object)),
             )
             entries.append(TargetBoundDraftReviewBatchEntry(
                 request=request, expected_source=source_identity,
@@ -6323,7 +6331,9 @@ def _review_target_bound_draft_candidates(
         if claim_review and run.attempted_calls:
             review_reasons[f"{review_label}_claim_review_calls"] += run.attempted_calls
         if object_review and run.attempted_calls and (
-            review_label != "habit" or batch[0].request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14
+            review_label != "habit" or batch[0].request.prompt_version in {
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
+            }
         ):
             review_reasons[f"{review_label}_object_review_calls"] += run.attempted_calls
         if run.failure_reason is not None:
@@ -6463,7 +6473,10 @@ def _habit_source_recall_candidates(
     for entries, run in batches:
         for i, entry in enumerate(entries):
             request = entry.request
-            if request.prompt_version not in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14}:
+            if request.prompt_version not in {
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
+            }:
                 continue
             digest = target_bound_draft_review_request_digest(request)
             window = (request.proposals[0].line_start, request.proposals[0].line_end)

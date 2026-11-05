@@ -213,8 +213,10 @@ TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 = "character-target-bound-draft-review-prom
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12 = "character-target-bound-draft-review-prompt-v12"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13 = "character-target-bound-draft-review-prompt-v13"
 TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14 = "character-target-bound-draft-review-prompt-v14"
+TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15 = "character-target-bound-draft-review-prompt-v15"
 _HABIT_ACTION_PROMPTS = {
     TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14,
+    TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
 }
 HABIT_CONTEXT_TARGET_VERSION = "character-habit-context-target-v1"
 HABIT_CONTEXT_TARGET_GUIDE = (
@@ -1754,6 +1756,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
         "character-target-bound-draft-review-prompt-v12",
         "character-target-bound-draft-review-prompt-v13",
         "character-target-bound-draft-review-prompt-v14",
+        "character-target-bound-draft-review-prompt-v15",
     ] = (
         TARGET_BOUND_DRAFT_REVIEW_PROMPT_V2
     )
@@ -1787,7 +1790,7 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
                 or self.primary_claim is not None and (
                     self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13
                     and {"key_object", "include_previous_line"} & self.primary_claim.model_fields_set
-                    or self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14
+                    or self.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15}
                     and (not self.primary_claim.key_object or self.primary_claim.include_previous_line)
                 )
             ):
@@ -1867,7 +1870,10 @@ class TargetBoundDraftReviewRequest(ScopeReviewSourceIdentity):
                     or anchor.end_offset >= fact.start_offset
                 )
                 or proposal.binding_kind == "habit_action_chain"
-                and (self.prompt_version not in _HABIT_ACTION_PROMPTS or not habit_action_path(self.lines, self.target, proposal))
+                and (self.prompt_version not in _HABIT_ACTION_PROMPTS or not habit_action_path(
+                    self.lines, self.target, proposal,
+                    allow_object_chain=self.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
+                ))
                 or proposal.binding_kind not in {"adjacent_zero_subject", "named_direct_speech", "habit_action_chain"}
                 and proposal.actor_anchor_id is not None
                 or self.schema_version == TARGET_BOUND_DRAFT_REVIEW_SCHEMA_V2
@@ -1917,15 +1923,34 @@ TargetBoundSlotConflict = Literal[
 ]
 
 
+class HabitObjectStep(BaseModel):
+    """The reviewer must identify the same affected object at each frozen step."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    clause_id: str = Field(pattern=_SUPPORT_ID)
+    quote: str = Field(min_length=1, max_length=80)
+    grounding: Literal["explicit", "reference", "omitted"]
+    referent_relation: Literal["same", "different", "uncertain"]
+
+
 class ClaimObjectGrounding(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     role: Literal["axis_label", "event_object"]
-    grounding: Literal["explicit", "unique_reference", "different", "uncertain"]
+    grounding: Literal["explicit", "unique_reference", "action_path", "different", "uncertain"]
     referent_relation: Literal["same", "different", "uncertain"] | None = None
     fact_quote: str | None = Field(max_length=80)
     antecedent_clause_id: str | None = Field(pattern=_SUPPORT_ID)
     antecedent_quote: str | None = Field(max_length=80)
+    object_steps: tuple[HabitObjectStep, ...] | None = Field(default=None, min_length=2, max_length=3)
+
+    @model_serializer(mode="wrap")
+    def serialize_grounding(self, handler):
+        data = handler(self)
+        if "object_steps" not in self.model_fields_set:
+            data.pop("object_steps", None)
+        return data
 
 
 class HabitActionStep(BaseModel):
@@ -2186,12 +2211,34 @@ _HABIT_CONTINUATION_FORM = re.compile(
     r"^(?:(?:却|又|并|还|仍|随即|随后|接着|然后){0,2})"
     r"(?:逐(?:一|项|件|个|条|页|批)|依次|故意|刻意|特意|亲手|顺手|随手|把|将)"
 )
+_HABIT_NEGATED_CONTINUATION = re.compile(
+    r"^(?P<negated>(?:(?:却|又|并|还|仍|随即|随后|接着|然后){0,2})"
+    r"(?:没有|未曾|尚未|未|没)(?P<omitted>[^，,。；;！？!?：:\n]{1,80}?))"
+    r"(?:就|便)(?P<action>[^，,。；;！？!?：:\n]{1,80})$"
+)
+
+
+def _habit_negated_continuation(text: str) -> re.Match[str] | None:
+    """An omitted preliminary action followed by a narrated action, not proof of either."""
+    match = _HABIT_NEGATED_CONTINUATION.fullmatch(text)
+    if match is None:
+        return None
+    for part in (match["omitted"], match["action"]):
+        if (part.startswith(_TARGET_ZERO_SUBJECT_OVERT_PRONOUNS)
+                or _OTHER_SUBJECT.match(part) or _TARGET_EXPLICIT_OTHER_ACTOR.match(part)
+                or _DELEGATE.match(part)):
+            return None
+    if re.match(r"^(?:并|还|仍)?(?:未|没|不|无法|不能|不曾)", match["action"]):
+        return None
+    return match
 
 
 def habit_action_path(
     lines: tuple[ScopeReviewLine, ...],
     target: TargetBoundDraftReviewTarget,
     proposal: TargetBoundDraftProposal,
+    *,
+    allow_object_chain: bool = False,
 ) -> tuple[ScopeReviewClause, ...]:
     """An eligible proposal is still only a question about one frozen path."""
     if not target.habit_contexts or proposal.line_start != proposal.line_end:
@@ -2229,7 +2276,7 @@ def habit_action_path(
                 tail.startswith(_TARGET_ZERO_SUBJECT_OVERT_PRONOUNS) or _OTHER_SUBJECT.match(tail)
             ):
                 return ()
-        elif _zero_subject_statement(current, target) is None:
+        elif not (allow_object_chain and _habit_negated_continuation(text)) and _zero_subject_statement(current, target) is None:
             return ()
     return path
 
@@ -2322,6 +2369,7 @@ def build_target_bound_draft_proposals(
     allow_named_speech: bool = False,
     primary_claim_review: bool = False,
     allow_habit_chain: bool = True,
+    allow_object_chain: bool = False,
 ) -> tuple[DraftActorClauseIndex, tuple[TargetBoundDraftProposal, ...]]:
     """Create bounded structural leads; this function never certifies semantics."""
 
@@ -2391,7 +2439,7 @@ def build_target_bound_draft_proposals(
                     actor_anchor_id=anchor.support_id, binding_kind="habit_action_chain",
                     target_digest=digest, canonical_statement=statement,
                 )
-                if not habit_action_path(index.lines, target, candidate):
+                if not habit_action_path(index.lines, target, candidate, allow_object_chain=allow_object_chain):
                     break
                 proposals.append(candidate)
             continue
@@ -2500,7 +2548,13 @@ def build_target_bound_draft_review_request(
     allow_named_speech: bool = False,
     primary_claim: PrimaryDraftClaim | None = None,
     allow_habit_chain: bool = True,
+    allow_object_chain: bool = False,
 ) -> TargetBoundDraftReviewRequest:
+    if allow_object_chain and (
+        not allow_habit_chain or protocol_version != "v4" or not target.habit_contexts
+        or primary_claim is None or not primary_claim.key_object
+    ):
+        raise ValueError("target_bound_object_chain_requires_claim")
     if (
         not isinstance(index, DraftActorClauseIndex)
         or not isinstance(target, TargetBoundDraftReviewTarget)
@@ -2519,6 +2573,7 @@ def build_target_bound_draft_review_request(
         allow_named_speech=allow_named_speech,
         primary_claim_review=primary_claim is not None,
         allow_habit_chain=allow_habit_chain,
+        allow_object_chain=allow_object_chain,
     )
     requested = {
         json.dumps(
@@ -2577,7 +2632,11 @@ def build_target_bound_draft_review_request(
         if primary_claim is None:
             prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V12
         else:
-            prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14 if primary_claim.key_object else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13
+            prompt_version = (
+                TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15 if allow_object_chain and primary_claim.key_object
+                else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14 if primary_claim.key_object
+                else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V13
+            )
     elif primary_claim is not None:
         prompt_version = TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11 if primary_claim.key_object else TARGET_BOUND_DRAFT_REVIEW_PROMPT_V10
     elif protocol_version == "v4":
@@ -2637,6 +2696,7 @@ def verify_target_bound_draft_review_source(
             line_end=line_end,
             primary_claim_review=expected_primary_claim is not None,
             allow_habit_chain=request.prompt_version in _HABIT_ACTION_PROMPTS,
+            allow_object_chain=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
             allow_named_speech=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
             protocol_version=(
                 "v4"
@@ -2664,6 +2724,7 @@ def verify_target_bound_draft_review_source(
             expected_source=expected_source,
             primary_claim=expected_primary_claim,
             allow_habit_chain=request.prompt_version in _HABIT_ACTION_PROMPTS,
+            allow_object_chain=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
             allow_named_speech=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V9,
             protocol_version=(
                 "v4"
@@ -2723,11 +2784,56 @@ def _competing_antecedent(text: str, quote: str) -> bool:
     return bool(re.match(conjunction, after) or re.search(conjunction + r"[^，。]{0,5}$", before))
 
 
+def _valid_habit_object_path(
+    request: TargetBoundDraftReviewRequest,
+    proposal: TargetBoundDraftReviewProposal,
+    obj: ClaimObjectGrounding,
+) -> bool:
+    if (request.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15
+            or proposal.binding_kind != "habit_action_chain"
+            or obj.role != "event_object" or obj.referent_relation != "same"):
+        return False
+    path = habit_action_path(request.lines, request.target, proposal, allow_object_chain=True)
+    steps = obj.object_steps or ()
+    if not path or len(steps) != len(path):
+        return False
+    if any(step.clause_id != clause.support_id or clause.text.count(step.quote) != 1
+           or step.referent_relation != "same" or _competing_antecedent(clause.text, step.quote)
+           for step, clause in zip(steps, path)):
+        return False
+    first, last = steps[0], steps[-1]
+    negated = _habit_negated_continuation(path[-1].text)
+    if (first.grounding != "explicit" or has_object_reference(first.quote)
+            or re.search(r"、|以及|或者|[和与]", first.quote)
+            or obj.antecedent_clause_id != first.clause_id or obj.antecedent_quote != first.quote
+            or last.grounding != "omitted" or not negated
+            or last.quote != negated["negated"] or obj.fact_quote != last.quote
+            or has_object_reference(last.quote)):
+        return False
+    # Each middle step must explicitly keep this noun or use a literal object
+    # reference. An unanchored omission cannot silently bridge a second gap.
+    for step in steps[1:-1]:
+        if not (step.grounding == "explicit" and step.quote == first.quote
+                or step.grounding == "reference" and _OBJECT_REFERENCE.fullmatch(step.quote)):
+            return False
+    raw = request.primary_claim.key_object
+    if not raw or raw not in first.quote:
+        # Reuse V14's conservative synonym boundary: a named object elsewhere
+        # cannot be replaced with another object or a missing qualifier.
+        if not raw or first.quote in raw or any(raw in clause.text for clause in path):
+            return False
+    return raw == first.quote or request.primary_claim.statement.count(raw) == 1
+
+
 def valid_primary_object_grounding(
     request: TargetBoundDraftReviewRequest,
     proposal: TargetBoundDraftReviewProposal,
     obj: ClaimObjectGrounding | None,
 ) -> bool:
+    if obj is not None and obj.grounding == "action_path":
+        return _valid_habit_object_path(request, proposal, obj)
+    if obj is not None and "object_steps" in obj.model_fields_set:
+        return False
     if (obj is None or obj.grounding not in {"explicit", "unique_reference"} or not obj.fact_quote
             or obj.referent_relation in {"different", "uncertain"}):
         return False
@@ -2737,7 +2843,7 @@ def valid_primary_object_grounding(
     if fact.text.count(obj.fact_quote) != 1:
         return False
     raw = request.primary_claim.key_object
-    habit = request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14
+    habit = request.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15}
     if habit and (obj.role != "event_object" or obj.referent_relation != "same"):
         return False
     if obj.role == "axis_label" and raw != request.target.key_object:
@@ -3112,7 +3218,8 @@ def evaluate_target_bound_draft_review(
     for proposal in request.proposals:
         item = returned[proposal.proposal_id]
         if proposal.binding_kind == "habit_action_chain":
-            path = habit_action_path(request.lines, request.target, proposal)
+            path = habit_action_path(request.lines, request.target, proposal,
+                                     allow_object_chain=request.prompt_version == TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15)
             steps = item.action_steps or ()
             checked = (
                 bool(path) and len(steps) == len(path)
@@ -3131,9 +3238,14 @@ def evaluate_target_bound_draft_review(
         elif "action_steps" in item.model_fields_set:
             return _uncertain_target_bound_review(request, "response_mismatch")
         claim_fields = {"claim_digest", "claim_relation"} & item.model_fields_set
-        object_review = request.prompt_version in {TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14}
+        object_review = request.prompt_version in {
+            TARGET_BOUND_DRAFT_REVIEW_PROMPT_V11, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V14, TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15,
+        }
         if (
             ("claim_object" in item.model_fields_set) != object_review
+            or item.claim_object is not None and request.prompt_version != TARGET_BOUND_DRAFT_REVIEW_PROMPT_V15 and (
+                item.claim_object.grounding == "action_path" or "object_steps" in item.claim_object.model_fields_set
+            )
             or request.primary_claim is None and claim_fields
             or request.primary_claim is not None and (
                 item.claim_digest != request.primary_claim.claim_digest or item.claim_relation is None

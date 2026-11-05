@@ -15,7 +15,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select, update
 
 from .config import (
     HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS,
-    HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, get_settings,
+    HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, get_settings,
 )
 from .account_provider import runtime_for_analysis_run
 from .character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
@@ -59,6 +59,7 @@ from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from .character_history_semantic_review import HISTORY_REVIEW_SYSTEM_PROMPT
 from .character_draft_actor_review import SCOPED_DRAFT_DIRECTION_GUIDE
 from .character_draft_actor_review_provider import (
+    HABIT_OBJECT_CHAIN_MAX_COMPLETION_TOKENS,
     DRAFT_ACTOR_REVIEW_SYSTEM_PROMPT,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V7,
@@ -69,6 +70,7 @@ from .character_draft_actor_review_provider import (
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15,
 )
 from .character_drift import (
     CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
@@ -757,10 +759,14 @@ class _CharacterConsistencyAccountingProvider:
         if habit_scene and not self.settings._character_habit_scene_scheduling_v1:
             raise ValueError("habit scene scheduling is disabled")
         review_provider = self._habit_scene_provider if habit_scene else self.signal_provider
-        reserve = min(
-            completion_reserve,
-            self.settings.character_draft_actor_review_completion_tokens,
-        )
+        reserve_cap = self.settings.character_draft_actor_review_completion_tokens
+        if (
+            self.settings.character_target_bound_draft_review_v3
+            and self.settings._character_habit_scene_scheduling_v1
+            and self.settings._character_habit_object_chain_v1
+        ):
+            reserve_cap = max(reserve_cap, HABIT_OBJECT_CHAIN_MAX_COMPLETION_TOKENS)
+        reserve = min(completion_reserve, reserve_cap)
         if isinstance(review_provider, OpenAICompatibleProvider):
             provider_settings = review_provider.settings
             package_cap = self.settings.character_signal_total_deadline_seconds
@@ -968,7 +974,23 @@ class _CharacterConsistencyAccountingProvider:
                 TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V13,
                 TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14,
             }
+        ) or (
+            system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15
+            and self.settings.character_target_bound_draft_review_v3
+            and self.settings._character_habit_scene_scheduling_v1
+            and self.settings._character_habit_object_chain_v1
         ):
+            completion_reserve = (
+                self.draft_actor_review_completion_reserve
+                or self.settings.character_draft_actor_review_completion_tokens
+            )
+            prompt_cap = (
+                HABIT_OBJECT_CHAIN_MAX_COMPLETION_TOKENS
+                if system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15
+                else self.settings.character_draft_actor_review_completion_tokens
+            )
+            if completion_reserve > prompt_cap:
+                raise RuntimeError("draft actor review completion reserve exceeds prompt limit")
             if self.draft_actor_review_provider is None:
                 bounded = self.fork_for_character_draft_actor_review(
                     timeout_seconds=(
@@ -988,10 +1010,6 @@ class _CharacterConsistencyAccountingProvider:
                 provider = bounded.draft_actor_review_provider
             else:
                 provider = self.draft_actor_review_provider
-            completion_reserve = (
-                self.draft_actor_review_completion_reserve
-                or self.settings.character_draft_actor_review_completion_tokens
-            )
         elif system == HABIT_SCOPE_SYSTEM_PROMPT and self.settings._character_habit_scope_review_v1:
             if self.settings.character_drift_max_completion_tokens > 512 or self.settings.character_drift_max_attempts != 1:
                 raise RuntimeError("habit scope review requires a bounded provider")
@@ -3173,6 +3191,9 @@ def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
     )
     stage._character_habit_scope_review_v1 = (
         stage._character_habit_scene_scheduling_v1 and coverage.get("habit_scope_policy") == HABIT_SCOPE_POLICY_V1
+    )
+    stage._character_habit_object_chain_v1 = (
+        stage._character_habit_scene_scheduling_v1 and coverage.get("habit_object_chain_policy") == HABIT_OBJECT_CHAIN_POLICY_V1
     )
     return stage
 

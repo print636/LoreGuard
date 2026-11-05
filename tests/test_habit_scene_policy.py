@@ -1,7 +1,7 @@
 """Only an opted-in author draft runs the longer scene checks."""
 import pytest
 
-from app.config import HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, Settings
+from app.config import HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, Settings
 from app.db import AnalysisRunRow
 from app.service import (
     CharacterConsistencyUsageAccumulator, _CharacterConsistencyAccountingProvider,
@@ -106,3 +106,110 @@ def test_habit_scope_call_requires_explicit_consent_exact_purpose_and_one_attemp
     bounded(stage).complete(HABIT_SCOPE_SYSTEM_PROMPT, "{}")
     assert len(sent) == usage.logical_calls == 1
     assert sent[0] == (HABIT_SCOPE_SYSTEM_PROMPT, "{}")
+
+
+@pytest.mark.parametrize(("changes", "enabled"), [
+    ({}, False),
+    ({"habit_object_chain_policy": HABIT_OBJECT_CHAIN_POLICY_V1}, True),
+    ({"habit_object_chain_policy": HABIT_OBJECT_CHAIN_POLICY_V1, "character_review_enabled": False}, False),
+    ({"habit_object_chain_policy": HABIT_OBJECT_CHAIN_POLICY_V1, "habit_scene_policy": None}, False),
+    ({"habit_object_chain_policy": "unknown"}, False),
+])
+def test_object_chain_requires_its_frozen_version_and_habit_authorization(changes, enabled):
+    base, stage = local_run(coverage_changes=changes)
+    assert stage._character_habit_object_chain_v1 is enabled
+    assert base._character_habit_object_chain_v1 is False
+    assert "_character_habit_object_chain_v1" not in stage.model_dump()
+
+
+def test_object_chain_exact_purpose_uses_existing_bounded_call_and_accounting():
+    from types import SimpleNamespace
+    from app.character_draft_actor_review import SCOPED_DRAFT_DIRECTION_GUIDE
+    from app.character_draft_actor_review_provider import TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15
+
+    sent = []
+    class RecordingProvider:
+        def complete(self, system, user):
+            sent.append((system, user))
+            return SimpleNamespace(text="{}", prompt_tokens=9, completion_tokens=2)
+
+    _, stage = local_run(coverage_changes={"habit_object_chain_policy": HABIT_OBJECT_CHAIN_POLICY_V1})
+    stage = stage.model_copy(update={
+        "character_target_bound_draft_review_v3": True, "character_signal_full_line_prompt_v2": True,
+    })
+    usage = CharacterConsistencyUsageAccumulator()
+    transport = RecordingProvider()
+
+    def bounded(config):
+        return _CharacterConsistencyAccountingProvider(
+            config, usage, signal_provider=transport, drift_provider=transport,
+        ).fork_for_character_draft_actor_review(**LIMITS)
+
+    legacy = stage.model_copy()
+    legacy._character_habit_object_chain_v1 = False
+    unauthorized = stage.model_copy()
+    unauthorized._character_habit_scene_scheduling_v1 = False
+    for config, prompt in (
+        (legacy, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15),
+        (unauthorized, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15),
+        (stage, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15 + "x"),
+        (stage, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15 + SCOPED_DRAFT_DIRECTION_GUIDE),
+    ):
+        with pytest.raises(RuntimeError, match="unsupported"):
+            bounded(config).complete(prompt, "{}")
+    assert not sent and usage.logical_calls == 0
+    call = bounded(stage)
+    assert call.draft_actor_review_completion_reserve == LIMITS["completion_reserve"]
+    call.complete(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15, "{}")
+    assert sent == [(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15, "{}")]
+    assert usage.logical_calls == usage.successful_calls == 1
+    assert usage.prompt_tokens == 9 and usage.completion_tokens == 2 and usage.charged_tokens >= 11
+
+
+def test_object_chain_larger_reserve_is_exclusive_and_honors_transport_caps():
+    from types import SimpleNamespace
+    from app.character_draft_actor_review_provider import (
+        HABIT_OBJECT_CHAIN_MAX_COMPLETION_TOKENS,
+        TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15,
+    )
+    from app.usage import estimate_issue_evidence_review_tokens
+
+    _, stage = local_run(coverage_changes={"habit_object_chain_policy": HABIT_OBJECT_CHAIN_POLICY_V1})
+    stage = stage.model_copy(update={
+        "character_target_bound_draft_review_v3": True, "character_signal_full_line_prompt_v2": True,
+        "character_draft_actor_review_completion_tokens": 2048,
+    })
+    limits = {**LIMITS, "completion_reserve": HABIT_OBJECT_CHAIN_MAX_COMPLETION_TOKENS}
+    legacy = stage.model_copy()
+    legacy._character_habit_object_chain_v1 = False
+    for config, expected_reserve, expected_transport in (
+        (stage, 4096, 4096), (legacy, 2048, 2048),
+        (stage.model_copy(update={"provider_max_completion_tokens": 1024}), 4096, 1024),
+    ):
+        bounded = _CharacterConsistencyAccountingProvider(
+            config, CharacterConsistencyUsageAccumulator(),
+        ).fork_for_habit_scene_review(**limits)
+        assert bounded.draft_actor_review_completion_reserve == expected_reserve
+        assert bounded.draft_actor_review_provider.settings.provider_max_completion_tokens == expected_transport
+        assert bounded.draft_actor_review_provider.settings.provider_max_attempts == 1
+
+    sent = []
+    class RecordingProvider:
+        def complete(self, system, user):
+            sent.append(system)
+            return SimpleNamespace(text="{}", prompt_tokens=9, completion_tokens=2)
+
+    transport = RecordingProvider()
+    usage = CharacterConsistencyUsageAccumulator()
+    bounded = _CharacterConsistencyAccountingProvider(
+        stage, usage, signal_provider=transport, drift_provider=transport,
+    ).fork_for_habit_scene_review(**limits)
+    with pytest.raises(RuntimeError, match="reserve exceeds prompt limit"):
+        bounded.complete(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14, "{}")
+    assert sent == [] and usage.logical_calls == 0
+    bounded.complete(TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15, "{}")
+    assert sent == [TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15]
+    assert usage.logical_calls == usage.successful_calls == 1
+    assert usage.charged_tokens == estimate_issue_evidence_review_tokens(
+        TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15, "{}", completion_reserve=4096,
+    )
