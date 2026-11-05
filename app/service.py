@@ -15,7 +15,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select, update
 
 from .config import (
     HABIT_SCENE_CALL_TIMEOUT_SECONDS, HABIT_SCENE_PACKAGE_DEADLINE_SECONDS,
-    CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, get_settings,
+    CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, get_settings,
 )
 from .account_provider import runtime_for_analysis_run
 from .character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
@@ -78,6 +78,7 @@ from .character_draft_actor_review_provider import (
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V14,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15,
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V16,
+    TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17,
 )
 from .character_drift import (
     CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
@@ -1005,6 +1006,14 @@ class _CharacterConsistencyAccountingProvider:
             and self.settings._character_habit_scene_scheduling_v1
             and self.settings._character_habit_object_chain_v1
             and self.settings._character_habit_action_selection_v1
+        ) or (
+            system == TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17
+            and self.settings.character_target_bound_draft_review_v3
+            and self.settings._character_habit_scene_scheduling_v1
+            and self.settings._character_habit_object_chain_v1
+            and self.settings._character_habit_action_selection_v1
+            and self.settings._character_claim_resolution_v1
+            and self.settings._character_selected_claim_resolution_v1
         ):
             completion_reserve = (
                 self.draft_actor_review_completion_reserve
@@ -1012,7 +1021,8 @@ class _CharacterConsistencyAccountingProvider:
             )
             prompt_cap = (
                 HABIT_OBJECT_CHAIN_MAX_COMPLETION_TOKENS
-                if system in {TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V16}
+                if system in {TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V15, TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V16,
+                              TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V17}
                 else self.settings.character_draft_actor_review_completion_tokens
             )
             if completion_reserve > prompt_cap:
@@ -3226,6 +3236,10 @@ def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
     )
     stage._character_habit_action_selection_v1 = (
         stage._character_habit_object_chain_v1 and coverage.get("habit_action_selection_policy") == HABIT_ACTION_SELECTION_POLICY_V1
+    )
+    stage._character_selected_claim_resolution_v1 = (
+        stage._character_claim_resolution_v1 and stage._character_habit_action_selection_v1
+        and coverage.get("selected_claim_resolution_policy") == SELECTED_CLAIM_RESOLUTION_POLICY_V1
     )
     return stage
 

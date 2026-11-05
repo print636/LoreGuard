@@ -683,6 +683,7 @@ _FORMAL_SEMANTIC_SCOPE_RECORD_ADAPTER = TypeAdapter(_RawFormalSignalWithSemantic
 
 
 class CharacterSignal(BaseModel):
+    selected_action_origin: dict | None = Field(default=None, exclude=True)
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str = Field(pattern=r"^cs_[a-f0-9]{32}$")
@@ -1564,6 +1565,7 @@ class CharacterSignalExtractionResult(BaseModel):
     material_resolved_claims: tuple[str, ...] = Field(default=(), exclude=True)
     claim_resolution_state: Any = Field(default=None, exclude=True)
     selection_only: bool = Field(default=False, exclude=True)
+    selected_action_certificates: tuple = Field(default=(), exclude=True)
     # For the candidate-lines verification pass only. None means unobserved.
     verification_primary_attempts: tuple[DraftSignalTraceAttemptV1, ...] | None = Field(
         default=None, exclude=True, max_length=2
@@ -2255,7 +2257,8 @@ class CharacterSignalExtractor:
         coverage_enabled = baseline_coverage_recovery and formal_scope_v5 and support_index is not None
         material_tracker = (
             DraftMaterialTracker(source_identity, frozen_content, chunk,
-                                 claim_resolution_enabled=self.settings._character_claim_resolution_v1)
+                                 claim_resolution_enabled=self.settings._character_claim_resolution_v1,
+                                 selected_claim_resolution_enabled=self.settings._character_selected_claim_resolution_v1)
             if chunk.source_kind == "draft" else None
         )
         result = self._extract_with_prompt(
@@ -2465,7 +2468,8 @@ class CharacterSignalExtractor:
         )
         material_tracker = (
             DraftMaterialTracker(source_identity, frozen_content, chunk,
-                                 claim_resolution_enabled=self.settings._character_claim_resolution_v1)
+                                 claim_resolution_enabled=self.settings._character_claim_resolution_v1,
+                                 selected_claim_resolution_enabled=self.settings._character_selected_claim_resolution_v1)
             if chunk.source_kind == "draft" else None
         )
         result = self._extract_with_prompt(
@@ -6091,7 +6095,7 @@ def _bind_target_bound_draft_certificate(
     else:
         observed_object = target.key_object
     evidence_start = proposal.line_start
-    selected_protocol = request.prompt_version == "character-target-bound-draft-review-prompt-v16"
+    selected_protocol = request.prompt_version in {"character-target-bound-draft-review-prompt-v16", "character-target-bound-draft-review-prompt-v17"}
     if expected_primary_claim is not None and expected_primary_claim.key_object or selected_protocol:
         grounded = decision.verified_object
         if selected_protocol:

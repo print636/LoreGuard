@@ -71,7 +71,8 @@ class ClaimResolutionManager:
     def capture_targeted(self, source, chunk, target, result) -> None:
         self.targeted.append((source, chunk, target, result))
 
-    def reconcile(self, *, baselines, provider, settings, budget, charge, checkpoint, admit, ledger, reasons) -> None:
+    def reconcile(self, *, baselines, provider, settings, budget, charge, checkpoint, admit, ledger, reasons,
+                  origin_admitted=None) -> None:
         from .character_trait_extraction import (
             CharacterSignalChunk, _target_bound_review_target, review_original_material_claim, stable_trait_identity,
         )
@@ -125,31 +126,57 @@ class ClaimResolutionManager:
                     if not any(signal.evidence.line_start <= gap.line_end and gap.line_start <= signal.evidence.line_end
                                for _, admitted in results for signal in admitted):
                         continue
+                    origin = None
+                    if not original.deferred.record.key_object:
+                        if not settings._character_selected_claim_resolution_v1 or origin_admitted is None:
+                            continue
+                        origins = [cert for result, admitted in results for cert in result.selected_action_certificates
+                                   if cert.signal.id in {s.id for s in admitted} and origin_admitted(cert.signal)
+                                   and cert.signal.evidence.line_start == gap.line_start
+                                   and cert.signal.evidence.line_end == gap.line_end]
+                        if not origins:
+                            reasons["selected_claim_origin_unavailable"] += 1
+                            continue
+                        # Literal correspondence can prioritize a question; it
+                        # cannot discharge the claim or replace the new review.
+                        statement = original.deferred.record.statement
+                        origins.sort(key=lambda cert: not any(p.proposal_id == cert.proposal_id and (
+                            p.canonical_statement == statement or any(c.support_id == p.fact_clause_id and c.text == statement
+                                for line in cert.request.lines for c in line.clauses)) for p in cert.request.proposals))
+                        origin = origins[0]
                     attempted_targets.add(row.candidate_id)
                     checkpoint()
                     available = budget()
                     if available < 256:
                         reasons["claim_resolution_token_budget"] += 1
                         continue
-                    review = review_original_material_claim(
+                    review_function = review_original_material_claim
+                    extra = {}
+                    if origin is not None:
+                        from .character_selected_claim_resolution import review_selected_original_claim
+                        review_function = review_selected_original_claim
+                        extra["origin"] = origin
+                    review = review_function(
                         original, chunk=CharacterSignalChunk(source.document.id, source.document.name, chunk.content,
                                                              chunk.global_line_start, "draft"),
                         source_identity=ScopeReviewSourceIdentity(
                             run_input_id=source.input_id, document_id=source.document.id,
                             document_version=source.document_version, content_sha256=source.content_sha256),
-                        frozen_content=source.document.content, provider=provider, settings=settings, token_budget=available,
+                        frozen_content=source.document.content, provider=provider, settings=settings, token_budget=available, **extra,
                     )
                     charge(review)
                     reasons["claim_resolution_attempted_calls"] += review.attempted_calls
                     reasons.update(dict(review.reason_counts))
                     checkpoint()
+                    if origin is not None and review.material_reasons:
+                        ledger.reason_scopes[(source.input_id, row.candidate_id, key)] = review.material_reasons[0][1]
                     admitted_ids = set()
                     for signal in review.signals:
                         if admit(signal, source, target):
                             admitted_ids.add(signal.id)
                     for proof in review.claim_certificates:
                         if proof["target_sha256"] == identity and proof["observation_id"] in admitted_ids:
-                            known[key] = (proof, "original_claim_recheck")
+                            known[key] = (proof, "selected_claim_recheck" if origin is not None else "original_claim_recheck")
                     if key not in known:
                         reasons["claim_resolution_unresolved"] += 1
                 scope_receipts = []

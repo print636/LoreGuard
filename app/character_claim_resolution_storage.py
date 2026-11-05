@@ -17,7 +17,12 @@ from .character_claim_resolution import (
     MAX_CLAIM_RESOLUTION_SCOPES, claim_resolution_target_sha256,
 )
 from .character_draft_actor_review import TargetBoundDraftReviewTarget
-from .config import CLAIM_RESOLUTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1
+from .character_observations import validate_selected_action_origin, CharacterObservationIntegrityError
+from .domain import EvidenceSpan
+from .config import (
+    CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1,
+    HABIT_OBJECT_CHAIN_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1,
+)
 from .db import (
     AnalysisRunCharacterTraitInputRow, AnalysisRunInputRow, AnalysisRunRow,
     CharacterObservationRow,
@@ -53,6 +58,13 @@ class _Receipt(_Binding):
     observation_statement_sha256: Digest
 
 
+class _SelectedReceipt(_Receipt):
+    method: Literal["selected_claim_recheck"]
+    origin_request_sha256: Digest
+    origin_observation_id: str = Field(pattern=r"^cs_[a-f0-9]{32}$")
+    fact_clause_id: str = Field(pattern=r"^L[1-9][0-9]{0,7}:A[1-9][0-9]{0,2}$")
+
+
 class _Scope(_Binding):
     chunk_line_start: int = Field(ge=1)
     chunk_line_end: int = Field(ge=1)
@@ -67,7 +79,7 @@ class _Scope(_Binding):
 class _Payload(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     schema_version: Literal["character-claim-resolution-v1"]
-    receipts: list[_Receipt] = Field(max_length=MAX_CLAIM_RESOLUTION_RECEIPTS)
+    receipts: list[Annotated[_Receipt | _SelectedReceipt, Field(discriminator="method")]] = Field(max_length=MAX_CLAIM_RESOLUTION_RECEIPTS)
     final_scopes: list[_Scope] = Field(max_length=MAX_CLAIM_RESOLUTION_SCOPES)
     omitted_count: Count
     payload_sha256: Digest
@@ -84,6 +96,46 @@ def _require(condition: bool) -> None:
 
 def _text_sha256(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
+
+
+def _validate_origin(db, *, run, item: _SelectedReceipt, source, baseline, final_value):
+    origin = db.get(CharacterObservationRow, (run.id, item.origin_observation_id))
+    _require(origin is not None and origin.source_run_input_id == source.id)
+    value = origin.payload
+    _require(isinstance(value, dict) and payload_sha256(value) == origin.payload_sha256)
+    stored_source = value.get("source")
+    _require(isinstance(stored_source, dict) and value.get("observation_id") == item.origin_observation_id
+        and stored_source.get("run_input_id") == source.id
+        and stored_source.get("document_id") == source.document_id
+        and stored_source.get("content_sha256") == source.content_sha256)
+    try:
+        evidence = EvidenceSpan.model_validate(value.get("evidence"))
+        target = TargetBoundDraftReviewTarget.model_validate_json(json.dumps(value.get("target_bound_target")))
+    except ValidationError:
+        raise ClaimResolutionIntegrityError("character claim resolution origin invalid") from None
+    lines = source.content.splitlines()
+    _require(
+        evidence.document_id == source.document_id and evidence.document_name == source.document_name
+        and 1 <= evidence.line_start <= evidence.line_end <= len(lines)
+        and bool(evidence.text.strip()) and evidence.text in "\n".join(lines[evidence.line_start - 1:evidence.line_end])
+        and claim_resolution_target_sha256(target) == item.target_sha256
+        and isinstance(value.get("matches"), list)
+    )
+    _require(any(isinstance(match, dict) and isinstance(match.get("baseline"), dict)
+        and match["baseline"].get("input_id") == baseline.id
+        and match["baseline"].get("candidate_id") == baseline.candidate_id
+        and match["baseline"].get("payload_sha256") == baseline.payload_sha256
+        for match in value["matches"]))
+    try:
+        proof = validate_selected_action_origin(value.get("selected_action_origin"), source=source,
+            target=target, evidence=evidence, observation_id=item.origin_observation_id,
+            statement=value.get("statement"), key_object=value.get("key_object"))
+        validate_selected_action_origin(proof, source=source, target=target,
+            evidence=EvidenceSpan.model_validate(final_value["evidence"]), observation_id=item.observation_id,
+            statement=final_value.get("statement"), key_object=final_value.get("key_object"))
+    except CharacterObservationIntegrityError:
+        raise ClaimResolutionIntegrityError("character claim resolution origin invalid") from None
+    _require(proof.request_sha256 == item.origin_request_sha256 and proof.fact_clause_id == item.fact_clause_id)
 
 
 def validate_claim_resolution_payload(db, *, run: AnalysisRunRow, payload: object) -> dict | None:
@@ -163,6 +215,12 @@ def validate_claim_resolution_payload(db, *, run: AnalysisRunRow, payload: objec
             and match["baseline"].get("payload_sha256") == baseline.payload_sha256
             for match in value.get("matches", ())
         ))
+        if isinstance(item, _SelectedReceipt):
+            _require(
+                coverage.get("habit_action_selection_policy") == HABIT_ACTION_SELECTION_POLICY_V1
+                and coverage.get("selected_claim_resolution_policy") == SELECTED_CLAIM_RESOLUTION_POLICY_V1
+            )
+            _validate_origin(db, run=run, item=item, source=source, baseline=baseline, final_value=value)
         receipts[item.id] = item
 
     seen_scopes = set()

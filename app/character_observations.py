@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 from collections.abc import Sequence
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
@@ -23,7 +24,15 @@ from .db import (
     CharacterObservationRow,
 )
 from .domain import EvidenceSpan
-from .character_draft_actor_review import TargetBoundDraftReviewTarget
+from .character_draft_actor_review import (
+    TargetBoundDraftReviewTarget, TargetBoundDraftProposal, build_draft_actor_clause_index,
+    _exact_actor_occurrences, _target_bound_proposal_id, target_bound_draft_target_digest,
+)
+from .character_scope_review import ScopeReviewSourceIdentity
+from .config import (
+    CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1,
+    HABIT_OBJECT_CHAIN_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1,
+)
 from .time_utils import utc_now_naive
 
 
@@ -72,6 +81,17 @@ class ObservationRecordingCoverage(BaseModel):
         return self.baseline_not_evaluated_count + sum(self.excluded_baseline_counts.values())
 
 
+class SelectedActionOrigin(BaseModel):
+    """Private provenance from an actually admitted V16 review."""
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    request_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    proposal_id: str = Field(pattern=r"^tdp_[a-f0-9]{32}$")
+    selection_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    fact_clause_id: str = Field(pattern=r"^L[1-9][0-9]{0,7}:A[1-9][0-9]{0,2}$")
+    path_ids: list[Annotated[str, Field(pattern=r"^L[1-9][0-9]{0,7}:A[1-9][0-9]{0,2}$")]] = Field(min_length=1, max_length=3)
+    window_ids: list[Annotated[str, Field(pattern=r"^L[1-9][0-9]{0,7}:A[1-9][0-9]{0,2}$")]] = Field(min_length=1, max_length=3)
+
+
 class ValidatedCharacterObservation(BaseModel):
     """Explicit allowlist supplied only after the existing admission checks."""
 
@@ -94,12 +114,52 @@ class ValidatedCharacterObservation(BaseModel):
     target_bound_target: TargetBoundDraftReviewTarget | None = None
     target_bound_target_ordinal: int | None = Field(default=None, ge=1, le=12)
     target_bound_object_basis_id: str | None = Field(default=None, pattern=r"^L[1-9][0-9]{0,7}:A[1-9][0-9]{0,2}$")
+    selected_action_origin: SelectedActionOrigin | None = None
     evidence: EvidenceSpan
     matches: tuple[ObservationMatchDecision, ...] = Field(min_length=1, max_length=MAX_TRACKED_BASELINES)
 
 
 class CharacterObservationIntegrityError(ValueError):
     """A fixed message only: do not interpolate private payloads or exceptions."""
+
+
+def validate_selected_action_origin(origin, *, source, target, evidence, observation_id, statement, key_object):
+    """Rebuild reference structure from frozen text, without deciding semantics."""
+    from .character_action_selection import _contiguous_window
+    from .character_trait_extraction import _target_bound_signal_id
+
+    try:
+        proof = SelectedActionOrigin.model_validate(origin)
+        if target is None or evidence.line_start != evidence.line_end:
+            raise ValueError("selected origin binding")
+        identity = ScopeReviewSourceIdentity(run_input_id=source.id, document_id=source.document_id,
+            document_version=source.document_version, content_sha256=source.content_sha256)
+        index = build_draft_actor_clause_index(source.content, identity,
+            line_start=evidence.line_start, line_end=evidence.line_end)
+        window = tuple(index.resolve(value) for value in proof.window_ids)
+        if (any(value is None for value in window) or len(set(proof.window_ids)) != len(window)
+                or not _contiguous_window(window, index.lines[0].text)
+                or proof.fact_clause_id != proof.path_ids[-1]):
+            raise ValueError("selected origin window")
+        first, last = proof.window_ids.index(proof.path_ids[0]), proof.window_ids.index(proof.path_ids[-1])
+        if proof.window_ids[first:last + 1] != proof.path_ids or not _exact_actor_occurrences(window[first].text, target):
+            raise ValueError("selected origin path")
+        fact = index.resolve(proof.fact_clause_id)
+        canonical_statement = fact.text if _exact_actor_occurrences(fact.text, target) else target.character + fact.text
+        proposal = TargetBoundDraftProposal(
+            source_sha256=source.content_sha256, line_start=evidence.line_start, line_end=evidence.line_end,
+            evidence=index.lines[0].text, fact_clause_id=proof.fact_clause_id,
+            actor_anchor_id=proof.path_ids[0], path_ids=tuple(proof.path_ids), binding_kind="selected_action_path",
+            target_digest=target_bound_draft_target_digest(target), canonical_statement=canonical_statement,
+        )
+        if (_target_bound_proposal_id(proposal) != proof.proposal_id or statement != canonical_statement
+                or not isinstance(key_object, str) or not key_object.strip()
+                or _target_bound_signal_id(chunk=SimpleNamespace(document_id=source.document_id),
+                    target=target, proposal=proposal, habit_event_object=key_object) != observation_id):
+            raise ValueError("selected origin proposal")
+        return proof
+    except (ValueError, TypeError, AttributeError, IndexError):
+        raise CharacterObservationIntegrityError("character observation selected origin invalid") from None
 
 
 def _hash(value: object) -> str:
@@ -182,7 +242,21 @@ class CharacterObservationRecorder:
                 seen_baselines.add(decision.baseline_input_id)
                 decisions.append({"status": decision.status, "reason_code": decision.reason_code, "match_method": decision.match_method, "identity_match": decision.identity_match, "baseline": _baseline(baseline) if baseline is not None else None})
             decisions.sort(key=lambda item: (item["baseline"]["input_id"] if item["baseline"] else "", item["reason_code"]))
-            payload = observation.model_dump(mode="json", exclude={"source_run_input_id", "matches"})
+            payload = observation.model_dump(mode="json", exclude={"source_run_input_id", "matches", "selected_action_origin"})
+            if observation.selected_action_origin is not None:
+                run = _run(db, run_id, project_id)
+                coverage = run.batch_coverage if isinstance(run.batch_coverage, dict) else {}
+                if (run.batch_mode != "draft_review" or coverage.get("character_review_enabled") is not True
+                        or coverage.get("habit_object_chain_policy") != HABIT_OBJECT_CHAIN_POLICY_V1
+                        or coverage.get("claim_resolution_policy") != CLAIM_RESOLUTION_POLICY_V1
+                        or coverage.get("habit_action_selection_policy") != HABIT_ACTION_SELECTION_POLICY_V1
+                        or coverage.get("selected_claim_resolution_policy") != SELECTED_CLAIM_RESOLUTION_POLICY_V1):
+                    raise CharacterObservationIntegrityError("character observation selected origin unauthorized")
+                validate_selected_action_origin(observation.selected_action_origin, source=source,
+                    target=observation.target_bound_target, evidence=evidence,
+                    observation_id=observation.observation_id, statement=observation.statement,
+                    key_object=observation.key_object)
+                payload["selected_action_origin"] = observation.selected_action_origin.model_dump(mode="json")
             payload.update(source=_source(source), matches=decisions)
             digest = _hash(payload)
             previous = pending.get(observation.observation_id)
@@ -258,7 +332,8 @@ def project_character_observations(db: Session, run: AnalysisRunRow, *, offset: 
                 decisions.append({**decision, "baseline": {**reference, "payload": baseline.payload}})
             else:
                 decisions.append(decision)
-        items.append({**row.payload, "ordinal": row.ordinal, "matches": decisions})
+        public_payload = {key: value for key, value in row.payload.items() if key != "selected_action_origin"}
+        items.append({**public_payload, "ordinal": row.ordinal, "matches": decisions})
     if header is None:
         status = "legacy_unavailable"
         if run.batch_mode == "baseline_build":

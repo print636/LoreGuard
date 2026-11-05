@@ -28,6 +28,7 @@
 - [角色一致性](character-consistency-v1.md)：作者确认的角色基线及实验性审查。
 - [原主张复核](character-claim-resolution-v1.md)：如何对应先前未决材料与后续核实结果，恢复有完整依据的目标覆盖。
 - [原文行为选择](character-action-selection-v1.md)：在固定窗口内让模型选择行为与承接路径，再独立核实来源和含义。
+- [原记录与新路径关联](selected-claim-resolution-v1.md)：独立核实原抽取记录能否对应已接纳的行为，再解除有依据的旧疑点。
 - [工具调用调查实验](evidence-investigator-live-evaluation.md)：获授权证据范围、候选与真实失败边界。
 - [长篇扩展路线](scalability-roadmap.md)：未来方向，不代表当前已完成能力。
 

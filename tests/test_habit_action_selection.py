@@ -231,7 +231,7 @@ def test_old_authorization_keeps_the_old_targeted_call_without_a_selector():
 def test_native_authorized_stage_service_persists_selected_observation():
     """Frozen author choice + native orchestration; the model responses are a fixture."""
     from fastapi.testclient import TestClient
-    from sqlalchemy import select
+    from sqlalchemy import func, select
     from app.character_consistency_stage import CharacterConsistencyStage
     from app.character_drift import CHARACTER_HABIT_CONTEXT_REVIEW_SYSTEM_PROMPT, CHARACTER_REVIEW_POLICY_VERSION
     from app.config import HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1
@@ -292,7 +292,9 @@ def test_native_authorized_stage_service_persists_selected_observation():
         with SessionLocal() as db:
             run = db.get(AnalysisRunRow, run_id)
             owner = run.requested_by_user_id
-            config = AccountProviderConfigRow(user_id=owner, revision=1, base_url="https://selection.invalid/v1",
+            revision = (db.scalar(select(func.max(AccountProviderConfigRow.revision)).where(
+                AccountProviderConfigRow.user_id == owner)) or 0) + 1
+            config = AccountProviderConfigRow(user_id=owner, revision=revision, base_url="https://selection.invalid/v1",
                 model_name="fixture", endpoint_sha256="a" * 64, state="usable")
             db.add(config)
             db.flush()

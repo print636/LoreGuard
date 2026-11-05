@@ -132,7 +132,7 @@ def _exercise_author_review(client):
     import httpx
     from app import service
     from app.main import write_limiter
-    from app.config import CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1
+    from app.config import CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1
     from app.db import AnalysisRunRow, SessionLocal
     from app.character_drift import CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT
     from app.character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
@@ -242,6 +242,9 @@ def _exercise_author_review(client):
                 {"_character_habit_action_selection_v1": True},
                 {"habit_action_selection_policy": HABIT_ACTION_SELECTION_POLICY_V1},
                 {"batch_coverage": {"habit_action_selection_policy": HABIT_ACTION_SELECTION_POLICY_V1}},
+                {"_character_selected_claim_resolution_v1": True},
+                {"selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V1},
+                {"batch_coverage": {"selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V1}},
             ):
                 assert client.post(runs_url, json={**chosen, **override}).status_code == 422
         assert len(calls) == before_private_override
@@ -280,6 +283,8 @@ def _exercise_author_review(client):
         assert all(frozen_scene_policy(run, "claim_resolution_policy") is None for run in (default, ordinary, created))
         assert frozen_scene_policy(reviewed, "habit_action_selection_policy") == HABIT_ACTION_SELECTION_POLICY_V1
         assert all(frozen_scene_policy(run, "habit_action_selection_policy") is None for run in (default, ordinary, created))
+        assert frozen_scene_policy(reviewed, "selected_claim_resolution_policy") == SELECTED_CLAIM_RESOLUTION_POLICY_V1
+        assert all(frozen_scene_policy(run, "selected_claim_resolution_policy") is None for run in (default, ordinary, created))
         assert reviewed["review_batch"]["character_baseline_run_id"] == baseline_id
         assert calls.count(CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT) == 1
         run_url = "/api/v1/analysis-runs/" + reviewed["id"]
@@ -317,8 +322,9 @@ def _exercise_author_review(client):
                 assert failed_run.batch_coverage.get("habit_object_chain_policy") == (HABIT_OBJECT_CHAIN_POLICY_V1 if enabled else None)
                 assert failed_run.batch_coverage.get("claim_resolution_policy") == (CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
                 assert failed_run.batch_coverage.get("habit_action_selection_policy") == (HABIT_ACTION_SELECTION_POLICY_V1 if enabled else None)
+                assert failed_run.batch_coverage.get("selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
                 # Replay a genuine older snapshot shape after the application has upgraded.
-                failed_run.batch_coverage = {key: value for key, value in failed_run.batch_coverage.items() if key not in {"habit_object_chain_policy", "claim_resolution_policy", "habit_action_selection_policy"}}
+                failed_run.batch_coverage = {key: value for key, value in failed_run.batch_coverage.items() if key not in {"habit_object_chain_policy", "claim_resolution_policy", "habit_action_selection_policy", "selected_claim_resolution_policy"}}
                 db.commit()
             calls.clear()
             retry = client.post("/api/v1/analysis-runs/" + failed.json()["detail"]["run_id"] + "/retry")
@@ -328,6 +334,7 @@ def _exercise_author_review(client):
             assert frozen_scene_policy(retry.json(), "habit_object_chain_policy") is None
             assert frozen_scene_policy(retry.json(), "claim_resolution_policy") is None
             assert frozen_scene_policy(retry.json(), "habit_action_selection_policy") is None
+            assert frozen_scene_policy(retry.json(), "selected_claim_resolution_policy") is None
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
         # A new draft version requires a fresh choice, even after a paid review.
         _document(client, project, name="draft.md", role="chapter", publication="draft",
@@ -346,6 +353,7 @@ def _exercise_author_review(client):
             assert frozen_scene_policy(recheck.json(), "habit_object_chain_policy") == (HABIT_OBJECT_CHAIN_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "claim_resolution_policy") == (CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "habit_action_selection_policy") == (HABIT_ACTION_SELECTION_POLICY_V1 if enabled else None)
+            assert frozen_scene_policy(recheck.json(), "selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
             assert (CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT in calls) is enabled
         repeated = client.post(recheck_url, headers={"Idempotency-Key": "deep-recheck"})
         assert repeated.status_code == 409, repeated.text

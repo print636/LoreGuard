@@ -301,6 +301,7 @@ def extract_selected_actions(chunk, target, *, target_ordinal, source_identity, 
     counts = Counter()
     usage = dict(attempted_calls=0, prompt_tokens=0, completion_tokens=0, charged_tokens=0)
     signals = {}
+    selected_certificates = []
     raw_count = rejected = 0
     unresolved = False
     window = None
@@ -317,7 +318,7 @@ def extract_selected_actions(chunk, target, *, target_ordinal, source_identity, 
                     text_sha256=hashlib.sha256(frozen_content.splitlines()[number - 1].encode("utf-8")).hexdigest())
             gap = (DraftMaterialGap(reason="record_unverified" if unresolved else "processing_incomplete", **location),)
         return CharacterSignalExtractionResult(signals=tuple(signals.values()), draft_observations=tuple(signals.values()),
-            selection_only=True, material_gaps=gap, diagnostics=CharacterSignalDiagnostics(
+            selection_only=True, material_gaps=gap, selected_action_certificates=tuple(selected_certificates), diagnostics=CharacterSignalDiagnostics(
                 outcome="partial" if failure or unresolved else "completed", raw_records=raw_count,
                 accepted_records=len(signals), rejected_records=rejected, reason_counts=dict(counts), **usage))
 
@@ -386,6 +387,10 @@ def extract_selected_actions(chunk, target, *, target_ordinal, source_identity, 
                 try:
                     signal = _bind_target_bound_draft_certificate(request=request, proposal=proposal, decision=decision,
                         target=target, chunk=chunk, source_identity=source_identity, frozen_content=frozen_content)
+                    if settings._character_selected_claim_resolution_v1:
+                        from .character_selected_claim_resolution import SelectedActionCertificate, selected_origin_payload
+                        signal = signal.model_copy(update={"selected_action_origin": selected_origin_payload(request, proposal)})
+                        selected_certificates.append(SelectedActionCertificate(request, proposal.proposal_id, signal))
                     signals.setdefault(signal.id, signal)
                 except (TypeError, ValueError, UnicodeError):
                     unresolved = True

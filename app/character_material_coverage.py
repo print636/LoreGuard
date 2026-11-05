@@ -56,6 +56,7 @@ class DraftMaterialTracker:
     captured: bool = False
     pending_response: bool = False
     claim_resolution_enabled: bool = False
+    selected_claim_resolution_enabled: bool = False
     claim_state: ClaimPackageState = field(default_factory=ClaimPackageState)
     final_review_reasons: dict[int, MaterialReason] = field(default_factory=dict)
 
@@ -146,7 +147,7 @@ class DraftMaterialTracker:
             )
             for deferred in validation.target_bound_draft_deferred:
                 key = keys.get(deferred.record_index)
-                if (key is None or not deferred.claim_review or not deferred.object_review
+                if (key is None or not deferred.claim_review or not (deferred.object_review or self.selected_claim_resolution_enabled)
                         or deferred.target.dimension != "contextual_behavior" or not deferred.target.habit_contexts):
                     continue
                 # The target model is already frozen on the generated proposal;
@@ -208,6 +209,7 @@ class MaterialGapLedger:
     omitted_count: int = 0
     scoped_resolution: bool = False
     resolved_scopes: set[tuple[str, str, str]] = field(default_factory=set)
+    reason_scopes: dict[tuple[str, str, str], str] = field(default_factory=dict)
 
     def add(self, result, source, phase: MaterialPhase, target_key=None) -> None:
         if not self.scoped_resolution:
@@ -252,6 +254,9 @@ class MaterialGapLedger:
                     continue
                 seen_claims.add(claim_key)
             data = {k: v for k, v in entry.items() if k not in {"claim_digest", "target_key"}}
+            scoped_reason = self.reason_scopes.get((entry["source_input_id"], candidate_id, entry.get("claim_digest")))
+            if scoped_reason is not None:
+                data["reason"] = scoped_reason
             located = "line_start" in data and "text_sha256" in data
             data["location"] = "located" if located else "unknown"
             data["relation"] = "unknown"

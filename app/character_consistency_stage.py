@@ -547,6 +547,7 @@ class _ObservationJournal:
                 statement=signal.statement, polarity=signal.polarity,
                 stability=signal.stability, observation_kind=signal.observation_kind,
                 context=signal.context, evidence=signal.evidence,
+                **({"selected_action_origin": signal.selected_action_origin} if signal.selected_action_origin is not None else {}),
                 target_bound_target_digest=signal.target_bound_target_digest,
                 target_bound_target=(
                     signal.target_bound_target
@@ -2037,6 +2038,7 @@ class CharacterConsistencyStage:
                 budget=lambda: max(0, stage_budget - usage.charged_tokens - targeted_reviewer_reserve_tokens),
                 charge=usage.add, checkpoint=self.checkpoint, admit=admit_resolved_claim,
                 ledger=material_ledger, reasons=reason_counts,
+                origin_admitted=lambda signal: all_signals.get(signal.id) == signal,
             )
         signals = tuple(all_signals.values())
         # Count final server-deduplicated signals, not per-chunk clean model
