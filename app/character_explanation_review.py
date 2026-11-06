@@ -34,11 +34,16 @@ from .config import Settings, get_settings
 from .domain import EvidenceSpan
 from .provider import OpenAICompatibleProvider, ProviderError
 from .usage import estimate_issue_evidence_review_tokens
+from .character_explanation_assertions import (
+    ExplanationAssertionLink, assertion_index, make_assertion_binding, payload_sha256,
+)
 
 
 EXPLANATION_REVIEW_SCHEMA_V1 = "character-explanation-review-v1"
 EXPLANATION_REVIEW_SCHEMA_V2 = "character-explanation-review-v2"
 EXPLANATION_REVIEW_PROMPT_V2 = "character-explanation-review-prompt-v2"
+EXPLANATION_REVIEW_SCHEMA_V3 = "character-explanation-review-v3"
+EXPLANATION_REVIEW_PROMPT_V3 = "character-explanation-review-prompt-v3"
 EXPLANATION_REVIEW_USER_PREFIX = "请逐条复核以下服务端冻结候选 JSON：\n"
 MAX_EXPLANATION_CANDIDATES_PER_BATCH = 4
 MAX_EXPLANATION_CANDIDATES_PER_RUN = 64
@@ -65,6 +70,7 @@ ReviewFailure = Literal[
     "provider_error",
     "response_too_large",
     "response_invalid",
+    "source_index_truncated",
 ]
 ContractFailure = Literal[
     "json_invalid",
@@ -127,7 +133,7 @@ class ExplanationCandidate(BaseModel):
     resolution_state: Literal["confirmed"]
     source_ordinal: int = Field(ge=0, le=10_000_000)
     eligible_draft_document_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
-    promotion_cap: Literal["definitive", "possible_only"] = "definitive"
+    promotion_cap: Literal["definitive", "possible_only", "assertion_bound"] = "definitive"
     evidence: EvidenceSpan
 
     @model_validator(mode="after")
@@ -271,6 +277,21 @@ class ExplanationReviewResponse(BaseModel):
         return self
 
 
+class ExplanationReviewItemV3(ExplanationReviewItem):
+    assertion_links: tuple[ExplanationAssertionLink, ...] = Field(max_length=MAX_EXPLANATION_OBSERVATIONS)
+
+    @model_validator(mode="after")
+    def validate_assertion_links(self):
+        citations = tuple(row.observation_citation for row in self.assertion_links)
+        if len(citations) != len(set(citations)) or set(citations) != set(self.applicable_observation_citations):
+            raise ValueError("assertion links must bind each applicable observation exactly once")
+        return self
+
+
+class ExplanationReviewResponseV3(ExplanationReviewResponse):
+    items: tuple[ExplanationReviewItemV3, ...] = Field(min_length=1, max_length=MAX_EXPLANATION_CANDIDATES_PER_BATCH)
+
+
 class ExplanationReviewDiagnostics(BaseModel):
     """Content-free diagnostics safe to persist or expose to callers."""
 
@@ -292,6 +313,7 @@ class ExplanationReviewDiagnostics(BaseModel):
     contract_regeneration_attempted_calls: int = Field(default=0, ge=0)
     contract_regeneration_recovered_batches: int = Field(default=0, ge=0)
     citation_order_normalized_batches: int = Field(default=0, ge=0)
+    unresolved_assertion_candidates: int = Field(default=0, ge=0, exclude=True)
 
     @property
     def usage(self) -> dict[str, int]:
@@ -306,7 +328,10 @@ class ExplanationReviewDiagnostics(BaseModel):
     def safe_dict(self) -> dict[str, object]:
         """Return only bounded counters/reasons; model text is never retained."""
 
-        return self.model_dump(mode="json")
+        result = self.model_dump(mode="json")
+        if self.unresolved_assertion_candidates:
+            result["unresolved_assertion_candidates"] = self.unresolved_assertion_candidates
+        return result
 
 
 class ExplanationReviewResult(BaseModel):
@@ -340,11 +365,33 @@ citation 只能逐字回显本批给出的 E 编号。表面词语相似不等�
 若用户 JSON 含 validation_retry，它是服务端在上一份回答未通过结构或引用合同时生成的内容无关重试指令；只能按其中 failure_code、expected_schema_version、expected_request_digest 与 expected_candidate_citations 修正 JSON 合同，不得猜测、复述或请求上一份回答。重生回答仍必须使用上面的完整三键顶层骨架。"""
 
 
+
+EXPLANATION_REVIEW_SYSTEM_PROMPT_V3 = EXPLANATION_REVIEW_SYSTEM_PROMPT.replace(
+    EXPLANATION_REVIEW_PROMPT_V2, EXPLANATION_REVIEW_PROMPT_V3
+).replace(EXPLANATION_REVIEW_SCHEMA_V2, EXPLANATION_REVIEW_SCHEMA_V3).replace(
+    "- promotion_cap=possible_only 表示候选与当前 C 位于同一物理行；仍需审查额外断言是否相关，但 C 本身、当前行为的目的或同一行文字不是独立解释，服务端最多保留为 P，绝不能形成 G/X；",
+    "- promotion_cap=assertion_bound 表示E与C共享原文范围，只有各自独立的有源断言和有效因果关系才可能形成G/X；同物理行本身不限制解释强度。possible_only仍最多为P；"
+).replace(
+    '"applicable_observation_citations":[]}', '"applicable_observation_citations":[],"assertion_links":[]}'
+).replace(
+    "causal_relation、applicable_observation_citations，不得输出", "causal_relation、applicable_observation_citations、assertion_links，不得输出"
+) + """
+V3额外合同：每个item还必须包含assertion_links数组，且与applicable_observation_citations逐项一一对应；无适用C则为空。每项形如
+{"observation_citation":"C01","independence":"independent_fact","explanation":{"assertion_id":"A1","quote":"E原文中的完整解释断言"},"observation":{"assertion_id":"A2","quote":"C原文中的实际行为断言"}}
+independence只能为independent_fact|current_behavior|purpose_only|unverified_claim|unclear。无法定位可将explanation/observation设null，但independent_fact必须两者有源。
+candidates和observations的assertion_index给出稳定句段ID/全文offset，所有evidence.text仍完整可读。句号/分号只是导航；同一句中原因和行为可选不同的完整语义短片段，勿要求标点隔开、每段重复主语或逐字重复target。quote必须逐字出自对应A段且在该段唯一，不可剪掉否定、条件或转述来制造事实。不要把两个字符区间分开本身当作独立事实证明。
+independent_fact须是实际独立的原因、限制、变化或状态，并确实解释当前目标下的行为；当前行为自身用current_behavior，仅行为目的用purpose_only，无正文事实性支持的自辩或传闻用unverified_claim，不明用unclear。角色陈述也可能获得叙述事实支持，不能一概当假；须看完整上下文。否定的原因、他人原因、作用对象不符不能成为适用解释，actor/axis/actuality槽须反映该事实；axis_relation=same同时要求对本目标实际作用对象或具体条件适用。
+解释必须说明为何该表现与当前已确认设定可以并存或具有有据的变化，不能只说明动作动机。另一片段若仅重复当前偏离、直接声称与目标相反的倾向，仍用current_behavior，不能作为G/X自证；即使它能解释后续动作也不等于解释了与稳定设定的冲突。确有独立变化事实则依完整来源与既有成长规则复核，不能凭当事人自称完成变化。
+explicit_causal表示完整正文确立了该原因/限制与当前行为的直接解释关系，不要求出现‘因为/所以’等词。相邻原因与实际行为可由上下文建立清楚关系；仅猜测或弱相关仍bounded_inference/ambiguous，最多P。未来事件不得倒填原因，事后叙述只有明确回溯当时状态才适用。保留既有来源权威及G/X/P规则，不把本段自称成长当已成立的长期成长。
+"""
+
+
 def build_character_explanation_review_prompts(
     candidates: Sequence[ExplanationCandidate],
     *,
     baseline: ExplanationBaselineSummary,
     observations: Sequence[ExplanationObservationSummary],
+    assertion_policy: bool = False,
 ) -> tuple[str, str]:
     """Build one bounded prompt for at most four already-frozen candidates."""
 
@@ -364,9 +411,9 @@ def build_character_explanation_review_prompts(
         ):
             raise ValueError("explanation observation key_object does not match baseline")
     payload = _build_request_payload(
-        batch, baseline=frozen_baseline, observations=current
+        batch, baseline=frozen_baseline, observations=current, assertion_policy=assertion_policy
     )
-    return EXPLANATION_REVIEW_SYSTEM_PROMPT, (
+    return (EXPLANATION_REVIEW_SYSTEM_PROMPT_V3 if assertion_policy else EXPLANATION_REVIEW_SYSTEM_PROMPT), (
         EXPLANATION_REVIEW_USER_PREFIX
         + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
@@ -377,14 +424,23 @@ def _build_request_payload(
     *,
     baseline: ExplanationBaselineSummary,
     observations: Sequence[ExplanationObservationSummary],
+    assertion_policy: bool = False,
 ) -> dict[str, object]:
     """Build the exact model-visible frozen request and bind it to a digest."""
 
+    if not assertion_policy and any(row.promotion_cap == "assertion_bound" for row in candidates):
+        raise ValueError("assertion candidates require frozen policy")
+    def row_payload(row):
+        value = row.model_dump(mode="json")
+        if assertion_policy:
+            value["assertion_index"] = assertion_index(row.evidence)
+        return value
+    schema = EXPLANATION_REVIEW_SCHEMA_V3 if assertion_policy else EXPLANATION_REVIEW_SCHEMA_V2
     frozen = {
-        "schema_version": EXPLANATION_REVIEW_SCHEMA_V2,
+        "schema_version": schema,
         "baseline": baseline.model_dump(mode="json"),
-        "observations": [row.model_dump(mode="json") for row in observations],
-        "candidates": [row.model_dump(mode="json") for row in candidates],
+        "observations": [row_payload(row) for row in observations],
+        "candidates": [row_payload(row) for row in candidates],
     }
     encoded = json.dumps(
         frozen,
@@ -394,7 +450,7 @@ def _build_request_payload(
         allow_nan=False,
     ).encode("utf-8")
     return {
-        "schema_version": EXPLANATION_REVIEW_SCHEMA_V2,
+        "schema_version": schema,
         "request_digest": hashlib.sha256(encoded).hexdigest(),
         "baseline": frozen["baseline"],
         "observations": frozen["observations"],
@@ -407,17 +463,18 @@ def _build_contract_regeneration_prompts(
     *,
     baseline: ExplanationBaselineSummary,
     observations: Sequence[ExplanationObservationSummary],
+    assertion_policy: bool = False,
     failure: ContractFailure,
 ) -> tuple[str, str]:
     """Rebuild from frozen inputs plus a safe reason code, never prior output."""
 
     system, user = build_character_explanation_review_prompts(
-        candidates, baseline=baseline, observations=observations
+        candidates, baseline=baseline, observations=observations, assertion_policy=assertion_policy
     )
     payload = json.loads(user.removeprefix(EXPLANATION_REVIEW_USER_PREFIX))
     payload["validation_retry"] = {
         "failure_code": failure,
-        "expected_schema_version": EXPLANATION_REVIEW_SCHEMA_V2,
+        "expected_schema_version": payload["schema_version"],
         "expected_request_digest": payload["request_digest"],
         "expected_candidate_citations": [row.citation for row in candidates],
         "required_top_level_keys": ["schema_version", "request_digest", "items"],
@@ -432,6 +489,8 @@ def _build_contract_regeneration_prompts(
             "applicable_observation_citations",
         ],
     }
+    if assertion_policy:
+        payload["validation_retry"]["required_item_keys"].append("assertion_links")
     return system, (
         EXPLANATION_REVIEW_USER_PREFIX
         + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -589,6 +648,7 @@ def _parse_response(
     expected_citations: tuple[str, ...],
     allowed_observation_citations: frozenset[str],
     expected_request_digest: str,
+    *, assertion_policy: bool = False,
 ) -> tuple[tuple[ExplanationReviewItem, ...], bool]:
     try:
         parsed = json.loads(
@@ -605,14 +665,15 @@ def _parse_response(
         # ``model_validate_json`` preserves strict scalar typing while allowing
         # that JSON-native conversion. The first parse above already rejected
         # duplicate keys and non-finite constants.
-        response = ExplanationReviewResponse.model_validate_json(raw, strict=True)
+        response_model = ExplanationReviewResponseV3 if assertion_policy else ExplanationReviewResponse
+        response = response_model.model_validate_json(raw, strict=True)
     except ValidationError as exc:
         raise _ResponseContractError(
             _classify_response_validation_error(exc)
         ) from None
     except (ValueError, TypeError, RecursionError):
         raise _ResponseContractError("top_level_schema_invalid") from None
-    if response.schema_version != EXPLANATION_REVIEW_SCHEMA_V2:
+    if response.schema_version != (EXPLANATION_REVIEW_SCHEMA_V3 if assertion_policy else EXPLANATION_REVIEW_SCHEMA_V2):
         raise _ResponseContractError("schema_version_invalid")
     if response.request_digest != expected_request_digest:
         raise _ResponseContractError("request_digest_invalid")
@@ -837,13 +898,19 @@ def _make_support(
     kind: Literal["causal_bridge", "exception", "possible_explanation"],
     *,
     applicable_observation_ids: tuple[str, ...],
+    assertion_binding_v1: dict | None = None,
 ) -> SupportEvidence:
+    summary = _support_summary(candidate)
+    if assertion_binding_v1:
+        summaries = list(dict.fromkeys(candidate.evidence.text[row["explanation"]["start"]:row["explanation"]["end"]]
+                                       for row in assertion_binding_v1["links"]))
+        summary = " / ".join(summaries)[:300]
     return SupportEvidence(
         id=_support_id(
             candidate, kind, applicable_observation_ids
         ),
         kind=kind,
-        summary=_support_summary(candidate),
+        summary=summary,
         explicit=kind != "possible_explanation" and item.causal_relation == "explicit_causal",
         evidence=candidate.evidence.model_copy(deep=True),
         source_kind=candidate.source_kind,
@@ -854,12 +921,16 @@ def _make_support(
         eligible_draft_document_ids=candidate.eligible_draft_document_ids,
         selection_basis="semantic_relation_v1",
         applicable_observation_ids=applicable_observation_ids,
+        assertion_binding_v1=assertion_binding_v1,
     )
 
 
 def _promote_reviewed_items(
     reviewed: Sequence[tuple[ExplanationCandidate, ExplanationReviewItem]],
     observations: tuple[ExplanationObservationSummary, ...],
+    *, assertion_policy: bool = False,
+    request_digests: dict[str, str] | None = None,
+    baseline_sha256: str | None = None,
 ) -> tuple[SupportEvidence, ...]:
     eligible = [
         (candidate, item)
@@ -882,6 +953,32 @@ def _promote_reviewed_items(
     ordered_identities: list[tuple[object, ...]] = []
     emitted: dict[tuple[object, ...], SupportEvidence] = {}
     for candidate, item in eligible:
+        if assertion_policy:
+            if type(item) is not ExplanationReviewItemV3:
+                raise ValueError("assertion protocol item required")
+            by_citation = {row.citation: row for row in observations}
+            # Source validation also applies to opinions that remain P or are
+            # excluded. A role/meaning enum cannot rescue a fabricated quote.
+            binding = make_assertion_binding(
+                candidate=candidate, links=item.assertion_links, observations=by_citation,
+                request_sha256=request_digests[candidate.citation], baseline_sha256=baseline_sha256,
+            )
+            independent_ids = tuple(row["observation_id"] for row in binding["links"]) if binding else ()
+            possible_ids = tuple(by_citation[row.observation_citation].observation_id
+                                 for row in item.assertion_links
+                                 if row.independence in {"unverified_claim", "unclear"})
+            for ids, proof in ((independent_ids, binding), (possible_ids, None)):
+                if not ids:
+                    continue
+                kind = (_definitive_kind(candidate, item)
+                        if proof and candidate.promotion_cap != "possible_only" else None)
+                support = _make_support(candidate, item, kind or "possible_explanation",
+                                        applicable_observation_ids=ids, assertion_binding_v1=proof)
+                identity = (*_evidence_identity(candidate), support.kind, ids)
+                if identity not in emitted:
+                    ordered_identities.append(identity)
+                    emitted[identity] = support
+            continue
         kind = (
             None
             if candidate.promotion_cap == "possible_only"
@@ -950,6 +1047,8 @@ def run_character_explanation_review(
     frozen_observations = _coerce_observations(observations)
     frozen_baseline = _snapshot_baseline(baseline)
     configured = settings or get_settings()
+    from .config import CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
+    assertion_policy = configured._character_explanation_assertions_policy == CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
     base_provider = provider or OpenAICompatibleProvider(configured)
     if not callable(getattr(base_provider, "complete", None)):
         raise TypeError("explanation review provider is invalid")
@@ -985,16 +1084,22 @@ def run_character_explanation_review(
     contract_regeneration_attempted_calls = 0
     contract_regeneration_recovered_batches = 0
     citation_order_normalized_batches = 0
+    request_digests: dict[str, str] = {}
 
     for batch in batches:
+        if assertion_policy and any(assertion_index(row.evidence)["omitted_count"] for row in (*batch, *frozen_observations)):
+            failures.append("source_index_truncated")
+            continue
         expected_citations = tuple(candidate.citation for candidate in batch)
         expected_request_digest = str(
             _build_request_payload(
                 batch,
                 baseline=frozen_baseline,
                 observations=frozen_observations,
+                assertion_policy=assertion_policy,
             )["request_digest"]
         )
+        request_digests.update({row.citation: expected_request_digest for row in batch})
         allowed_observation_citations = frozenset(
             observation.citation for observation in frozen_observations
         )
@@ -1009,6 +1114,7 @@ def run_character_explanation_review(
                         batch,
                         baseline=frozen_baseline,
                         observations=frozen_observations,
+                        assertion_policy=assertion_policy,
                     )
                 )
             else:
@@ -1020,6 +1126,7 @@ def run_character_explanation_review(
                     batch,
                     baseline=frozen_baseline,
                     observations=frozen_observations,
+                    assertion_policy=assertion_policy,
                     failure=retry_reason,
                 )
             estimate = estimate_issue_evidence_review_tokens(
@@ -1100,6 +1207,7 @@ def run_character_explanation_review(
                     expected_citations,
                     allowed_observation_citations,
                     expected_request_digest,
+                    assertion_policy=assertion_policy,
                 )
             except _ResponseContractError as exc:
                 contract_failure_counts[exc.reason] += 1
@@ -1121,7 +1229,11 @@ def run_character_explanation_review(
         reviewed.extend(zip(batch, batch_items, strict=True))
 
     try:
-        support = _promote_reviewed_items(reviewed, frozen_observations)
+        support = _promote_reviewed_items(
+            reviewed, frozen_observations, assertion_policy=assertion_policy,
+            request_digests=request_digests,
+            baseline_sha256=payload_sha256(frozen_baseline.model_dump(mode="json")),
+        )
     except Exception:
         # Promotion is still part of the trust boundary. If a validated model
         # response cannot be converted into bounded SupportEvidence, discard
@@ -1131,13 +1243,19 @@ def run_character_explanation_review(
         completed_batches = 0
         reviewed.clear()
         support = ()
-    if not failures:
+    unresolved_assertion_candidates = sum(
+        1 for candidate, item in reviewed if assertion_policy and candidate.promotion_cap == "assertion_bound"
+        and (any(getattr(item, slot) == "ambiguous" for slot in
+                 ("actor_relation", "axis_relation", "actuality", "temporal_relation"))
+             or any(link.independence in {"unclear", "unverified_claim"} for link in item.assertion_links))
+    )
+    if not failures and not unresolved_assertion_candidates:
         outcome: Literal["complete", "partial", "degraded"] = "complete"
     elif completed_batches:
         outcome = "partial"
     else:
         outcome = "degraded"
-    coverage: Literal["complete", "partial"] = "partial" if failures else "complete"
+    coverage: Literal["complete", "partial"] = "partial" if failures or unresolved_assertion_candidates else "complete"
     diagnostics = ExplanationReviewDiagnostics(
         outcome=outcome,
         batch_count=len(batches),
@@ -1159,6 +1277,7 @@ def run_character_explanation_review(
             contract_regeneration_recovered_batches
         ),
         citation_order_normalized_batches=citation_order_normalized_batches,
+        unresolved_assertion_candidates=unresolved_assertion_candidates,
     )
     return ExplanationReviewResult(
         support_evidence=support,
@@ -1170,6 +1289,11 @@ def run_character_explanation_review(
 __all__ = [
     "EXPLANATION_REVIEW_SCHEMA_V1",
     "EXPLANATION_REVIEW_SCHEMA_V2",
+    "EXPLANATION_REVIEW_SCHEMA_V3",
+    "EXPLANATION_REVIEW_PROMPT_V3",
+    "EXPLANATION_REVIEW_SYSTEM_PROMPT_V3",
+    "ExplanationReviewItemV3",
+    "ExplanationReviewResponseV3",
     "EXPLANATION_REVIEW_PROMPT_V2",
     "EXPLANATION_REVIEW_SYSTEM_PROMPT",
     "EXPLANATION_REVIEW_USER_PREFIX",

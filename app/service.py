@@ -18,6 +18,7 @@ from .config import (
 )
 from .account_provider import runtime_for_analysis_run
 from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+from .config import CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
 from .character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
 from .db import (
     AnalysisDiagnosticRow,
@@ -59,11 +60,13 @@ from .character_support_bindings import verify_stored_support_bindings
 from .character_target_focus import TARGET_FOCUS_SIGNAL_INSTRUCTIONS
 from .character_claim_resolution import CLAIM_RESOLUTION_KEY
 from .character_claim_resolution_storage import validate_claim_resolution_payload
+from .character_explanation_assertions import EXPLANATION_ASSERTION_REFS_KEY
+from .character_explanation_assertion_storage import validate_explanation_assertion_payload
 from .character_action_selection import (
     HABIT_ACTION_SELECTION_MAX_COMPLETION_TOKENS,
     HABIT_ACTION_SELECTION_SYSTEM_PROMPT_V1,
 )
-from .character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT
+from .character_explanation_review import EXPLANATION_REVIEW_SYSTEM_PROMPT, EXPLANATION_REVIEW_SYSTEM_PROMPT_V3
 from .character_scope_review_provider import SCOPE_REVIEW_SYSTEM_PROMPT
 from .character_history_semantic_review import HISTORY_REVIEW_SYSTEM_PROMPT
 from .character_draft_actor_review import SCOPED_DRAFT_DIRECTION_GUIDE
@@ -1082,6 +1085,16 @@ class _CharacterConsistencyAccountingProvider:
         } and self.settings._character_target_focus_policy == CHARACTER_TARGET_FOCUS_POLICY_V1:
             provider = self.drift_provider
             completion_reserve = self.settings.character_drift_max_completion_tokens
+        elif (
+            system == EXPLANATION_REVIEW_SYSTEM_PROMPT_V3
+            and self.settings.character_explanation_review_v1
+            and self.settings._character_explanation_assertions_policy == CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
+        ) or (
+            system == EXPLANATION_REVIEW_SYSTEM_PROMPT
+            and self.settings._character_explanation_assertions_policy is None
+        ):
+            provider = self.drift_provider
+            completion_reserve = self.settings.character_drift_max_completion_tokens
         elif system in {
             CHARACTER_REVIEW_SYSTEM_PROMPT,
             CHARACTER_EVENT_IDENTITY_REVIEW_SYSTEM_PROMPT,
@@ -1089,7 +1102,6 @@ class _CharacterConsistencyAccountingProvider:
             CHARACTER_MULTI_EVENT_REVIEW_SYSTEM_PROMPT,
             CHARACTER_SCOPED_REVIEW_SYSTEM_PROMPT,
             CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT,
-            EXPLANATION_REVIEW_SYSTEM_PROMPT,
         }:
             provider = self.drift_provider
             completion_reserve = self.settings.character_drift_max_completion_tokens
@@ -3352,6 +3364,13 @@ def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
         and coverage.get("target_focus_policy") == CHARACTER_TARGET_FOCUS_POLICY_V1
         else None
     )
+    stage._character_explanation_assertions_policy = (
+        CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
+        if stage._character_target_focus_policy == CHARACTER_TARGET_FOCUS_POLICY_V1
+        and stage.character_explanation_review_v1
+        and coverage.get("explanation_assertions_policy") == CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
+        else None
+    )
     return stage
 
 
@@ -3557,6 +3576,13 @@ def execute_analysis(
                 )
                 if claim_resolution is not None:
                     character_stage_result.diagnostics[CLAIM_RESOLUTION_KEY] = claim_resolution
+                character_failure_stage = "character_explanation_assertion_validation"
+                assertion_refs = validate_explanation_assertion_payload(
+                    character_stage_db, run=run,
+                    payload=character_stage_result.diagnostics.get(EXPLANATION_ASSERTION_REFS_KEY),
+                )
+                if assertion_refs is not None:
+                    character_stage_result.diagnostics[EXPLANATION_ASSERTION_REFS_KEY] = assertion_refs
             except (AnalysisCancelled, WorkerLeaseLost, AnalysisDeadlineExceeded):
                 raise
             except Exception as exc:
@@ -4051,11 +4077,10 @@ def execute_analysis(
                 ),
                 **run_trait_snapshot_metadata(db, run_id),
             }
-            # API and worker each report the same content-free identity. The
-            # live E2E runner compares them so a stale worker image or a
-            # divergent model/RAG configuration fails provenance closed.
+            # The worker includes this run's authorized protocol selection;
+            # health has no run context and describes deployment defaults.
             result.diagnostics["runtime_provenance"] = safe_runtime_provenance(
-                settings
+                character_stage_settings
             )
             persisted_diagnostics = dict(result.diagnostics)
             character_diagnostics = persisted_diagnostics.get("character_consistency")

@@ -3773,18 +3773,12 @@ def _safe_runtime_provenance(value: Any) -> dict[str, Any] | None:
             prompt_version = character_limits[
                 _CHARACTER_EXPLANATION_PROMPT_VERSION_KEY
             ]
-            if (
-                schema_version
-                != (
-                    _CHARACTER_EXPLANATION_SCHEMA_VERSION
-                    if enabled else None
-                )
-                or prompt_version
-                != (
-                    _CHARACTER_EXPLANATION_PROMPT_VERSION
-                    if enabled else None
-                )
-            ):
+            allowed_versions = (
+                ((_CHARACTER_EXPLANATION_SCHEMA_VERSION, _CHARACTER_EXPLANATION_PROMPT_VERSION),
+                 ("character-explanation-review-v3", "character-explanation-review-prompt-v3"))
+                if enabled else ((None, None),)
+            )
+            if (schema_version, prompt_version) not in allowed_versions:
                 return None
             safe_character_limits[
                 _CHARACTER_EXPLANATION_SCHEMA_VERSION_KEY

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from .config import Settings
+from .config import CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1, Settings
 from .character_drift import (
     CHARACTER_HABIT_CONTEXT_PROMPT_VERSION,
     CHARACTER_HABIT_CONTEXT_REVIEW_SYSTEM_PROMPT,
@@ -57,6 +57,8 @@ from .character_draft_actor_review import (
 from .character_explanation_review import (
     EXPLANATION_REVIEW_PROMPT_V2,
     EXPLANATION_REVIEW_SCHEMA_V2,
+    EXPLANATION_REVIEW_PROMPT_V3,
+    EXPLANATION_REVIEW_SCHEMA_V3,
 )
 from .character_draft_actor_review_provider import (
     TARGET_BOUND_DRAFT_REVIEW_SYSTEM_PROMPT_V12,
@@ -643,11 +645,15 @@ def safe_runtime_provenance(settings: Settings) -> dict[str, Any]:
             "drift_provider_max_response_bytes": drift_provider_response_bytes,
             "explanation_review_v1": settings.character_explanation_review_v1,
             "explanation_review_schema_version": (
-                EXPLANATION_REVIEW_SCHEMA_V2
+                (EXPLANATION_REVIEW_SCHEMA_V3
+                 if settings._character_explanation_assertions_policy == CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
+                 else EXPLANATION_REVIEW_SCHEMA_V2)
                 if settings.character_explanation_review_v1 else None
             ),
             "explanation_review_prompt_version": (
-                EXPLANATION_REVIEW_PROMPT_V2
+                (EXPLANATION_REVIEW_PROMPT_V3
+                 if settings._character_explanation_assertions_policy == CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
+                 else EXPLANATION_REVIEW_PROMPT_V2)
                 if settings.character_explanation_review_v1 else None
             ),
             "explanation_token_budget": (

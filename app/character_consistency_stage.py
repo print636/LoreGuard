@@ -6,7 +6,7 @@ import re
 import unicodedata
 from bisect import bisect_right
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Literal, Protocol
 from uuid import UUID
 
@@ -47,6 +47,11 @@ from .character_explanation_review import (
     ExplanationObservationSummary,
     run_character_explanation_review,
 )
+from .character_explanation_assertions import (
+    EXPLANATION_ASSERTION_REFS_KEY, MAX_ASSERTION_RECEIPTS,
+    assertion_receipt_payload, valid_assertion_binding,
+)
+from .config import CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
 from .character_scope_failure import ScopeProviderFailureSeriesV1
 from .character_verification_trace import MAX_VERIFICATION_TRACE_CHUNKS, verification_trace_chunk
 from .character_scope_review import (
@@ -398,7 +403,7 @@ class _ExplanationWindowSpec:
     source_ordinal: int
     eligible_draft_document_ids: tuple[str, ...]
     evidence: EvidenceSpan
-    promotion_cap: Literal["definitive", "possible_only"] = "definitive"
+    promotion_cap: Literal["definitive", "possible_only", "assertion_bound"] = "definitive"
     compound_observation_ids: tuple[str, ...] = ()
 
 
@@ -406,10 +411,11 @@ class _ExplanationWindowSpec:
 class _ExplanationWindowCoverage:
     """Separate hard source gaps from line-level compound observation debt.
 
-    A compound C line still has to be removed as one provenance unit.  Unlike
+    Legacy compound C lines are removed as one provenance unit. Unlike
     a missing/cropped source range, however, that structural debt can later be
     closed by independently cited, non-overlapping semantic G/X evidence for
-    every observation in the case.
+    every observation in the case. The assertion policy can instead review
+    the full shared source and bind distinct semantic fragments within it.
     """
 
     hard_incomplete: bool = False
@@ -2211,6 +2217,9 @@ class CharacterConsistencyStage:
         explanation_review_truncated_cases = 0
         explanation_review_required_cases = 0
         explanation_review_complete_cases = 0
+        assertion_receipts: list[dict] = []
+        assertion_receipts_omitted = 0
+        assertion_policy = settings._character_explanation_assertions_policy == CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
         explanation_stage_partial = False
         explanation_partial_candidate_ids: set[str] = set()
         case_material_complete_count = 0
@@ -2619,6 +2628,7 @@ class CharacterConsistencyStage:
                                 settings.character_explanation_max_windows_per_case
                             ),
                             segment_cache=explanation_segment_cache,
+                            assertion_policy=assertion_policy,
                         )
                     )
                     if explanation_window_coverage.hard_incomplete:
@@ -2819,6 +2829,21 @@ class CharacterConsistencyStage:
                                 explanation_review_emitted_support += len(
                                     semantic_support
                                 )
+                                kept_support = []
+                                for support in semantic_support:
+                                    if support.assertion_binding_v1 is not None:
+                                        if len(assertion_receipts) >= MAX_ASSERTION_RECEIPTS:
+                                            assertion_receipts_omitted += 1
+                                            support_truncated = True
+                                            continue
+                                        assertion_receipts.append({
+                                            "case_id": case_id, "confirmed_candidate_id": baseline_row.candidate_id,
+                                            "baseline_payload_sha256": baseline_row.payload_sha256,
+                                            "support_id": support.id, "kind": support.kind,
+                                            "binding": support.assertion_binding_v1,
+                                        })
+                                    kept_support.append(support)
+                                semantic_support = tuple(kept_support)
                                 if (
                                     explanation_result.coverage != "complete"
                                     or support_truncated
@@ -2833,7 +2858,7 @@ class CharacterConsistencyStage:
                     reviewed_possible_only_ids = {
                         observation_id
                         for spec in explanation_specs
-                        if spec.promotion_cap == "possible_only"
+                        if spec.promotion_cap in {"possible_only", "assertion_bound"}
                         for observation_id in spec.compound_observation_ids
                     }
                     compound_debt_closed = (
@@ -3311,6 +3336,9 @@ class CharacterConsistencyStage:
         )
         if habit_scope_refs:
             diagnostics["habit_scope_refs_v1"] = habit_scope_refs
+        if assertion_receipts or assertion_receipts_omitted:
+            diagnostics[EXPLANATION_ASSERTION_REFS_KEY] = assertion_receipt_payload(
+                assertion_receipts, assertion_receipts_omitted)
         if claim_payload := claim_resolution.payload():
             diagnostics[CLAIM_RESOLUTION_KEY] = claim_payload
         if settings.character_target_bound_draft_review_v3 and eligible_draft_count:
@@ -5317,6 +5345,7 @@ def _without_observation_explanation_spans(
     spans: tuple[EvidenceSpan, ...],
     *,
     observations: tuple[CharacterSignal, ...],
+    assertion_policy: bool = False,
 ) -> tuple[tuple[EvidenceSpan, ...], _ExplanationWindowCoverage]:
     """Remove applicable current C lines from explanation candidates.
 
@@ -5327,13 +5356,15 @@ def _without_observation_explanation_spans(
     ranges and split windows around them so genuinely separate neighbouring
     explanation material remains reviewable.
 
-    Evidence coordinates are line based.  If C shares a physical line with a
+    Legacy evidence coordinates are line based. If C shares a physical line with a
     second assertion, the service cannot retain that assertion without making
     an unverified sub-line attribution.  The whole line is therefore removed
     and its observation id is retained as a distinct compound-line debt.  The
     stage may close only that debt later when independent definitive evidence
     covers every C in the case.  A coordinate/text mismatch is a hard gap and
-    fails closed rather than subtracting an unrelated line.
+    fails closed rather than subtracting an unrelated line. Under the new
+    policy every valid C range is offered to the same reviewer for bounded
+    assertion selection, including an unpunctuated cause/action sentence.
     """
 
     applicable = tuple(
@@ -5367,7 +5398,9 @@ def _without_observation_explanation_spans(
             ):
                 excluded.append((evidence.line_start, evidence.line_end))
             continue
-        if evidence.line_start != evidence.line_end:
+        if assertion_policy:
+            compound_observation_ids.add(observation.id)
+        elif evidence.line_start != evidence.line_end:
             hard_incomplete = True
         elif _line_has_multiple_assertions(lines[evidence.line_start - 1]):
             compound_observation_ids.add(observation.id)
@@ -5427,6 +5460,7 @@ def _explanation_window_specs_with_coverage(
     draft_document_ids: tuple[str, ...],
     documents: list[_FrozenDocument],
     limit: int = 48,
+    assertion_policy: bool = False,
     segment_cache: dict[
         tuple[str, str], tuple[tuple[EvidenceSpan, ...], bool]
     ] | None = None,
@@ -5634,6 +5668,7 @@ def _explanation_window_specs_with_coverage(
                     if observation.evidence.document_id
                     in eligible_source_draft_ids
                 ),
+                assertion_policy=assertion_policy,
             )
         )
         hard_incomplete = hard_incomplete or source_incomplete
@@ -5668,7 +5703,7 @@ def _explanation_window_specs_with_coverage(
                 source_ordinal=source.ordinal,
                 eligible_draft_document_ids=eligible_source_draft_ids,
                 evidence=observation.evidence.model_copy(deep=True),
-                promotion_cap="possible_only",
+                promotion_cap="assertion_bound" if assertion_policy else "possible_only",
                 compound_observation_ids=(observation.id,),
             )
             for observation in observations
@@ -5679,16 +5714,19 @@ def _explanation_window_specs_with_coverage(
     unique: dict[tuple[str, int, int, str, str], _ExplanationWindowSpec] = {}
     for row in raw:
         span = row.evidence
-        unique.setdefault(
-            (
+        identity = (
                 span.document_id,
                 span.line_start,
                 span.line_end,
                 span.text,
                 row.promotion_cap,
-            ),
-            row,
-        )
+            )
+        if assertion_policy and identity in unique:
+            existing = unique[identity]
+            unique[identity] = replace(existing, compound_observation_ids=tuple(sorted(
+                set(existing.compound_observation_ids) | set(row.compound_observation_ids))))
+        else:
+            unique.setdefault(identity, row)
     candidates = tuple(unique.values())
     coverage = _ExplanationWindowCoverage(
         hard_incomplete=hard_incomplete,
@@ -5945,7 +5983,9 @@ def _compound_explanation_debt_is_closed(
             # This duplicates the promotion trust-boundary gate intentionally:
             # callers and future refactors cannot use overlapping C/E rows to
             # erase compound-line debt.
-            continue
+            if not valid_assertion_binding(support.assertion_binding_v1, support.evidence,
+                                           {row.id: row.evidence for row in observations}):
+                continue
         covered.update(applicable)
     return required <= covered
 

@@ -296,6 +296,7 @@ class SupportEvidence(BaseModel):
     applicable_observation_ids: tuple[str, ...] = Field(
         default=(), max_length=24
     )
+    assertion_binding_v1: dict[str, Any] | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def validate_applicable_observation_ids(self):
@@ -365,6 +366,15 @@ class CharacterDriftCase(BaseModel):
             for support in self.support_evidence
         ):
             raise ValueError("support observation does not belong to case")
+        from .character_explanation_assertions import valid_assertion_binding
+        for support in self.support_evidence:
+            if support.assertion_binding_v1 is not None and (
+                not valid_assertion_binding(support.assertion_binding_v1, support.evidence,
+                                            {row.id: row.evidence for row in self.observations})
+                or {row["observation_id"] for row in support.assertion_binding_v1["links"]}
+                != set(support.applicable_observation_ids)
+            ):
+                raise ValueError("explanation assertion binding is invalid")
         return self
 
     def axis_observation_polarity(self, signal_id: str) -> str | None:
@@ -2841,6 +2851,18 @@ def _evidence_rows(
                 support.evidence, support.summary,
                 applicable_citations,
             )
+        if support.assertion_binding_v1 is not None:
+            from .character_explanation_assertions import valid_assertion_binding
+            sources = {row.id: row.evidence for row in candidate.matching_observations}
+            if not valid_assertion_binding(support.assertion_binding_v1, support.evidence, sources):
+                raise ValueError("explanation assertion source changed")
+            rows[-1]["assertion_focus"] = [
+                {"current_citation": current_citation_by_id[link["observation_id"]],
+                 "explanation_text": support.evidence.text[link["explanation"]["start"]:link["explanation"]["end"]],
+                 "current_text": sources[link["observation_id"]].text[link["observation"]["start"]:link["observation"]["end"]],
+                 "independence": "independent_fact"}
+                for link in support.assertion_binding_v1["links"]
+            ]
     return rows, frozenset(labels)
 
 

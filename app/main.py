@@ -26,6 +26,7 @@ from starlette.types import Scope
 from .config import CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings
 from .character_claim_resolution import CLAIM_RESOLUTION_KEY
 from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+from .config import CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
 from .auth import (
     AuthContext,
     ExactOriginMiddleware,
@@ -869,6 +870,8 @@ def _review_batch_selection(
         coverage["habit_action_selection_policy"] = HABIT_ACTION_SELECTION_POLICY_V1
         coverage["selected_claim_resolution_policy"] = SELECTED_CLAIM_RESOLUTION_POLICY_V3
         coverage["target_focus_policy"] = CHARACTER_TARGET_FOCUS_POLICY_V1
+        if settings.character_explanation_review_v1:
+            coverage["explanation_assertions_policy"] = CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
     return selected, roles, coverage
 
 
@@ -7194,7 +7197,7 @@ def _without_private_character_metadata(payload):
         return {
             key: _without_private_character_metadata(value)
             for key, value in payload.items()
-            if key not in {"target_focus_review_v1", "failure_diagnostic_v1"}
+            if key not in {"target_focus_review_v1", "failure_diagnostic_v1", "explanation_assertion_refs_v1", "assertion_binding_v1"}
         }
     if isinstance(payload, list):
         return [_without_private_character_metadata(value) for value in payload]
