@@ -259,10 +259,11 @@ def custody_comparisons(directives: list[ParsedDirective]) -> tuple[list, int]:
                         state, observation, require_start=True):
                     applicable = False
                 evidence += start_evidence + end_evidence
-            elif (supported_semantic_state(state) and state.attrs.get("state_kind") == "custody"
+            elif (supported_semantic_state(state) and state.attrs.get("state_kind") in {"custody", "transfer"}
                   and sourced_handover_ends(state, observation, require_start=True)):
-                # A located ordinary custody state also has a known successor
-                # when an actual handover establishes both ordering boundaries.
+                # Ordinary custody, including custody obtained in an actual
+                # transfer, has a known successor when the next handover
+                # establishes both ordering boundaries.
                 applicable = False
             else:
                 order, time_evidence = compare_time_points(state, observation, relations)

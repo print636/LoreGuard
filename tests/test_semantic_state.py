@@ -168,10 +168,13 @@ def test_proof_cannot_be_borrowed_after_source_identity_or_field_mutation():
 
 
 @pytest.mark.parametrize("mode", ["ordered_handover", "missing_handover", "unknown_order"])
-def test_ordinary_custody_consumes_only_a_sourced_ordered_handover(mode):
-    text = "2026-05-01 09:00，铜钥匙由许舟保管。"
+@pytest.mark.parametrize("initial_state", ["custody", "transfer"])
+def test_ordinary_custody_consumes_only_a_sourced_ordered_handover(mode, initial_state):
+    text = ("2026-05-01 09:00，铜钥匙由许舟保管。" if initial_state == "custody"
+            else "2026-05-01 09:00，库管把铜钥匙交给许舟。")
     custody = state_fixture(text, record("item", text, dict(item="铜钥匙", owner="许舟"),
-        time="2026-05-01 09:00", state="custody"), document_id="custody")
+        time="2026-05-01 09:00", state=initial_state,
+        sender="库管" if initial_state == "transfer" else None), document_id="custody")
     transfer_time = "09:30" if mode == "unknown_order" else "2026-05-01 09:30"
     text = f"{transfer_time}，许舟把铜钥匙交到沈澈手里。"
     transfer = state_fixture(text, record("item", text, dict(item="铜钥匙", owner="沈澈"),
