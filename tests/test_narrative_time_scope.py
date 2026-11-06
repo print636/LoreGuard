@@ -8,13 +8,14 @@ import pytest
 from app.config import NARRATIVE_TIME_SCOPE_POLICY_V1, SEMANTIC_STATE_POLICY_V1, NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
 from app.pipeline import AnalysisPipeline, DocumentInput
 from app.provider import OpenAICompatibleProvider, RetryPolicy
-from app.model_extractor import ModelEnhancedExtractor
+from app.model_extractor import (ModelEnhancedExtractor, BATCH_SYSTEM_PROMPT_NARRATIVE_V1,
+                                 BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1)
 from app.narrative_relations import compare_time_points, bind_relation, NarrativeTimeExtraction, _digest
 from app.narrative_time_scope import (NarrativeTimeScopeExtraction, bind_time_scope, member_matches,
     valid_time_scope, validate_time_scope_sources, scope_comparison, NARRATIVE_TIME_SCOPE_INSTRUCTIONS)
 from app.domain import EvidenceSpan, ParsedDirective
 from app.chunking import chunk_document
-from app.semantic_state import custody_comparisons
+from app.semantic_state import custody_comparisons, SEMANTIC_STATE_INSTRUCTIONS
 from app.candidate_normalizer import DeterministicCandidateNormalizer
 from tests.test_semantic_state import record, state_fixture
 from tests.test_model_extractor import settings, completion
@@ -69,7 +70,17 @@ def run_chain(*, enabled=True, mutate=None, **options):
 @pytest.mark.parametrize(("relation", "last_time"), [("same_day", "10:00"), ("same_day_ordered", "10:00"), ("ordered", "随后")])
 def test_original_phrases_and_bounded_members_complete_actual_handover(relation, last_time):
     result, calls, docs = run_chain(relation=relation, last_time=last_time)
-    assert len(calls) == 1 and calls[0]["messages"][0]["content"].endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)
+    assert len(calls) == 1
+    system, user = [m["content"] for m in calls[0]["messages"]]
+    assert system == BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS
+    assert "相互隔离" not in user
+    assert "跨行/跨文档拼接替代词面证据" not in system
+    assert "时间关系允许引用本次授权输入中多个 doc_ref" in system
+    assert "无源或不明时保留 unclear" in system
+    assert "同次输出结束前检查" in system and "omitted_count如实记录" in system
+    sent = json.loads(user.split("\n", 1)[1])["documents"]
+    assert [x["doc_ref"] for x in sent] == ["d1", "d2"]
+    assert all(all(line in x["numbered_lines"] for line in doc.content.splitlines()) for x, doc in zip(sent, docs, strict=True))
     assert not [r for r in result.issues if r.category.value == "item_ownership"]
     assert custody_comparisons([r for r in result.directives if r.semantic_state or r.narrative_time_scope]) == ([], 0)
     assert result.diagnostics["semantic_state_comparison"]["unresolved_pairs"] == 0
@@ -95,6 +106,10 @@ def test_uncovered_conflicting_or_unbound_scopes_do_not_complete_time(mode):
     assert not [r for r in result.issues if r.category.value == "item_ownership"]
     if mode == "old_run":
         assert not any(r.narrative_time_scope for r in result.directives)
+        system, user = [m["content"] for m in calls[0]["messages"]]
+        assert system == BATCH_SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS
+        assert user.startswith("批量抽取以下相互隔离的文档。")
+        assert "跨行/跨文档拼接替代词面证据" in system
     if mode in {"omitted", "unclear", "wrong_source", "too_many"}:
         assert result.diagnostics["model"]["unresolved_invalid_records"] > 0
     assert result.model_used  # Valid primitive siblings remain admitted.

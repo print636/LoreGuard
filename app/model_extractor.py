@@ -289,6 +289,32 @@ SYSTEM_PROMPT_NARRATIVE_V1 = SYSTEM_PROMPT + NARRATIVE_RELATION_INSTRUCTIONS
 BATCH_SYSTEM_PROMPT_NARRATIVE_V1 = BATCH_SYSTEM_PROMPT + NARRATIVE_RELATION_INSTRUCTIONS
 
 
+# Source ownership stays per document. Under the bounded time-scope contract,
+# semantic relations may refer to multiple authorized documents in this request.
+# Keep the legacy prompts byte-for-byte unchanged for runs without the policy.
+BATCH_SYSTEM_PROMPT_TIME_SCOPE_V1 = (
+    BATCH_SYSTEM_PROMPT.replace(
+        "每条记录只表达一个原子状态，且只能使用对应 kind 的字段；",
+        "每条原子状态记录只表达一个状态；时间关系记录按扩展合同列明有源成员。每条记录只能使用对应 kind 的字段；",
+    ).replace(
+        "仅抽取原文明确陈述的内容，不补全常识，不随意做代词猜测，不创造角色、时间或地点。",
+        "原子状态不得无源补全常识、猜测代词或创造角色、时间、地点。时间关系可按扩展合同结合本次授权正文上下文作有源合理推断。",
+    ).replace(
+        "每条记录只能放在其证据所属的 doc_ref 分组中，行号只能引用该分组的 numbered_lines；",
+        "每条记录放在其主体证据所属的 doc_ref 分组中，该记录的 source_line_start/end 引用该分组的 numbered_lines；时间关系成员各自引用其 doc_ref 的 numbered_lines；",
+    ).replace(
+        "每个核心字段必须能由同一 doc_ref、所填行号内的原文词组直接支持；优先复制原文的最小连续词组，\n"
+        "不要用摘要、近义改写、常识补全或跨行/跨文档拼接替代词面证据。无法满足时省略该记录。",
+        "原子事实和字段证据各归其源，不得把不同文档的片段拼接成某处原文。每个源 quote 须来自其标明的 doc_ref 和行号。\n"
+        "时间关系允许引用本次授权输入中多个 doc_ref 的成员，并结合兼容故事作用域中的历史与目标稿完整上下文作有源合理推断；证据归属独立不表示叙事时间互相隔离。\n"
+        "关系自身的 relation_quote 保留在其来源分组，每个成员的事件与时间 quote 分别来自该成员的来源。不得跨互斥主线推断，不得把局部关系自动扩散到未列明事件；无源或不明时保留 unclear，不补日期或端点。",
+    )
+)
+BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1 = (
+    BATCH_SYSTEM_PROMPT_TIME_SCOPE_V1 + NARRATIVE_RELATION_INSTRUCTIONS
+)
+
+
 class BatchProtocolError(ValueError):
     """The shared model response cannot be safely attributed to documents."""
 
@@ -1615,9 +1641,11 @@ class ModelEnhancedExtractor:
         refs = [f"d{index}" for index in range(1, len(documents) + 1)]
         self._narrative_sources = {ref: (document, chunks[0])
                                   for ref, document, chunks in zip(refs, documents, plans, strict=True)}
-        system_prompt = (BATCH_SYSTEM_PROMPT_NARRATIVE_V1
+        time_scope_enabled = settings._narrative_time_scope_policy == NARRATIVE_TIME_SCOPE_POLICY_V1
+        batch_base = BATCH_SYSTEM_PROMPT_TIME_SCOPE_V1 if time_scope_enabled else BATCH_SYSTEM_PROMPT
+        system_prompt = (batch_base + NARRATIVE_RELATION_INSTRUCTIONS
                          if settings._narrative_time_knowledge_policy == NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
-                         else BATCH_SYSTEM_PROMPT)
+                         else batch_base)
         if settings._semantic_state_policy == SEMANTIC_STATE_POLICY_V1:
             system_prompt += SEMANTIC_STATE_INSTRUCTIONS
         if settings._narrative_time_scope_policy == NARRATIVE_TIME_SCOPE_POLICY_V1:
@@ -1631,8 +1659,13 @@ class ModelEnhancedExtractor:
             }
             for ref, document, chunks in zip(refs, documents, plans, strict=True)
         ]
-        user_prompt = (
+        batch_instruction = (
+            "批量抽取以下本次授权文档。原子证据分别归属对应 doc_ref；兼容故事作用域中的时间关系可结合全部输入上下文，引用多个 doc_ref 的有源成员。返回前检查相关状态链的时间成员覆盖；无依据或未覆盖不得当作已完成比较。\n"
+            if time_scope_enabled else
             "批量抽取以下相互隔离的文档。只把证据记录放入对应 doc_ref 分组。\n"
+        )
+        user_prompt = (
+            batch_instruction
             + json.dumps(
                 {"documents": request_documents},
                 ensure_ascii=False,

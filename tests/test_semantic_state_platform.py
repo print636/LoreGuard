@@ -95,21 +95,23 @@ def test_private_binding_uses_this_runs_frozen_source_and_exact_saved_record(db,
 
 
 def test_normal_account_persists_binding_and_keeps_old_retry_and_full_reader():
-    from app.model_extractor import BATCH_SYSTEM_PROMPT_NARRATIVE_V1, SYSTEM_PROMPT_NARRATIVE_V1
+    from app.model_extractor import BATCH_SYSTEM_PROMPT_NARRATIVE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1, SYSTEM_PROMPT_NARRATIVE_V1
     from app.narrative_time_scope import NARRATIVE_TIME_SCOPE_INSTRUCTIONS
     sent = []
     def respond(request):
         body = json.loads(request.content)
         system,user = (message['content'] for message in body['messages'])
         sent.append(system)
-        if system.endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS):
+        time_scope = system.endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)
+        if time_scope:
             system = system[:-len(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)]
         current = system.endswith(SEMANTIC_STATE_INSTRUCTIONS)
         base = system[:-len(SEMANTIC_STATE_INSTRUCTIONS)] if current else system
-        assert base in {BATCH_SYSTEM_PROMPT_NARRATIVE_V1, SYSTEM_PROMPT_NARRATIVE_V1}
+        batch = BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1 if time_scope else BATCH_SYSTEM_PROMPT_NARRATIVE_V1
+        assert base in {batch, SYSTEM_PROMPT_NARRATIVE_V1}
         rows = [fact_wire()] if current else []
         value = {'records':rows}
-        if base == BATCH_SYSTEM_PROMPT_NARRATIVE_V1:
+        if base == batch:
             value = {'documents':[{'doc_ref':doc['doc_ref'],'records':rows} for doc in json.loads(user.split('\n',1)[1])['documents']]}
         return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(value)}}],'usage':{'prompt_tokens':12,'completion_tokens':8}})
     original = OpenAICompatibleProvider.__init__

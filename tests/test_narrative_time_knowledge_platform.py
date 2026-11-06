@@ -30,7 +30,7 @@ def test_worker_uses_only_frozen_policy_and_preserves_legacy_default(frozen):
 
 
 def test_normal_account_freezes_policy_retries_keep_history_and_extra_evidence_is_readable():
-    from app.model_extractor import SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT, SYSTEM_PROMPT_NARRATIVE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_V1
+    from app.model_extractor import SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT, SYSTEM_PROMPT_NARRATIVE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_V1, BATCH_SYSTEM_PROMPT_TIME_SCOPE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1
     from app.semantic_state import SEMANTIC_STATE_INSTRUCTIONS
     from app.narrative_time_scope import NARRATIVE_TIME_SCOPE_INSTRUCTIONS
 
@@ -39,17 +39,20 @@ def test_normal_account_freezes_policy_retries_keep_history_and_extra_evidence_i
         body = json.loads(request.content)
         system, user = (message["content"] for message in body["messages"])
         sent.append(system)
-        if system.endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS):
+        time_scope = system.endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)
+        if time_scope:
             system = system[:-len(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)]
         if system.endswith(SEMANTIC_STATE_INSTRUCTIONS):
             system = system[:-len(SEMANTIC_STATE_INSTRUCTIONS)]
-        assert system in {SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT, SYSTEM_PROMPT_NARRATIVE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_V1}
+        batch = BATCH_SYSTEM_PROMPT_TIME_SCOPE_V1 if time_scope else BATCH_SYSTEM_PROMPT
+        narrative_batch = BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1 if time_scope else BATCH_SYSTEM_PROMPT_NARRATIVE_V1
+        assert system in {SYSTEM_PROMPT, batch, SYSTEM_PROMPT_NARRATIVE_V1, narrative_batch}
         record = {"kind": "knowledge_constraint", "character": "林安", "fact": "换班口令", "time": "14:00",
                   "relation": "unknown_before", "knowledge_scope": "whole_content", "basis": "explicit",
                   "relation_quote": "14:00之前，林安明确不知道换班口令。", "source_line_start": 4, "source_line_end": 4,
                   "modality": "asserted", "source_scope": "narrator", "certainty": "certain"}
-        rows = [record] if system in {SYSTEM_PROMPT_NARRATIVE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_V1} else []
-        if system in {BATCH_SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT_NARRATIVE_V1}:
+        rows = [record] if system in {SYSTEM_PROMPT_NARRATIVE_V1, narrative_batch} else []
+        if system in {batch, narrative_batch}:
             documents = json.loads(user.split("\n", 1)[1])["documents"]
             content = {"documents": [{"doc_ref": row["doc_ref"], "records": rows} for row in documents]}
         else:

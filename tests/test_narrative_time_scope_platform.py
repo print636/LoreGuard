@@ -98,7 +98,7 @@ def test_time_scope_storage_binds_frozen_sources_and_only_actual_records(db,dama
 
 
 def test_normal_account_scope_reaches_storage_report_reader_and_legacy_retry():
-    from app.model_extractor import BATCH_SYSTEM_PROMPT_NARRATIVE_V1,SYSTEM_PROMPT_NARRATIVE_V1
+    from app.model_extractor import BATCH_SYSTEM_PROMPT_NARRATIVE_V1,BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1,SYSTEM_PROMPT_NARRATIVE_V1
     sent=[]
     def respond(request):
         body=json.loads(request.content)
@@ -106,12 +106,13 @@ def test_normal_account_scope_reaches_storage_report_reader_and_legacy_retry():
         sent.append(system)
         current=system.endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)
         base=system[:-len(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)] if current else system
-        assert base in {BATCH_SYSTEM_PROMPT_NARRATIVE_V1+SEMANTIC_STATE_INSTRUCTIONS,SYSTEM_PROMPT_NARRATIVE_V1+SEMANTIC_STATE_INSTRUCTIONS}
+        batch=BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1 if current else BATCH_SYSTEM_PROMPT_NARRATIVE_V1
+        assert base in {batch+SEMANTIC_STATE_INSTRUCTIONS,SYSTEM_PROMPT_NARRATIVE_V1+SEMANTIC_STATE_INSTRUCTIONS}
         events=[dict(kind='event',time='12:00',location=place,participants=['许宁'],source_line_start=i,source_line_end=i,
                      modality='asserted',source_scope='narrator',certainty='certain') for i,place in ((2,'北楼'),(3,'南门'))]
         rows=events+[scope_wire()] if current else []
         value={'records':rows}
-        if base.startswith(BATCH_SYSTEM_PROMPT_NARRATIVE_V1):
+        if base == batch+SEMANTIC_STATE_INSTRUCTIONS:
             value={'documents':[{'doc_ref':doc['doc_ref'],'records':rows} for doc in json.loads(user.split('\n',1)[1])['documents']]}
         return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(value)}}],'usage':{'prompt_tokens':12,'completion_tokens':8}})
     original=OpenAICompatibleProvider.__init__

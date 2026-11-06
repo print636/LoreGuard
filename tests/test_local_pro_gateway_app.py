@@ -152,6 +152,7 @@ def _exercise_author_review(client):
     from app.model_extractor import (
         SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT,
         SYSTEM_PROMPT_NARRATIVE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_V1,
+        BATCH_SYSTEM_PROMPT_TIME_SCOPE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1,
     )
     from app.semantic_state import SEMANTIC_STATE_INSTRUCTIONS
     from app.narrative_time_scope import NARRATIVE_TIME_SCOPE_INSTRUCTIONS
@@ -197,7 +198,8 @@ def _exercise_author_review(client):
         assert body["model"] == "mock-author"
         system, user = (message["content"] for message in body["messages"])
         calls.append(system)
-        if system.endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS):
+        time_scope = system.endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)
+        if time_scope:
             system = system[:-len(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)]
         if system.endswith(SEMANTIC_STATE_INSTRUCTIONS):
             system = system[:-len(SEMANTIC_STATE_INSTRUCTIONS)]
@@ -207,7 +209,7 @@ def _exercise_author_review(client):
             return httpx.Response(503)
         if system in {SYSTEM_PROMPT, SYSTEM_PROMPT_NARRATIVE_V1}:
             content = '{"records":[]}'
-        elif system in {BATCH_SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT_NARRATIVE_V1}:
+        elif system in ({BATCH_SYSTEM_PROMPT_TIME_SCOPE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1} if time_scope else {BATCH_SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT_NARRATIVE_V1}):
             docs = json.loads(user.split("\n", 1)[1])["documents"]
             content = json.dumps({"documents": [{"doc_ref": row["doc_ref"], "records": []} for row in docs]})
         elif system in (formal_prompt, SCOPE_REVIEW_SYSTEM_PROMPT):
@@ -259,7 +261,7 @@ def _exercise_author_review(client):
             "logical_seconds": 360, "run_seconds": 2400,
         }
         assert default["review_batch"]["character_review_enabled"] is False
-        assert calls and set(calls) <= {SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS, BATCH_SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS}
+        assert calls and set(calls) <= {SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS, BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS}
         assert client.post(runs_url, json={"character_review_enabled": True}).status_code == 422
         assert client.post(runs_url, json={**baseline, "character_review_enabled": "true"}).status_code == 422
 
@@ -317,7 +319,7 @@ def _exercise_author_review(client):
         assert not calls
         ordinary = start(chosen)
         assert ordinary["review_batch"]["character_review_enabled"] is False
-        assert calls and set(calls) <= {SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS, BATCH_SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS}
+        assert calls and set(calls) <= {SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS, BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS}
         reviewed = start(opted_in)
         assert frozen_scene_policy(reviewed) == HABIT_SCENE_POLICY_V1
         assert all(frozen_scene_policy(run) is None for run in (default, ordinary, created))
