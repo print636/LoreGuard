@@ -464,6 +464,42 @@ test("项目信息：409保留作者修改，显式合并未修改字段后仍�
   await assertNoOtherWrites(state);
 });
 
+test("项目信息：初次读取后的延迟聚焦不抢走作者已选择的说明输入", async ({ page }) => {
+  const state = stateFixture();
+  state.metadataSaveFailure = true;
+  await open(page, state, "/app");
+  // Hold the next frame so the author can choose a field before initial focus runs.
+  await page.evaluate(() => {
+    const original = window.requestAnimationFrame.bind(window);
+    const pending: FrameRequestCallback[] = [];
+    window.requestAnimationFrame = (callback) => {
+      if (!document.querySelector(".projectMetadataEditor")) return original(callback);
+      pending.push(callback);
+      return -pending.length;
+    };
+    (window as unknown as { releaseMetadataFrames: () => number }).releaseMetadataFrames = () => {
+      window.requestAnimationFrame = original;
+      const count = pending.length;
+      pending.splice(0).forEach((callback) => callback(performance.now()));
+      return count;
+    };
+  });
+  await page.getByRole("button", { name: "编辑C-雾潮主线的项目信息", exact: true }).click();
+  const description = metadata(page).getByRole("textbox", { name: "项目说明", exact: true });
+  await expect(description).toBeEnabled();
+  await description.fill("作者已开始填写");
+  expect(await page.evaluate(() => (window as unknown as { releaseMetadataFrames: () => number }).releaseMetadataFrames())).toBeGreaterThan(0);
+  await expect(description).toBeFocused();
+  await page.keyboard.insertText("，继续填写备注");
+  await expect(description).toHaveValue("作者已开始填写，继续填写备注");
+  await expect(metadata(page).getByLabel("项目名称", { exact: true })).toHaveValue("C-雾潮主线");
+  await metadata(page).getByRole("button", { name: "保存项目信息", exact: true }).click();
+  await expect(metadata(page)).toContainText("保存结果待核对");
+  expect(state.patches).toEqual([{ name: "C-雾潮主线", description: "作者已开始填写，继续填写备注", expected_revision: 3 }]);
+  await expect(description).toHaveValue("作者已开始填写，继续填写备注");
+  await assertNoOtherWrites(state);
+});
+
 test("项目信息：保存错误保留输入，Escape/取消须确认放弃修改并返回入口焦点", async ({ page }) => {
   const state = stateFixture();
   state.metadataSaveFailure = true;

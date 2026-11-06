@@ -42,6 +42,7 @@ export default function ProjectMetadataEditor({ projectId, trigger, onClose, onS
 
   async function readLatest(compareOnly = false) {
     const sequence = ++requests.current;
+    const focusBeforeRead = document.activeElement;
     controller.current?.abort();
     const requestController = new AbortController();
     controller.current = requestController;
@@ -53,7 +54,11 @@ export default function ProjectMetadataEditor({ projectId, trigger, onClose, onS
       if (!alive.current || sequence !== requests.current) return;
       if (compareOnly) setLatest(result);
       else { setBase(result); setDraft({ name: result.name, description: result.description }); }
-      requestAnimationFrame(() => nameInput.current?.focus());
+      if (!compareOnly) requestAnimationFrame(() => {
+        // Loading may finish before the author starts typing in another field.
+        if (!alive.current || sequence !== requests.current || document.activeElement !== focusBeforeRead) return;
+        nameInput.current?.focus();
+      });
     } catch (reason) {
       if (!alive.current || sequence !== requests.current || requestController.signal.aborted) return;
       setError(`${apiErrorDetail(reason)} ${compareOnly ? "你填写的修改仍保留，可重新读取最新信息。" : "尚未读取项目信息，请重试；本次没有保存修改。"}`);
