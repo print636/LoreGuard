@@ -241,6 +241,17 @@ def _timeline_title(kind: str, attrs: dict[str, str]) -> str:
         return f"{attrs.get('character', '未知角色')} 获知 {attrs.get('fact', '未知信息')}"
     if kind == "claims_knows":
         return f"{attrs.get('character', '未知角色')} 声称知道 {attrs.get('fact', '未知信息')}"
+    if kind == "knowledge_constraint":
+        if attrs.get("knowledge_scope") != "whole_content":
+            return f"{attrs.get('character', '未知角色')} · {attrs.get('fact', '未知信息')}的知情范围尚未核清"
+        relation = {
+            "unknown_before": "此前尚未知晓",
+            "unknown_through": "截至此时仍未知晓",
+            "known_by": "截至此时已知晓",
+        }.get(attrs.get("relation"), "知情时间待确认")
+        return f"{attrs.get('character', '未知角色')} · {relation} {attrs.get('fact', '未知信息')}"
+    if kind == "narrative_time_relation":
+        return "正文中的时间关系依据"
     if kind == "item":
         return f"{attrs.get('owner', '未知角色')} 持有 {attrs.get('item', '未知物品')}"
     if kind == "uses":

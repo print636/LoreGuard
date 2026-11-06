@@ -37,6 +37,11 @@ from .semantic_quality import (
     eligible_for_deterministic_rules,
     open_question_directives,
 )
+from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+from .narrative_relations import (
+    RELATION_KINDS, NARRATIVE_RELATION_INSTRUCTIONS, NarrativeTimeExtraction,
+    KnowledgeConstraintExtraction, bind_relation,
+)
 
 
 class ExtractionBase(BaseModel):
@@ -133,6 +138,8 @@ ExtractionRecord = Annotated[
         WorldExtraction,
         OpenQuestionExtraction,
         ClarificationExtraction,
+        NarrativeTimeExtraction,
+        KnowledgeConstraintExtraction,
     ],
     Field(discriminator="kind"),
 ]
@@ -268,6 +275,10 @@ BATCH_SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
 不要用摘要、近义改写、常识补全或跨行/跨文档拼接替代词面证据。无法满足时省略该记录。
 返回前逐条检查 kind 的必需字段、字段类型、语义三标签、doc_ref 与证据行号；不得为了凑数量输出低把握记录。
 """
+
+
+SYSTEM_PROMPT_NARRATIVE_V1 = SYSTEM_PROMPT + NARRATIVE_RELATION_INSTRUCTIONS
+BATCH_SYSTEM_PROMPT_NARRATIVE_V1 = BATCH_SYSTEM_PROMPT + NARRATIVE_RELATION_INSTRUCTIONS
 
 
 class BatchProtocolError(ValueError):
@@ -657,6 +668,10 @@ def _evidence_supports(record: ExtractionRecord, text: str) -> bool:
     need lexical support; this does not authorize common-sense completion.
     """
     compact = _clean(text)
+    if record.kind in RELATION_KINDS:
+        # The separate bounded binder checks every source and endpoint before
+        # this record can reach the semantic gate or deterministic comparison.
+        return record.relation_quote in text
     if record.kind == "open_question":
         return bool(
             re.search(r"[?？]|是否|能否|会不会|是不是|有没有|还是", text)
@@ -802,6 +817,7 @@ class ModelEnhancedExtractor:
         return clock()
 
     def begin_run(self, checkpoint=None) -> None:
+        self._narrative_sources = {}
         self._run_tokens_used = 0
         self._failed_documents = 0
         self._circuit_open = False
@@ -949,9 +965,15 @@ class ModelEnhancedExtractor:
         doc_ref: str = "d1",
     ) -> tuple[ParsedDirective | None, _RepairCandidate | None, str | None]:
         """Validate a record and isolate only the two Agent-safe failure classes."""
+        relation_record = isinstance(raw_record, dict) and raw_record.get("kind") in RELATION_KINDS
+        if relation_record and self.provider.settings._narrative_time_knowledge_policy != NARRATIVE_TIME_KNOWLEDGE_POLICY_V1:
+            raise ValueError("模型记录未通过语义质量门")
         try:
             record = RECORD_ADAPTER.validate_python(raw_record)
         except ValidationError as exc:
+            if relation_record:
+                # Label repair cannot establish a relation or create sources.
+                raise
             error_codes = _semantic_label_error_codes(exc)
             if error_codes is None or not isinstance(raw_record, dict):
                 raise
@@ -986,7 +1008,8 @@ class ModelEnhancedExtractor:
             candidate = self._to_directive(document, chunk, record)
         except ValueError as exc:
             if not (
-                self._model_extraction_configured()
+                not relation_record
+                and self._model_extraction_configured()
                 and self.provider.settings.enable_review_agent
                 and str(exc) == "模型记录缺少原文词面支持"
             ):
@@ -1013,6 +1036,11 @@ class ModelEnhancedExtractor:
                 ),
                 None,
             )
+        if relation_record:
+            try:
+                candidate = bind_relation(record, candidate, getattr(self, "_narrative_sources", {}))
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ValueError("模型记录未通过语义质量门") from exc
         assessed, semantic_reason = assess_directive(candidate)
         if assessed is None:
             raise ValueError("模型记录未通过语义质量门")
@@ -1557,6 +1585,11 @@ class ModelEnhancedExtractor:
             return None
 
         refs = [f"d{index}" for index in range(1, len(documents) + 1)]
+        self._narrative_sources = {ref: (document, chunks[0])
+                                  for ref, document, chunks in zip(refs, documents, plans, strict=True)}
+        system_prompt = (BATCH_SYSTEM_PROMPT_NARRATIVE_V1
+                         if settings._narrative_time_knowledge_policy == NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+                         else BATCH_SYSTEM_PROMPT)
         request_documents = [
             {
                 "doc_ref": ref,
@@ -1575,7 +1608,7 @@ class ModelEnhancedExtractor:
             )
         )
         estimated_tokens = estimate_batch_request_tokens(
-            BATCH_SYSTEM_PROMPT, user_prompt, len(documents)
+            system_prompt, user_prompt, len(documents)
         )
         if (
             estimated_tokens > settings.model_batch_max_estimated_tokens
@@ -1613,7 +1646,7 @@ class ModelEnhancedExtractor:
         try:
             self._checkpoint()
             first_execution.attempted_chunks = 1
-            response = self.provider.complete(BATCH_SYSTEM_PROMPT, user_prompt)
+            response = self.provider.complete(system_prompt, user_prompt)
             self._account_model_response(response, estimated_tokens)
             first_execution.record_provider_call(
                 getattr(response, "telemetry", None), succeeded=True
@@ -1754,6 +1787,10 @@ class ModelEnhancedExtractor:
                         validated_records[location] = assessed
                         if semantic_reason:
                             semantic_reasons[location] = semantic_reason
+                            if semantic_reason == "narrative_relation_unresolved":
+                                executions[doc_index].invalid_records += 1
+                                _add_execution_counter(executions[doc_index], "unresolved_invalid_records")
+                                executions[doc_index].note("semantic_quality")
 
             if repair_candidates:
                 affected_indexes = list(
@@ -1981,6 +2018,10 @@ class ModelEnhancedExtractor:
         failed_chunks = 0
         for chunk in selected:
             self._checkpoint()
+            self._narrative_sources = {"d1": (document, chunk)}
+            system_prompt = (SYSTEM_PROMPT_NARRATIVE_V1
+                             if settings._narrative_time_knowledge_policy == NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+                             else SYSTEM_PROMPT)
             context = ""
             if document.role is not None or document.scope is not None:
                 context = (
@@ -1993,7 +2034,7 @@ class ModelEnhancedExtractor:
                 f"当前分块：{chunk.id}，原文全局行 {chunk.global_line_start}-{chunk.global_line_end}\n"
                 f"以下文本使用原文全局行号：\n{numbered_chunk(chunk)}"
             )
-            estimated_tokens = estimate_request_tokens(SYSTEM_PROMPT, user_prompt)
+            estimated_tokens = estimate_request_tokens(system_prompt, user_prompt)
             used_tokens = self._run_tokens_used
             if used_tokens + estimated_tokens > settings.per_run_token_budget:
                 execution.note("token_budget")
@@ -2004,7 +2045,7 @@ class ModelEnhancedExtractor:
             try:
                 execution.attempted_chunks += 1
                 response = self.provider.complete(
-                    SYSTEM_PROMPT,
+                    system_prompt,
                     user_prompt,
                 )
                 self._account_model_response(response, estimated_tokens)
@@ -2065,6 +2106,10 @@ class ModelEnhancedExtractor:
                             parsed.warnings.append(
                                 f"模型记录 #{index}（分块 {chunk.id}）已按原文语气转为非确定记录（{semantic_reason}）"
                             )
+                            if semantic_reason == "narrative_relation_unresolved":
+                                execution.invalid_records += 1
+                                _add_execution_counter(execution, "unresolved_invalid_records")
+                                execution.note("semantic_quality")
                         if assessed is not None:
                             chunk_directives.append(assessed)
                     except ValidationError as exc:

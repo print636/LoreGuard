@@ -314,7 +314,9 @@ def _world_rule_title(key: str) -> str:
     return f"世界规则“{key}”被违反"
 
 
-def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
+def detect_issues(
+    directives: list[ParsedDirective], *, require_explicit_knowledge_bound: bool = False,
+) -> list[ConsistencyIssue]:
     issues: list[ConsistencyIssue] = []
 
     facts: dict[tuple[str, str], list[ParsedDirective]] = defaultdict(list)
@@ -501,6 +503,11 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
             ))
 
     for claim in claims:
+        if require_explicit_knowledge_bound:
+            # An observed acquisition can repeat previously known content.
+            # New runs compare only sourced lower bounds below; legacy runs
+            # retain their original acquisition-order interpretation.
+            continue
         key = (claim.attrs.get("character", ""), claim.attrs.get("fact", ""))
         acquisitions = [
             row for row in knows.get(key, []) if _scopes_compatible(row, claim)
@@ -611,4 +618,6 @@ def detect_issues(directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
                 key=key,
             ))
 
+    from .narrative_relations import relation_issues
+    issues.extend(relation_issues(directives))
     return issues

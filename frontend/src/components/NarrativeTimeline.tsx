@@ -1,6 +1,7 @@
 import {useEffect, useMemo, useState} from 'react';
 
 import type {TimelineEntry, TimelineResponse} from '../types/visualization';
+import {recordKindName} from '../reviewPresentation';
 
 type Props={data:TimelineResponse|null;focusedIssueId:string|null};
 
@@ -16,9 +17,9 @@ export default function NarrativeTimeline({data,focusedIssueId}:Props){
   const groups=data.groups.map(group=>({...group,entries:group.entries.filter(visible)})).filter(group=>group.entries.length);
   const unscheduled=data.unscheduled.filter(visible);
   return <div className="timelinePanel">
-    <div className="visualControls"><select value={kind} onChange={event=>setKind(event.target.value)}><option value="all">全部记录</option>{kinds.map(value=><option key={value} value={value}>{value}</option>)}</select><label><input type="checkbox" checked={onlyIssues} onChange={event=>setOnlyIssues(event.target.checked)}/>只看问题记录</label><span>{groups.reduce((sum,group)=>sum+group.entries.length,0)+unscheduled.length} 条</span></div>
+    <div className="visualControls"><select value={kind} onChange={event=>setKind(event.target.value)}><option value="all">全部记录</option>{kinds.map(value=><option key={value} value={value}>{recordKindName(value)}</option>)}</select><label><input type="checkbox" checked={onlyIssues} onChange={event=>setOnlyIssues(event.target.checked)}/>只看问题记录</label><span>{groups.reduce((sum,group)=>sum+group.entries.length,0)+unscheduled.length} 条</span></div>
     {data.warnings.map(warning=><p className="visualWarning" key={warning}>{warning}</p>)}
-    <div className="timelineList">{groups.map(group=><section key={group.sort_key}><time>{group.timestamp}</time><div>{group.entries.map(entry=><button key={entry.id} className={`${entry.issue_ids.length?'hasIssue ':''}${focusedIssueId&&entry.issue_ids.includes(focusedIssueId)?'focused':''}`} onClick={()=>setSelected(entry)}><b>{entry.title}</b><small>{entry.kind} · {entry.evidence.document_name}:{entry.evidence.line_start}</small></button>)}</div></section>)}
+    <div className="timelineList">{groups.map(group=><section key={group.sort_key}><time>{group.timestamp}</time><div>{group.entries.map(entry=><button key={entry.id} className={`${entry.issue_ids.length?'hasIssue ':''}${focusedIssueId&&entry.issue_ids.includes(focusedIssueId)?'focused':''}`} onClick={()=>setSelected(entry)}><b>{entry.title}</b><small>{recordKindName(entry.kind)} · {entry.evidence.document_name}:{entry.evidence.line_start}</small></button>)}</div></section>)}
       {unscheduled.length>0&&<section className="unscheduled"><time>时间未确定</time><div>{unscheduled.map(entry=><button key={entry.id} className={`${entry.issue_ids.length?'hasIssue ':''}${focusedIssueId&&entry.issue_ids.includes(focusedIssueId)?'focused':''}`} onClick={()=>setSelected(entry)}><b>{entry.title}</b><small>{entry.timestamp||'无时间'} · {entry.evidence.document_name}:{entry.evidence.line_start}</small></button>)}</div></section>}
     </div>
     {!groups.length&&!unscheduled.length&&<div className="visualEmpty">当前筛选下没有时间记录。</div>}

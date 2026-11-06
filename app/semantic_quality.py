@@ -27,6 +27,8 @@ CANONICAL_KINDS = {
     "uses",
     "world_rule",
     "world_assert",
+    "narrative_time_relation",
+    "knowledge_constraint",
 }
 
 NON_CANONICAL_KINDS = {
@@ -1543,6 +1545,13 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
         return None, "unsupported_kind"
     if not directive.evidence.text.strip():
         return None, "empty_evidence"
+    if directive.kind in {"narrative_time_relation", "knowledge_constraint"}:
+        from .narrative_relations import valid_relation, relation_is_certain
+        if not valid_relation(directive):
+            return None, "unbound_narrative_relation"
+        # These relations have independent source-bound semantics: negation in
+        # an unknown-before constraint is not a negated event/acquisition.
+        return directive, None if relation_is_certain(directive) else "narrative_relation_unresolved"
 
     attrs = dict(directive.attrs)
     for key in _REQUIRED_ATTRS.get(directive.kind, ()):
@@ -2030,6 +2039,9 @@ def apply_semantic_quality_gate(directives: list[ParsedDirective]) -> SemanticQu
 
 
 def eligible_for_deterministic_rules(directive: ParsedDirective) -> bool:
+    if directive.kind in {"narrative_time_relation", "knowledge_constraint"}:
+        from .narrative_relations import relation_is_certain
+        return relation_is_certain(directive)
     if directive.kind not in CANONICAL_KINDS:
         return False
     if directive.noncanonical_frame:

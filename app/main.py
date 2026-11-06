@@ -25,6 +25,7 @@ from starlette.types import Scope
 
 from .config import CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings
 from .character_claim_resolution import CLAIM_RESOLUTION_KEY
+from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
 from .auth import (
     AuthContext,
     ExactOriginMiddleware,
@@ -6083,6 +6084,7 @@ def start_analysis(
             payload=request,
         )
         timing = execution_limits_payload(settings)
+        coverage["narrative_time_knowledge_policy"] = NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
         if timing is not None:
             coverage[EXECUTION_LIMITS_KEY] = timing
         provider_runtime = account_provider_runtime(
@@ -6448,6 +6450,7 @@ def start_recheck(
             payload=recheck_request,
         )
         coverage["recheck_baseline_run_id"] = baseline_run_id
+        coverage["narrative_time_knowledge_policy"] = NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
         timing = execution_limits_payload(settings)
         if timing is not None:
             coverage[EXECUTION_LIMITS_KEY] = timing

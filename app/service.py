@@ -17,6 +17,7 @@ from .config import (
     CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings,
 )
 from .account_provider import runtime_for_analysis_run
+from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
 from .character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
 from .db import (
     AnalysisDiagnosticRow,
@@ -3354,6 +3355,18 @@ def _character_stage_settings_for_run(settings, run: AnalysisRunRow | None):
     return stage
 
 
+def _narrative_settings_for_run(settings, run: AnalysisRunRow):
+    """Only the server's frozen version activates the new fact semantics."""
+    local = settings.model_copy()
+    coverage = run.batch_coverage if isinstance(run.batch_coverage, dict) else {}
+    local._narrative_time_knowledge_policy = (
+        NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+        if coverage.get("narrative_time_knowledge_policy") == NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+        else None
+    )
+    return local
+
+
 def execute_analysis(
     run_id: str,
     *,
@@ -3399,6 +3412,7 @@ def execute_analysis(
             settings = settings_for_execution_limits(
                 provider_runtime.settings, (run.batch_coverage or {}).get(EXECUTION_LIMITS_KEY)
             )
+            settings = _narrative_settings_for_run(settings, run)
             if settings.analysis_run_timeout_seconds is not None:
                 if run.started_at is None:
                     raise ValueError("analysis start time is unavailable")

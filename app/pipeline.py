@@ -64,8 +64,11 @@ class BaselineExtractor:
 
 
 class RuleChecker:
+    def __init__(self, *, require_explicit_knowledge_bound: bool = False):
+        self.require_explicit_knowledge_bound = require_explicit_knowledge_bound
+
     def check(self, directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
-        return detect_issues(directives)
+        return detect_issues(directives, require_explicit_knowledge_bound=self.require_explicit_knowledge_bound)
 
     def check_with_candidates(self, directives, candidate_pairs):
         compatible = {
@@ -85,7 +88,7 @@ class RuleChecker:
                 consumed=bool(family),
             ))
         # Exact canonical rules remain direct and cannot be lost to a retrieval top-k.
-        return detect_issues(directives), traces
+        return self.check(directives), traces
 
 
 class AnalysisPipeline:
@@ -105,7 +108,7 @@ class AnalysisPipeline:
         retriever=None,
         settings=None,
     ):
-        from .config import get_settings
+        from .config import get_settings, NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
         from .provider import OpenAICompatibleProvider
 
         self.settings = settings or get_settings()
@@ -116,7 +119,9 @@ class AnalysisPipeline:
                 provider=OpenAICompatibleProvider(self.settings)
             )
         self.extractor = extractor
-        self.checker = checker or RuleChecker()
+        self.checker = checker or RuleChecker(require_explicit_knowledge_bound=(
+            self.settings._narrative_time_knowledge_policy == NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+        ))
         if normalizer is None:
             from .candidate_normalizer import DeterministicCandidateNormalizer
 

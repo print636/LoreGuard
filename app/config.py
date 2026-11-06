@@ -19,6 +19,7 @@ SELECTED_CLAIM_RESOLUTION_POLICY_V1 = "selected-claim-resolution-v1"
 SELECTED_CLAIM_RESOLUTION_POLICY_V2 = "selected-claim-resolution-v2"
 SELECTED_CLAIM_RESOLUTION_POLICY_V3 = "selected-claim-resolution-v3"
 CHARACTER_TARGET_FOCUS_POLICY_V1 = "character-target-focus-v1"
+NARRATIVE_TIME_KNOWLEDGE_POLICY_V1 = "narrative-time-knowledge-v1"
 HABIT_SCENE_CALL_TIMEOUT_SECONDS = 60.0
 HABIT_SCENE_PACKAGE_DEADLINE_SECONDS = 180.0
 
@@ -207,6 +208,7 @@ class Settings(BaseSettings):
     execution_timing_profile: Literal["legacy", "local_quality"] = "legacy"
     analysis_run_timeout_seconds: float | None = Field(default=None, gt=0, le=2400)
     _execution_deadline: ExecutionDeadline | None = PrivateAttr(default=None)
+    _narrative_time_knowledge_policy: str | None = PrivateAttr(default=None)
     provider_max_completion_tokens: int | None = Field(default=None, gt=0)
     # Tightly bound successful upstream response bodies independently of model
     # token controls, which compatible relays may ignore. ``None`` disables

@@ -27,6 +27,7 @@ export type ClarificationView = {
 const kindNames: Record<string, string> = {
   fact: '事实记录', event: '事件记录', knows: '知识获得',
   claims_knows: '知识声称', item: '物品状态', uses: '物品使用',
+  narrative_time_relation: '时间关系', knowledge_constraint: '知情约束',
   world_rule: '世界规则', world_assert: '章节断言',
   open_question: '原文开放问题', clarification: '待作者澄清',
 };
@@ -70,6 +71,19 @@ export function summarizeRecord(row: RecordView): string {
   if (row.kind === 'knows' || row.kind === 'claims_knows') {
     const verb = row.kind === 'knows' ? '得知' : '声称知道';
     return `${at}${text(attrs.character)}${verb}“${text(attrs.fact)}”`;
+  }
+  if (row.kind === 'narrative_time_relation') {
+    return row.evidence.text || '这条时间关系需结合原文核对。';
+  }
+  if (row.kind === 'knowledge_constraint') {
+    const subject = `${text(attrs.character)}对“${text(attrs.fact)}”`;
+    if (attrs.knowledge_scope !== 'whole_content') {
+      return `${subject}的知情依据${attrs.knowledge_scope === 'channel_only' ? '仅限所引途径，其他途径尚未核清' : '范围尚未核清'}`;
+    }
+    if (attrs.relation === 'unknown_before') return `${time ? `${time}之前，` : ''}${subject}尚不知情`;
+    if (attrs.relation === 'unknown_through') return `${time ? `截至${time}，` : ''}${subject}仍不知情`;
+    if (attrs.relation === 'known_by') return `${time ? `最迟到${time}，` : ''}${subject}已经知情；这不代表此时才获知`;
+    return `${subject}的知情时间仍需核对原文`;
   }
   if (row.kind === 'item') {
     return `${at}${text(attrs.item)}由${text(attrs.owner)}持有`;
