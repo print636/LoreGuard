@@ -1,4 +1,5 @@
 import unittest
+from io import BytesIO
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -6,12 +7,58 @@ from unittest.mock import patch
 from app.embeddings import EmbeddingProfile
 from scripts.run_compose_smoke import (
     PGVECTOR_SMOKE_SQL,
+    run,
     verify_pgvector_compose,
     wait_until_ready,
 )
 
 
 class ComposeSmokeTests(unittest.TestCase):
+    def test_current_demo_contract_checks_categories_and_retained_knowledge_without_compose(self):
+        from app.config import Settings, NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+        from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
+
+        root = Path(__file__).resolve().parents[1] / "data" / "advanced"
+        config = Settings(_env_file=None, enable_model_extraction=False,
+                          enable_review_agent=False, enable_embeddings=False)
+        config._narrative_time_knowledge_policy = NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+        result = AnalysisPipeline(extractor=BaselineExtractor(), settings=config).run([
+            DocumentInput(path.stem, path.name, path.read_text(encoding="utf-8"),
+                          "canon" if path.stem == "world" else "chapter", "main")
+            for path in sorted(root.glob("*.md"))
+        ])
+        issues = [{"category": row.category.value} for row in result.issues]
+        records = [{"kind": row.kind, "attrs": row.attrs} for row in result.directives]
+        responses = {
+            "/api/v1/demo/advanced": {"id": "project", "document_count": 3},
+            "/api/v1/projects/project/analysis-runs": {"id": "run"},
+            "/api/v1/analysis-runs/run": {"id": "run", "status": "completed"},
+            "/api/v1/analysis-runs/run/issues": issues,
+            "/api/v1/analysis-runs/run/records": {"records": records},
+            "/api/v1/analysis-runs/run/graph": {"nodes": [{"id": "node"}]},
+            "/api/v1/analysis-runs/run/timeline": {"groups": [], "unscheduled": [{}]},
+        }
+        with (
+            patch("scripts.run_compose_smoke.wait_until_ready"),
+            patch("scripts.run_compose_smoke.verify_pgvector_compose"),
+            patch("scripts.run_compose_smoke.request_json", side_effect=lambda base, path, *args: responses[path]),
+            patch("scripts.run_compose_smoke.urlopen", side_effect=lambda *args, **kwargs: BytesIO(
+                b'event: terminal\ndata: {"status": "completed"}\n\n')),
+        ):
+            summary = run("http://test.invalid", 1)
+            self.assertEqual(
+                ["fact_conflict", "item_ownership", "location_collision", "world_rule_conflict"],
+                summary["categories"],
+            )
+            responses["/api/v1/analysis-runs/run/records"] = {
+                "records": [row for row in records if row["kind"] != "knows"]
+            }
+            with self.assertRaisesRegex(RuntimeError, "knowledge events"):
+                run("http://test.invalid", 1)
+            issues.append({"category": "knowledge_without_acquisition"})
+            with self.assertRaisesRegex(RuntimeError, "Unexpected issue categories"):
+                run("http://test.invalid", 1)
+
     def test_backend_docker_context_excludes_local_secrets_and_artifacts(self):
         root = Path(__file__).resolve().parents[1]
         rules = {

@@ -80,7 +80,7 @@ docker compose up --build
 - API：<http://localhost:8000/docs>
 - Prometheus：<http://localhost:9090>
 
-GitHub Actions 会实际构建并启动整套 Compose，在关闭模型的隔离环境中经 Celery worker 完成复杂样例分析，并断言五类问题、关系图、时间线和 SSE 终态；这不是只做 YAML 语法检查。
+GitHub Actions 会实际构建并启动整套 Compose，在关闭模型的隔离环境中经 Celery worker 完成复杂样例分析，并核对事实、地点、物品、世界规则四类问题，以及关系图、时间线和 SSE 终态。知识记录也须保留，但无模型模式没有生成新策略所需的有来源知情下界，不能据此断言知识冲突；这不是只做 YAML 语法检查。
 
 #### 可选：本地真实 embedding 服务
 

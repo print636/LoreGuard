@@ -12,9 +12,15 @@ from urllib.request import Request, urlopen
 EXPECTED_CATEGORIES = {
     "fact_conflict",
     "location_collision",
-    "knowledge_without_acquisition",
     "item_ownership",
     "world_rule_conflict",
+}
+# Ordinary new API runs use the sourced knowledge-bound policy. This model-free
+# smoke still extracts the two knowledge events, but does not obtain a model-
+# bound constraint from the advanced demo's explicit prior-ignorance passage.
+EXPECTED_KNOWLEDGE_RECORDS = {
+    ("claims_knows", "林澈", "沉星航线入口位置", "1026-04-03 14:00"),
+    ("knows", "林澈", "沉星航线入口位置", "1026-04-03 18:00"),
 }
 
 PGVECTOR_SMOKE_SQL = r"""
@@ -421,6 +427,14 @@ def run(base_url: str, timeout_seconds: float) -> dict:
         raise RuntimeError(
             f"Unexpected issue categories: {sorted(categories)}"
         )
+    records = request_json(base_url, f"/api/v1/analysis-runs/{run_id}/records")
+    knowledge_records = {
+        (row["kind"], row["attrs"].get("character"), row["attrs"].get("fact"), row["attrs"].get("time"))
+        for row in records["records"]
+        if row["kind"] in {"knows", "claims_knows"}
+    }
+    if not EXPECTED_KNOWLEDGE_RECORDS <= knowledge_records:
+        raise RuntimeError("Advanced demo knowledge events were not retained")
     graph = request_json(base_url, f"/api/v1/analysis-runs/{run_id}/graph")
     timeline = request_json(base_url, f"/api/v1/analysis-runs/{run_id}/timeline")
     timeline_entry_count = sum(len(group["entries"]) for group in timeline["groups"])
