@@ -12,7 +12,8 @@ from app.model_extractor import (ModelEnhancedExtractor, BATCH_SYSTEM_PROMPT_NAR
                                  BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1)
 from app.narrative_relations import compare_time_points, bind_relation, NarrativeTimeExtraction, _digest
 from app.narrative_time_scope import (NarrativeTimeScopeExtraction, bind_time_scope, member_matches,
-    valid_time_scope, validate_time_scope_sources, scope_comparison, NARRATIVE_TIME_SCOPE_INSTRUCTIONS)
+    valid_time_scope, validate_time_scope_sources, scope_comparison, NARRATIVE_TIME_SCOPE_INSTRUCTIONS,
+    TimeScopeBindingError)
 from app.domain import EvidenceSpan, ParsedDirective
 from app.chunking import chunk_document
 from app.semantic_state import custody_comparisons, SEMANTIC_STATE_INSTRUCTIONS
@@ -192,3 +193,55 @@ def test_unlocated_baseline_action_is_not_erased_by_sourced_proposition(whole_pa
     assert sum(r.kind == "uses" for r in result.directives) == 2
     assert any(r.semantic_state is None and not r.attrs.get("time") for r in result.directives)
     assert any(r.kind == "item" and r.semantic_state for r in result.directives)
+
+
+@pytest.mark.parametrize("mode", ["shared_prefix", "local_priority", "ambiguous", "absent", "probable"])
+def test_member_time_uses_unique_same_evidence_prefix_and_preserves_uncertainty(mode):
+    basis = "这两处行动发生在同一天。"
+    action = "许岚在南门值守。"
+    first = "16:00，江遥抵达北楼，" + action
+    if mode == "local_priority":
+        action = "16:00，许岚在南门值守。"
+        first = "16:00，江遥抵达北楼；" + action
+    elif mode == "ambiguous":
+        first = "16:00，江遥抵达北楼；16:00，江遥离开，" + action
+    elif mode == "absent":
+        first = "江遥抵达北楼，" + action
+    second = "17:00，许岚来到东门。"
+    doc = DocumentInput("prefix", "prefix.md", "\n".join([basis, first, second]), "chapter", "main")
+    span = lambda n: EvidenceSpan(document_id=doc.id, document_name=doc.name,
+        line_start=n, line_end=n, text=doc.content.splitlines()[n-1])
+    raw = scope_wire(basis, [member("d1", action, "16:00", "16:00", line=2),
+                             member("d1", second, "17:00", "17:00", line=3)], relation="same_day")
+    if mode == "probable":
+        raw["certainty"] = "probable"
+    typed = NarrativeTimeScopeExtraction.model_validate(raw)
+    row = ParsedDirective(kind="narrative_time_scope", attrs={"story_scope":"main", "document_role":"chapter"}, evidence=span(1))
+    sources = {"d1": (doc, chunk_document(doc, 12000)[0])}
+    if mode in {"ambiguous", "absent"}:
+        with pytest.raises(TimeScopeBindingError, match="source_not_unique"):
+            bind_time_scope(typed, row, sources)
+        return
+    scope = bind_time_scope(typed, row, sources)
+    assert validate_time_scope_sources(scope, {doc.id:doc.content})
+    source_member = scope.narrative_time_scope["members"][0]
+    assert source_member["time_ref"]["start"] == (first.rindex("16:00") if mode == "local_priority" else 0)
+    left = ParsedDirective(kind="event", attrs={"time":"16:00", "location":"南门", "participants":"许岚", "story_scope":"main"}, evidence=span(2))
+    right = ParsedDirective(kind="event", attrs={"time":"17:00", "location":"东门", "participants":"许岚", "story_scope":"main"}, evidence=span(3))
+    assert member_matches(source_member, left)
+    assert not member_matches(source_member, left.model_copy(update={"attrs":{**left.attrs,"location":"北楼","participants":"江遥"}}))
+    order, evidence = compare_time_points(left, right, [scope])
+    from app.semantic_quality import assess_directive
+    _, reason = assess_directive(scope)
+    if mode == "probable":
+        assert order is None and reason == "time_scope_unresolved"
+        assert scope.attrs["certainty"] == "probable"
+    else:
+        assert order == -1 and len(evidence) == 1 and reason is None
+    if mode == "local_priority":
+        proof = deepcopy(scope.narrative_time_scope)
+        proof["members"][0]["time_ref"] = dict(start=0,end=5,text_sha256=_digest("16:00"))
+        proof["payload_sha256"] = _digest({k:v for k,v in proof.items() if k != "payload_sha256"})
+        altered = scope.model_copy(update={"narrative_time_scope":proof})
+        assert not validate_time_scope_sources(altered, {doc.id:doc.content})
+        assert not member_matches(proof["members"][0], left)

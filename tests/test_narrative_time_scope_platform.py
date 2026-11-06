@@ -50,11 +50,11 @@ def test_worker_restores_only_exact_server_frozen_time_scope_policy(frozen):
     assert '_narrative_time_scope_policy' not in local.model_dump()
 
 
-def scope_rows(run,source):
+def scope_rows(run,source,*,wire=None):
     span = lambda line: EvidenceSpan(document_id=source.document_id,document_name=source.document_name,
         line_start=line,line_end=line,text=source.content.splitlines()[line-1])
     scope = ParsedDirective(kind='narrative_time_scope',attrs={'document_role':'chapter','story_scope':'global'},evidence=span(1))
-    scope = bind_time_scope(NarrativeTimeScopeExtraction.model_validate(scope_wire()),scope,
+    scope = bind_time_scope(NarrativeTimeScopeExtraction.model_validate(wire or scope_wire()),scope,
         {'d1':(DocumentInput(source.document_id,source.document_name,source.content,'chapter','global'),SimpleNamespace(global_line_start=1,global_line_end=4))})
     events = [ParsedDirective(kind='event',attrs={'time':'12:00','location':place,'participants':'许宁','story_scope':'global'},evidence=span(i))
               for i,place in ((2,'北楼'),(3,'南门'))]
@@ -95,6 +95,25 @@ def test_time_scope_storage_binds_frozen_sources_and_only_actual_records(db,dama
         assert '许宁' not in json.dumps(payload,ensure_ascii=False)
         assert _public_diagnostics_payload({TIME_SCOPE_REFS_KEY:payload,'model':{'used':True}}) == {'model':{'used':True}}
         assert time_scope_storage_payload(db,run=run,records=records[:2],directives=rows[:2]) is None
+
+
+def test_time_scope_storage_retains_unique_shared_time_prefix_and_actual_event_matches(db):
+    _,run,source = seed(db)
+    source.content = BODY
+    source.content_sha256 = hashlib.sha256(BODY.encode()).hexdigest()
+    run.batch_coverage = {'narrative_time_scope_policy':NARRATIVE_TIME_SCOPE_POLICY_V1}
+    wire = scope_wire()
+    for member in wire['members']:
+        member['event_quote'] = member['event_quote'].split('，',1)[1]
+    rows,records = scope_rows(run,source,wire=wire)
+    payload = time_scope_storage_payload(db,run=run,records=records,directives=rows)
+    receipt, = payload['receipts']
+    assert [member['matched_record_ids'] for member in receipt['members']] == [['record-0'],['record-1'],[]]
+    for member in receipt['binding']['members']:
+        assert member['time_ref']['end'] <= member['event_ref']['start']
+        assert member['time_ref']['text_sha256'] == _digest(source.content.splitlines()[member['line_start']-1].split('，',1)[0])
+    assert receipt['source_input_id'] == source.id
+    assert receipt['record_sha256'] == _digest({'kind':records[-1].kind,'attrs':records[-1].attrs,'evidence':records[-1].evidence})
 
 
 def test_normal_account_scope_reaches_storage_report_reader_and_legacy_retry():

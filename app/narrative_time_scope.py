@@ -67,6 +67,10 @@ clock_relation=same|equivalent|unclear明确钟点同义；不知钟点就clock=
 def _ref(text: str, quote: str, within: dict | None = None) -> dict:
     start, end = (within["start"], within["end"]) if within else (0, len(text))
     local = text[start:end]
+    if within is not None and quote not in local:
+        # The model already assigned this time to the event. Resolve a shared
+        # prefix only within that same frozen evidence range, never a new source.
+        start, local = 0, text
     if local.count(quote) != 1:
         raise TimeScopeBindingError("time_scope_source_not_unique")
     start += local.index(quote)
@@ -170,8 +174,7 @@ def validate_time_scope_sources(row: ParsedDirective, sources: dict[str, str]) -
                 or document_context_has_noncanonical_frame(content, member["line_start"], member["line_end"])):
             return False
         event, time = member["event_ref"], member["time_ref"]
-        if not (_valid_ref(event, text) and _valid_ref(time, text)
-                and event["start"] <= time["start"] < time["end"] <= event["end"]):
+        if not (_valid_ref(event, text) and _valid_ref(time, text)):
             return False
         try:
             if _ref(text, text[event["start"]:event["end"]]) != event or _ref(text, text[time["start"]:time["end"]], event) != time:
