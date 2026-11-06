@@ -37,7 +37,9 @@ from .semantic_quality import (
     eligible_for_deterministic_rules,
     open_question_directives,
 )
-from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1
+from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1, NARRATIVE_TIME_SCOPE_POLICY_V1
+from .narrative_time_scope import (NarrativeTimeScopeExtraction, NARRATIVE_TIME_SCOPE_INSTRUCTIONS,
+                                   TimeScopeBindingError, bind_time_scope)
 from .semantic_state import (SemanticRelation, SEMANTIC_STATE_INSTRUCTIONS,
                              SemanticStateBindingError, bind_semantic_state)
 from .narrative_relations import (
@@ -144,6 +146,7 @@ ExtractionRecord = Annotated[
         OpenQuestionExtraction,
         ClarificationExtraction,
         NarrativeTimeExtraction,
+        NarrativeTimeScopeExtraction,
         KnowledgeConstraintExtraction,
     ],
     Field(discriminator="kind"),
@@ -674,7 +677,7 @@ def _evidence_supports(record: ExtractionRecord, text: str) -> bool:
     need lexical support; this does not authorize common-sense completion.
     """
     compact = _clean(text)
-    if record.kind in RELATION_KINDS:
+    if record.kind in RELATION_KINDS or record.kind == "narrative_time_scope":
         # The separate bounded binder checks every source and endpoint before
         # this record can reach the semantic gate or deterministic comparison.
         return record.relation_quote in text
@@ -971,6 +974,9 @@ class ModelEnhancedExtractor:
         doc_ref: str = "d1",
     ) -> tuple[ParsedDirective | None, _RepairCandidate | None, str | None]:
         """Validate a record and isolate only the two Agent-safe failure classes."""
+        scope_record = isinstance(raw_record, dict) and raw_record.get("kind") == "narrative_time_scope"
+        if scope_record and self.provider.settings._narrative_time_scope_policy != NARRATIVE_TIME_SCOPE_POLICY_V1:
+            raise ValueError("模型记录未通过语义质量门")
         state_record = isinstance(raw_record, dict) and raw_record.get("semantic_relation") is not None
         if state_record and self.provider.settings._semantic_state_policy != SEMANTIC_STATE_POLICY_V1:
             raise ValueError("模型记录未通过语义质量门")
@@ -980,7 +986,7 @@ class ModelEnhancedExtractor:
         try:
             record = RECORD_ADAPTER.validate_python(raw_record)
         except ValidationError as exc:
-            if relation_record or state_record:
+            if relation_record or state_record or scope_record:
                 # Label repair cannot establish a relation or create sources.
                 raise
             error_codes = _semantic_label_error_codes(exc)
@@ -1025,7 +1031,7 @@ class ModelEnhancedExtractor:
                     raise ValueError("模型记录未通过语义质量门") from exc
         except ValueError as exc:
             if not (
-                not relation_record and not state_record
+                not relation_record and not state_record and not scope_record
                 and self._model_extraction_configured()
                 and self.provider.settings.enable_review_agent
                 and str(exc) == "模型记录缺少原文词面支持"
@@ -1053,6 +1059,11 @@ class ModelEnhancedExtractor:
                 ),
                 None,
             )
+        if scope_record:
+            try:
+                candidate = bind_time_scope(record, candidate, self._narrative_sources)
+            except TimeScopeBindingError as exc:
+                raise ValueError("模型记录未通过语义质量门") from exc
         if relation_record:
             try:
                 candidate = bind_relation(record, candidate, getattr(self, "_narrative_sources", {}))
@@ -1609,6 +1620,8 @@ class ModelEnhancedExtractor:
                          else BATCH_SYSTEM_PROMPT)
         if settings._semantic_state_policy == SEMANTIC_STATE_POLICY_V1:
             system_prompt += SEMANTIC_STATE_INSTRUCTIONS
+        if settings._narrative_time_scope_policy == NARRATIVE_TIME_SCOPE_POLICY_V1:
+            system_prompt += NARRATIVE_TIME_SCOPE_INSTRUCTIONS
         request_documents = [
             {
                 "doc_ref": ref,
@@ -1806,7 +1819,7 @@ class ModelEnhancedExtractor:
                         validated_records[location] = assessed
                         if semantic_reason:
                             semantic_reasons[location] = semantic_reason
-                            if semantic_reason in {"narrative_relation_unresolved", "semantic_state_unresolved"}:
+                            if semantic_reason in {"narrative_relation_unresolved", "semantic_state_unresolved", "time_scope_unresolved"}:
                                 executions[doc_index].invalid_records += 1
                                 _add_execution_counter(executions[doc_index], "unresolved_invalid_records")
                                 executions[doc_index].note("semantic_quality")
@@ -2043,6 +2056,8 @@ class ModelEnhancedExtractor:
                              else SYSTEM_PROMPT)
             if settings._semantic_state_policy == SEMANTIC_STATE_POLICY_V1:
                 system_prompt += SEMANTIC_STATE_INSTRUCTIONS
+            if settings._narrative_time_scope_policy == NARRATIVE_TIME_SCOPE_POLICY_V1:
+                system_prompt += NARRATIVE_TIME_SCOPE_INSTRUCTIONS
             context = ""
             if document.role is not None or document.scope is not None:
                 context = (
@@ -2127,7 +2142,7 @@ class ModelEnhancedExtractor:
                             parsed.warnings.append(
                                 f"模型记录 #{index}（分块 {chunk.id}）已按原文语气转为非确定记录（{semantic_reason}）"
                             )
-                            if semantic_reason in {"narrative_relation_unresolved", "semantic_state_unresolved"}:
+                            if semantic_reason in {"narrative_relation_unresolved", "semantic_state_unresolved", "time_scope_unresolved"}:
                                 execution.invalid_records += 1
                                 _add_execution_counter(execution, "unresolved_invalid_records")
                                 execution.note("semantic_quality")

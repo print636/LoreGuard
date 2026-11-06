@@ -17,9 +17,11 @@ from .config import (
     CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings,
 )
 from .account_provider import runtime_for_analysis_run
-from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1
+from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1, NARRATIVE_TIME_SCOPE_POLICY_V1
 from .semantic_state import SEMANTIC_STATE_REFS_KEY
 from .semantic_state_storage import semantic_state_storage_payload
+from .narrative_time_scope import TIME_SCOPE_REFS_KEY
+from .narrative_time_scope_storage import time_scope_storage_payload
 from .config import CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
 from .character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
 from .db import (
@@ -3399,6 +3401,11 @@ def _narrative_settings_for_run(settings, run: AnalysisRunRow):
         if coverage.get("semantic_state_policy") == SEMANTIC_STATE_POLICY_V1
         else None
     )
+    local._narrative_time_scope_policy = (
+        NARRATIVE_TIME_SCOPE_POLICY_V1
+        if coverage.get("narrative_time_scope_policy") == NARRATIVE_TIME_SCOPE_POLICY_V1
+        else None
+    )
     return local
 
 
@@ -4015,6 +4022,12 @@ def execute_analysis(
             result.diagnostics.pop(SEMANTIC_STATE_REFS_KEY, None)
             if state_refs is not None:
                 result.diagnostics[SEMANTIC_STATE_REFS_KEY] = state_refs
+            time_scope_refs = time_scope_storage_payload(
+                db, run=run, records=record_rows, directives=result.directives,
+            )
+            result.diagnostics.pop(TIME_SCOPE_REFS_KEY, None)
+            if time_scope_refs is not None:
+                result.diagnostics[TIME_SCOPE_REFS_KEY] = time_scope_refs
             db.execute(delete(IssueRow).where(IssueRow.run_id == run_id))
             db.execute(
                 delete(AnalysisRecordRow).where(AnalysisRecordRow.run_id == run_id)

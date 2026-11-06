@@ -25,7 +25,7 @@ from starlette.types import Scope
 
 from .config import CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings
 from .character_claim_resolution import CLAIM_RESOLUTION_KEY
-from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1
+from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1, NARRATIVE_TIME_SCOPE_POLICY_V1
 from .config import CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
 from .auth import (
     AuthContext,
@@ -6089,6 +6089,7 @@ def start_analysis(
         timing = execution_limits_payload(settings)
         coverage["narrative_time_knowledge_policy"] = NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
         coverage["semantic_state_policy"] = SEMANTIC_STATE_POLICY_V1
+        coverage["narrative_time_scope_policy"] = NARRATIVE_TIME_SCOPE_POLICY_V1
         if timing is not None:
             coverage[EXECUTION_LIMITS_KEY] = timing
         provider_runtime = account_provider_runtime(
@@ -6456,6 +6457,7 @@ def start_recheck(
         coverage["recheck_baseline_run_id"] = baseline_run_id
         coverage["narrative_time_knowledge_policy"] = NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
         coverage["semantic_state_policy"] = SEMANTIC_STATE_POLICY_V1
+        coverage["narrative_time_scope_policy"] = NARRATIVE_TIME_SCOPE_POLICY_V1
         timing = execution_limits_payload(settings)
         if timing is not None:
             coverage[EXECUTION_LIMITS_KEY] = timing
@@ -7199,7 +7201,7 @@ def _without_private_character_metadata(payload):
         return {
             key: _without_private_character_metadata(value)
             for key, value in payload.items()
-            if key not in {"target_focus_review_v1", "failure_diagnostic_v1", "explanation_assertion_refs_v1", "assertion_binding_v1", "semantic_state_refs_v1", "semantic_state"}
+            if key not in {"target_focus_review_v1", "failure_diagnostic_v1", "explanation_assertion_refs_v1", "assertion_binding_v1", "semantic_state_refs_v1", "semantic_state", "narrative_time_scope_refs_v1", "narrative_time_scope"}
         }
     if isinstance(payload, list):
         return [_without_private_character_metadata(value) for value in payload]

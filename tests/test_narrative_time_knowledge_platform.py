@@ -32,12 +32,15 @@ def test_worker_uses_only_frozen_policy_and_preserves_legacy_default(frozen):
 def test_normal_account_freezes_policy_retries_keep_history_and_extra_evidence_is_readable():
     from app.model_extractor import SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT, SYSTEM_PROMPT_NARRATIVE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_V1
     from app.semantic_state import SEMANTIC_STATE_INSTRUCTIONS
+    from app.narrative_time_scope import NARRATIVE_TIME_SCOPE_INSTRUCTIONS
 
     sent = []
     def respond(request):
         body = json.loads(request.content)
         system, user = (message["content"] for message in body["messages"])
         sent.append(system)
+        if system.endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS):
+            system = system[:-len(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)]
         if system.endswith(SEMANTIC_STATE_INSTRUCTIONS):
             system = system[:-len(SEMANTIC_STATE_INSTRUCTIONS)]
         assert system in {SYSTEM_PROMPT, BATCH_SYSTEM_PROMPT, SYSTEM_PROMPT_NARRATIVE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_V1}
@@ -112,7 +115,7 @@ def test_normal_account_freezes_policy_retries_keep_history_and_extra_evidence_i
             old_id = client.post(runs_url, json={}).json()["id"]
             with SessionLocal() as db:
                 old = db.get(AnalysisRunRow, old_id)
-                old.batch_coverage = {key: value for key, value in old.batch_coverage.items() if key not in {"narrative_time_knowledge_policy", "semantic_state_policy"}}
+                old.batch_coverage = {key: value for key, value in old.batch_coverage.items() if key not in {"narrative_time_knowledge_policy", "semantic_state_policy", "narrative_time_scope_policy"}}
                 old.status = "failed"
                 db.commit()
             retry = client.post(f"/api/v1/analysis-runs/{old_id}/retry")

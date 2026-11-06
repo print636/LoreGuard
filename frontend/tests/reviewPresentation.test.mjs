@@ -63,3 +63,11 @@ test('time and knowledge records describe bounds without internal identities or 
   assert.equal(summarizeRecord(relation), '这两件事发生在同一天。');
   assert.doesNotMatch(summarizeRecord(relation), /doc_ref|same_day|d2/);
 });
+
+test('bounded narrative time scope shows its source without inventing calendar dates', () => {
+  const row = {id:'scope', kind:'narrative_time_scope', evidence:{...evidence,text:'当天的交接和开门按以下顺序发生。'},
+    attrs:{relation:'same_day_ordered',basis:'supported_inference',member_count:'3'}};
+  assert.equal(recordKindName(row.kind), '时间范围');
+  assert.equal(summarizeRecord(row), row.evidence.text);
+  assert.doesNotMatch(summarizeRecord(row), /same_day|member_count|sha256|\d{4}-\d{2}-\d{2}/);
+});

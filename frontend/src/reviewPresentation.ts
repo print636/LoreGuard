@@ -28,6 +28,7 @@ const kindNames: Record<string, string> = {
   fact: '事实记录', event: '事件记录', knows: '知识获得',
   claims_knows: '知识声称', item: '物品状态', uses: '物品使用',
   narrative_time_relation: '时间关系', knowledge_constraint: '知情约束',
+  narrative_time_scope: '时间范围',
   world_rule: '世界规则', world_assert: '章节断言',
   open_question: '原文开放问题', clarification: '待作者澄清',
 };
@@ -72,7 +73,7 @@ export function summarizeRecord(row: RecordView): string {
     const verb = row.kind === 'knows' ? '得知' : '声称知道';
     return `${at}${text(attrs.character)}${verb}“${text(attrs.fact)}”`;
   }
-  if (row.kind === 'narrative_time_relation') {
+  if (row.kind === 'narrative_time_relation' || row.kind === 'narrative_time_scope') {
     return row.evidence.text || '这条时间关系需结合原文核对。';
   }
   if (row.kind === 'knowledge_constraint') {

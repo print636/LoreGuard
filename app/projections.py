@@ -260,6 +260,8 @@ def _timeline_title(kind: str, attrs: dict[str, str]) -> str:
         return f"{attrs.get('character', '未知角色')} · {relation} {attrs.get('fact', '未知信息')}"
     if kind == "narrative_time_relation":
         return "正文中的时间关系依据"
+    if kind == "narrative_time_scope":
+        return "正文中的时间范围依据"
     if kind == "item":
         if attrs.get("state_kind") == "transfer":
             return f"{attrs.get('transfer_from', '原持有人')} 将 {attrs.get('item', '未知物品')} 交给 {attrs.get('owner', '未知角色')}"

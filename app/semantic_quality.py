@@ -28,6 +28,7 @@ CANONICAL_KINDS = {
     "world_rule",
     "world_assert",
     "narrative_time_relation",
+    "narrative_time_scope",
     "knowledge_constraint",
 }
 
@@ -1545,6 +1546,11 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
         return None, "unsupported_kind"
     if not directive.evidence.text.strip():
         return None, "empty_evidence"
+    if directive.kind == "narrative_time_scope":
+        from .narrative_time_scope import valid_time_scope, time_scope_is_certain
+        if not valid_time_scope(directive):
+            return None, "unbound_time_scope"
+        return directive, None if time_scope_is_certain(directive) else "time_scope_unresolved"
     if directive.kind in {"narrative_time_relation", "knowledge_constraint"}:
         from .narrative_relations import valid_relation, relation_is_certain
         if not valid_relation(directive):
@@ -2059,6 +2065,9 @@ def eligible_for_deterministic_rules(directive: ParsedDirective) -> bool:
         from .semantic_state import supported_semantic_state
         if not supported_semantic_state(directive):
             return False
+    if directive.kind == "narrative_time_scope":
+        from .narrative_time_scope import time_scope_is_certain
+        return time_scope_is_certain(directive)
     if directive.kind in {"narrative_time_relation", "knowledge_constraint"}:
         from .narrative_relations import relation_is_certain
         return relation_is_certain(directive)

@@ -180,6 +180,20 @@ def compare_time_points(left: ParsedDirective, right: ParsedDirective,
     if absolute_left is not None and absolute_right is not None:
         conclusions.add((absolute_left > absolute_right) - (absolute_left < absolute_right))
     for relation in relations:
+        if relation.kind == "narrative_time_scope":
+            from .narrative_time_scope import scope_comparison
+            applies, results = scope_comparison(relation, left, right)
+            if applies:
+                if not results:
+                    unknown = True
+                else:
+                    conclusions.update(results)
+                    evidence.append(relation.evidence)
+                if relation.attrs.get("relation") in {"same_day", "same_day_ordered"}:
+                    same_day = True
+                    if absolute_left is not None and absolute_right is not None and absolute_left.date() != absolute_right.date():
+                        unknown = True
+            continue
         if not valid_relation(relation):
             continue
         points = relation.narrative_relation["points"]
@@ -219,7 +233,7 @@ def relation_issues(directives: list[ParsedDirective]) -> list:
     from .rules import (_issue, _scopes_compatible, _same_evidence, _evidence_shares_place,
                         _event_precise_timestamp, _location_within, _mobility_limit_applies)
 
-    relations = [row for row in directives if row.kind == "narrative_time_relation"]
+    relations = [row for row in directives if row.kind in {"narrative_time_relation", "narrative_time_scope"}]
     trusted = [row for row in directives if eligible_for_deterministic_rules(row)]
     constraints = [row for row in trusted if row.kind == "knowledge_constraint"
                    and row.attrs.get("knowledge_scope") == "whole_content"]

@@ -96,11 +96,14 @@ def test_private_binding_uses_this_runs_frozen_source_and_exact_saved_record(db,
 
 def test_normal_account_persists_binding_and_keeps_old_retry_and_full_reader():
     from app.model_extractor import BATCH_SYSTEM_PROMPT_NARRATIVE_V1, SYSTEM_PROMPT_NARRATIVE_V1
+    from app.narrative_time_scope import NARRATIVE_TIME_SCOPE_INSTRUCTIONS
     sent = []
     def respond(request):
         body = json.loads(request.content)
         system,user = (message['content'] for message in body['messages'])
         sent.append(system)
+        if system.endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS):
+            system = system[:-len(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)]
         current = system.endswith(SEMANTIC_STATE_INSTRUCTIONS)
         base = system[:-len(SEMANTIC_STATE_INSTRUCTIONS)] if current else system
         assert base in {BATCH_SYSTEM_PROMPT_NARRATIVE_V1, SYSTEM_PROMPT_NARRATIVE_V1}
@@ -153,7 +156,7 @@ def test_normal_account_persists_binding_and_keeps_old_retry_and_full_reader():
             old_id = client.post(runs,json={}).json()['id']
             with SessionLocal() as session:
                 old = session.get(AnalysisRunRow,old_id)
-                old.batch_coverage = {k:v for k,v in old.batch_coverage.items() if k != 'semantic_state_policy'}
+                old.batch_coverage = {k:v for k,v in old.batch_coverage.items() if k not in {'semantic_state_policy','narrative_time_scope_policy'}}
                 old.status = 'failed'
                 session.commit()
             retry = client.post(f'/api/v1/analysis-runs/{old_id}/retry').json()['id']

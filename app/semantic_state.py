@@ -208,7 +208,7 @@ def custody_comparisons(directives: list[ParsedDirective]) -> tuple[list, int]:
     from .rules import _scopes_compatible
 
     rows = [d for d in directives if d.kind in {"item", "uses"} and eligible_for_deterministic_rules(d)]
-    relations = [d for d in directives if d.kind == "narrative_time_relation"]
+    relations = [d for d in directives if d.kind in {"narrative_time_relation", "narrative_time_scope"}]
     observations = [d for d in rows if d.kind == "uses" or d.attrs.get("state_kind") in {"observed_possession", "transfer"}]
     states = [d for d in rows if d.kind == "item" and d.attrs.get("state_kind") != "observed_possession"]
     issues, unknown, seen = [], 0, set()

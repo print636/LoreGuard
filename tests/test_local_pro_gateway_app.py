@@ -154,6 +154,7 @@ def _exercise_author_review(client):
         SYSTEM_PROMPT_NARRATIVE_V1, BATCH_SYSTEM_PROMPT_NARRATIVE_V1,
     )
     from app.semantic_state import SEMANTIC_STATE_INSTRUCTIONS
+    from app.narrative_time_scope import NARRATIVE_TIME_SCOPE_INSTRUCTIONS
     from app.provider import OpenAICompatibleProvider
     from tests.test_account_provider import register, save_provider
     from tests.test_character_baseline_recovery import _record as formal_record
@@ -196,6 +197,8 @@ def _exercise_author_review(client):
         assert body["model"] == "mock-author"
         system, user = (message["content"] for message in body["messages"])
         calls.append(system)
+        if system.endswith(NARRATIVE_TIME_SCOPE_INSTRUCTIONS):
+            system = system[:-len(NARRATIVE_TIME_SCOPE_INSTRUCTIONS)]
         if system.endswith(SEMANTIC_STATE_INSTRUCTIONS):
             system = system[:-len(SEMANTIC_STATE_INSTRUCTIONS)]
         if draft_service_unavailable and system.startswith(
@@ -256,7 +259,7 @@ def _exercise_author_review(client):
             "logical_seconds": 360, "run_seconds": 2400,
         }
         assert default["review_batch"]["character_review_enabled"] is False
-        assert calls and set(calls) <= {SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS, BATCH_SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS}
+        assert calls and set(calls) <= {SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS, BATCH_SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS}
         assert client.post(runs_url, json={"character_review_enabled": True}).status_code == 422
         assert client.post(runs_url, json={**baseline, "character_review_enabled": "true"}).status_code == 422
 
@@ -314,7 +317,7 @@ def _exercise_author_review(client):
         assert not calls
         ordinary = start(chosen)
         assert ordinary["review_batch"]["character_review_enabled"] is False
-        assert calls and set(calls) <= {SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS, BATCH_SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS}
+        assert calls and set(calls) <= {SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS, BATCH_SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS}
         reviewed = start(opted_in)
         assert frozen_scene_policy(reviewed) == HABIT_SCENE_POLICY_V1
         assert all(frozen_scene_policy(run) is None for run in (default, ordinary, created))
