@@ -1018,7 +1018,22 @@ class ApiFlowTests(unittest.TestCase):
             self.assertEqual("completed", status)
             issues = client.get(f"/api/v1/analysis-runs/{run['id']}/issues").json()
             records = client.get(f"/api/v1/analysis-runs/{run['id']}/records").json()
-            self.assertEqual(5, len({issue["category"] for issue in issues}))
+            self.assertEqual(
+                {"fact_conflict", "location_collision", "item_ownership", "world_rule_conflict"},
+                {issue["category"] for issue in issues},
+            )
+            # Both knowledge records remain extracted. A later ordinary
+            # acquisition does not establish the first possible knowledge;
+            # this no-model demo supplies no explicit prior-ignorance bound.
+            knowledge_records = {
+                (row["kind"], row["attrs"].get("time"))
+                for row in records["records"]
+                if row["kind"] in {"knows", "claims_knows"}
+            }
+            self.assertEqual(
+                {("knows", "1026-04-03 12:00"), ("claims_knows", "1026-04-03 09:00")},
+                knowledge_records,
+            )
             self.assertGreaterEqual(records["record_count"], 10)
             diagnostics = client.get(f"/api/v1/analysis-runs/{run['id']}/diagnostics")
             self.assertEqual(200, diagnostics.status_code)
