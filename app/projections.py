@@ -144,7 +144,7 @@ def _relations(row: Any, issue_ids: list[str]) -> tuple[list[dict], list[dict]]:
         if item and actor:
             source = add_node(_node("entity", actor, actor))
             target = add_node(_node("item", item, item))
-            add_edge(source, target, "持有" if kind == "item" else "使用")
+            add_edge(source, target, _item_state_label(attrs) if kind == "item" else "使用")
     elif kind in {"world_rule", "world_assert"}:
         key, value = attrs.get("key", "").strip(), attrs.get("value", "").strip()
         if key and value:
@@ -232,6 +232,14 @@ def _time_classification(value: str | None) -> tuple[str, str | None, str | None
     return "relative", None, value
 
 
+def _item_state_label(attrs: dict[str, str]) -> str:
+    state = attrs.get("state_kind")
+    if not state:
+        return "持有"
+    return {"observed_possession": "观察到持有", "custody": "保管",
+            "transfer": "交接后持有", "retained_custody": "保管且明确未交接"}.get(state, "持有关系待核实")
+
+
 def _timeline_title(kind: str, attrs: dict[str, str]) -> str:
     if kind == "fact":
         return f"{attrs.get('subject', '未知对象')} · {attrs.get('predicate', '状态')} = {attrs.get('value', '未知')}"
@@ -253,6 +261,13 @@ def _timeline_title(kind: str, attrs: dict[str, str]) -> str:
     if kind == "narrative_time_relation":
         return "正文中的时间关系依据"
     if kind == "item":
+        if attrs.get("state_kind") == "transfer":
+            return f"{attrs.get('transfer_from', '原持有人')} 将 {attrs.get('item', '未知物品')} 交给 {attrs.get('owner', '未知角色')}"
+        if attrs.get("state_kind") == "retained_custody":
+            bound = f"截至{attrs['through_time']}" if attrs.get("through_time") else "所引期间"
+            return f"{bound}，{attrs.get('owner', '未知角色')} 仍保管 {attrs.get('item', '未知物品')}，明确未交给别人"
+        if attrs.get("state_kind"):
+            return f"{attrs.get('owner', '未知角色')} · {attrs.get('item', '未知物品')} · {_item_state_label(attrs)}"
         return f"{attrs.get('owner', '未知角色')} 持有 {attrs.get('item', '未知物品')}"
     if kind == "uses":
         return f"{attrs.get('user', '未知角色')} 使用 {attrs.get('item', '未知物品')}"

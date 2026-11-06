@@ -12,12 +12,13 @@ from urllib.request import Request, urlopen
 EXPECTED_CATEGORIES = {
     "fact_conflict",
     "location_collision",
-    "item_ownership",
     "world_rule_conflict",
 }
 # Ordinary new API runs use the sourced knowledge-bound policy. This model-free
 # smoke still extracts the two knowledge events, but does not obtain a model-
 # bound constraint from the advanced demo's explicit prior-ignorance passage.
+# Its lexical owner record also does not express the source's no-transfer/use
+# constraint. The missing item finding is unassessed, not proof of consistency.
 EXPECTED_KNOWLEDGE_RECORDS = {
     ("claims_knows", "林澈", "沉星航线入口位置", "1026-04-03 14:00"),
     ("knows", "林澈", "沉星航线入口位置", "1026-04-03 18:00"),

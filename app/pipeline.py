@@ -64,11 +64,13 @@ class BaselineExtractor:
 
 
 class RuleChecker:
-    def __init__(self, *, require_explicit_knowledge_bound: bool = False):
+    def __init__(self, *, require_explicit_knowledge_bound: bool = False, semantic_state_policy: bool = False):
         self.require_explicit_knowledge_bound = require_explicit_knowledge_bound
+        self.semantic_state_policy = semantic_state_policy
 
     def check(self, directives: list[ParsedDirective]) -> list[ConsistencyIssue]:
-        return detect_issues(directives, require_explicit_knowledge_bound=self.require_explicit_knowledge_bound)
+        return detect_issues(directives, require_explicit_knowledge_bound=self.require_explicit_knowledge_bound,
+                             semantic_state_policy=self.semantic_state_policy)
 
     def check_with_candidates(self, directives, candidate_pairs):
         compatible = {
@@ -108,7 +110,7 @@ class AnalysisPipeline:
         retriever=None,
         settings=None,
     ):
-        from .config import get_settings, NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+        from .config import get_settings, NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1
         from .provider import OpenAICompatibleProvider
 
         self.settings = settings or get_settings()
@@ -121,7 +123,7 @@ class AnalysisPipeline:
         self.extractor = extractor
         self.checker = checker or RuleChecker(require_explicit_knowledge_bound=(
             self.settings._narrative_time_knowledge_policy == NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
-        ))
+        ), semantic_state_policy=self.settings._semantic_state_policy == SEMANTIC_STATE_POLICY_V1)
         if normalizer is None:
             from .candidate_normalizer import DeterministicCandidateNormalizer
 
@@ -532,6 +534,12 @@ class AnalysisPipeline:
                 "total_ms": round((perf_counter() - started) * 1000, 3),
             },
         }
+        if getattr(self.checker, "semantic_state_policy", False):
+            from .semantic_state import custody_comparisons
+            unresolved = custody_comparisons(result.directives)[1]
+            result.diagnostics["semantic_state_comparison"] = {"unresolved_pairs": unresolved}
+            if unresolved:
+                result.warnings.append(f"有 {unresolved} 组物品状态缺少可比较时序或交接依据，未作正式判断。")
         emit("check", 75, f"检查器发现 {len(result.issues)} 个候选问题")
         result.diagnostics["timings"]["total_ms"] = round((perf_counter() - started) * 1000, 3)
         return result
@@ -687,8 +695,9 @@ def _merge_final_directive_sources(
             continue
         existing = merged[existing_index]
         sources = existing.provenance_sources | directive.provenance_sources
-        if sources != existing.provenance_sources:
-            merged[existing_index] = existing.model_copy(
+        if sources != existing.provenance_sources or directive.semantic_state is not None:
+            preferred = directive if directive.semantic_state is not None else existing
+            merged[existing_index] = preferred.model_copy(
                 update={"provenance_sources": frozenset(sources)}
             )
     return merged

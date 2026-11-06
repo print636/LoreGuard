@@ -17,7 +17,9 @@ from .config import (
     CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings,
 )
 from .account_provider import runtime_for_analysis_run
-from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1
+from .semantic_state import SEMANTIC_STATE_REFS_KEY
+from .semantic_state_storage import semantic_state_storage_payload
 from .config import CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
 from .character_habit_scope_review import HABIT_SCOPE_SYSTEM_PROMPT
 from .db import (
@@ -2122,6 +2124,12 @@ def _emit_owned(
 
 def analysis_mode(result) -> tuple[str, bool]:
     execution = getattr(result, "diagnostics", {}).get("model")
+    state_comparison = getattr(result, "diagnostics", {}).get("semantic_state_comparison")
+    state_incomplete = (
+        isinstance(state_comparison, dict)
+        and type(state_comparison.get("unresolved_pairs")) is int
+        and state_comparison["unresolved_pairs"] > 0
+    )
     required_counters = (
         "succeeded_chunks",
         "failed_chunks",
@@ -2135,6 +2143,8 @@ def analysis_mode(result) -> tuple[str, bool]:
     ):
         return "执行状态未知（缺少结构化记录）", True
     if not execution["enabled"]:
+        if state_incomplete:
+            return "确定性基线（物品状态比较尚未完成）", True
         return "确定性基线", False
     succeeded = execution["succeeded_chunks"]
     empty_responses = execution["empty_response_chunks"]
@@ -2171,6 +2181,7 @@ def analysis_mode(result) -> tuple[str, bool]:
         or repair_incomplete
         or empty_responses
         or not execution["configured"]
+        or state_incomplete
     )
     if succeeded:
         if empty_responses:
@@ -3383,6 +3394,11 @@ def _narrative_settings_for_run(settings, run: AnalysisRunRow):
         if coverage.get("narrative_time_knowledge_policy") == NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
         else None
     )
+    local._semantic_state_policy = (
+        SEMANTIC_STATE_POLICY_V1
+        if coverage.get("semantic_state_policy") == SEMANTIC_STATE_POLICY_V1
+        else None
+    )
     return local
 
 
@@ -3989,6 +4005,16 @@ def execute_analysis(
                     )
             checkpoint()
             report_started = perf_counter()
+            record_rows = [AnalysisRecordRow(
+                id=str(uuid4()), run_id=run_id, kind=directive.kind,
+                attrs=directive.attrs, evidence=directive.evidence.model_dump(),
+            ) for directive in result.directives]
+            state_refs = semantic_state_storage_payload(
+                db, run=run, records=record_rows, directives=result.directives,
+            )
+            result.diagnostics.pop(SEMANTIC_STATE_REFS_KEY, None)
+            if state_refs is not None:
+                result.diagnostics[SEMANTIC_STATE_REFS_KEY] = state_refs
             db.execute(delete(IssueRow).where(IssueRow.run_id == run_id))
             db.execute(
                 delete(AnalysisRecordRow).where(AnalysisRecordRow.run_id == run_id)
@@ -3998,15 +4024,7 @@ def execute_analysis(
                     AnalysisDiagnosticRow.run_id == run_id
                 )
             )
-            for directive in result.directives:
-                db.add(
-                    AnalysisRecordRow(
-                        run_id=run_id,
-                        kind=directive.kind,
-                        attrs=directive.attrs,
-                        evidence=directive.evidence.model_dump(),
-                    )
-                )
+            db.add_all(record_rows)
             for issue in result.issues:
                 extra = dict(issue.metadata)
                 if review_result is not None:

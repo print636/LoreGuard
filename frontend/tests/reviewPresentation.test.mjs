@@ -8,6 +8,19 @@ import {
 const evidence = {document_id:'d1', document_name:'chapter.md', line_start:7,
   line_end:7, text:'林澈的身份是领航员。'};
 
+test('item states distinguish observation custody transfer and uncertainty without proof fields', () => {
+  const row = {id:'item', kind:'item', evidence, attrs:{item:'铜钥匙', owner:'林澈', time:'12:00'}};
+  const summaries = Object.fromEntries(['observed_possession','custody','transfer','retained_custody','unclear'].map(state_kind =>
+    [state_kind, summarizeRecord({...row, attrs:{...row.attrs, state_kind, transfer_from:'乔予', through_time:'13:00'}})]));
+  assert.match(summaries.observed_possession, /观察到.*不代表已核实交接/);
+  assert.match(summaries.custody, /由林澈保管/);
+  assert.match(summaries.transfer, /乔予将铜钥匙交给林澈/);
+  assert.match(summaries.retained_custody, /截至13:00.*明确未交给别人/);
+  assert.match(summaries.unclear, /尚未核清/);
+  assert.equal(summarizeRecord(row), '12:00，铜钥匙由林澈持有');
+  assert.doesNotMatch(Object.values(summaries).join(''), /state_kind|semantic_state|payload_sha256|所有权/);
+});
+
 test('record card uses a natural summary and hides empty time by default', () => {
   const row = {id:'r1', kind:'fact', evidence, attrs:{time:'', subject:'林澈',
     predicate:'身份', value:'领航员', modality:'asserted'}};

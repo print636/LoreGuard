@@ -575,6 +575,9 @@ def _dedupe_semantic_records(directives: list[ParsedDirective]) -> list[ParsedDi
             key = related_key or (*base, character)
         else:
             key = _fingerprint(directive)
+        if directive.semantic_state is not None:
+            # Different sourced states on one line must not collapse into one owner.
+            key = (*key, "semantic_state", directive.semantic_state["payload_sha256"])
         if key not in indexes:
             indexes[key] = len(result)
             result.append(directive)

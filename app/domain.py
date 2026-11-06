@@ -788,6 +788,7 @@ class ParsedDirective(BaseModel):
     attrs: dict[str, str]
     evidence: EvidenceSpan
     narrative_relation: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
+    semantic_state: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     # Server-derived narrative-frame safety bit.  A preceding section marker
     # such as "the following passage is a dream" may govern an otherwise
     # ordinary-looking evidence line.  Keep that context through model_copy

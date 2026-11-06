@@ -15,13 +15,14 @@ from scripts.run_compose_smoke import (
 
 class ComposeSmokeTests(unittest.TestCase):
     def test_current_demo_contract_checks_categories_and_retained_knowledge_without_compose(self):
-        from app.config import Settings, NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+        from app.config import Settings, NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1
         from app.pipeline import AnalysisPipeline, BaselineExtractor, DocumentInput
 
         root = Path(__file__).resolve().parents[1] / "data" / "advanced"
         config = Settings(_env_file=None, enable_model_extraction=False,
                           enable_review_agent=False, enable_embeddings=False)
         config._narrative_time_knowledge_policy = NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+        config._semantic_state_policy = SEMANTIC_STATE_POLICY_V1
         result = AnalysisPipeline(extractor=BaselineExtractor(), settings=config).run([
             DocumentInput(path.stem, path.name, path.read_text(encoding="utf-8"),
                           "canon" if path.stem == "world" else "chapter", "main")
@@ -47,7 +48,7 @@ class ComposeSmokeTests(unittest.TestCase):
         ):
             summary = run("http://test.invalid", 1)
             self.assertEqual(
-                ["fact_conflict", "item_ownership", "location_collision", "world_rule_conflict"],
+                ["fact_conflict", "location_collision", "world_rule_conflict"],
                 summary["categories"],
             )
             responses["/api/v1/analysis-runs/run/records"] = {

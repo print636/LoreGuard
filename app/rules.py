@@ -316,6 +316,7 @@ def _world_rule_title(key: str) -> str:
 
 def detect_issues(
     directives: list[ParsedDirective], *, require_explicit_knowledge_bound: bool = False,
+    semantic_state_policy: bool = False,
 ) -> list[ConsistencyIssue]:
     issues: list[ConsistencyIssue] = []
 
@@ -557,7 +558,7 @@ def detect_issues(
                 claim_time=claim_time,
             ))
 
-    for use in uses:
+    for use in ([] if semantic_state_policy else uses):
         item = use.attrs.get("item", "")
         user = use.attrs.get("user", "")
         use_time = use.attrs.get("time", "")
@@ -618,6 +619,9 @@ def detect_issues(
                 key=key,
             ))
 
+    if semantic_state_policy:
+        from .semantic_state import custody_comparisons
+        issues.extend(custody_comparisons(directives)[0])
     from .narrative_relations import relation_issues
     issues.extend(relation_issues(directives))
     return issues

@@ -1553,6 +1553,16 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
         # an unknown-before constraint is not a negated event/acquisition.
         return directive, None if relation_is_certain(directive) else "narrative_relation_unresolved"
 
+    from .semantic_state import valid_semantic_state, supported_semantic_state
+    source_bound = directive.semantic_state is not None
+    if source_bound and not valid_semantic_state(directive):
+        return None, "invalid_semantic_state"
+    if source_bound and not supported_semantic_state(directive):
+        return (_to_noncanonical(directive, kind="tentative_fact",
+                                modality=SemanticModality.uncertain,
+                                source_scope=SourceScope.unknown,
+                                certainty=CertaintyLevel.unknown), "semantic_state_unresolved")
+
     attrs = dict(directive.attrs)
     for key in _REQUIRED_ATTRS.get(directive.kind, ()):
         if not _clean(attrs.get(key, "")):
@@ -1881,6 +1891,7 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
         and attrs.get("input_form") != "directive"
         and not attrs.get("predicate", "").startswith("body_state:")
         and _clean(attrs.get("predicate", "")) not in _STRUCTURED_FACT_PREDICATES
+        and not source_bound
         and not _fact_has_bound_relation(
             support,
             subject=_clean(attrs.get("subject", "")),
@@ -1935,6 +1946,7 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
     if (
         directive.kind == "uses"
         and attrs.get("input_form") != "directive"
+        and not source_bound
         and not _candidate_action_matches(support, directive)
     ):
         return (
@@ -1961,6 +1973,10 @@ def assess_directive(directive: ParsedDirective) -> tuple[ParsedDirective | None
         # is explicitly affirmed.
         negated = False
         declared_modality = SemanticModality.asserted
+    if source_bound and directive.attrs.get("state_kind") == "retained_custody":
+        # Explicit absence of transfer is itself a positive custody constraint.
+        # Its actual/role relation was independently supplied in the same extraction.
+        negated = False
     if negated and directive.kind not in {"fact", "world_rule"}:
         return (
             _to_noncanonical(
@@ -2039,6 +2055,10 @@ def apply_semantic_quality_gate(directives: list[ParsedDirective]) -> SemanticQu
 
 
 def eligible_for_deterministic_rules(directive: ParsedDirective) -> bool:
+    if directive.semantic_state is not None:
+        from .semantic_state import supported_semantic_state
+        if not supported_semantic_state(directive):
+            return False
     if directive.kind in {"narrative_time_relation", "knowledge_constraint"}:
         from .narrative_relations import relation_is_certain
         return relation_is_certain(directive)

@@ -1019,9 +1019,11 @@ class ApiFlowTests(unittest.TestCase):
             issues = client.get(f"/api/v1/analysis-runs/{run['id']}/issues").json()
             records = client.get(f"/api/v1/analysis-runs/{run['id']}/records").json()
             self.assertEqual(
-                {"fact_conflict", "location_collision", "item_ownership", "world_rule_conflict"},
+                {"fact_conflict", "location_collision", "world_rule_conflict"},
                 {issue["category"] for issue in issues},
             )
+            # An owner observation does not prove a persistent no-transfer
+            # bound; this model-free item's constraint remains unassessed.
             # Both knowledge records remain extracted. A later ordinary
             # acquisition does not establish the first possible knowledge;
             # this no-model demo supplies no explicit prior-ignorance bound.
@@ -1037,6 +1039,8 @@ class ApiFlowTests(unittest.TestCase):
             self.assertGreaterEqual(records["record_count"], 10)
             diagnostics = client.get(f"/api/v1/analysis-runs/{run['id']}/diagnostics")
             self.assertEqual(200, diagnostics.status_code)
+            self.assertTrue(diagnostics.json()["model"]["partial_fallback"])
+            self.assertGreater(diagnostics.json()["semantic_state_comparison"]["unresolved_pairs"], 0)
             payload = diagnostics.json()
             self.assertGreaterEqual(payload["chunking"]["total_chunks"], 2)
             self.assertIn("candidate_count", payload["retrieval"])

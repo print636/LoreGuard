@@ -86,6 +86,11 @@ export function summarizeRecord(row: RecordView): string {
     return `${subject}的知情时间仍需核对原文`;
   }
   if (row.kind === 'item') {
+    if (attrs.state_kind === 'observed_possession') return `${at}观察到${text(attrs.owner)}持有${text(attrs.item)}；这不代表已核实交接`;
+    if (attrs.state_kind === 'custody') return `${at}${text(attrs.item)}由${text(attrs.owner)}保管`;
+    if (attrs.state_kind === 'transfer') return `${at}${text(attrs.transfer_from)}将${text(attrs.item)}交给${text(attrs.owner)}`;
+    if (attrs.state_kind === 'retained_custody') return `${at}${attrs.through_time ? `截至${text(attrs.through_time)}，` : '所引期间，'}${text(attrs.owner)}仍保管${text(attrs.item)}，明确未交给别人`;
+    if (attrs.state_kind) return `${at}${text(attrs.item)}与${text(attrs.owner)}的持有关系尚未核清`;
     return `${at}${text(attrs.item)}由${text(attrs.owner)}持有`;
   }
   if (row.kind === 'uses') {

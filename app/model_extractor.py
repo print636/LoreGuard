@@ -37,7 +37,8 @@ from .semantic_quality import (
     eligible_for_deterministic_rules,
     open_question_directives,
 )
-from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
+from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1
+from .semantic_state import SemanticRelation, SEMANTIC_STATE_INSTRUCTIONS, bind_semantic_state
 from .narrative_relations import (
     RELATION_KINDS, NARRATIVE_RELATION_INSTRUCTIONS, NarrativeTimeExtraction,
     KnowledgeConstraintExtraction, bind_relation,
@@ -58,6 +59,7 @@ class ExtractionBase(BaseModel):
 
 
 class FactExtraction(ExtractionBase):
+    semantic_relation: SemanticRelation | None = None
     kind: Literal["fact"]
     subject: str = Field(min_length=1)
     predicate: str = Field(min_length=1)
@@ -89,6 +91,7 @@ class KnowledgeExtraction(ExtractionBase):
 
 
 class ItemExtraction(ExtractionBase):
+    semantic_relation: SemanticRelation | None = None
     kind: Literal["item"]
     item: str = Field(min_length=1)
     owner: str = Field(min_length=1)
@@ -96,6 +99,7 @@ class ItemExtraction(ExtractionBase):
 
 
 class UsesExtraction(ExtractionBase):
+    semantic_relation: SemanticRelation | None = None
     kind: Literal["uses"]
     item: str = Field(min_length=1)
     user: str = Field(min_length=1)
@@ -461,7 +465,7 @@ def _repair_input(candidate: _RepairCandidate) -> dict[str, Any]:
 
 def _attrs(record: ExtractionRecord, line_start: int) -> dict[str, str]:
     data = record.model_dump(
-        exclude={"kind", "source_line_start", "source_line_end"}, exclude_none=True
+        exclude={"kind", "source_line_start", "source_line_end", "semantic_relation"}, exclude_none=True
     )
     if record.kind == "event":
         participants = data.pop("participants")
@@ -563,7 +567,7 @@ def merge_directives(
     merged = list(baseline)
     seen = {_fingerprint(item): index for index, item in enumerate(merged)}
     for item in model:
-        if item.kind == "fact":
+        if item.kind == "fact" and item.semantic_state is None:
             predicate = _clean(item.attrs.get("predicate", ""))
             candidates = baseline_predicates.get(fact_key(item), {})
             if (
@@ -582,8 +586,9 @@ def merge_directives(
         else:
             existing = merged[existing_index]
             sources = existing.provenance_sources | item.provenance_sources
-            if sources != existing.provenance_sources:
-                merged[existing_index] = existing.model_copy(
+            if sources != existing.provenance_sources or item.semantic_state is not None:
+                preferred = item if item.semantic_state is not None else existing
+                merged[existing_index] = preferred.model_copy(
                     update={"provenance_sources": frozenset(sources)}
                 )
     return merged
@@ -965,13 +970,16 @@ class ModelEnhancedExtractor:
         doc_ref: str = "d1",
     ) -> tuple[ParsedDirective | None, _RepairCandidate | None, str | None]:
         """Validate a record and isolate only the two Agent-safe failure classes."""
+        state_record = isinstance(raw_record, dict) and raw_record.get("semantic_relation") is not None
+        if state_record and self.provider.settings._semantic_state_policy != SEMANTIC_STATE_POLICY_V1:
+            raise ValueError("模型记录未通过语义质量门")
         relation_record = isinstance(raw_record, dict) and raw_record.get("kind") in RELATION_KINDS
         if relation_record and self.provider.settings._narrative_time_knowledge_policy != NARRATIVE_TIME_KNOWLEDGE_POLICY_V1:
             raise ValueError("模型记录未通过语义质量门")
         try:
             record = RECORD_ADAPTER.validate_python(raw_record)
         except ValidationError as exc:
-            if relation_record:
+            if relation_record or state_record:
                 # Label repair cannot establish a relation or create sources.
                 raise
             error_codes = _semantic_label_error_codes(exc)
@@ -1005,10 +1013,12 @@ class ModelEnhancedExtractor:
             return None, candidate, None
 
         try:
-            candidate = self._to_directive(document, chunk, record)
+            candidate = self._to_directive(document, chunk, record, require_lexical_support=not state_record)
+            if state_record:
+                candidate = bind_semantic_state(record, candidate)
         except ValueError as exc:
             if not (
-                not relation_record
+                not relation_record and not state_record
                 and self._model_extraction_configured()
                 and self.provider.settings.enable_review_agent
                 and str(exc) == "模型记录缺少原文词面支持"
@@ -1590,6 +1600,8 @@ class ModelEnhancedExtractor:
         system_prompt = (BATCH_SYSTEM_PROMPT_NARRATIVE_V1
                          if settings._narrative_time_knowledge_policy == NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
                          else BATCH_SYSTEM_PROMPT)
+        if settings._semantic_state_policy == SEMANTIC_STATE_POLICY_V1:
+            system_prompt += SEMANTIC_STATE_INSTRUCTIONS
         request_documents = [
             {
                 "doc_ref": ref,
@@ -1787,7 +1799,7 @@ class ModelEnhancedExtractor:
                         validated_records[location] = assessed
                         if semantic_reason:
                             semantic_reasons[location] = semantic_reason
-                            if semantic_reason == "narrative_relation_unresolved":
+                            if semantic_reason in {"narrative_relation_unresolved", "semantic_state_unresolved"}:
                                 executions[doc_index].invalid_records += 1
                                 _add_execution_counter(executions[doc_index], "unresolved_invalid_records")
                                 executions[doc_index].note("semantic_quality")
@@ -2022,6 +2034,8 @@ class ModelEnhancedExtractor:
             system_prompt = (SYSTEM_PROMPT_NARRATIVE_V1
                              if settings._narrative_time_knowledge_policy == NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
                              else SYSTEM_PROMPT)
+            if settings._semantic_state_policy == SEMANTIC_STATE_POLICY_V1:
+                system_prompt += SEMANTIC_STATE_INSTRUCTIONS
             context = ""
             if document.role is not None or document.scope is not None:
                 context = (
@@ -2106,7 +2120,7 @@ class ModelEnhancedExtractor:
                             parsed.warnings.append(
                                 f"模型记录 #{index}（分块 {chunk.id}）已按原文语气转为非确定记录（{semantic_reason}）"
                             )
-                            if semantic_reason == "narrative_relation_unresolved":
+                            if semantic_reason in {"narrative_relation_unresolved", "semantic_state_unresolved"}:
                                 execution.invalid_records += 1
                                 _add_execution_counter(execution, "unresolved_invalid_records")
                                 execution.note("semantic_quality")
