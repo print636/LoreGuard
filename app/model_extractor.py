@@ -38,7 +38,8 @@ from .semantic_quality import (
     open_question_directives,
 )
 from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1
-from .semantic_state import SemanticRelation, SEMANTIC_STATE_INSTRUCTIONS, bind_semantic_state
+from .semantic_state import (SemanticRelation, SEMANTIC_STATE_INSTRUCTIONS,
+                             SemanticStateBindingError, bind_semantic_state)
 from .narrative_relations import (
     RELATION_KINDS, NARRATIVE_RELATION_INSTRUCTIONS, NarrativeTimeExtraction,
     KnowledgeConstraintExtraction, bind_relation,
@@ -1015,7 +1016,13 @@ class ModelEnhancedExtractor:
         try:
             candidate = self._to_directive(document, chunk, record, require_lexical_support=not state_record)
             if state_record:
-                candidate = bind_semantic_state(record, candidate)
+                try:
+                    candidate = bind_semantic_state(record, candidate)
+                except SemanticStateBindingError as exc:
+                    # Attribution/ranges have already passed. An ambiguous
+                    # fragment invalidates this record, not its valid siblings.
+                    # Unexpected exceptions still follow the fatal batch path.
+                    raise ValueError("模型记录未通过语义质量门") from exc
         except ValueError as exc:
             if not (
                 not relation_record and not state_record

@@ -19,6 +19,10 @@ CORE_FIELDS = {"fact": ("subject", "predicate", "value"),
                "item": ("item", "owner"), "uses": ("item", "user")}
 
 
+class SemanticStateBindingError(ValueError):
+    """Expected, record-local source binding failure after source attribution."""
+
+
 class SourceRole(BaseModel):
     model_config = ConfigDict(extra="forbid")
     quote: str = Field(min_length=1, max_length=600)
@@ -49,7 +53,9 @@ relation:supported|different|unclear, actuality:actual|negated|hypothetical|repo
 basis:explicit|supported_inference|unclear, state_kind:null, retention_scope:null, transfer_from:null, through_time:null}。
 fact核心字段subject/predicate/value；item为item/owner；uses为item/user。quote必须逐字且在所报完整证据行中唯一；
 允许完整上下文支持的同义、关系归纳、省略主体/对象承接，不要求归纳标签逐字出现或使用特定动作词。
-roles的quote可以共享或来自证据行的前文，必须确实证明当前角色/对象/属性；邻近别人的事实、另一物件不能借用。
+roles的quote先在已选择的唯一命题quote内定位；同名在整行其他命题出现不影响此处定位。
+若命题内仍重复，请给更具体的逐字原文片段区分；不计算偏移，不改正文，也不随便取第一个。
+roles的quote可以共享或来自证据行的前文；跨命题承接须在完整证据行中唯一，必须确实证明当前角色/对象/属性；邻近别人的事实、另一物件不能借用。
 完整证据行保留否定、条件、转述及限制。只有正文实际成立的关系才actual/supported；推测、计划、意图、否认不能当实际。
 不同规范值请尽量统一同一属性predicate与同一物件名；不补不存在的事实、日期、交接。
 item.owner仅表示物理持有/保管者，不是法律所有权。item必须给state_kind：
@@ -57,6 +63,8 @@ observed_possession=此刻观察到持有/拿取；custody=保管状态；transf
 retained_custody=正文明确某期间仍由该人持有、未交给别人（不是仅没有写交接），retention_scope=ongoing表示有源持续约束、不要求写明终点；bounded表示有界区间才给through_time。
 time起点照原文，不造日期或截止。范围不明用unclear；没有数字终点不等于范围不明。
 retention_scope只用于retained_custody；through_time只用于其bounded范围；transfer_from只用于transfer，quote中的人物须保留完整姓名。
+transfer_from非空时与roles的值使用完全相同的对象结构：{"quote":"原文中的出让人片段","relation":"same"}；
+relation必须判断为same/equivalent/different/unclear之一。不得只输出姓名字符串；没有同指依据用unclear，不擅填same。
 实际持有不证明合法交接，不得用观察到的新持有人抹去明确未交接的约束。
 uses表示实际操作物品；不要仅因持有就虚构操作。其state_kind/retention_scope/transfer_from/through_time均null。
 fact的state_kind/retention_scope/transfer_from/through_time也均null。
@@ -76,9 +84,15 @@ def _claim(row: ParsedDirective, kind: str) -> dict:
             "evidence": row.evidence.model_dump(mode="json")}
 
 
-def _ref(text: str, quote: str) -> dict:
+def _ref(text: str, quote: str, *, proposition: dict | None = None) -> dict:
+    if proposition is not None:
+        start, end = proposition["start"], proposition["end"]
+        local = text[start:end]
+        if local.count(quote) == 1:
+            start += local.index(quote)
+            return {"start": start, "end": start + len(quote), "text_sha256": digest(quote)}
     if text.count(quote) != 1:
-        raise ValueError("semantic_state_source_not_unique")
+        raise SemanticStateBindingError("semantic_state_source_not_unique")
     start = text.index(quote)
     return {"start": start, "end": start + len(quote), "text_sha256": digest(quote)}
 
@@ -86,31 +100,31 @@ def _ref(text: str, quote: str) -> dict:
 def bind_semantic_state(record, row: ParsedDirective) -> ParsedDirective:
     relation = record.semantic_relation
     if relation is None or record.kind not in CORE_FIELDS:
-        raise ValueError("semantic_state_missing")
+        raise SemanticStateBindingError("semantic_state_missing")
     if set(relation.roles) != set(CORE_FIELDS[record.kind]):
-        raise ValueError("semantic_state_roles")
+        raise SemanticStateBindingError("semantic_state_roles")
     if record.kind != "item" and any((relation.state_kind, relation.retention_scope, relation.transfer_from, relation.through_time)):
-        raise ValueError("semantic_state_wrong_kind")
+        raise SemanticStateBindingError("semantic_state_wrong_kind")
     if record.kind == "item" and relation.state_kind is None:
-        raise ValueError("semantic_state_missing_state")
+        raise SemanticStateBindingError("semantic_state_missing_state")
     if (relation.state_kind == "transfer") != (relation.transfer_from is not None):
-        raise ValueError("semantic_state_transfer_source")
+        raise SemanticStateBindingError("semantic_state_transfer_source")
     if (relation.state_kind == "retained_custody") != (relation.retention_scope is not None):
-        raise ValueError("semantic_state_retention_scope")
+        raise SemanticStateBindingError("semantic_state_retention_scope")
     if relation.retention_scope == "bounded" and not relation.through_time:
-        raise ValueError("semantic_state_constraint_range")
+        raise SemanticStateBindingError("semantic_state_constraint_range")
     if relation.through_time is not None and relation.retention_scope != "bounded":
-        raise ValueError("semantic_state_constraint_range")
+        raise SemanticStateBindingError("semantic_state_constraint_range")
     text = row.evidence.text
     refs = {"proposition": _ref(text, relation.quote)}
-    refs.update({k: _ref(text, v.quote) for k, v in relation.roles.items()})
+    refs.update({k: _ref(text, v.quote, proposition=refs["proposition"]) for k, v in relation.roles.items()})
     attrs = dict(row.attrs)
     if relation.state_kind:
         attrs["state_kind"] = relation.state_kind
     if relation.retention_scope:
         attrs["retention_scope"] = relation.retention_scope
     if relation.transfer_from:
-        refs["transfer_from"] = _ref(text, relation.transfer_from.quote)
+        refs["transfer_from"] = _ref(text, relation.transfer_from.quote, proposition=refs["proposition"])
         attrs["transfer_from"] = relation.transfer_from.quote
     for key, value in (("time", attrs.get("time")), ("through_time", relation.through_time)):
         if value:
@@ -156,6 +170,16 @@ def valid_semantic_state(row: ParsedDirective) -> bool:
         if (type(start) is not int or type(end) is not int or not 0 <= start < end <= len(row.evidence.text)
                 or digest(row.evidence.text[start:end]) != ref.get("text_sha256")):
             return False
+    # Recompute the same disambiguation as admission. A valid hash at another
+    # equal-looking occurrence cannot replace the selected proposition's role.
+    try:
+        for name, ref in proof["refs"].items():
+            quote = row.evidence.text[ref["start"]:ref["end"]]
+            proposition = proof["refs"]["proposition"] if name in {*CORE_FIELDS[kind], "transfer_from"} else None
+            if _ref(row.evidence.text, quote, proposition=proposition) != ref:
+                return False
+    except SemanticStateBindingError:
+        return False
     return set(CORE_FIELDS[kind]).issubset(proof.get("refs", {}))
 
 

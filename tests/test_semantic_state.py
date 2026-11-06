@@ -13,7 +13,8 @@ from app.provider import OpenAICompatibleProvider, RetryPolicy
 from app.rules import detect_issues
 from app.semantic_quality import assess_directive, eligible_for_deterministic_rules
 from app.semantic_state import (SEMANTIC_STATE_INSTRUCTIONS, bind_semantic_state,
-                                valid_semantic_state, custody_comparisons)
+                                valid_semantic_state, custody_comparisons,
+                                SemanticStateBindingError, digest)
 from app.chunking import chunk_document
 from tests.test_model_extractor import settings, completion
 
@@ -183,3 +184,73 @@ def test_ordinary_custody_consumes_only_a_sourced_ordered_handover(mode):
     issues, unresolved = custody_comparisons(rows)
     assert not issues
     assert unresolved == 0 if mode == "ordered_handover" else unresolved > 0
+
+
+@pytest.mark.parametrize("mode", ["local_unique", "context_unique", "ambiguous"])
+def test_role_source_uses_proposition_before_full_context(mode):
+    proposition = "沈澈从袋中取出铜钥匙。"
+    text = "沈澈已经到场。" + proposition
+    if mode == "context_unique":
+        proposition = "随后从袋中取出铜钥匙。"
+        text = "沈澈已经到场。" + proposition
+    elif mode == "ambiguous":
+        proposition = text
+    raw = record("item", proposition, dict(item="铜钥匙", owner="沈澈"), state="observed_possession")
+    if mode == "ambiguous":
+        with pytest.raises(SemanticStateBindingError, match="source_not_unique"):
+            state_fixture(text, raw)
+        return
+    row = state_fixture(text, raw)
+    assert valid_semantic_state(row) and eligible_for_deterministic_rules(row)
+    owner = row.semantic_state["refs"]["owner"]
+    assert owner["start"] == (text.rindex("沈澈") if mode == "local_unique" else 0)
+    if mode == "local_unique":
+        proof = deepcopy(row.semantic_state)
+        proof["refs"]["owner"].update(start=0, end=2)
+        proof["payload_sha256"] = digest({k:v for k,v in proof.items() if k != "payload_sha256"})
+        assert not valid_semantic_state(row.model_copy(update={"semantic_state": proof}))
+
+
+@pytest.mark.parametrize("unknown_failure", [False, True])
+def test_source_binding_failure_is_record_local_but_unknown_exceptions_are_fatal(monkeypatch, unknown_failure):
+    from app import model_extractor
+    text, good = fact_fixture()
+    item_text = "许舟走进屋里，许舟随即把铜钥匙收进袋子。"
+    ambiguous = record("item", item_text, dict(item="铜钥匙", owner="许舟"),
+                       state="observed_possession", line=2)
+    transfer_text = "许舟把铜钥匙交给沈澈。"
+    wrong_type = record("item", transfer_text, dict(item="铜钥匙", owner="沈澈"),
+                        state="transfer", sender="许舟", line=3)
+    wrong_type["semantic_relation"]["transfer_from"] = "许舟"  # never infer the missing relation enum
+    payload = {"documents": [dict(doc_ref="d1", records=[good, ambiguous, wrong_type]),
+                              dict(doc_ref="d2", records=[good])]}
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return completion(json.dumps(payload, ensure_ascii=False))
+    config = settings(provider_max_attempts=1, enable_review_agent=False)
+    config._semantic_state_policy = SEMANTIC_STATE_POLICY_V1
+    provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler),
+        retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0), sleep=lambda _: None)
+    if unknown_failure:
+        original = model_extractor.bind_semantic_state
+        def unexpected(record, row):
+            if record.kind == "item":
+                raise ValueError("unexpected_internal_state_failure")
+            return original(record, row)
+        monkeypatch.setattr(model_extractor, "bind_semantic_state", unexpected)
+    result = AnalysisPipeline(extractor=ModelEnhancedExtractor(provider), settings=config).run([
+        DocumentInput("source-a", "a.md", text + "\n" + item_text + "\n" + transfer_text, "chapter", "main"),
+        DocumentInput("source-b", "b.md", text, "chapter", "main")])
+    model = result.diagnostics["model"]
+    assert len(calls) == 1
+    if unknown_failure:
+        assert not result.model_used
+        assert "batch_protocol" in model["reason_codes"]
+        assert not any(r.semantic_state for r in result.directives)
+    else:
+        assert result.model_used and model["succeeded_chunks"] == 2
+        assert {r.evidence.document_id for r in result.directives if r.semantic_state} == {"source-a", "source-b"}
+        assert model["unresolved_invalid_records"] == 2
+        assert model["record_rejections"] == {"semantic_quality": 1, "schema_wrong_type": 1}
+        assert "batch_protocol" not in model["reason_codes"]
