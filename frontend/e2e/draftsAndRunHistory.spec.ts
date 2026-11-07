@@ -95,6 +95,12 @@ async function mockApi(page: Page, state: Fixture) {
     }
     else if (/^\/api\/v1\/analysis-runs\/history-run-\d+$/.test(endpoint)) body = fullRun(Number(endpoint.slice(-3)));
     else if (/^\/api\/v1\/analysis-runs\/history-run-\d+\/issues$/.test(endpoint)) body = issues;
+    else if (method === "GET" && history.some(item => endpoint === `/api/v1/analysis-runs/${item.id}/evidence-preview`)
+      && url.searchParams.get("kind") === "issue" && issues.some(item => item.id === url.searchParams.get("item_id"))
+      && url.searchParams.get("evidence_index") === "0") {
+      // This fixture has only excerpts, not frozen full-text snapshots.
+      await route.fulfill({ status: 409, json: { detail: "source_snapshot_unavailable" } }); return;
+    }
     else if (/^\/api\/v1\/analysis-runs\/history-run-\d+\/records$/.test(endpoint)) body = { records: [], warnings: [] };
     else if (/^\/api\/v1\/analysis-runs\/history-run-\d+\/diagnostics$/.test(endpoint)) body = {};
     else if (/^\/api\/v1\/analysis-runs\/history-run-\d+\/clarifications$/.test(endpoint)) body = [];
@@ -241,15 +247,19 @@ test("备注成功只清对应问题，失败与401保留；换run不会误绑",
   const state = fixtureState();
   await open(page, state, `/app/projects/${projectId}/runs/${runId(0)}/report`);
   await notes(page, 1).fill("问题一：已准备提交的备注。");
+  await page.getByRole("combobox", { name: "当前问题", exact: true }).selectOption("history-issue-2");
   await notes(page, 2).fill("问题二：尚未提交的备注。");
+  await page.getByRole("combobox", { name: "当前问题", exact: true }).selectOption("history-issue-1");
   await page.locator("#issue-history-issue-1").getByRole("button", { name: "已接受", exact: true }).click();
   await expect(notes(page, 1)).toHaveValue("");
   const cached = (await draftEntries(page))[0].value.payload.notes;
   expect(cached).not.toHaveProperty("history-issue-1");
   expect(cached["history-issue-2"]).toBe("问题二：尚未提交的备注。");
   state.feedbackFailure = true;
+  await page.getByRole("combobox", { name: "当前问题", exact: true }).selectOption("history-issue-2");
   await page.locator("#issue-history-issue-2").getByRole("button", { name: "已接受", exact: true }).click();
-  await expect(page.locator(".railLive")).toContainText("提交反馈失败");
+  await expect(page.locator(".storyOperationMessage")).toBeVisible();
+  await expect(page.locator(".storyOperationMessage")).toContainText("提交反馈失败");
   await page.reload();
   await expect(notes(page, 2)).toHaveValue("问题二：尚未提交的备注。");
   await expect(page.getByRole("complementary", { name: "备注暂存状态" })).toContainText("已恢复本标签页");
@@ -307,7 +317,8 @@ test("匿名体验仍能提交反馈并更新UI，但不缓存未提交文本", 
   await notes(page, 1).fill("本地体验的反馈备注。");
   await page.locator("#issue-history-issue-1").getByRole("button", { name: "已接受", exact: true }).click();
   await expect(page.locator("#issue-history-issue-1 .feedbackState")).toContainText("已接受");
-  await expect(page.locator(".railLive")).toContainText("反馈已记录");
+  await expect(page.locator(".storyOperationMessage")).toBeVisible();
+  await expect(page.locator(".storyOperationMessage")).toContainText("反馈已记录");
   expect(await draftEntries(page)).toEqual([]);
   await expect(page.locator(".issues")).toContainText("本地体验模式不暂存未提交备注");
   await noUnexpected(state);
@@ -319,11 +330,13 @@ test("文本导入成功后清稿，即使启动分析失败；上传失败继�
   await bodyEditor(page).fill("需要导入的原创正文。");
   state.textFailure = true;
   await page.getByRole("button", { name: "开始校验", exact: true }).click();
-  await expect(page.locator(".railLive")).toContainText("fixture upload failed");
+  await expect(page.locator(".storyOperationMessage")).toBeVisible();
+  await expect(page.locator(".storyOperationMessage")).toContainText("fixture upload failed");
   expect(await draftEntries(page)).toHaveLength(1);
   state.textFailure = false;
   await page.getByRole("button", { name: "开始校验", exact: true }).click();
-  await expect(page.locator(".railLive")).toContainText("fixture analysis start failed after successful import");
+  await expect(page.locator(".storyOperationMessage")).toBeVisible();
+  await expect(page.locator(".storyOperationMessage")).toContainText("fixture analysis start failed after successful import");
   expect(await draftEntries(page)).toEqual([]);
   expect(state.writes.some((value) => value.endsWith("/documents/text"))).toBe(true);
   await noUnexpected(state);
@@ -372,7 +385,8 @@ test("成功导入后复用可见设定写下一章，新的暂存包保留完�
   await page.getByRole("textbox", { name: "可选权威设定 / world.md", exact: true }).fill("需要在下一章复用的原创世界观。");
   await page.getByRole("textbox", { name: "待审章节 / chapter.md", exact: true }).fill("已导入的第一章。");
   await page.getByRole("button", { name: "开始校验", exact: true }).click();
-  await expect(page.locator(".railLive")).toContainText("fixture analysis start failed after successful import");
+  await expect(page.locator(".storyOperationMessage")).toBeVisible();
+  await expect(page.locator(".storyOperationMessage")).toContainText("fixture analysis start failed after successful import");
   expect(await draftEntries(page)).toEqual([]);
   // Navigate within the same mounted workspace so the imported visible values remain available.
   await page.evaluate(() => { history.pushState({}, "", "/check"); window.dispatchEvent(new PopStateEvent("popstate")); });

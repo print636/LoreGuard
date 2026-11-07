@@ -371,7 +371,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
   }
 
   return (
-    <div className="productPage projectCenterPage">
+    <div className="productPage projectCenterPage storyProjectCenter">
       <a className="skipLink" href="#project-center-main">跳到项目列表</a>
       <aside className="productSidebar" aria-label="全局导航">
         <button className="brandLockup sidebarBrand" type="button" onClick={() => browserNavigate("/app")}>
@@ -408,8 +408,8 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
       <main id="project-center-main" className="projectCenterMain" tabIndex={-1}>
         <header className="projectCenterHeader">
           <div>
-            <h1>项目</h1>
-            <p>继续最近的故事审查，或从一份文稿开始。</p>
+            <h1>你的故事，从这里继续</h1>
+            <p>在外部编辑器写作，在这里整理资料、阅读原文、核对剧情。</p>
           </div>
           <div className="projectHelpActions">
             <button type="button" onClick={(event) => setHelpTrigger(event.currentTarget)}>使用指南</button>
@@ -426,6 +426,8 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
           </section>
         )}
 
+        <div className="storyStartSurface">
+        <div className="storyStartCopy"><h2>带上文稿就能开始</h2><p>从一章正文开始也可以。资料、角色和每次审查，都会留在各自的作品中。</p></div>
         <section className="projectEntryActions" aria-label="开始方式">
           <button type="button" onClick={() => openEntry("import")}>
             <strong>导入已有故事</strong><span>支持 DOCX、Markdown、TXT、JSON</span>
@@ -437,6 +439,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
             <strong>{samplePending ? "正在创建样例…" : "打开原创样例"}</strong><span>使用多章节素材了解完整审查流程</span>
           </button>
         </section>
+        </div>
 
         {entryMode && (
           <section className="quickEntry" aria-labelledby="quick-entry-title">
@@ -498,7 +501,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
 
         <section className="projectListSection" aria-labelledby="project-list-title">
           <div className="projectListHeader">
-            <h2 id="project-list-title">项目列表</h2>
+            <h2 id="project-list-title">我的作品 <span className="storyCatalogTerm">项目列表</span></h2>
             <div className="projectListTools">
               <label className="searchField">
                 <span className="srOnly">搜索项目</span>
@@ -557,7 +560,7 @@ export default function ProjectCenter({ identity, onLoggedOut }: ProjectCenterPr
                 return (
                 <li key={project.id} className="projectRowWithEdit">
                   <a className="projectRow" href={nextAction.path} onClick={followSpaLink}>
-                    <span className="projectRowIdentity"><ProjectIcon /><span><strong>{project.name}</strong><small>{project.description || "尚未添加项目说明"}</small></span></span>
+                    <span className="projectRowIdentity"><span className="storyBookSpine" aria-hidden="true">{project.name.slice(0, 1)}</span><span><strong>{project.name}</strong><small>{project.description || "尚未添加项目说明"}</small></span></span>
                     <span><small>文档</small><b>{project.active_document_count}</b></span>
                     <span><small>最近运行</small><b>{statusLabel(project.latest_run?.status)}</b>{latestModelExecution && <small className={`projectRunSource ${latestModelExecution.tone}`}>{latestModelExecution.label}</small>}</span>
                     <span><small>创建时间</small><b>{relativeProjectDate(project.created_at)}</b></span>

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiJson } from "../../api/client";
 import TechnicalDetails from "../../components/TechnicalDetails";
 import {
@@ -8,7 +8,7 @@ import {
 } from "./evidenceReaderModel";
 import "./evidence-reader.css";
 
-type Props = { selection: EvidenceSelection; trigger: HTMLButtonElement; onClose: () => void };
+type Props = { selection: EvidenceSelection; trigger?: HTMLButtonElement; onClose?: () => void; presentation?: "dialog" | "inline" };
 type ReadingState = { request: EvidenceRequest | null; status: "loading" | "ready" | "error"; preview: EvidencePreview | null; error: string };
 
 function safeReaderError(error: unknown, timedOut: boolean): string {
@@ -23,7 +23,10 @@ function safeReaderError(error: unknown, timedOut: boolean): string {
   return "读取冻结原文失败。请检查连接后重试，或关闭面板返回报告。";
 }
 
-export default function EvidenceReader({ selection, trigger, onClose }: Props) {
+export default function EvidenceReader({ selection, trigger, onClose, presentation = "dialog" }: Props) {
+  const instanceId = useId();
+  const titleId = `${instanceId}-title`;
+  const boundaryId = `${instanceId}-boundary`;
   const dialog = useRef<HTMLDialogElement | null>(null);
   const readingRegion = useRef<HTMLDivElement | null>(null);
   const pinnedSource = useRef<EvidenceSource | null>(null);
@@ -44,16 +47,16 @@ export default function EvidenceReader({ selection, trigger, onClose }: Props) {
 
   function closeReader() {
     dialog.current?.close();
-    onClose();
+    onClose?.();
     // Native dialog keeps the report mounted; preserve the reader's original position.
-    if (trigger.isConnected) trigger.focus({ preventScroll: true });
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true });
   }
 
   useLayoutEffect(() => {
     const element = dialog.current;
-    if (element && !element.open) element.showModal();
+    if (presentation === "dialog" && element && !element.open) element.showModal();
     return () => { if (element?.open) element.close(); };
-  }, []);
+  }, [presentation]);
 
   useEffect(() => {
     const requestSequence = ++sequence.current;
@@ -84,7 +87,7 @@ export default function EvidenceReader({ selection, trigger, onClose }: Props) {
     if (!preview || !readingRegion.current) return;
     if (offset === null) {
       const referenceLine = readingRegion.current.querySelector<HTMLElement>(`[data-evidence-line="${selection.expected.line_start}"]`);
-      referenceLine?.scrollIntoView({ behavior: "auto", block: "nearest" });
+      if (referenceLine) readingRegion.current.scrollTop += referenceLine.getBoundingClientRect().top - readingRegion.current.getBoundingClientRect().top - 8;
     } else readingRegion.current.scrollTop = 0;
     if (focusReferenceAfterLoad.current) readingRegion.current.focus({ preventScroll: true });
     focusReferenceAfterLoad.current = false;
@@ -95,23 +98,22 @@ export default function EvidenceReader({ selection, trigger, onClose }: Props) {
       focusReferenceAfterLoad.current = true;
       setOffset(null);
     } else {
-      readingRegion.current?.querySelector<HTMLElement>(`[data-evidence-line="${selection.expected.line_start}"]`)?.scrollIntoView({ behavior: "auto", block: "nearest" });
+      const reference = readingRegion.current?.querySelector<HTMLElement>(`[data-evidence-line="${selection.expected.line_start}"]`);
+      if (reference && readingRegion.current) readingRegion.current.scrollTop += reference.getBoundingClientRect().top - readingRegion.current.getBoundingClientRect().top - 8;
       readingRegion.current?.focus({ preventScroll: true });
     }
   }
 
-  return (
-    <dialog className="evidenceReader" ref={dialog} aria-labelledby="evidence-reader-title" aria-describedby="evidence-reader-boundary"
-      onCancel={(event) => { event.preventDefault(); closeReader(); }}>
+  const content = <>
       <div className="evidenceReaderHeading">
         <div>
-          <h2 id="evidence-reader-title">分析时原文</h2>
+          <h2 id={titleId}>分析时原文</h2>
           <p>{selection.expected.document_name}</p>
           <p className={`evidenceReaderHeaderSummary ${pending ? "pending" : ""}`}>{headerSummary}</p>
         </div>
-        <button type="button" autoFocus onClick={closeReader}>关闭阅读面板</button>
+        {presentation === "dialog" && <button type="button" autoFocus onClick={closeReader}>关闭阅读面板</button>}
       </div>
-      <p className="evidenceReaderBoundary" id="evidence-reader-boundary">阅读本次报告绑定的冻结来源。文稿后续修改不会替换这里的原文。</p>
+      <p className="evidenceReaderBoundary" id={boundaryId}>阅读本次报告绑定的冻结来源。文稿后续修改不会替换这里的原文。</p>
       <div className="evidenceReaderReading" ref={readingRegion} tabIndex={0} role="region" aria-label="冻结原文阅读区" aria-busy={busy}>
         <p className={`evidenceReaderKind ${pending ? "pending" : ""}`}>
           <strong>{evidenceKindLabel(selection.kind)}</strong>
@@ -160,8 +162,11 @@ export default function EvidenceReader({ selection, trigger, onClose }: Props) {
             <button type="button" disabled={busy} onClick={returnToReference}>返回引用位置</button>
             <button type="button" disabled={busy || !preview.page.has_more} onClick={() => setOffset(preview.page!.offset + EVIDENCE_PAGE_SIZE)}>下一页原文</button>
           </div>
-        </> : <p>{busy ? "正在核对冻结来源与引用范围…" : "关闭面板后可继续核对报告。"}</p>}
+        </> : <p>{busy ? "正在核对冻结来源与引用范围…" : presentation === "inline" ? "可继续核对旁边的问题说明与报告摘录。" : "关闭面板后可继续核对报告。"}</p>}
       </nav>
-    </dialog>
-  );
+  </>;
+  return presentation === "inline"
+    ? <section className="evidenceReader evidenceReaderInline" aria-labelledby={titleId} aria-describedby={boundaryId}>{content}</section>
+    : <dialog className="evidenceReader" ref={dialog} aria-labelledby={titleId} aria-describedby={boundaryId}
+        onCancel={(event) => { event.preventDefault(); closeReader(); }}>{content}</dialog>;
 }

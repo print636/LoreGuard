@@ -374,3 +374,43 @@ test("360px与1440px可阅读长标识，键盘可以选稿、搜索和翻页", 
   await page.screenshot({ path: `${screenshotFolder}/document-library-desktop-1440.png` });
   assertReadOnly(state);
 });
+
+
+test("阅读台保持文稿位置，资料工具折叠与手机返回目录不清空正文", async ({ page }) => {
+  const state = initialState();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await openLibrary(page, state);
+  const tools = page.locator(".storyMaterialTools");
+  await expect(tools).not.toHaveAttribute("open", "");
+  const library = page.locator(".documentLibrary");
+  const chapter = library.getByRole("list", { name: "文稿列表" }).getByRole("button", { name: /01-北港主线\.md/ });
+  await chapter.click();
+  const reader = page.locator("#document-library-reader");
+  const lines = reader.locator(".documentLibraryLines");
+  await expect(lines.locator(":scope > li")).toHaveCount(120);
+  await lines.evaluate(element => { element.scrollTop = 420; });
+  await expect.poll(() => lines.evaluate(element => element.scrollTop)).toBe(420);
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
+  await expect(tools).toHaveAttribute("open", "");
+  await tools.locator(":scope > summary").click();
+  await expect.poll(() => lines.evaluate(element => element.scrollTop)).toBe(420);
+  await page.locator(".sideNav").getByRole("button", { name: "版本对比", exact: true }).click();
+  await page.goBack();
+  await expect(reader.getByRole("combobox", { name: "阅读版本" })).toHaveValue("chapter-current");
+  await expect.poll(() => lines.evaluate(element => element.scrollTop)).toBe(420);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await expect(chapter).not.toBeVisible();
+  await reader.getByRole("button", { name: "返回文稿目录" }).click();
+  await expect(library.getByRole("list", { name: "文稿列表" })).toBeFocused();
+  await expect(chapter).toBeVisible();
+  await chapter.click();
+  await expect(reader.getByRole("heading")).toBeFocused();
+  const focusedHeading = await reader.getByRole("heading").boundingBox();
+  const stickyHeader = await page.locator(".topBar").boundingBox();
+  expect(focusedHeading!.y, "选稿后的焦点标题不能被固定顶栏遮住").toBeGreaterThanOrEqual(stickyHeader!.y + stickyHeader!.height);
+  await expect(reader.getByRole("combobox", { name: "阅读版本" })).toHaveValue("chapter-current");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await reader.getByRole("heading").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${screenshotFolder}/story-library-mobile-375.png` });
+  assertReadOnly(state);
+});

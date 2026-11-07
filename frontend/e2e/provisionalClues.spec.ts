@@ -105,6 +105,12 @@ async function mockCompletedReport(page: Page, state: MockState) {
     else if (path === `/api/v1/analysis-runs/${runId}`) body = run;
     else if (path === `/api/v1/analysis-runs/${secondRunId}` && state.secondClueResponse) body = secondRun;
     else if (path === `/api/v1/analysis-runs/${runId}/issues` || (state.secondClueResponse && path === `/api/v1/analysis-runs/${secondRunId}/issues`)) body = state.issueResponse ?? [issue];
+    else if ((path === `/api/v1/analysis-runs/${runId}/evidence-preview`
+      || (state.secondClueResponse && path === `/api/v1/analysis-runs/${secondRunId}/evidence-preview`))
+      && route.request().method() === "GET" && url.searchParams.get("kind") === "issue"
+      && url.searchParams.get("item_id") === issue.id && url.searchParams.get("evidence_index") === "0") {
+      await route.fulfill({ status: 409, json: { detail: "source_snapshot_unavailable" } }); return;
+    }
     else if (path === `/api/v1/issues/${issue.id}/feedback`) {
       if (route.request().method() === "POST") {
         state.feedbackPosts += 1;
@@ -185,8 +191,10 @@ test("pending clues remain a separate reading section and do not become formal i
   await expect(formalIssues.locator("article")).toHaveCount(1);
   await expect(formalIssues).toContainText(issue.title);
   await expect(formalIssues).not.toContainText(clue.proposed_statement);
-  await expect(page.locator(".railSummary")).toContainText("正式一致性问题");
-  await expect(page.locator(".railSummary")).not.toContainText("待复核线索");
+  const formalCount = page.locator(".storyReportSummary > span").filter({ hasText: "正式问题" });
+  await expect(formalCount).toBeVisible();
+  await expect(formalCount.locator("b")).toHaveText("1");
+  await expect(formalCount).not.toContainText("待复核线索");
   await formalIssues.getByRole("button", { name: "已接受" }).click();
   await expect(formalIssues).toContainText("当前反馈：已接受");
   const visibleText = await page.locator("body").innerText();
@@ -244,8 +252,10 @@ test("zero formal issues with an unverified clue never reads as a clean pass", a
   await expect(formalIssues).toContainText("另有 1 条待复核线索列于下方，未计入正式问题");
   await expect(formalIssues).not.toContainText(clue.proposed_statement);
   await expect(clues).toContainText(clue.proposed_statement);
-  await expect(page.locator(".railSummary")).toContainText("正式一致性问题");
-  await expect(page.locator(".railSummary")).not.toContainText("待复核线索");
+  const formalCount = page.locator(".storyReportSummary > span").filter({ hasText: "正式问题" });
+  await expect(formalCount).toBeVisible();
+  await expect(formalCount.locator("b")).toHaveText("0");
+  await expect(formalCount).not.toContainText("待复核线索");
   expect(state.unexpected).toEqual([]);
 });
 
@@ -276,8 +286,10 @@ test("one contrary character action is a dual-evidence review clue, not a formal
   await expect(clues.getByRole("button", { name: "查看分析时原文", exact: true })).toHaveCount(2);
   await expect(clues.getByRole("button", { name: /^(已接受|误报|已解决|重新打开|导出.*)$/ })).toHaveCount(0);
   await expect(clues.getByRole("link")).toHaveCount(0);
-  await expect(page.locator(".railSummary")).toContainText("正式一致性问题");
-  await expect(page.locator(".railSummary")).not.toContainText(reviewClue.title);
+  const formalCount = page.locator(".storyReportSummary > span").filter({ hasText: "正式问题" });
+  await expect(formalCount).toBeVisible();
+  await expect(formalCount.locator("b")).toHaveText("0");
+  await expect(formalCount).not.toContainText(reviewClue.title);
   await page.setViewportSize({ width: 375, height: 812 });
   await expect(clues).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

@@ -30,7 +30,7 @@ export default function PublicHome({ status, onRetry, draftLogoutWarning }: Prop
   }
 
   return (
-    <div className="publicHome productPage">
+    <div className="publicHome productPage storyPublicHome">
       <a className="skipLink" href="#public-home-main">跳到产品介绍</a>
       <header className="publicHomeHeader">
         <a className="brandLockup publicHomeBrand" href="/" aria-label="LoreGuard 公开首页">
@@ -50,13 +50,14 @@ export default function PublicHome({ status, onRetry, draftLogoutWarning }: Prop
           <div className="publicHomeWelcomeCopy">
             <div className="publicHomeReadingMark">
               <span className="emptyBookSpirit" aria-hidden="true"><i /><i /><b>··</b></span>
-              <span>先了解，再打开你的故事</span>
+              <span>故事资料与审查工作台</span>
             </div>
-            <h1 id="public-home-title" ref={heading} tabIndex={-1}>让每一条判断<br />回到原文证据</h1>
-            <p>LoreGuard 为作者与叙事设计者核对故事中的事实、世界规则和角色表现。直接从正文开始，也可以加入已确认的设定与旧稿，审查新增剧情。</p>
+            <h1 id="public-home-title" ref={heading} tabIndex={-1}>故事往前写，<br />依据留在身边。</h1>
+            <p>LoreGuard 是作者与叙事设计者的故事工作台。导入章节、设定和旧稿，阅读与整理资料，再核对事实、世界规则和角色表现。</p>
             <p>报告把判断与双方原文放在一起，帮助你决定哪里需要修订、哪里是合理的变化。</p>
             <div className="publicHomeWelcomeActions">
               {entryButton("workspace", true)}
+              {entryButton("import")}
               <button type="button" onClick={(event) => setHelpTrigger(event.currentTarget)}>阅读使用指南</button>
             </div>
             <p className="publicHomeSession" role="status">{publicSessionMessage(status)}</p>

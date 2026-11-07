@@ -1,0 +1,156 @@
+/* Stage-one composition. Palette and type remain owned by product-shell tokens. */
+.storyPublicHome .publicHomeWelcome { position: relative; gap: clamp(32px, 5vw, 80px); padding-block: 40px 64px; }
+.storyPublicHome .publicHomeWelcome::before { content: ""; position: absolute; width: 55%; height: 85%; right: 0; top: 0; border-radius: 50%; background: radial-gradient(ellipse, var(--color-subtle-strong), transparent 70%); pointer-events: none; }
+.storyPublicHome .publicHomeWelcomeCopy { position: relative; }
+.storyPublicHome .publicHomeWelcome h1 { font-size: clamp(34px, 4.2vw, 62px); line-height: 1.35; letter-spacing: -.025em; }
+.storyPublicHome .publicHomeExample { position: relative; border-radius: 10px 24px 24px 10px; border-left: 4px solid var(--color-lavender); box-shadow: 12px 14px 0 -6px var(--color-field), 12px 14px 0 -5px var(--color-border); }
+.storyProjectCenter .projectCenterHeader { padding-bottom: 24px; }
+.storyProjectCenter .projectCenterHeader h1 { font-family: "Noto Serif SC", "Source Han Serif SC", "STKaiti", serif; font-size: clamp(28px, 3vw, 40px); }
+.storyStartSurface { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(0, 1.6fr); gap: 24px; align-items: center; margin: 12px 0 36px; padding: 28px; border: 1px solid var(--color-border); border-radius: 18px; background: linear-gradient(120deg, var(--color-surface-raised), var(--color-surface)); }
+.storyStartCopy h2 { margin: 0 0 12px; font-size: 23px; }
+.storyStartCopy p { max-width: 30em; margin: 0; color: var(--color-text-secondary); line-height: 1.8; }
+.storyStartSurface .projectEntryActions { grid-template-columns: 1fr 1fr; margin: 0; border: 0; background: transparent; gap: 8px; }
+.storyStartSurface .projectEntryActions button { min-height: 88px; padding: 16px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-field); }
+.storyStartSurface .projectEntryActions button:first-child { grid-column: 1 / -1; background: var(--color-subtle-strong); border-color: var(--color-border-strong); }
+.storyStartSurface .projectEntryActions button + button { border: 1px solid var(--color-border); }
+.storyCatalogTerm { margin-left: 8px; color: var(--color-text-muted); font: 400 13px "Noto Sans SC", sans-serif; }
+.storyProjectCenter .projectListSection { padding-inline: 0; border: 0; border-top: 1px solid var(--color-border); border-radius: 0; background: transparent; }
+.storyProjectCenter .projectRow { min-height: 120px; }
+.storyBookSpine { display: grid; flex: 0 0 48px; width: 48px; height: 64px; place-items: center; color: var(--color-lavender); border: 1px solid var(--color-border-strong); border-left: 5px solid var(--color-lavender); border-radius: 3px 9px 9px 3px; background: var(--color-surface); font: 25px "Noto Serif SC", "STKaiti", serif; }
+
+.storyWorkbench.appShell { grid-template-columns: 202px minmax(0, 1fr) 300px; gap: 12px; padding: 12px; max-width: 2100px; }
+.storyWorkbench.appShell.documentMode, .storyWorkbench.appShell.characterMode { grid-template-columns: 202px minmax(0, 1fr); }
+.storyWorkbench .mainCanvas { background: var(--color-page); border-radius: 14px; box-shadow: none; }
+.storyOperationMessage { position: sticky; top: 0; z-index: 6; margin-bottom: 16px; padding: 10px 14px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-surface); color: var(--color-text-secondary); font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.storyWorkbench .sideNav { padding: 14px 10px; border: 0; border-radius: 12px; background: var(--color-surface); box-shadow: none; overflow-y: auto; }
+.storyWorkbench .sideNavTitle { padding: 0 10px 14px; margin-bottom: 8px; border-bottom: 1px solid var(--color-border); }
+.storyWorkbench .sideNavTitle span { font: 13px "Noto Sans SC", sans-serif; letter-spacing: normal; color: var(--color-text-muted); }
+.storyWorkbench .sideNavTitle b { font-family: "Noto Sans SC", sans-serif; font-size: 17px; line-height: 1.6; overflow-wrap: anywhere; }
+.storyWorkbench .storyNavigation { display: grid; gap: 18px; }
+.storyNavGroup > p { margin: 0 10px 5px; color: var(--color-text-muted); font-size: 12px; }
+.storyNavGroup > button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 9px 10px; text-align: left; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--color-text-secondary); }
+.storyNavGroup > button:hover:not(:disabled), .storyNavGroup > button.active { border-color: var(--color-border); background: var(--color-subtle-strong); color: var(--color-text); transform: none; }
+.storyNavGroup > button.active { box-shadow: inset 3px 0 var(--color-lavender); }
+.storyNavGroup svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
+.storyNavGroup small { color: var(--color-cyan); font-size: 12px; }
+.storyWorkbench .sideNavBottom { padding-top: 22px; }
+.storyWorkbench .resultRail { border-radius: 12px; background: var(--color-surface); box-shadow: none; }
+.storyWorkbench .storyDocumentHeader { position: static; display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; height: auto; padding: 0 0 24px; margin: 0; border: 0; background: transparent; box-shadow: none; }
+.storyDocumentHeader h1 { margin: 0 0 8px; font-size: 28px; line-height: 1.5; }
+.storyDocumentHeader p { max-width: 60ch; margin: 0; color: var(--color-text-secondary); line-height: 1.7; }
+.storyDocumentActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex: 0 0 auto; max-width: 46%; }
+.storyDocumentActions button { min-height: 44px; }
+.storyWorkbench .projectPanel { padding: 24px; }
+.storyWorkbench .documentLibrarySurface { grid-template-columns: minmax(230px, 270px) minmax(0, 1fr); }
+.storyWorkbench .documentLibraryReader { background: var(--color-field); }
+.storyWorkbench .documentLibraryLines { max-height: 64dvh; }
+.storyWorkbench .storyMaterialTools { margin-top: 24px; padding: 0; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); }
+.storyMaterialTools > summary { min-height: 56px; padding: 16px 20px; cursor: pointer; font-size: 17px; font-weight: 600; }
+.storyMaterialTools > summary span { margin-left: 16px; color: var(--color-text-muted); font-size: 13px; font-weight: 400; }
+.storyMaterialTools[open] > summary { border-bottom: 1px solid var(--color-border); margin-bottom: 20px; }
+.storyMaterialTools > :not(summary) { margin-inline: 20px; }
+.storyMaterialTools > :last-child { margin-bottom: 20px; }
+.documentLibrary .documentLibraryBack { display: none; }
+.storyWorkbench .workbenchIntro { padding-block: 24px; }
+.storyWorkbench .workbenchIntro .workbenchMascot { display: none; }
+.storyReviewInputs, .storyReviewContinuity { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-block: 24px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-field); }
+.storyReviewInputs > div, .storyReviewContinuity > div { padding: 20px; min-width: 0; }
+.storyReviewInputs > div + div, .storyReviewContinuity > div + div { border-left: 1px solid var(--color-border); }
+.storyReviewInputs h3, .storyReviewContinuity h3 { margin: 0 0 8px; font-size: 17px; }
+.storyReviewInputs p, .storyReviewContinuity p { margin: 0 0 12px; color: var(--color-text-secondary); font-size: 14px; line-height: 1.7; }
+.storyReviewInputs ul { margin: 12px 0 0; padding-left: 18px; line-height: 1.8; color: var(--color-text-secondary); }
+.storyReviewInputs li span { margin-left: 10px; color: var(--color-text-muted); }
+.storyReviewInputs summary { padding-block: 8px; cursor: pointer; color: var(--color-cyan); }
+
+.storyReportContents { margin-top: 22px; border-top: 1px solid var(--color-border); }
+.storyReportContents > summary { padding-block: 14px; color: var(--color-text-secondary); font-size: 14px; cursor: pointer; }
+.storyWorkbench .storyReportContents nav { display: grid; gap: 2px; }
+.storyWorkbench .storyReportContents nav > button, .storyReportContents li > button { display: block; width: 100%; min-height: 40px; padding: 8px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-secondary); text-align: left; font-size: 13px; line-height: 1.6; }
+.storyReportContents ol { margin: 0; padding: 0 0 0 18px; color: var(--color-text-muted); }
+.storyReportContents li > button[aria-current], .storyReportContents button:hover { color: var(--color-cyan); background: var(--color-subtle); }
+.storyWorkbench.storyReportMode { grid-template-columns: 200px minmax(0, 1fr); }
+.storyReportMode .resultRail { display: none; }
+.storyReportMode .mainCanvas { padding: 24px; }
+.storyReportSummary { display: flex; align-items: center; flex-wrap: wrap; gap: 16px 28px; margin-bottom: 20px; padding: 16px 20px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); }
+.storyReportSummary > span { display: grid; gap: 5px; }
+.storyReportSummary small { font-size: 12px; color: var(--color-text-muted); }
+.storyReportSummary b { font-size: 16px; font-weight: 600; }
+.storyReportSummary > button { margin-left: auto; min-height: 44px; }
+.storyIssuePicker { display: grid; gap: 8px; margin: 20px 0; max-width: 100%; font-size: 14px; color: var(--color-text-secondary); }
+.storyIssuePicker select { width: 100%; min-height: 44px; }
+.storyReportIssues .storyCurrentIssue:not([hidden]) { display: grid; grid-template-columns: minmax(280px, .85fr) minmax(0, 1.35fr); gap: 24px; padding: 24px 0; border: 0; border-top: 1px solid var(--color-border); border-radius: 0; background: transparent; }
+.storyCurrentIssue > .rank { display: none; }
+.storyCurrentIssue > div { min-width: 0; }
+.storyReportIssues .storyCurrentIssue[hidden], .storyEvidenceWorkspace > [hidden] { display: none; }
+.storyCurrentIssue > div > h3 { font-size: 22px; line-height: 1.6; }
+.storyCurrentIssue .evidence { display: grid; grid-template-columns: 1fr; }
+.storyCurrentIssue .evidence blockquote { font-size: 14px; }
+.storyEvidenceWorkspace { min-width: 0; position: sticky; top: var(--story-operation-height, 0px); align-self: start; }
+.storyEvidenceSources { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.storyEvidenceSources > button { display: grid; gap: 3px; flex: 1 1 150px; min-width: 0; padding: 12px; text-align: left; border: 1px solid var(--color-border); background: var(--color-field); }
+.storyEvidenceSources > button[aria-pressed="true"] { border-color: var(--color-cyan); background: var(--color-cyan-subtle); }
+.storyEvidenceSources b { overflow-wrap: anywhere; font-size: 14px; font-weight: 600; }
+.storyEvidenceSources span, .storyEvidenceSources small { color: var(--color-text-muted); font-size: 12px; }
+.evidenceReader.evidenceReaderInline { display: flex; flex-direction: column; width: 100%; max-height: none; margin: 0; border-radius: 12px; box-shadow: none; }
+.evidenceReaderInline .evidenceReaderHeading { padding: 16px; }
+.evidenceReaderInline .evidenceReaderHeading h2 { font-size: 18px; }
+.evidenceReaderInline .evidenceReaderHeading p { font-size: 14px; }
+.evidenceReaderInline .evidenceReaderBoundary { padding: 12px 16px; font-size: 13px; }
+.evidenceReaderInline .evidenceReaderReading { position: relative; max-height: 54dvh; min-height: 220px; padding: 16px; }
+.evidenceReaderInline .evidenceReaderMetadata { font-size: 13px; }
+.evidenceReaderInline .evidenceReaderPagination { min-height: 0; padding: 12px 16px; }
+.evidenceReaderInline .evidenceReaderLines > li { font-size: 15px; }
+.storyOpenReader { margin-top: 10px; min-height: 44px; }
+.storyClueReaderToggle { min-height: 44px; margin-block: 12px; }
+.storyWorkbench :is(.storyDocumentHeader, #report-coverage, #report-questions, #report-formal-issues, #report-pending) { scroll-margin-top: 16px; }
+.storyWorkbench :is(button, summary, select):focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+@media (max-width: 1439px) {
+  .storyWorkbench.appShell { grid-template-columns: 184px minmax(0, 1fr); }
+  .storyWorkbench .resultRail { display: none; }
+  .storyWorkbench.appShell.documentMode, .storyWorkbench.appShell.characterMode { grid-template-columns: 184px minmax(0, 1fr); }
+  .storyWorkbench .storyDocumentHeader { flex-wrap: wrap; }
+  .storyDocumentActions { max-width: 100%; justify-content: flex-start; }
+}
+@media (max-width: 1023px) {
+  body.loreguard-workspace { overflow: auto; }
+  .storyStartSurface { grid-template-columns: 1fr; }
+  .storyWorkbench.appShell, .storyWorkbench.appShell.documentMode, .storyWorkbench.appShell.characterMode { display: block; height: auto; overflow: visible; padding: 12px; }
+  .storyWorkbench .sideNav { margin-bottom: 12px; min-width: 0; max-width: 100%; overflow: visible; }
+  .storyWorkbench .sideNavTitle, .storyWorkbench .sideNavBottom { display: none; }
+  .storyWorkbench .storyNavigation { display: flex; gap: 12px; width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; padding-bottom: 4px; }
+  .storyNavGroup { display: flex; flex: 0 0 auto; gap: 4px; }
+  .storyNavGroup > p { display: none; }
+  .storyNavGroup > button { width: auto; white-space: nowrap; }
+  .storyWorkbench .mainCanvas { height: auto; overflow: visible; }
+  .storyOperationMessage { top: var(--story-header-height, 72px); }
+  .storyReportContents { margin-top: 6px; }
+  .storyWorkbench .storyReportContents nav { width: 100%; min-width: 0; max-width: 100%; max-height: 220px; overflow-y: auto; }
+  .storyReportMode .mainCanvas { padding: 20px; }
+  .storyReportIssues .storyCurrentIssue:not([hidden]) { grid-template-columns: 1fr; }
+  .storyEvidenceWorkspace { position: static; }
+  .storyWorkbench .documentLibrarySurface { grid-template-columns: 230px minmax(0, 1fr); }
+}
+@media (max-width: 767px) {
+  .storyPublicHome .publicHomeWelcome { padding-block: 24px 40px; }
+  .storyStartSurface { padding: 20px; margin-block: 8px 24px; gap: 20px; }
+  .storyStartSurface .projectEntryActions { grid-template-columns: 1fr; }
+  .storyStartSurface .projectEntryActions button { min-height: 80px; }
+  .storyBookSpine { width: 38px; height: 52px; flex-basis: 38px; font-size: 20px; }
+  .storyWorkbench .projectPanel, .storyReportMode .mainCanvas { padding: 16px; }
+  .storyWorkbench .storyDocumentHeader { gap: 16px; padding-bottom: 20px; }
+  .storyDocumentHeader h1 { font-size: 24px; }
+  .storyDocumentActions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  .storyDocumentActions button:last-child { grid-column: 1 / -1; }
+  .storyWorkbench .documentLibrarySurface { grid-template-columns: 1fr; }
+  .storyWorkbench .documentLibrarySurface.readingOnMobile .documentLibraryCatalog { display: none; }
+  .storyWorkbench .documentLibrarySurface:not(.readingOnMobile) .documentLibraryReader:has(.documentLibraryBack) { display: none; }
+  .documentLibrary .documentLibraryBack { display: block; margin-bottom: 16px; }
+  .storyMaterialTools > summary span { display: block; margin: 6px 0 0; }
+  .storyMaterialTools > :not(summary) { margin-inline: 12px; }
+  .storyReviewInputs, .storyReviewContinuity { grid-template-columns: 1fr; }
+  .storyReviewInputs > div + div, .storyReviewContinuity > div + div { border-left: 0; border-top: 1px solid var(--color-border); }
+  .storyReportIssues .storyCurrentIssue:not([hidden]) { gap: 20px; }
+  .storyEvidenceSources > button { flex-basis: 120px; }
+  .storyReportContents > summary { min-height: 44px; }
+}

@@ -45,6 +45,11 @@ async function mockApi(page: Page, state: State) {
       const id = path.split("/")[4], endpoint = path.split("/")[5];
       if (!endpoint) body = run(id);
       else if (endpoint === "issues") body = [issue];
+      else if (endpoint === "evidence-preview" && [runId, nextRunId].includes(id)
+        && url.searchParams.get("kind") === "issue" && url.searchParams.get("item_id") === issue.id
+        && url.searchParams.get("evidence_index") === "0") {
+        await route.fulfill({ status: 409, json: { detail: "source_snapshot_unavailable" } }); return;
+      }
       else if (endpoint === "records") body = { records: [], warnings: [] };
       else if (endpoint === "diagnostics") body = {};
       else if (endpoint === "clarifications") body = [];

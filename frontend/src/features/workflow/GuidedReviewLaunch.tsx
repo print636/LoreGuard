@@ -375,6 +375,22 @@ export default function GuidedReviewLaunch({
 
       {actionError && <div className="guidedActionError" role="alert">{actionError}</div>}
 
+      <section className="storyReviewInputs" aria-label="新稿与审查依据">
+        <div>
+          <h3>本次要检查的新稿</h3>
+          <p>{projectLoading ? "正在读取文稿…" : selectedDraftIds.length ? `已选择 ${selectedDraftIds.length} 份；未选择的草稿不会作为背景。` : "在下方勾选章节。可只选一章，也可选择多章。"}</p>
+          {selectedDraftIds.length > 0 && <ul>{documentState.confirmedDrafts.filter(document => selectedDraftIds.includes(document.id)).map(document =>
+            <li key={document.id}>{document.name}<span>v{document.version}</span></li>)}</ul>}
+        </div>
+        <div>
+          <h3>可作为依据的正式资料</h3>
+          <p>{projectLoading ? "正在读取资料身份…" : draftOnlyAvailable ? "当前没有正式背景，将进行有限范围的新稿自检。" : "仅已确认的正式资料参与匹配；本次实际使用范围由所选新稿的作用域决定。"}</p>
+          {!projectLoading && documentState.baseline.length > 0 && <details><summary>查看 {documentState.baseline.length} 份正式资料</summary>
+            <ul>{documentState.baseline.map(document => <li key={document.id}>{document.name}<span>v{document.version}</span></li>)}</ul>
+          </details>}
+        </div>
+      </section>
+
       <ol className="guidedStages" aria-label={draftOnlyAvailable ? "新稿自检" : "故事审查三阶段"}>
         {!draftOnlyAvailable && <>
         <li className={contextsReady ? "complete" : "current"}>
@@ -576,6 +592,12 @@ export default function GuidedReviewLaunch({
         <span className={`boundaryLight ${providerTone}`} aria-hidden="true" />
         <p><b>模型连接：{providerLabel}</b><small>状态仅表示连接准备情况；实际 AI 覆盖以运行完成后的诊断为准。模型不可用时不会把规则结果冒充 AI 判断。</small></p>
       </footer>
+      <div className="storyReviewContinuity">
+        <div><h3>提交后，可以继续整理资料</h3><p>任务在后台执行。切换页面后，可从“任务与记录”查看进度、取消任务，或恢复已有报告。</p>
+          <button type="button" onClick={() => onNavigate("audit")}>查看任务与记录</button></div>
+        <div><h3>关系图与时间线按需查看</h3><p>审查不会自动生成图表。完成后到“关系与时间”主动生成；角色深度审查也只在本次勾选后启用。</p>
+          <button type="button" onClick={() => onNavigate("visual")}>打开关系与时间</button></div>
+      </div>
     </div>
   );
 }

@@ -103,6 +103,7 @@ test("作者明确确认后才发布章节；没有审查报告也不自动阻�
   const state = initialState();
   await mockApi(page, state);
   await page.goto(`/app/projects/${projectId}/documents`);
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   const workbench = page.locator(".contextWorkbench");
   const publish = workbench.getByRole("button", { name: "作者定稿并发布…" });
   await expect(publish).toBeEnabled();
@@ -135,6 +136,7 @@ test("版本冲突时不重复发布；375px 弹窗可键盘取消、错误可�
   await page.setViewportSize({ width: 375, height: 812 });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto(`/app/projects/${projectId}/documents`);
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   const publish = page.getByRole("button", { name: "作者定稿并发布…" });
   await publish.focus();
   await publish.press("Enter");
@@ -160,12 +162,14 @@ test("待确认章节不能发布，导入既有历史仍可独立标注已发�
   state.context = { ...state.context, resolution_state: "unresolved" };
   await mockApi(page, state);
   await page.goto(`/app/projects/${projectId}/documents`);
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   await expect(page.getByRole("button", { name: "作者定稿并发布…" })).toBeDisabled();
   await expect(page.locator(".contextPublishAction")).toContainText("请先确认这份章节");
   await expect(page.locator(".contextWorkbench").getByLabel("发布状态").getByRole("option", { name: "已发布" })).toHaveCount(0);
   state.role = "reference";
   state.context = { ...state.context, resolution_state: "confirmed", publication_status: "published" };
   await page.reload();
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   await expect(page.getByRole("button", { name: "作者定稿并发布…" })).toHaveCount(0);
   await expect(page.locator(".contextWorkbench").getByLabel("发布状态").getByRole("option", { name: "已发布" })).toHaveCount(1);
   expect(state.posts).toEqual([]);

@@ -223,7 +223,7 @@ async function mockApi(page: Page, state: MockState) {
           return;
         }
         if (state.delayedRunId === activeRunId) {
-          await new Promise<void>((resolve) => { state.releaseDelayed = resolve; });
+          await new Promise<void>((resolve) => { const earlier = state.releaseDelayed; state.releaseDelayed = () => { earlier?.(); resolve(); }; });
           try { await route.fulfill({ json: previewPayload(url, activeRunId, state) }); } catch { /* Cancelled old selection. */ }
           state.delayedSettled = true;
           return;
@@ -303,6 +303,7 @@ test("剧情策划核对旧特征来源与两类待复核证据，阅读不会�
   const state = initialState();
   await openReport(page, state);
   const dialog = page.getByRole("dialog", { name: "分析时原文" });
+  await page.getByRole("combobox", { name: "当前问题" }).selectOption(traitIssueId);
   const traitTrigger = page.locator(`#issue-${traitIssueId}`).getByRole("button", { name: "查看分析时原文" }).first();
   await expect(page.locator(`#issue-${traitIssueId} .tag`)).toContainText("角色漂移 · 情境行为偏差");
   await traitTrigger.click();
@@ -410,8 +411,9 @@ test("作者查看已比较的事件和另处待核清材料，未知缺口按�
 
 test("分页可返回引用位置；读取失败可重试；只剩冻结摘录时不能扩展", async ({ page }) => {
   const state = initialState();
-  state.failures = 1;
   await openReport(page, state);
+  await expect(page.locator(".evidenceReaderInline .evidenceReaderLines .referenced")).toContainText(draftEvidence().text);
+  state.failures = 1;
   await primaryTrigger(page).click();
   const dialog = page.getByRole("dialog", { name: "分析时原文" });
   await expect(dialog.getByRole("alert")).toContainText("服务器暂时无法读取冻结原文");
@@ -435,6 +437,7 @@ test("分页可返回引用位置；读取失败可重试；只剩冻结摘录�
   await dialog.press("Escape");
 
   state.excerptOnly = true;
+  await page.getByRole("combobox", { name: "当前问题" }).selectOption(traitIssueId);
   const traitTrigger = page.locator(`#issue-${traitIssueId}`).getByRole("button", { name: "查看分析时原文" }).first();
   await traitTrigger.click();
   await expect(dialog).toContainText("只有冻结摘录，完整来源原文不可用");
@@ -545,5 +548,47 @@ test("360与1440阅读原文，375与横屏可操作；键盘Escape返回触发�
     await expect(dialog).not.toBeVisible();
     await expect(trigger).toBeFocused();
   }
+  assertReadingOnly(state);
+});
+
+
+test("当前问题嵌入冻结原文，切换双方和问题保留各自阅读页与反馈草稿", async ({ page }) => {
+  const state = initialState();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await openReport(page, state);
+  await page.getByRole("combobox", { name: "当前问题" }).selectOption(traitIssueId);
+  const article = page.locator(`#issue-${traitIssueId}`);
+  const desk = article.getByRole("region", { name: "当前问题的原文工作区" });
+  await expect(page.getByRole("dialog", { name: "分析时原文" })).toHaveCount(0);
+  await expect(desk.locator(".evidenceReaderInline:visible .evidenceReaderLines .referenced")).toContainText(traitEvidence.text);
+  await desk.getByRole("button", { name: /依据 2/ }).click();
+  const reader = desk.locator(".evidenceReaderInline:visible");
+  await expect(reader.locator(".evidenceReaderMetadata")).toContainText("冻结版本 v1");
+  await expect(reader.locator(".evidenceReaderLines .referenced")).toContainText(draftEvidence().text);
+  await reader.getByRole("button", { name: "下一页原文" }).click();
+  await expect(reader.locator(".evidenceReaderLines > li").first()).toHaveAttribute("data-evidence-line", "238");
+  await article.locator(".note").fill("保留这个问题的阅读进度");
+  await desk.getByRole("button", { name: /依据 1/ }).click();
+  await expect(reader.locator(".evidenceReaderLines .referenced")).toContainText(traitEvidence.text);
+  await desk.getByRole("button", { name: /依据 2/ }).click();
+  await expect(reader.locator(".evidenceReaderLines > li").first()).toHaveAttribute("data-evidence-line", "238");
+  const requestCount = state.previews.length;
+  await page.getByRole("combobox", { name: "当前问题" }).selectOption(primaryId);
+  await expect(article).not.toBeVisible();
+  await page.getByRole("combobox", { name: "当前问题" }).selectOption(traitIssueId);
+  await expect(reader.locator(".evidenceReaderLines > li").first()).toHaveAttribute("data-evidence-line", "238");
+  await expect(article.locator(".note")).toHaveValue("保留这个问题的阅读进度");
+  expect(state.previews.length).toBe(requestCount);
+  await article.evaluate(element => element.scrollIntoView({ block: "start", behavior: "instant" }));
+  await page.screenshot({ path: `${screenshotFolder}/story-report-desktop-1440.png` });
+  await page.setViewportSize({ width: 375, height: 812 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await desk.getByRole("button", { name: "单独阅读这份原文" }).click();
+  await expect(page.getByRole("dialog", { name: "分析时原文" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(desk.getByRole("button", { name: "单独阅读这份原文" })).toBeFocused();
+  await expect(reader.locator(".evidenceReaderLines > li").first()).toHaveAttribute("data-evidence-line", "238");
+  await article.evaluate(element => element.scrollIntoView({ block: "start", behavior: "instant" }));
+  await page.screenshot({ path: `${screenshotFolder}/story-report-mobile-375.png` });
   assertReadingOnly(state);
 });

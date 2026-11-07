@@ -102,6 +102,8 @@ test("项目中心分页、服务端搜索和过期响应不覆盖新结果", as
 test("项目中心的 URL 在打开项目、浏览器返回和刷新后恢复目录状态", async ({ page }) => {
   const mock = await mockCatalog(page);
   await page.goto("/app");
+  await expect(page.getByRole("heading", { name: "你的故事，从这里继续", exact: true })).toBeVisible();
+  if (process.env.LOREGUARD_E2E_SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.LOREGUARD_E2E_SCREENSHOT_DIR}/story-home.png` });
   const pagination = page.getByRole("navigation", { name: "项目分页" });
   await pagination.getByRole("button", { name: "下一页" }).click();
   await expect(pagination).toContainText("第 2 / 55 页");

@@ -139,7 +139,7 @@ def _exercise_author_review(client):
     from app import service
     from app.main import write_limiter
     from app.config import CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
-    from app.config import CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3
+    from app.config import CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, HABIT_SCOPE_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3
     from app.db import AnalysisRunRow, AnalysisRunCharacterTraitInputRow, IssueRow, SessionLocal
     from sqlalchemy import select
     from app.character_drift import CHARACTER_SINGLE_EVENT_REVIEW_SYSTEM_PROMPT, CHARACTER_TARGET_FOCUS_REVIEW_SYSTEM_PROMPT
@@ -284,6 +284,7 @@ def _exercise_author_review(client):
                 {"habit_action_selection_policy": HABIT_ACTION_SELECTION_POLICY_V1},
                 {"batch_coverage": {"habit_action_selection_policy": HABIT_ACTION_SELECTION_POLICY_V1}},
                 {"_character_selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V3},
+                {"_character_habit_scope_review_policy": HABIT_SCOPE_POLICY_V2},
                 {"selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V3},
                 {"batch_coverage": {"selected_claim_resolution_policy": SELECTED_CLAIM_RESOLUTION_POLICY_V3}},
                 {"_character_target_focus_policy": CHARACTER_TARGET_FOCUS_POLICY_V1},
@@ -322,6 +323,7 @@ def _exercise_author_review(client):
         assert calls and set(calls) <= {SYSTEM_PROMPT_NARRATIVE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS, BATCH_SYSTEM_PROMPT_NARRATIVE_TIME_SCOPE_V1 + SEMANTIC_STATE_INSTRUCTIONS + NARRATIVE_TIME_SCOPE_INSTRUCTIONS}
         reviewed = start(opted_in)
         assert frozen_scene_policy(reviewed) == HABIT_SCENE_POLICY_V1
+        assert frozen_scene_policy(reviewed, "habit_scope_policy") == HABIT_SCOPE_POLICY_V2
         assert all(frozen_scene_policy(run) is None for run in (default, ordinary, created))
         assert frozen_scene_policy(reviewed, "habit_object_chain_policy") == HABIT_OBJECT_CHAIN_POLICY_V1
         assert all(frozen_scene_policy(run, "habit_object_chain_policy") is None for run in (default, ordinary, created))
@@ -385,6 +387,9 @@ def _exercise_author_review(client):
                 assert failed_run.batch_coverage.get("habit_action_selection_policy") == (HABIT_ACTION_SELECTION_POLICY_V1 if enabled else None)
                 assert failed_run.batch_coverage.get("selected_claim_resolution_policy") == (SELECTED_CLAIM_RESOLUTION_POLICY_V3 if enabled else None)
                 assert failed_run.batch_coverage.get("target_focus_policy") == (CHARACTER_TARGET_FOCUS_POLICY_V1 if enabled else None)
+                assert failed_run.batch_coverage.get("habit_scope_policy") == (HABIT_SCOPE_POLICY_V2 if enabled else None)
+                if enabled:
+                    failed_run.batch_coverage = {**failed_run.batch_coverage, "habit_scope_policy": HABIT_SCOPE_POLICY_V1}
                 # Replay a genuine older snapshot shape after the application has upgraded.
                 failed_run.batch_coverage = {key: value for key, value in failed_run.batch_coverage.items() if key not in {"habit_object_chain_policy", "claim_resolution_policy", "habit_action_selection_policy", "selected_claim_resolution_policy", "target_focus_policy", "explanation_assertions_policy", "execution_limits"}}
                 db.commit()
@@ -393,6 +398,7 @@ def _exercise_author_review(client):
             assert retry.status_code == 202
             assert retry.json()["review_batch"]["character_review_enabled"] is enabled
             assert frozen_scene_policy(retry.json()) == (HABIT_SCENE_POLICY_V1 if enabled else None)
+            assert frozen_scene_policy(retry.json(), "habit_scope_policy") == (HABIT_SCOPE_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(retry.json(), "habit_object_chain_policy") is None
             assert frozen_scene_policy(retry.json(), "claim_resolution_policy") is None
             assert frozen_scene_policy(retry.json(), "habit_action_selection_policy") is None
@@ -428,6 +434,7 @@ def _exercise_author_review(client):
             enabled = choice is True
             assert recheck.json()["review_batch"]["character_review_enabled"] is enabled
             assert frozen_scene_policy(recheck.json()) == (HABIT_SCENE_POLICY_V1 if enabled else None)
+            assert frozen_scene_policy(recheck.json(), "habit_scope_policy") == (HABIT_SCOPE_POLICY_V2 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "habit_object_chain_policy") == (HABIT_OBJECT_CHAIN_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "claim_resolution_policy") == (CLAIM_RESOLUTION_POLICY_V1 if enabled else None)
             assert frozen_scene_policy(recheck.json(), "habit_action_selection_policy") == (HABIT_ACTION_SELECTION_POLICY_V1 if enabled else None)

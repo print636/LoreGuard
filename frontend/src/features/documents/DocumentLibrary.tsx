@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiJson } from "../../api/client";
 import { documentRoles, type DocumentRole } from "../../documentContext";
+import { revealWorkbenchTarget } from "../workbench/revealTarget";
 import {
   documentPreviewPath, filterDocumentGroups, groupDocuments, initialLibraryState,
   isCurrentPreviewRequest, libraryPage, literalHighlightSegments,
@@ -18,6 +19,7 @@ type Props = {
   state: LibraryState;
   onStateChange: (state: LibraryState) => void;
   onCompare: (fromId: string, toId: string) => void;
+  readingPositions?: Map<string, number>;
 };
 
 type ReaderState = {
@@ -50,7 +52,7 @@ function readableDate(value: string): string {
   return Number.isNaN(date.getTime()) ? "时间未记录" : date.toLocaleString("zh-CN");
 }
 
-export default function DocumentLibrary({ projectId, documents, loading, state: savedState, onStateChange, onCompare }: Props) {
+export default function DocumentLibrary({ projectId, documents, loading, state: savedState, onStateChange, onCompare, readingPositions }: Props) {
   const state = savedState.projectId === projectId ? savedState : initialLibraryState(projectId);
   const groups = useMemo(() => groupDocuments(documents, projectId), [documents, projectId]);
   const filtered = useMemo(() => filterDocumentGroups(groups, state), [groups, state.appliedFilenameQuery, state.roleFilter, state.versionFilter]);
@@ -67,9 +69,18 @@ export default function DocumentLibrary({ projectId, documents, loading, state: 
   const requestSequence = useRef(0);
   const catalogList = useRef<HTMLUListElement | null>(null);
   const readerHeading = useRef<HTMLHeadingElement | null>(null);
+  const readerLines = useRef<HTMLOListElement | null>(null);
+  const focusFrame = useRef<number | null>(null);
+  const [readingOnMobile, setReadingOnMobile] = useState(Boolean(state.selectedDocumentId));
   const currentReader = isCurrentPreviewRequest(reader.request, request) ? reader : null;
   const preview = currentReader?.status === "ready" ? currentReader.preview : null;
   const metadata = preview?.document || selected;
+  const readingKey = JSON.stringify([projectId, selected?.id, selected?.version, state.offset, state.appliedQuery]);
+
+  useLayoutEffect(() => {
+    if (preview && readerLines.current) readerLines.current.scrollTop = readingPositions?.get(readingKey) || 0;
+  }, [preview, readingKey, readingPositions]);
+  useEffect(() => () => { if (focusFrame.current !== null) cancelAnimationFrame(focusFrame.current); }, []);
 
   function update(next: Partial<LibraryState>) {
     onStateChange({ ...state, ...next, projectId });
@@ -80,10 +91,15 @@ export default function DocumentLibrary({ projectId, documents, loading, state: 
   }
 
   function selectVersion(document: LibraryDocument, groupKey: string, focusReader = true) {
+    const previousFocus = globalThis.document.activeElement;
+    if (focusFrame.current !== null) cancelAnimationFrame(focusFrame.current);
     update({ selectedGroupKey: groupKey, selectedDocumentId: document.id, offset: 0, queryDraft: "", appliedQuery: "" });
-    if (focusReader) requestAnimationFrame(() => {
+    setReadingOnMobile(true);
+    if (focusReader) focusFrame.current = requestAnimationFrame(() => {
+      focusFrame.current = null;
+      if (globalThis.document.activeElement !== previousFocus && globalThis.document.activeElement !== globalThis.document.body) return;
       readerHeading.current?.focus({ preventScroll: true });
-      readerHeading.current?.scrollIntoView({ block: "start", behavior: "auto" });
+      revealWorkbenchTarget(readerHeading.current);
     });
   }
 
@@ -124,7 +140,7 @@ export default function DocumentLibrary({ projectId, documents, loading, state: 
         <h3 id="document-library-title">资料库</h3>
         {!loading && projectId && <span>{groups.length} 份文稿，{documents.filter((document) => document.project_id === projectId).length} 个版本</span>}
       </div>
-      <div className="documentLibrarySurface">
+      <div className={`documentLibrarySurface ${readingOnMobile && selected ? "readingOnMobile" : ""}`}>
         <div className="documentLibraryCatalog">
           <form className="documentLibrarySearch" onSubmit={(event) => {
             event.preventDefault();
@@ -188,6 +204,18 @@ export default function DocumentLibrary({ projectId, documents, loading, state: 
             </>}
         </div>
         <section className="documentLibraryReader" id="document-library-reader" aria-labelledby="document-reader-heading" aria-busy={Boolean(request && (!currentReader || currentReader.status === "loading"))}>
+          {selected && <button type="button" className="documentLibraryBack" onClick={() => {
+            setReadingOnMobile(false);
+            const previousFocus = document.activeElement;
+            if (focusFrame.current !== null) cancelAnimationFrame(focusFrame.current);
+            focusFrame.current = requestAnimationFrame(() => {
+              focusFrame.current = null;
+              if (document.activeElement === previousFocus || document.activeElement === document.body) {
+                catalogList.current?.focus({ preventScroll: true });
+                revealWorkbenchTarget(catalogList.current);
+              }
+            });
+          }}>返回文稿目录</button>}
           <h4 id="document-reader-heading" ref={readerHeading} tabIndex={-1}>{!loading && selected ? selected.name : "文稿阅读"}</h4>
           {loading ? <p className="documentLibraryNotice" role="status">正在读取项目资料…</p>
             : !selected || !selectedGroup ? <p className="documentLibraryNotice">选择文稿，阅读当前或历史版本。</p>
@@ -239,7 +267,11 @@ export default function DocumentLibrary({ projectId, documents, loading, state: 
                   {preview.lines.length === 0 ? <div className="documentLibraryNotice">
                     <p>{preview.page.total > 0 ? "这一页已没有原文。" : preview.query ? "此版本中没有匹配文字。修改搜索文字，或清除搜索阅读全部正文。" : "此版本保存的正文为空。"}</p>
                     {state.offset > 0 && <button type="button" onClick={() => update({ offset: 0 })}>返回第一页</button>}
-                  </div> : <ol className="documentLibraryLines" tabIndex={0} aria-label={preview.query ? "匹配原文与原始行号" : "正文与原始行号"}>
+                  </div> : <ol className="documentLibraryLines" ref={readerLines} tabIndex={0}
+                    onScroll={event => { if (readingPositions) {
+                      readingPositions.set(readingKey, event.currentTarget.scrollTop);
+                      if (readingPositions.size > 80) readingPositions.delete(readingPositions.keys().next().value!);
+                    } }} aria-label={preview.query ? "匹配原文与原始行号" : "正文与原始行号"}>
                     {preview.lines.map((line) => <li key={line.line_number}>
                       <span className="documentLibraryLineNumber" aria-label={`原文第 ${line.line_number} 行`}>{line.line_number}</span>
                       <p><LiteralText text={line.text} query={preview.query} /></p>

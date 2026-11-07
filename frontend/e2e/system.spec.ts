@@ -61,6 +61,7 @@ async function confirmPublishedDocument(
   role: "canon" | "chapter",
 ): Promise<void> {
   const workbench = page.locator(".contextWorkbench");
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   const documentButton = workbench
     .locator(".contextDocumentList button")
     .filter({ hasText: name });
@@ -100,7 +101,7 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
   await page.goto("/");
   expect(new URL(page.url()).origin).toBe("http://127.0.0.1:8080");
   await expect(page).toHaveURL(/\/app$/);
-  await expect(page.getByRole("heading", { name: "项目", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "你的故事，从这里继续", exact: true })).toBeVisible();
 
   await page.goto("/check");
   await expect(page).toHaveURL(/\/check$/);
@@ -209,7 +210,7 @@ test("Nginx 入口串联 DOCX 上传、排队恢复与证据报告", async ({ pa
 
     compose("unpause", "worker");
     workerPaused = false;
-    await expect(page.locator(".railLiveTop span")).toContainText(
+    await expect(page.locator(".storyReportSummary > span").filter({ hasText: "任务状态" })).toContainText(
       "审查完成",
       { timeout: 45_000 },
     );

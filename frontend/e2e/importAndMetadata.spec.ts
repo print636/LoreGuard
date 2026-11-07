@@ -264,6 +264,7 @@ function row(page: Page, name: string) {
 function metadata(page: Page) { return page.getByRole("dialog", { name: "编辑项目信息", exact: true }); }
 
 async function selectWorkspaceFiles(page: Page, files: ReturnType<typeof file>[]) {
+  await page.locator(".storyDocumentActions").getByRole("button", { name: "导入文稿", exact: true }).click();
   await page.locator("#document-upload").setInputFiles(files);
   await expect(queue(page)).toBeVisible();
 }
@@ -434,6 +435,7 @@ test("项目信息：409保留作者修改，显式合并未修改字段后仍�
   const state = stateFixture();
   state.metadataConflict = true;
   await open(page, state, `/app/projects/${projectId}/documents`);
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   const originalUrl = page.url();
   await page.getByRole("button", { name: "编辑项目信息", exact: true }).click();
   await metadata(page).getByLabel("项目名称", { exact: true }).fill("A-作者保留的故事名");

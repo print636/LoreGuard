@@ -291,7 +291,8 @@ test("完成的仅新稿报告明确写出 1 份目标、0 份背景及 OOC 限�
   await expect(scope).toContainText("不能据零问题断言角色 OOC 已通过");
   await expect(page.getByRole("heading", { name: /一致性问题/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: /已确认的一致性问题/ })).toHaveCount(0);
-  await expect(page.locator(".railSummary")).toContainText("一致性问题");
+  await expect(page.locator(".storyReportSummary")).toBeVisible();
+  await expect(page.locator(".storyReportSummary > span").filter({ hasText: "正式问题" }).locator("b")).toHaveText("0");
   if (process.env.LOREGUARD_E2E_VISUAL_QA === "1") {
     await scope.screenshot({ path: testInfo.outputPath("draft-only-report-desktop.png") });
   }

@@ -197,12 +197,12 @@ test("慢探测不挡阅读，有限超时后登录且迟到探测不覆盖新�
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible();
   await submitAuth(page, "login");
   await expect(page).toHaveURL(/\/app$/);
-  await expect(page.getByRole("heading", { name: "项目", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "你的故事，从这里继续", exact: true })).toBeVisible();
   state.releaseProbe();
   await page.clock.resume();
   await expectNoBusinessWrite(page, state);
   await expect(page).toHaveURL(/\/app$/);
-  await expect(page.getByRole("heading", { name: "项目", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "你的故事，从这里继续", exact: true })).toBeVisible();
   expect(state.authWrites).toEqual(["POST /api/v1/auth/login"]);
 });
 
@@ -247,7 +247,7 @@ test("需账户按钮仅弹提醒，取消和 Escape 回焦点并保持原页面
   await expect(dialog).not.toBeVisible();
   await expect(trigger).toBeFocused();
   for (const name of ["新建故事项目", "导入已有故事", "模型与密钥"]) {
-    const feature = page.getByRole("button", { name, exact: true });
+    const feature = page.getByRole("button", { name, exact: true }).first();
     await feature.click();
     await expect(dialog).toBeVisible();
     await page.keyboard.press("Escape");
@@ -283,7 +283,7 @@ test("注册和登录切换保留目标，注册完成仅回跳而不执行导�
   await openPage(page, state);
   await expectPublicHome(page);
   await page.waitForLoadState("networkidle");
-  await page.getByRole("button", { name: "导入已有故事", exact: true }).click();
+  await page.getByRole("button", { name: "导入已有故事", exact: true }).first().click();
   await reminder(page).getByRole("button", { name: "创建账户", exact: true }).click();
   await expect(page).toHaveURL(/\/register\?returnTo=%2Fapp$/);
   await page.getByRole("button", { name: "已有账户？登录", exact: true }).click();
@@ -292,7 +292,7 @@ test("注册和登录切换保留目标，注册完成仅回跳而不执行导�
   await expect(page).toHaveURL(/\/register\?returnTo=%2Fapp$/);
   await submitAuth(page, "register");
   await expect(page).toHaveURL(/\/app$/);
-  await expect(page.getByRole("heading", { name: "项目", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "你的故事，从这里继续", exact: true })).toBeVisible();
   await expectNoBusinessWrite(page, state);
   expect(state.authWrites).toEqual(["POST /api/v1/auth/register"]);
 });
@@ -328,7 +328,7 @@ test("已登录和显式本地 anonymous 的根入口兼容旧行为自动进入
     state.privateAccess = true;
     if (mode === "anonymous") await page.goto("/");
     await expect(page).toHaveURL(/\/app$/);
-    await expect(page.getByRole("heading", { name: "项目", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "你的故事，从这里继续", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "进入工作区", exact: true })).toHaveCount(0);
     await expectNoBusinessWrite(page, state);
   }

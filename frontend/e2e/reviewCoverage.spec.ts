@@ -97,7 +97,8 @@ test("completed task with one uncalled character chunk stays visibly partial", a
   await expect(coverage).toContainText("调用模型 6 · 完成 6 · 未完成 1（其中未调用 1）");
   await expect(coverage).toContainText("Token 预算门控");
   await expect(coverage).not.toContainText("bounded_partial");
-  await expect(page.locator(".railCoverage")).toContainText("覆盖仍有限");
+  await expect(coverage).toBeVisible();
+  await expect(coverage).toContainText("角色审查仅覆盖部分内容");
   await page.getByText("分析诊断摘要", { exact: true }).click();
   await expect(page.getByText("角色审查主抽取", { exact: true })).toBeVisible();
   await expect(page.locator(".diagnosticGrid")).toContainText("计划 7 · 调用模型 6 · 完成 6");
@@ -131,7 +132,8 @@ test("contradictory completed stage cannot claim complete coverage", async ({ pa
   await expect(coverage).toContainText("角色审查覆盖无法核对");
   await expect(coverage).toContainText("阶段完成");
   await expect(coverage).not.toContainText("AI 语义与角色审查完整");
-  await expect(page.locator(".railCoverage")).toContainText("覆盖仍有限");
+  await expect(coverage).toBeVisible();
+  await expect(coverage).toContainText("角色审查覆盖无法核对");
   expect(state.unexpected).toEqual([]);
 });
 
@@ -160,7 +162,8 @@ test("author report distinguishes a processed draft without a matching observati
   await expect(scope).toContainText("1 项未发现冲突，1 项未匹配到新稿表现");
   await expect(page.getByRole("heading", { name: "正式一致性问题 0" })).toBeVisible();
   await expect(page.locator(".issues .empty")).toContainText("1 项未匹配到新稿表现");
-  await expect(page.locator(".railCoverage")).toContainText("覆盖仍有限");
+  await expect(scope).toBeVisible();
+  await expect(scope).toContainText("1 项未匹配到新稿表现");
   await page.emulateMedia({ reducedMotion: "reduce" });
   for (const [width, height] of [[375, 812], [812, 375]]) {
     await page.setViewportSize({ width, height });

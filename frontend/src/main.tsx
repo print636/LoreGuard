@@ -13,6 +13,7 @@ import "./product-shell.css";
 import "./features/characters/character-workspace.css";
 import "./features/workflow/guided-review.css";
 import "./app/error-boundary.css";
+import "./story-workbench.css";
 
 const rootElement = document.getElementById("root")!;
 const root = ReactDOM.createRoot(rootElement, safeReactRenderErrorHandlers(() => {

@@ -179,6 +179,7 @@ async function open(page: Page, state: Fixture, location = documentsPath) {
   await mockApi(page, state);
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto(location);
+  if (location === documentsPath) await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   if (location === documentsPath && !state.delayedDocument && !state.contextReadUnavailable && !state.contextMalformed) await expect(timeline(page)).toHaveValue("main");
 }
 
@@ -283,7 +284,7 @@ test("中央内部导航不绕过dirty保护；取消不换URL或丢稿", async 
   await expectAllDraft(page);
   await confirmation(page, () => page.getByRole("button", { name: "项目中心", exact: true }).click(), true);
   await expect(page).toHaveURL(/\/app$/u);
-  await expect(page.getByRole("heading", { name: "项目列表", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "我的作品 项目列表", exact: true })).toBeVisible();
   expect(state.saves).toEqual([]);
   assertIsolated(state);
 });
@@ -359,6 +360,7 @@ test("刷新确实触发原生beforeunload；取消保输入，确认刷新不�
   expect(accept.type()).toBe("beforeunload");
   await accept.accept();
   await acceptedReload;
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   await expect(timeline(page)).toHaveValue("main");
   expect(state.saves).toEqual([]);
   assertIsolated(state);

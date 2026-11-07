@@ -41,6 +41,7 @@ from .character_target_focus import TARGET_FOCUS_POLICY_V1, TARGET_FOCUS_REVIEW_
 from .character_material_coverage import MATERIAL_REVIEW_KEY, MaterialGapLedger
 from .character_claim_resolution import CLAIM_RESOLUTION_KEY, ClaimResolutionManager
 from .character_habit_scope_review import habit_scope_windows, review_habit_scope
+from .character_habit_scope_review_v2 import habit_scope_windows_v2, review_habit_scope_v2
 from .character_explanation_review import (
     ExplanationBaselineSummary,
     ExplanationCandidate,
@@ -110,7 +111,7 @@ from .character_observations import (
 )
 from .character_support_bindings import TraitSupportRef
 from .chunking import chunk_character_profile_document, chunk_document
-from .config import Settings, get_settings
+from .config import HABIT_SCOPE_POLICY_V2, Settings, get_settings
 from .db import (
     AnalysisRunCharacterTraitInputRow,
     AnalysisRunInputRow,
@@ -2228,7 +2229,9 @@ class CharacterConsistencyStage:
         explanation_segment_cache: dict[
             tuple[str, str], tuple[tuple[EvidenceSpan, ...], bool]
         ] = {}
-        scope_chunk_ids = {id(chunk) for _, chunk in selected_chunks} if settings._character_habit_scope_review_v1 else set()
+        scope_chunk_ids = ({id(chunk) for _, chunk in selected_chunks}
+            if settings._character_habit_scope_review_v1 or settings._character_habit_scope_review_policy == HABIT_SCOPE_POLICY_V2
+            else set())
         habit_scope_job = None
         habit_scope_refs = []
         case_trace: list[dict[str, Any]] = []
@@ -2438,7 +2441,8 @@ class CharacterConsistencyStage:
                 # Reserve at most one independent excerpt review for AFTER the
                 # normal cases. Its references cannot clear their evidence debt.
                 if (
-                    self.observation_applicable and settings._character_habit_scope_review_v1
+                    self.observation_applicable and (settings._character_habit_scope_review_v1
+                        or settings._character_habit_scope_review_policy == HABIT_SCOPE_POLICY_V2)
                     and habit_scope_job is None and baseline.dimension == "contextual_behavior"
                     and release_applicability is True and relation == "compatible"
                     and id(chunk) in scope_chunk_ids and source.input_id in draft_actor_sources
@@ -2453,9 +2457,11 @@ class CharacterConsistencyStage:
                             n for obs in matches if obs.evidence.document_id == source.document.id
                             for n in range(obs.evidence.line_start, obs.evidence.line_end + 1)
                         }
-                        windows = habit_scope_windows(target, draft_actor_sources[source.input_id], source.document.content,
-                                                     start=chunk.global_line_start, chunk_text=chunk_content,
-                                                     excluded_lines=excluded_lines)
+                        window_builder = (habit_scope_windows_v2
+                            if settings._character_habit_scope_review_policy == HABIT_SCOPE_POLICY_V2 else habit_scope_windows)
+                        windows = window_builder(target, draft_actor_sources[source.input_id], source.document.content,
+                                                 start=chunk.global_line_start, chunk_text=chunk_content,
+                                                 excluded_lines=excluded_lines)
                         if windows:
                             habit_scope_job = (windows, baseline_entry, source)
                 if release_applicability is None:
@@ -3148,7 +3154,9 @@ class CharacterConsistencyStage:
         if habit_scope_job is not None:
             self.checkpoint()
             windows, (trait_row, trait, _, _), source = habit_scope_job
-            offsets, scope_diagnostics = review_habit_scope(
+            scope_reviewer = (review_habit_scope_v2
+                if settings._character_habit_scope_review_policy == HABIT_SCOPE_POLICY_V2 else review_habit_scope)
+            offsets, scope_diagnostics = scope_reviewer(
                 windows, trait, provider=self.provider, settings=settings, budget=stage_budget - usage.charged_tokens,
             )
             usage.add(scope_diagnostics)

@@ -123,6 +123,11 @@ import RunHistoryPanel from "./features/run-history/RunHistoryPanel";
 import CharacterObservationsPanel from "./features/character-observations/CharacterObservationsPanel";
 import type { RunCatalogItem } from "./features/run-history/runHistoryModel";
 import TechnicalDetails from "./components/TechnicalDetails";
+import StoryNavigation from "./features/workbench/StoryNavigation";
+import ReportContents from "./features/workbench/ReportContents";
+import EvidenceWorkspace from "./features/workbench/EvidenceWorkspace";
+import OperationMessage from "./features/workbench/OperationMessage";
+import { revealWorkbenchTarget } from "./features/workbench/revealTarget";
 import { isSituationalPattern, issueSeverityLabel, reviewStatusLabel, reviewTimeLabel } from "./productLanguage";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
@@ -461,6 +466,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [project, setProject] = useState("");
   const [projectName, setProjectName] = useState("");
   const [docs, setDocs] = useState<Doc[]>([]);
+  const [visitedEvidenceIssues, setVisitedEvidenceIssues] = useState<string[]>([]);
+  const [readingClue, setReadingClue] = useState<string | null>(null);
+  const materialFocusFrame = useRef<number | null>(null);
+  const materialToolsRef = useRef<HTMLDetailsElement | null>(null);
+  const documentReadingPositions = useRef(new Map<string, number>());
   const [documentLibraryState, setDocumentLibraryState] = useState(() => initialLibraryState(""));
   const [runs, setRuns] = useState<RunInfo[]>([]);
   const [replaceId, setReplaceId] = useState("");
@@ -524,6 +534,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [graph, setGraph] = useState<GraphResponse | null>(null);
   const [timeline, setTimeline] = useState<TimelineResponse | null>(null);
   const [visualTab, setVisualTab] = useState<"graph" | "timeline">("graph");
+  const focusedReportLocation = useRef("");
   const [focusedIssue, setFocusedIssue] = useState<string | null>(null);
   const [evidenceReaderSelection, setEvidenceReaderSelection] = useState<EvidenceReaderSelection | null>(null);
   const [userGuideSelection, setUserGuideSelection] = useState<UserGuideSelection | null>(null);
@@ -1734,6 +1745,22 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     });
   }
 
+  function openMaterialTools(fieldId?: string) {
+    const previousFocus = document.activeElement;
+    const destination = workspacePath("projects", project || null);
+    if (materialFocusFrame.current !== null) cancelAnimationFrame(materialFocusFrame.current);
+    navigateWorkspace("projects");
+    materialFocusFrame.current = requestAnimationFrame(() => {
+      materialFocusFrame.current = null;
+      if (window.location.pathname !== destination || !materialToolsRef.current) return;
+      materialToolsRef.current.open = true;
+      if (document.activeElement !== previousFocus && document.activeElement !== document.body) return;
+      const target = fieldId ? document.getElementById(fieldId) : materialToolsRef.current;
+      revealWorkbenchTarget(target);
+      if (fieldId) target?.focus({ preventScroll: true });
+    });
+  }
+
   function openUserGuide(topic: UserGuideTopicId, trigger: HTMLButtonElement) {
     setUserGuideSelection({ topic, trigger, scope: evidenceReaderScope });
   }
@@ -1751,13 +1778,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     void loadProviderHealth();
     const intent = new URLSearchParams(window.location.search).get("intent");
     if (intent === "create" || intent === "import") {
-      requestAnimationFrame(() =>
-        document
-          .getElementById(intent === "create" ? "project-name" : "document-upload")
-          ?.focus(),
-      );
+      openMaterialTools(intent === "create" ? "project-name" : "document-upload");
     }
     return () => {
+      if (materialFocusFrame.current !== null) cancelAnimationFrame(materialFocusFrame.current);
       streamRef.current?.close();
       ++catalogRequestRef.current;
       ++selectedProjectRequestRef.current;
@@ -1788,13 +1812,26 @@ export default function App({ identity, onLoggedOut }: AppProps) {
 
   useEffect(() => {
     if (activeView !== "report" || !focusedIssue) return;
-    requestAnimationFrame(() => {
+    const location = `${run}:${focusedIssue}`;
+    if (focusedReportLocation.current === location) return;
+    const previousFocus = document.activeElement;
+    const frame = requestAnimationFrame(() => {
       const target = document.getElementById(`issue-${focusedIssue}`);
-      if (!target) return;
-      target.scrollIntoView({ block: "nearest" });
+      if (!target || target.hidden) return;
+      focusedReportLocation.current = location;
+      if (document.activeElement !== previousFocus && document.activeElement !== document.body) return;
+      revealWorkbenchTarget(target, "nearest");
       target.focus({ preventScroll: true });
     });
-  }, [activeView, focusedIssue, issues]);
+    return () => cancelAnimationFrame(frame);
+  }, [activeView, run, focusedIssue, issues]);
+
+  const currentReportIssueId = visibleIssues.find(issue => issue.id === focusedIssue)?.id || visibleIssues[0]?.id;
+  useEffect(() => {
+    if (activeView !== "report" || !currentReportIssueId || !run) return;
+    const key = `${run}:${currentReportIssueId}`;
+    setVisitedEvidenceIssues(current => current.includes(key) ? current : [...current.filter(item => item.startsWith(`${run}:`)), key].slice(-24));
+  }, [activeView, currentReportIssueId, run]);
 
   return (
     <>
@@ -1804,7 +1841,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         <i />
         <span>✦</span>
       </div>
-      <header className="topBar">
+      <header className="topBar storyTopBar">
         <button
           className="brand"
           onClick={() => navigateWorkspace("check")}
@@ -1863,10 +1900,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           <button
             className="workspaceSecondaryAction"
             onClick={() => {
-              navigateWorkspace("projects");
-              requestAnimationFrame(() =>
-                document.getElementById("project-name")?.focus(),
-              );
+              openMaterialTools("project-name");
             }}
           >
             新建项目
@@ -1874,11 +1908,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           <button
             className="workspaceSecondaryAction"
             onClick={() => {
-              navigateWorkspace("projects");
               if (!project) setMessage("请先新建或选择项目，再导入文稿");
-              requestAnimationFrame(() =>
-                document.getElementById("document-upload")?.focus(),
-              );
+              openMaterialTools("document-upload");
             }}
           >
             导入文稿
@@ -1891,56 +1922,16 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           </button>
         </div>
       </header>
-      <main className={`appShell ${activeView === "characters" ? "characterMode" : activeView === "projects" ? "documentMode" : ""}`}>
+      <main className={`appShell storyWorkbench ${activeView === "characters" ? "characterMode" : activeView === "projects" ? "documentMode" : activeView === "report" ? "storyReportMode" : ""}`}>
         <aside className="sideNav" aria-label="创作工作台导航">
           <div className="sideNavTitle">
-            <span>CREATIVE INDEX</span>
-            <b>创作索引</b>
+            <span>当前作品</span>
+            <b>{selectedProject?.name || "故事工作台"}</b>
           </div>
-          <nav>
-            {(
-              [
-                ["check", "PT", "文稿校验", busy ? "运行中" : ""],
-                [
-                  "projects",
-                  "PJ",
-                  "项目与文档",
-                  String(docs.filter((row) => row.active).length || ""),
-                ],
-                ["characters", "CH", "角色档案", ""],
-                ["diff", "DF", "版本对比", documentDiff ? "1" : ""],
-                ["revision", "RV", "修订复检", ""],
-                [
-                  "visual",
-                  "TL",
-                  "关系与时间",
-                  graph || timeline ? "已生成" : "",
-                ],
-                ["audit", "AU", "运行审计", String(records.length || "")],
-                [
-                  "report",
-                  "RP",
-                  "完整报告",
-                  "",
-                ],
-              ] as Array<[WorkspaceView, string, string, string]>
-            ).map(([view, glyph, label, badge]) => (
-              <button
-                key={view}
-                className={activeView === view ? "active" : ""}
-                aria-current={activeView === view ? "page" : undefined}
-                aria-label={label}
-                title={label}
-                onClick={() => navigateWorkspace(view)}
-              >
-                <span className="navGlyph" aria-hidden="true">
-                  {glyph}
-                </span>
-                <span className="navLabel">{label}</span>
-                {badge && <small>{badge}</small>}
-              </button>
-            ))}
-          </nav>
+          <StoryNavigation view={activeView} onNavigate={navigateWorkspace} busy={busy} />
+          {activeView === "report" && <ReportContents issues={visibleIssues} focusedIssue={focusedIssue || visibleIssues[0]?.id || null}
+            onIssue={(id) => updateReportRoute({ issueId: id })} />}
+
           <div className="sideNavBottom">
             <button
               className={`navProvider ${providerConnection.tone}`}
@@ -1967,6 +1958,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
         </aside>
 
         <div className="mainCanvas">
+          <OperationMessage message={message} />
           {busy && (
             <section className="mobileRunStrip" aria-live="polite">
               <span><i aria-hidden="true" />校验中 · {progress}%</span>
@@ -1977,12 +1969,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           {activeView === "check" && (
             <section className="workbenchIntro">
               <div>
-                <p className="eyebrow">NARRATIVE CONSISTENCY REVIEW</p>
+                <p className="eyebrow">本次审查</p>
                 <div className="workbenchTitleLine">
                   <h1>文稿校验台</h1>
                   <button className="userGuideTrigger" type="button" onClick={(event) => openUserGuide("review", event.currentTarget)}>使用指南</button>
                 </div>
-                <p>让每一条伏笔都沿着星轨归位，所有判断回到原文证据。</p>
+                <p>选好本次新稿和作为依据的资料，再开始审查。</p>
               </div>
               <span className="workbenchMascot" aria-hidden="true">
                 <i />
@@ -2028,12 +2020,36 @@ export default function App({ identity, onLoggedOut }: AppProps) {
               className="projectPanel workspaceView"
               aria-busy={projectLoading}
             >
+              {activeView === "projects" && <header className="storyDocumentHeader">
+                <div><h1>{selectedProject?.name || "作品与资料"}</h1>
+                  <p>{selectedProject?.description || "把章节、设定和参考资料放在一起，按版本阅读。"}</p></div>
+                <div className="storyDocumentActions">
+                  <button type="button" onClick={() => openMaterialTools("document-upload")}>导入文稿</button>
+                  <button type="button" onClick={() => openMaterialTools()}>核对资料身份</button>
+                  <button type="button" disabled={!project} onClick={() => navigateWorkspace("check")}>准备审查</button>
+                </div>
+              </header>}
+                  {activeView === "projects" && (
+                    <Suspense fallback={<p role="status">正在打开资料库…</p>}>
+                      <DocumentLibrary
+                        key={project}
+                        projectId={project}
+                        documents={docs}
+                        loading={projectLoading}
+                        readingPositions={documentReadingPositions.current}
+                        state={documentLibraryState}
+                        onStateChange={setDocumentLibraryState}
+                        onCompare={openLibraryComparison}
+                      />
+                    </Suspense>
+                  )}
               {activeView === "projects" && (
-                <div className="projectSetup">
+                <details className="projectSetup storyMaterialTools" ref={materialToolsRef} open={!project || docs.length === 0 || importQueue.entries.length > 0}>
+                  <summary>导入与资料身份 <span>添加文稿、核对用途和发布状态</span></summary>
                   <div className="sectionHead">
                     <div>
-                      <p className="eyebrow">PROJECTS</p>
-                      <h2>本地项目工作台</h2>
+                      <p className="eyebrow">资料管理</p>
+                      <h2>导入与整理</h2>
                     </div>
                     <button
                       disabled={projectsLoading}
@@ -2210,23 +2226,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       onLeaveGuardChange={(guard) => { contextLeaveGuardRef.current = guard; }}
                     />
                   )}
-                </div>
+                </details>
               )}
               {activeView !== "diff" && (
                 <div className="tables">
-                  {activeView === "projects" && (
-                    <Suspense fallback={<p role="status">正在打开资料库…</p>}>
-                      <DocumentLibrary
-                        key={project}
-                        projectId={project}
-                        documents={docs}
-                        loading={projectLoading}
-                        state={documentLibraryState}
-                        onStateChange={setDocumentLibraryState}
-                        onCompare={openLibraryComparison}
-                      />
-                    </Suspense>
-                  )}
                   {activeView === "audit" && (
                     <RunHistoryPanel
                       projectId={project}
@@ -2806,12 +2809,19 @@ export default function App({ identity, onLoggedOut }: AppProps) {
           )}
           {!routeProblem && activeView === "report" && (
             <>
-              <div className="reportHelpHeading">
+              <div className="reportHelpHeading" id="report-coverage" tabIndex={-1}>
                 <h1>审查报告</h1>
                 <div>
                   <button className="userGuideTrigger" type="button" onClick={(event) => openUserGuide("report", event.currentTarget)}>阅读报告帮助</button>
                   <button className="userGuideTrigger" type="button" onClick={(event) => openUserGuide("coverage", event.currentTarget)}>理解覆盖范围</button>
                 </div>
+              </div>
+              <div className="storyReportSummary" aria-label="本次报告摘要">
+                <span><small>任务状态</small><b>{runInfo ? reviewStatusLabel(runInfo.status) : "尚未选择运行"}</b></span>
+                <span><small>正式问题</small><b>{issues.length}</b></span>
+                <span><small>待复核线索</small><b>{pendingClueCountLabel}</b></span>
+                <span><small>模型用量</small><b>{selectedRunUsage.tokens}</b><small>{selectedRunUsage.cost}</small></span>
+                <button type="button" onClick={() => navigateWorkspace("audit")}>查看任务与记录</button>
               </div>
               {runInfo && (runInfo.status === "completed" || runInfo.review_batch?.mode === "draft_review") && (
                 <section
@@ -2839,57 +2849,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   </>}
                 </section>
               )}
-              <section className="clarifications workspaceView">
-                <div className="sectionHead">
-                  <div>
-                    <p className="eyebrow">REVIEW QUESTIONS</p>
-                    <h2>
-                      需要作者确认 <em>{clarifications.length}</em>
-                    </h2>
-                  </div>
-                </div>
-                {clarifications.length === 0 && !busy && (
-                  <div className="empty">
-                    {runInfo?.status === "completed"
-                      ? "本次没有列出需要作者补充的疑问。"
-                      : "完成或恢复一次分析后，这里会单独显示待澄清项。"}
-                  </div>
-                )}
-                {clarifications.map((item, index) => (
-                  <article key={item.id}>
-                    <div className="rank">
-                      {String(index + 1).padStart(2, "0")}
-                    </div>
-                    <div>
-                      <p className="tag">
-                        {clarificationKindName(item.kind)}
-                        {item.category
-                          ? ` · ${clarificationCategoryNames[item.category] || item.category}`
-                          : ""}
-                      </p>
-                      <h3>{item.text}</h3>
-                      <p>
-                        {modalityNames[item.modality] || item.modality} ·{" "}
-                        {sourceNames[item.source_scope] || item.source_scope} ·{" "}
-                        {certaintyNames[item.certainty] || item.certainty}
-                      </p>
-                      <div className="evidence">
-                        <blockquote>
-                          <b>
-                            {item.evidence.document_name}:
-                            {item.evidence.line_start}
-                            {item.evidence.line_end !== item.evidence.line_start
-                              ? `–${item.evidence.line_end}`
-                              : ""}
-                          </b>
-                          {item.evidence.text}
-                        </blockquote>
-                      </div>
-                    </div>
-                  </article>
-                ))}
-              </section>
-              <section className="issues">
+              <section className="issues storyReportIssues" id="report-formal-issues" tabIndex={-1}>
                 {issues.length > 0 && notesReadyRun !== run && <p className="hint" role="status">
                   {notesLoading ? "正在读取本次运行的反馈和暂存备注，读取完成后才能编辑，避免覆盖你的输入。" : "反馈状态尚未读完，备注暂不可编辑。"}
                   {!notesLoading && <button type="button" onClick={() => void loadCompleted(run).catch((error) => setMessage(`反馈状态读取失败：${String(error)}`))}>重试读取反馈状态</button>}
@@ -2992,6 +2952,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     当前类别与反馈状态下没有问题，请调整筛选条件。
                   </div>
                 )}
+                {visibleIssues.length > 1 && <label className="storyIssuePicker">当前问题
+                  <select value={visibleIssues.some(issue => issue.id === focusedIssue) ? focusedIssue! : visibleIssues[0].id}
+                    onChange={event => updateReportRoute({ issueId: event.target.value })}>
+                    {visibleIssues.map((issue, index) => <option key={issue.id} value={issue.id}>{index + 1}. {issue.title}</option>)}
+                  </select>
+                </label>}
                 {visibleIssues.map((issue, index) => {
                   const evidenceReview = describeIssueEvidenceReview(
                     issue.metadata,
@@ -3002,9 +2968,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       id={`issue-${issue.id}`}
                       key={issue.id}
                       tabIndex={-1}
-                      className={
-                        focusedIssue === issue.id ? "focusedIssue" : ""
-                      }
+                      hidden={issue.id !== (visibleIssues.find(row => row.id === focusedIssue)?.id || visibleIssues[0]?.id)}
+                      className={`storyCurrentIssue ${focusedIssue === issue.id ? "focusedIssue" : ""}`}
                     >
                       <div className="rank">
                         {String(index + 1).padStart(2, "0")}
@@ -3097,12 +3062,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                           )}
                         </div>
                       </div>
+                      {visitedEvidenceIssues.includes(`${run}:${issue.id}`) && !projectLoading && runInfo?.id === run && runInfo.project_id === project && runInfo.status === "completed" && <EvidenceWorkspace
+                        projectId={project} runId={run} kind="issue" itemId={issue.id} evidence={issue.evidence}
+                        onOpen={(index, trigger) => openEvidenceReader("issue", issue.id, index, issue.evidence[index], trigger)} />}
                     </article>
                   );
                 })}
               </section>
               <section
-                className="provisionalClues workspaceView"
+                className="provisionalClues workspaceView" id="report-pending" tabIndex={-1}
                 aria-labelledby="provisional-clues-title"
                 aria-busy={
                   (provisionalClues.status === "loading" && provisionalClues.runId === run) ||
@@ -3177,6 +3145,13 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                                   </blockquote>
                                 ))}
                               </div>
+                              <button type="button" className="storyClueReaderToggle" aria-expanded={readingClue === `${run}:${clue.id}`}
+                                onClick={() => setReadingClue(current => current === `${run}:${clue.id}` ? null : `${run}:${clue.id}`)}>
+                                {readingClue === `${run}:${clue.id}` ? "收起原文工作区" : "在工作台对照原文"}
+                              </button>
+                              {readingClue === `${run}:${clue.id}` && !projectLoading && runInfo?.id === run && runInfo.project_id === project && runInfo.status === "completed" && <EvidenceWorkspace
+                                key={`${run}:${clue.id}`} projectId={project} runId={run} kind="review_clue" itemId={clue.id} evidence={clue.evidence}
+                                onOpen={(index, trigger) => openEvidenceReader("review_clue", clue.id, index, clue.evidence[index], trigger)} />}
                               {clue.material_review && <MaterialReviewDetails review={clue.material_review} evidence={clue.evidence}
                                 onOpen={(kind, index, span, trigger) => openEvidenceReader(kind, clue.id, index, span, trigger)} />}
                             </li>
@@ -3246,6 +3221,56 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </p>
                   )}
                 </section>
+              </section>
+              <section className="clarifications workspaceView" id="report-questions" tabIndex={-1}>
+                <div className="sectionHead">
+                  <div>
+                    <p className="eyebrow">REVIEW QUESTIONS</p>
+                    <h2>
+                      需要作者确认 <em>{clarifications.length}</em>
+                    </h2>
+                  </div>
+                </div>
+                {clarifications.length === 0 && !busy && (
+                  <div className="empty">
+                    {runInfo?.status === "completed"
+                      ? "本次没有列出需要作者补充的疑问。"
+                      : "完成或恢复一次分析后，这里会单独显示待澄清项。"}
+                  </div>
+                )}
+                {clarifications.map((item, index) => (
+                  <article key={item.id}>
+                    <div className="rank">
+                      {String(index + 1).padStart(2, "0")}
+                    </div>
+                    <div>
+                      <p className="tag">
+                        {clarificationKindName(item.kind)}
+                        {item.category
+                          ? ` · ${clarificationCategoryNames[item.category] || item.category}`
+                          : ""}
+                      </p>
+                      <h3>{item.text}</h3>
+                      <p>
+                        {modalityNames[item.modality] || item.modality} ·{" "}
+                        {sourceNames[item.source_scope] || item.source_scope} ·{" "}
+                        {certaintyNames[item.certainty] || item.certainty}
+                      </p>
+                      <div className="evidence">
+                        <blockquote>
+                          <b>
+                            {item.evidence.document_name}:
+                            {item.evidence.line_start}
+                            {item.evidence.line_end !== item.evidence.line_start
+                              ? `–${item.evidence.line_end}`
+                              : ""}
+                          </b>
+                          {item.evidence.text}
+                        </blockquote>
+                      </div>
+                    </div>
+                  </article>
+                ))}
               </section>
               {reviewClues.status === "ready" && reviewClues.runId === run && reviewClues.habit_scope_notes?.length ? (
                 <section className="habitScopeNotes workspaceView" aria-labelledby="habit-scope-title">

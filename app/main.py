@@ -23,7 +23,7 @@ from sqlalchemy.orm import load_only
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
-from .config import CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V1, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings
+from .config import CHARACTER_TARGET_FOCUS_POLICY_V1, CLAIM_RESOLUTION_POLICY_V1, HABIT_ACTION_SELECTION_POLICY_V1, HABIT_OBJECT_CHAIN_POLICY_V1, HABIT_SCENE_POLICY_V1, HABIT_SCOPE_POLICY_V2, SELECTED_CLAIM_RESOLUTION_POLICY_V3, get_settings
 from .character_claim_resolution import CLAIM_RESOLUTION_KEY
 from .config import NARRATIVE_TIME_KNOWLEDGE_POLICY_V1, SEMANTIC_STATE_POLICY_V1, NARRATIVE_TIME_SCOPE_POLICY_V1
 from .config import CHARACTER_EXPLANATION_ASSERTIONS_POLICY_V1
@@ -864,7 +864,7 @@ def _review_batch_selection(
     }
     if settings.habit_scene_policy_available and payload.mode == "draft_review" and payload.character_review_enabled:
         coverage["habit_scene_policy"] = HABIT_SCENE_POLICY_V1
-        coverage["habit_scope_policy"] = HABIT_SCOPE_POLICY_V1
+        coverage["habit_scope_policy"] = HABIT_SCOPE_POLICY_V2
         coverage["habit_object_chain_policy"] = HABIT_OBJECT_CHAIN_POLICY_V1
         coverage["claim_resolution_policy"] = CLAIM_RESOLUTION_POLICY_V1
         coverage["habit_action_selection_policy"] = HABIT_ACTION_SELECTION_POLICY_V1

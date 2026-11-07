@@ -97,6 +97,11 @@ async function mockApi(page: Page, state: MockState) {
     else if (endpoint === `/api/v1/projects/${projectId}/analysis-runs`) body = [run];
     else if (endpoint === `/api/v1/analysis-runs/${runId}`) body = run;
     else if (endpoint === `/api/v1/analysis-runs/${runId}/issues`) body = [issue, secondIssue];
+    else if (endpoint === `/api/v1/analysis-runs/${runId}/evidence-preview` && method === "GET"
+      && url.searchParams.get("kind") === "issue" && [issue.id, secondIssue.id].includes(url.searchParams.get("item_id") || "")
+      && url.searchParams.get("evidence_index") === "0") {
+      await route.fulfill({ status: 409, json: { detail: "source_snapshot_unavailable" } }); return;
+    }
     else if (endpoint === `/api/v1/analysis-runs/${runId}/records`) body = { records: [], warnings: [] };
     else if (endpoint === `/api/v1/analysis-runs/${runId}/clarifications`) body = [];
     else if (endpoint === `/api/v1/analysis-runs/${runId}/diagnostics`) body = {

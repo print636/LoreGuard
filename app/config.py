@@ -12,6 +12,7 @@ from .execution_timing import ExecutionDeadline
 
 HABIT_SCENE_POLICY_V1 = "habit-scene-windows-v1"
 HABIT_SCOPE_POLICY_V1 = "habit-scope-review-v1"
+HABIT_SCOPE_POLICY_V2 = "habit-scope-review-v2"
 HABIT_OBJECT_CHAIN_POLICY_V1 = "habit-object-chain-v1"
 CLAIM_RESOLUTION_POLICY_V1 = "claim-resolution-v1"
 HABIT_ACTION_SELECTION_POLICY_V1 = "habit-action-selection-v1"
@@ -292,6 +293,7 @@ class Settings(BaseSettings):
     habit_scene_policy_available: ClassVar[bool] = False
     _character_habit_scene_scheduling_v1: bool = PrivateAttr(default=False)
     _character_habit_scope_review_v1: bool = PrivateAttr(default=False)
+    _character_habit_scope_review_policy: str | None = PrivateAttr(default=None)
     _character_habit_object_chain_v1: bool = PrivateAttr(default=False)
     _character_claim_resolution_v1: bool = PrivateAttr(default=False)
     _character_habit_action_selection_v1: bool = PrivateAttr(default=False)
