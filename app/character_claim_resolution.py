@@ -232,18 +232,43 @@ class ClaimResolutionManager:
             return False
         proofs = {(r["target_sha256"], r["primary_claim_sha256"]) for r in self.receipts
                   if r["source_input_id"] == source_input_id and r["confirmed_candidate_id"] == candidate_id}
+        if not proofs:
+            return False
         identities = {identity for identity, _ in proofs}
         repaired = False
         from .character_trait_extraction import _target_bound_review_target
+        bound_targets = {}
         for source, _, target, result in self.targeted:
-            identity = claim_resolution_target_sha256(_target_bound_review_target(target, target_ordinal=1))
-            if source.input_id != source_input_id or identity not in identities or result.diagnostics.outcome == "completed":
+            if source.input_id != source_input_id:
                 continue
+            # Ordinary recall targets need not satisfy the stricter semantic
+            # review DTO. An actually bound result must first link the target
+            # to an existing resolution receipt; absence is unresolved.
+            bound_identities = {
+                claim_resolution_target_sha256(signal.target_bound_target)
+                for signal in result.signals if signal.target_bound_target is not None
+            }
+            if not identities.intersection(bound_identities):
+                continue
+            identity = claim_resolution_target_sha256(_target_bound_review_target(target, target_ordinal=1))
+            if identity not in identities or identity not in bound_identities:
+                continue
+            recall_identity = payload_sha256(target.model_dump(mode="json", exclude={"existing_evidence_ranges"}))
+            bound_targets[recall_identity] = identity
+        for source, _, target, result in self.targeted:
+            if source.input_id != source_input_id or result.diagnostics.outcome == "completed":
+                continue
+            recall_identity = payload_sha256(target.model_dump(mode="json", exclude={"existing_evidence_ranges"}))
+            identity = bound_targets.get(recall_identity)
+            if identity is None:
+                continue
+            # A later verification package may contain no admitted signal.
+            # Its unresolved claims still belong to the same recall target.
             state = result.claim_resolution_state
-            if (state is None or not state.enumeration_complete or state.omitted_count or not state.gaps
+            if (state is None or not state.enumeration_complete or state.omitted_count
                     or any((identity, gap.claim_digest) not in proofs for gap in state.gaps)):
                 return False
-            repaired = True
+            repaired = repaired or bool(state.gaps)
         return repaired
 
     def payload(self) -> dict | None:

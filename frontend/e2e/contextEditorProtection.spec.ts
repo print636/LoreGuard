@@ -294,6 +294,7 @@ test("浏览器后退与前进取消保留当前稿；确认后到正确历史�
   await open(page, state, "/app");
   await page.getByRole("link", { name: /雾潮剧情工程/u }).click();
   await page.getByRole("button", { name: "项目与文档", exact: true }).click();
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   await expect(timeline(page)).toHaveValue("main");
   await editAll(page);
   await confirmation(page, () => page.goBack(), false);
@@ -302,10 +303,12 @@ test("浏览器后退与前进取消保留当前稿；确认后到正确历史�
   await confirmation(page, () => page.goBack(), true);
   await expect(page).toHaveURL(new RegExp(`${checkPath}$`, "u"));
   await page.goForward();
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   await expect(timeline(page)).toHaveValue("main");
   // Leave a forward entry, then modify the source form before traversing to it.
   await page.getByRole("button", { name: "文稿校验", exact: true }).click();
   await page.goBack();
+  await page.getByRole("button", { name: "核对资料身份", exact: true }).click();
   await expect(timeline(page)).toHaveValue("main");
   await editAll(page);
   await confirmation(page, () => page.goForward(), false);
