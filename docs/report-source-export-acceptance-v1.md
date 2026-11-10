@@ -63,3 +63,7 @@ Word 作者继续编辑原 Word 并同名上传；Markdown 恢复原名上传。
 - 最终 1600/375 截图来自受测构建连接实际 QA 后端；失败/迟到/会话的网络夹具证据单独标注。只读请求明细及前置失败见 `artifacts/report-sources/acceptance-summary.json`，真实主旅程分保留在 `real-backend` 和 `real-backend-completed`，最终可读 ZIP 核对在 `zip-validated`。
 
 本批没有测试原 Word 格式无损往返，也没有执行回传后的新审查。下载仅限所选报告已保存输入；坏源、隐含旧确认源排除与容量边界来自明确的受控专项证据，不冒称在真实用户资料上制造并验证了这些情形。
+
+## 最终交付检查
+
+[功能版五项 CI](https://github.com/print636/LoreGuard/actions/runs/42839951255)在提交 `2bf079733b6027244c987f04db0dd1e9c31c6f23` 一次全部通过，无失败、重试或额外触发。结果文档使用 skip ci 提交，正常快进主分支并复用已验收的 17 个资源；本机安装结果由最终交付收据确认。
