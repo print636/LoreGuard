@@ -16,7 +16,7 @@ Idempotency-Key: 本页生成的稳定操作 UUID
 multipart: file, document_role, story_scope, [replace_document_id]
 ```
 
-成功不能只看 HTTP 状态。响应须包含非空文档 ID、相同项目 ID、精确文件名和大于等于 1 的整数版本号；通过已有 `verifiedImportReceipt` 校验后才显示“上传已保存”。后端返回 `deduplicated=true` 时展示已核对原上传记录，不将重放说成新增版本。
+成功不能只看 HTTP 状态。响应须包含非空文稿 ID、相同项目 ID、正确的平台文稿名和有效版本；明确更新原文稿时，还按[修订稿手动对应](explicit-revision-mapping-v1.md)核对实际上传文件名及真正替换对象。上传名可以与平台保留名不同，不能只放宽名称检查就认定保存成功。通过 `verifiedImportReceipt` 后才显示“上传已保存”；`deduplicated=true` 表示已核对原上传记录，不是又创建了一个版本。
 
 ### 状态与恢复
 
