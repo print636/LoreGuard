@@ -64,7 +64,9 @@ def test_version_impact_cites_only_frozen_evidence_and_does_not_mutate_report(co
         assert source['frozen']['document_id'] == background['id'] and source['current']['document_id'] == revised['id']
         assert source['content_changed'] is (content != '北门敞开。')
         assert 'version_changed' in source['changes']
-        assert view['recheck'] == dict(inputs_changed=True, can_prepare=True, reason=None)
+        assert view['recheck'] == dict(inputs_changed=True, can_prepare=True, reason=None,
+                                      input_signature=view['recheck']['input_signature'])
+        assert len(view['recheck']['input_signature']) == 64
         second = impact(client, run, offset=1, issue_offset=1, limit=1, issue_limit=1)
         assert not second['sources']['has_more'] and not second['affected_issues']['has_more']
         assert {view['affected_issues']['items'][0]['report_class'], second['affected_issues']['items'][0]['report_class']} == {'formal','review_clue'}

@@ -431,6 +431,7 @@ class AnalysisRunIn(BaseModel):
 class RecheckIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     character_review_enabled: bool = Field(default=False, strict=True)
+    expected_input_signature: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class PublishChapterIn(BaseModel):
@@ -1872,6 +1873,7 @@ def _require_idempotency_operation(
     recheck_baseline_run_id: str | None = None,
     review_batch_intent: dict | None = None,
     recheck_character_review: bool | None = None,
+    recheck_expected_input_signature: str | None = None,
 ) -> None:
     """Reject reuse of a project-scoped key for a different user intent."""
     execution = db.get(AnalysisRunExecutionRow, run.id)
@@ -1902,6 +1904,10 @@ def _require_idempotency_operation(
         and (
             recheck_character_review is None
             or coverage.get("character_review_enabled", False) is recheck_character_review
+        )
+        and (
+            recheck_baseline_run_id is None
+            or coverage.get("recheck_expected_input_signature") == recheck_expected_input_signature
         )
         and (
             review_batch_intent is None
@@ -6356,6 +6362,17 @@ def retry_run(
     return payload
 
 
+def _recheck_input_signature(baseline, documents, source_signature: str) -> str:
+    """Bind a preview to the exact authorized selection, not just equal names."""
+    return payload_sha256({
+        "schema_version": "recheck-input-v1",
+        "project_id": baseline.project_id,
+        "baseline_run_id": baseline.id,
+        "selected_document_ids": [document.id for document in documents],
+        "source_signature": source_signature,
+    })
+
+
 def _recheck_material_selection(db, baseline, character_choice: dict):
     """Use the same logical targets and current authority for preview and POST."""
     baseline_run_id = baseline.id
@@ -6450,12 +6467,15 @@ def get_material_impact(
         if run is None:
             raise HTTPException(404, "分析任务不存在")
         selected, roles, changed, traits_changed = None, {}, None, None
+        input_signature = None
         reason, comparison = None, "complete"
         try:
             _, selected, roles, _ = _recheck_material_selection(db, run, {})
             before = frozen_run_source_state(db, run.id)
             after = current_project_source_state(db, run.project_id, selected, batch_roles=roles)
-            changed = payload_sha256(before) != payload_sha256(after)
+            current_signature = payload_sha256(after)
+            input_signature = _recheck_input_signature(run, selected, current_signature)
+            changed = payload_sha256(before) != current_signature
             traits_changed = before["character_profile_snapshot_sha256"] != after["character_profile_snapshot_sha256"]
             if not changed:
                 reason = "no_document_changes"
@@ -6470,7 +6490,8 @@ def get_material_impact(
         if run.status != "completed":
             reason = "run_not_completed"
         return material_impact(db, run, selected=selected, batch_roles=roles,
-            recheck=dict(inputs_changed=changed, can_prepare=reason is None, reason=reason),
+            recheck=dict(inputs_changed=changed, can_prepare=reason is None, reason=reason,
+                         input_signature=input_signature),
             comparison_status=comparison, traits_changed=traits_changed,
             offset=offset, limit=limit, issue_offset=issue_offset, issue_limit=issue_limit)
 
@@ -6486,6 +6507,7 @@ def start_recheck(
 ) -> dict:
     """Analyze the project's current revision against one frozen baseline."""
     idempotency_key = _normalize_idempotency_key(idempotency_key_header)
+    expected_input_signature = payload.expected_input_signature if payload else None
     with SessionLocal() as db:
         _begin_project_write_transaction(db)
         baseline = _run_in_workspace(db, baseline_run_id, context.workspace_id)
@@ -6514,6 +6536,7 @@ def start_recheck(
                 retried_from_run_id=None,
                 recheck_baseline_run_id=baseline_run_id,
                 recheck_character_review=character_choice.get("character_review_enabled"),
+                recheck_expected_input_signature=expected_input_signature,
             )
             comparison = db.scalar(
                 select(AnalysisRunComparisonRow).where(
@@ -6543,6 +6566,8 @@ def start_recheck(
         batch_mode = baseline.batch_mode or "full_review"
         sensitivity = baseline.sensitivity or "balanced"
         coverage["recheck_baseline_run_id"] = baseline_run_id
+        if expected_input_signature is not None:
+            coverage["recheck_expected_input_signature"] = expected_input_signature
         coverage["narrative_time_knowledge_policy"] = NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
         coverage["semantic_state_policy"] = SEMANTIC_STATE_POLICY_V1
         coverage["narrative_time_scope_policy"] = NARRATIVE_TIME_SCOPE_POLICY_V1
@@ -6567,6 +6592,15 @@ def start_recheck(
                     "message": "已确认角色档案数量超过单次分析上限",
                 },
             ) from None
+        if (expected_input_signature is not None
+                and expected_input_signature != _recheck_input_signature(baseline, documents, current_signature)):
+            # Still inside the same project write transaction as selection and
+            # capture_run_inputs. Refuse before provider setup, charging or run
+            # creation; never silently switch the author's reviewed revision.
+            raise HTTPException(409, detail={
+                "code": "recheck_inputs_changed",
+                "message": "准备复检的资料已发生变化，请重新核对文稿版本和资料身份后再提交。",
+            })
         if baseline_signature == current_signature:
             raise HTTPException(
                 409,
@@ -6648,6 +6682,7 @@ def start_recheck(
             retried_from_run_id=None,
             recheck_baseline_run_id=baseline_run_id,
             recheck_character_review=character_choice.get("character_review_enabled"),
+            recheck_expected_input_signature=expected_input_signature,
         )
         comparison = db.scalar(
             select(AnalysisRunComparisonRow).where(
