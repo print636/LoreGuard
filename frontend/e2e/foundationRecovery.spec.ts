@@ -51,6 +51,7 @@ function fixture() {
     requests: [] as string[], unexpected: [] as string[],
     uploads: [] as { key: string; payload: string }[], receipts: new Map<string, ReturnType<typeof makeDocument>>(),
     uploadMode: "success" as "success" | "unknown" | "reject" | "delay",
+    requiredAuth: false, invalidMappingReceipt: false,
     documentsUnavailable: false, delayedFulfilled: false,
     releaseDelayed: undefined as (() => void) | undefined,
     baselineHistoryPending: false, releaseBaselineHistory: undefined as (() => void) | undefined,
@@ -102,7 +103,7 @@ async function mockApi(page: Page, state: Fixture) {
     if (await fulfillLegacyRunCatalog(route, [{ projectId: projectA, runs: [baseline()] }, { projectId: projectB, runs: [] }])) return;
     let body: unknown;
     if (method === "GET" && endpoint === "/api/v1/auth/me") body = {
-      mode: "anonymous", user: { id: "foundation-author", email: "", display_name: "作者" },
+      mode: state.requiredAuth ? "required" : "anonymous", user: { id: "foundation-author", email: "qa@example.test", display_name: "作者" },
       workspace: { id: "foundation-workspace", name: "原创工作区", kind: "personal", role: "owner" },
     };
     else if (method === "GET" && endpoint === "/api/v1/account/model-provider") body = { configured: false, revision: 0 };
@@ -133,6 +134,8 @@ async function mockApi(page: Page, state: Fixture) {
       else if (tail === "diagnostics") body = {};
       else if (tail === "provisional-clues") body = { items: [], truncated: false };
       else if (tail === "review-clues") body = { items: [], truncated: false, unavailable_count: 0 };
+      else if (tail === "character-observations") body = { schema_version: "character-observations-v1", project_id: projectA, run_id: runId,
+        recording: { status: "complete", observation_count: 0 }, page: { offset: 0, limit: 50, total_items: 0, has_more: false }, items: [] };
       else { state.unexpected.push(`${method} ${endpoint}`); await reply(route, { detail: "Unknown isolated run endpoint" }, 404); return; }
     }
     else if (method === "POST" && endpoint === `${root}/documents`) {
@@ -151,7 +154,10 @@ async function mockApi(page: Page, state: Fixture) {
       } else expect(payload).toBe(state.uploads.find((item) => item.key === key)!.payload);
       if (state.uploadMode === "unknown") { state.uploadMode = "success"; await route.abort("failed"); return; }
       if (state.uploadMode === "delay") await new Promise<void>((resolve) => { state.releaseDelayed = resolve; });
-      try { await reply(route, { ...saved, superseded_document_ids: [chapterId], deduplicated: Boolean(previous) }, 201); }
+      const uploadedName = /filename="([^"]+)"/u.exec(request.postDataBuffer()?.toString("utf8") ?? "")?.[1] ?? "";
+      try { await reply(route, { ...saved, superseded_document_ids: [chapterId], deduplicated: Boolean(previous),
+        uploaded_filename: uploadedName, uploaded_format: "markdown", replaces_document_id: state.invalidMappingReceipt ? "different-document" : chapterId,
+        replaces_document_version: 1, upload_metadata_source: "stored_receipt" }, 201); }
       catch { /* A cancelled obsolete transport is allowed; the synthetic receipt is already stored. */ }
       if (state.uploadMode === "delay") state.delayedFulfilled = true;
       return;
@@ -247,6 +253,51 @@ async function confirmation(page: Page, action: () => Promise<unknown>, accept: 
 
 function expectNoUnexpected(state: Fixture) { expect(state.unexpected).toEqual([]); }
 function expectNoAnalysis(state: Fixture) { expect(state.requests.filter((item) => item.startsWith("POST ") && /analysis-runs|inference|model-provider/u.test(item))).toEqual([]); }
+
+test("显式改名修订不自动选原稿，作者核对对应后保存同一逻辑版本", async ({ page }) => {
+  const state = fixture(); state.requiredAuth = true;
+  await mockApi(page, state);
+  await page.setViewportSize({ width: 375, height: 900 });
+  await page.goto(`/app/projects/${projectA}/runs/${runId}/revise?step=upload`);
+  await expect(page.locator(".revisionHeader")).toHaveAttribute("data-baseline-run-id", runId);
+  const target = page.getByRole("combobox", { name: "替换目标", exact: true });
+  await expect(target).toHaveValue("");
+  await revisionFile(page).setInputFiles({ name: "001-外部改稿.md", mimeType: "text/markdown", buffer: Buffer.from("作者在外部编辑后的原创段落。") });
+  await expect(page.locator(".revisionMappingPreview")).toContainText("请选择原文稿");
+  await page.getByRole("button", { name: "保存新版本", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("请选择");
+  expect(state.uploads).toHaveLength(0);
+  await target.selectOption(chapterId);
+  await expect(page.locator(".revisionMappingPreview")).toContainText("001-外部改稿.md");
+  await expect(page.locator(".revisionMappingPreview")).toContainText("章节一.md");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole("button", { name: "保存新版本", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "确认变化并启动复检", exact: true })).toBeVisible();
+  expect(state.uploads).toHaveLength(1);
+  expect(state.uploads[0].payload).toContain('filename="001-外部改稿.md"');
+  expect(state.uploads[0].payload).toContain(chapterId);
+  expect(state.documents.filter(row => row.active && row.name === "章节一.md").map(row => row.version)).toEqual([2]);
+  expect(state.documents.filter(row => row.name === "001-外部改稿.md")).toHaveLength(0);
+  expectNoAnalysis(state); expectNoUnexpected(state);
+});
+
+test("显式目标收据不符不能冒充保存成功，未知结果锁定文件和目标", async ({ page }) => {
+  const state = fixture(); state.requiredAuth = true; state.invalidMappingReceipt = true;
+  await open(page, state);
+  await revisionFile(page).setInputFiles({ name: "改名修订.md", mimeType: "text/markdown", buffer: Buffer.from("待核对的修订正文。") });
+  await page.getByRole("button", { name: "保存新版本", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("上传结果待核对");
+  await expect(revisionFile(page)).toBeDisabled();
+  await expect(page.getByRole("combobox", { name: "替换目标", exact: true })).toBeDisabled();
+  await expect(page.getByRole("heading", { name: "确认变化并启动复检", exact: true })).toHaveCount(0);
+  expect(state.uploads).toHaveLength(1);
+  state.invalidMappingReceipt = false;
+  await page.getByRole("button", { name: /安全重试同一/u }).click();
+  await expect(page.getByRole("heading", { name: "确认变化并启动复检", exact: true })).toBeVisible();
+  expect(state.uploads[1]).toEqual(state.uploads[0]);
+  expect(state.receipts.size).toBe(1);
+  expectNoAnalysis(state); expectNoUnexpected(state);
+});
 
 test("修订稿角色深度审查需逐次勾选，冻结基线失效后可改为普通复检", async ({ page }) => {
   const state = fixture();

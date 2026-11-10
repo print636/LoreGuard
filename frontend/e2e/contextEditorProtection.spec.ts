@@ -92,14 +92,19 @@ async function mockApi(page: Page, state: Fixture) {
       body = state.documents;
     }
     else if (method === "POST" && endpoint === `${root}/documents`) {
-      const name = /filename="([^"]+)"/u.exec(request.postDataBuffer()?.toString("utf8") ?? "")?.[1] ?? "";
+      const payload = request.postDataBuffer()?.toString("utf8") ?? "";
+      const name = /filename="([^"]+)"/u.exec(payload)?.[1] ?? "";
+      const explicitTarget = /name="replace_document_id"\r\n\r\n([^\r\n]+)/u.exec(payload)?.[1];
       state.uploads.push(name);
-      const old = state.documents.find((item) => item.active && item.name === name);
-      const imported = document(`context-upload-${state.uploads.length}`, name, "main", (old?.version ?? 0) + 1);
+      const old = state.documents.find((item) => item.active && (explicitTarget ? item.id === explicitTarget : item.name === name));
+      if (explicitTarget) expect(old, "明确目标必须对应真实fixture文稿").toBeDefined();
+      const imported = document(`context-upload-${state.uploads.length}`, old?.name ?? name, "main", (old?.version ?? 0) + 1);
       if (old) old.active = false;
       state.documents.push(imported);
       if (state.dropOldOnUpload) state.documents = state.documents.filter((item) => item.id !== documentId);
-      await fulfill(route, { ...imported, superseded_document_ids: old ? [old.id] : [], deduplicated: false }, 201);
+      await fulfill(route, { ...imported, superseded_document_ids: old ? [old.id] : [], deduplicated: false,
+        ...(explicitTarget && old ? { uploaded_filename: name, uploaded_format: "markdown", replaces_document_id: old.id,
+          replaces_document_version: old.version, upload_metadata_source: "stored_receipt" } : {}) }, 201);
       return;
     }
     else if (method === "GET" && /^\/api\/v1\/projects\/[^/]+\/documents\/[^/]+\/preview$/u.test(endpoint)) {

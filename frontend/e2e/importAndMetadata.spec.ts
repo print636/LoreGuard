@@ -63,7 +63,7 @@ function stateFixture() {
     documents: [document("已存章节.md", "chapter", "source-chapter")],
     uploads: [] as Upload[],
     uploadPlans: new Map<string, UploadResult[]>(),
-    receipts: new Map<string, { signature: string; doc: Document }>(),
+    receipts: new Map<string, { signature: string; doc: Document; target?: { id: string; version: number } }>(),
     creations: [] as { name: string; description: string }[],
     patches: [] as { name: string; description: string; expected_revision: number }[],
     requests: [] as string[],
@@ -209,7 +209,9 @@ async function mockApi(page: Page, state: State) {
         if (receipt) {
           if (receipt.signature !== upload.signature) {
             await route.fulfill({ status: 409, json: { detail: { reason_code: "document_upload_idempotency_conflict", message: "同一导入记录不能对应不同内容" } } });
-          } else await route.fulfill({ status: 201, json: { ...receipt.doc, superseded_document_ids: [], deduplicated: true } });
+          } else await route.fulfill({ status: 201, json: { ...receipt.doc, superseded_document_ids: receipt.target ? [receipt.target.id] : [], deduplicated: true,
+            ...(receipt.target ? { uploaded_filename: upload.name, uploaded_format: "markdown", replaces_document_id: receipt.target.id,
+              replaces_document_version: receipt.target.version, upload_metadata_source: "stored_receipt" } : {}) } });
           return;
         }
         const result = state.uploadPlans.get(upload.name)?.shift() ?? "success";
@@ -217,12 +219,17 @@ async function mockApi(page: Page, state: State) {
           await route.fulfill({ status: 422, json: { detail: "文稿格式无法导入，请核对文件后重试" } });
           return;
         }
-        const created = document(upload.name, upload.role, `uploaded-${state.documents.length + 1}`, owner);
+        const target = upload.replaceId ? state.documents.find(doc => doc.id === upload.replaceId && doc.project_id === owner && doc.active) : undefined;
+        if (upload.replaceId) expect(target, "明确替换不能用新文件名创建旁支").toBeDefined();
+        const created = document(target?.name ?? upload.name, upload.role, `uploaded-${state.documents.length + 1}`, owner);
+        if (target) { created.version = target.version + 1; target.active = false; }
         created.story_scope = upload.scope;
         state.documents.push(created);
-        state.receipts.set(upload.key, { signature: upload.signature, doc: created });
+        state.receipts.set(upload.key, { signature: upload.signature, doc: created, target: target ? { id: target.id, version: target.version } : undefined });
         if (result === "unknown-committed") { await route.abort("failed"); return; }
-        await route.fulfill({ status: 201, json: { ...created, superseded_document_ids: [], deduplicated: false } });
+        await route.fulfill({ status: 201, json: { ...created, superseded_document_ids: target ? [target.id] : [], deduplicated: false,
+          ...(target ? { uploaded_filename: upload.name, uploaded_format: "markdown", replaces_document_id: target.id,
+            replaces_document_version: target.version, upload_metadata_source: "stored_receipt" } : {}) } });
         return;
       } else { state.unexpected.push(`${method} ${endpoint}`); await route.fulfill({ status: 404, json: { detail: "Unexpected fixture document method" } }); return; }
     }
@@ -299,6 +306,26 @@ async function captureQueueViewport(page: Page, name: string) {
   await queue(page).evaluate((element) => element.scrollIntoView({ block: "start", inline: "nearest", behavior: "instant" }));
   await page.screenshot({ path: path.join(screenshotFolder, name) });
 }
+
+test("工作台：改名文件由作者明确选原稿，核对对应后保留逻辑名版本", async ({ page }) => {
+  const state = stateFixture();
+  await page.setViewportSize({ width: 375, height: 900 });
+  await open(page, state, `/app/projects/${projectId}/documents`);
+  await selectWorkspaceFiles(page, [file("外部修订.md")]);
+  const target = page.getByLabel("外部修订.md 的版本处理", { exact: true });
+  await expect(target).toHaveValue("");
+  await target.selectOption("source-chapter");
+  await expect(row(page, "外部修订.md").locator(".importTargetPreview")).toContainText("已存章节.md");
+  await assertFits(page, queue(page));
+  await page.getByRole("button", { name: "导入待处理文稿", exact: true }).click();
+  await expect(row(page, "外部修订.md")).toContainText("已存章节.md v2");
+  await expect(row(page, "外部修订.md").locator(".importTargetPreview")).toContainText("已保存为");
+  expect(state.uploads).toHaveLength(1);
+  expect(state.uploads[0].replaceId).toBe("source-chapter");
+  expect(state.documents.filter(doc => doc.name === "外部修订.md")).toHaveLength(0);
+  expect(state.documents.filter(doc => doc.name === "已存章节.md").map(doc => doc.version)).toEqual([1, 2]);
+  await assertNoOtherWrites(state);
+});
 
 test("工作台：混合资料部分成功后仅重试失败文件，并保留逐文件类型", async ({ page }) => {
   const state = stateFixture();
