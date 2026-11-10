@@ -18,7 +18,6 @@ import {
   mergeRevisionRouteState,
   pendingVisualizationKinds,
   recheckPath,
-  revisionDocumentForIssue,
   revisionRouteStateFromSearch,
   revisionSearch,
   revisionSteps,
@@ -401,13 +400,6 @@ export default function RevisionReview({
       setScope(document.story_scope || "global");
       return;
     }
-    const inferred = revisionDocumentForIssue(
-      selectedIssue?.evidence[0]?.document_name,
-      documents,
-    );
-    if (inferred && route.step === "upload") {
-      updateRoute({ documentId: inferred }, true);
-    }
   }, [route.documentId, route.step, selectedIssue?.id, documents]);
 
   async function loadComparison(runId: string, quiet = false): Promise<ComparisonLoadResult> {
@@ -683,8 +675,7 @@ export default function RevisionReview({
     if (fileInput.current) fileInput.current.value = "";
     setNotice("");
     setProblem("");
-    const inferred = revisionDocumentForIssue(selectedIssue?.evidence[0]?.document_name, documents);
-    updateRoute({ documentId: inferred }, true);
+    updateRoute({ documentId: null }, true);
   }
 
   async function startRecheck(event: React.FormEvent<HTMLFormElement>) {
@@ -854,7 +845,7 @@ export default function RevisionReview({
                         type="button"
                         onClick={() => updateRoute({
                           step: "upload",
-                          documentId: revisionDocumentForIssue(issue.evidence[0]?.document_name, documents),
+                          documentId: null,
                         })}
                       >
                         上传处理此问题的新版本

@@ -130,6 +130,7 @@ test("revision upload validates active version chains and same-name related file
   assert.deepEqual(validateRevisionUploadSelection("replace", "renamed.md", "active", documents), { ok: true, replacement: documents[1] });
   assert.equal(validateRevisionUploadSelection("replace", "renamed.docx", "active", documents).ok, true);
   assert.equal(validateRevisionUploadSelection("replace", "renamed.md", null, documents).ok, false);
+  assert.equal(validateRevisionUploadSelection("replace", "chapter.md", null, [documents[1]]).ok, false, "even a single matching document still requires explicit selection");
   assert.deepEqual(validateRevisionUploadSelection("related", "CHAPTER.MD", null, documents), {
     ok: false,
     message: "项目中已有同名生效文档“chapter.md”。请选择“替换现有文档”并指定它，避免断开版本链。",
