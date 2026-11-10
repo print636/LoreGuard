@@ -53,6 +53,9 @@ function fixture() {
     uploadMode: "success" as "success" | "unknown" | "reject" | "delay",
     requiredAuth: false, invalidMappingReceipt: false,
     documentsUnavailable: false, delayedFulfilled: false,
+    diffInputTruncated: false, signedImpact: false, signature: "a".repeat(64),
+    recheckMode: "changed" as "changed" | "unknown" | "reject",
+    rechecks: [] as Array<{ key: string; body: unknown }>,
     releaseDelayed: undefined as (() => void) | undefined,
     baselineHistoryPending: false, releaseBaselineHistory: undefined as (() => void) | undefined,
     decisions: [] as unknown[], decisionUnavailable: false, rejected: new Set<string>(), axesCreated: 0 };
@@ -99,6 +102,19 @@ async function mockApi(page: Page, state: Fixture) {
     const endpoint = decodeURIComponent(url.pathname);
     const method = request.method();
     state.requests.push(`${method} ${endpoint}`);
+    if (state.signedImpact && method === "GET" && endpoint === `/api/v1/analysis-runs/${runId}/material-impact`) {
+      expect([...url.searchParams.keys()].sort()).toEqual(["issue_limit", "issue_offset", "limit", "offset"]);
+      const current = state.documents.find(item => item.active && item.name === "章节一.md")!;
+      await reply(route, { schema_version: "material-change-impact-v1", project_id: projectA, run_id: runId,
+        comparison_status: "complete", semantic_impact_complete: false, confirmed_traits_auto_invalidated: false, confirmed_traits_changed: false,
+        recheck: { inputs_changed: true, can_prepare: true, reason: null, input_signature: state.signature },
+        sources: { offset: 0, limit: 30, total: 1, has_more: false, items: [{ key: current.id, kind: "input", frozen: null,
+          current: { document_id: current.id, document_name: current.name, document_version: current.version, document_role: "chapter", story_scope: "global", batch_role: "target", publication_status: "draft" },
+          changes: ["version_changed"], selected_for_recheck: true, content_changed: true, identity_comparison_available: true }] },
+        affected_issues: { offset: 0, limit: 30, total: 0, has_more: false, items: [] },
+        summary: { changed_sources: 1, added_sources: 0, not_included_sources: 0, affected_issues: 0, unresolved_evidence: 0, unresolved_sources: 0 } });
+      return;
+    }
     if (await fulfillLegacyMaterialImpact(route, [{ projectId: projectA, runId, changed: state.documents.some(item => item.active && item.name === "章节一.md" && item.version > 1) }])) return;
     if (await fulfillLegacyRunCatalog(route, [{ projectId: projectA, runs: [baseline()] }, { projectId: projectB, runs: [] }])) return;
     let body: unknown;
@@ -119,6 +135,23 @@ async function mockApi(page: Page, state: Fixture) {
     else if (method === "GET" && endpoint === `${root}/documents`) {
       if (state.documentsUnavailable) { await reply(route, { detail: "项目资料暂时无法读取。" }, 503); return; }
       body = state.documents;
+    }
+    else if (method === "GET" && endpoint === `${root}/documents/diff`) {
+      expect([...url.searchParams.keys()].sort()).toEqual(["from_document_id", "to_document_id"]);
+      const from = state.documents.find(item => item.id === url.searchParams.get("from_document_id"));
+      const to = state.documents.find(item => item.id === url.searchParams.get("to_document_id"));
+      expect(from).toBeTruthy(); expect(to).toBeTruthy(); expect(from!.name).toBe(to!.name);
+      body = { from_document: from, to_document: to,
+        summary: { added_lines: 0, removed_lines: 0, unchanged_lines: 1, changed_hunks: 0, compared_old_lines: 1, compared_new_lines: 1,
+          old_total_lines: state.diffInputTruncated ? 20001 : 1, new_total_lines: state.diffInputTruncated ? 20001 : 1,
+          input_truncated: state.diffInputTruncated, output_truncated: false }, hunks: [], warnings: [] };
+    }
+    else if (method === "GET" && state.documents.some(item => endpoint === `${root}/documents/${item.id}/preview`)) {
+      const item = state.documents.find(item => endpoint === `${root}/documents/${item.id}/preview`)!;
+      expect([...url.searchParams.keys()].sort()).toEqual(["limit", "offset"]);
+      expect(url.searchParams.get("limit")).toBe("120"); expect(url.searchParams.get("offset")).toBe("0");
+      body = { document: { ...item, char_count: item.content.length, line_count: 1, content_sha256: "b".repeat(64) },
+        lines: [{ line_number: 1, text: item.content }], page: { offset: 0, limit: 120, total: 1, has_more: false }, query: "" };
     }
     else if (method === "GET" && endpoint === `/api/v1/projects/${projectB}/documents`) body = [makeDocument("second-project-document", "独立正文.md", 1, projectB)];
     else if (method === "GET" && endpoint === `${root}/analysis-runs`) {
@@ -200,11 +233,20 @@ async function mockApi(page: Page, state: Fixture) {
       state.rejected.add(candidateId);
       body = { candidate: candidate(state, candidateId), decision_id: "foundation-explicit-decision", deduplicated: false };
     }
-    else if (method === "GET" && ([chapterId, profileId].some((id) => endpoint === `${root}/documents/${id}/narrative-context`)
+    else if (method === "GET" && (state.documents.some((item) => endpoint === `${root}/documents/${item.id}/narrative-context`)
       || endpoint === `/api/v1/projects/${projectB}/documents/second-project-document/narrative-context`)) {
       const id = endpoint.split("/").at(-2);
       const item = state.documents.find((entry) => entry.id === id) ?? makeDocument("second-project-document", "独立正文.md", 1, projectB);
       body = { document_id: item.id, current: item.narrative_context, revision_count: 1 };
+    }
+    else if (state.signedImpact && method === "POST" && endpoint === `/api/v1/analysis-runs/${runId}/rechecks`) {
+      state.rechecks.push({ key: request.headers()["idempotency-key"] ?? "", body: request.postDataJSON() });
+      if (state.recheckMode === "unknown") { await route.abort("failed"); return; }
+      if (state.recheckMode === "changed") {
+        state.signature = "b".repeat(64);
+        await reply(route, { detail: { code: "recheck_inputs_changed", message: "资料已变化，请重新核对。" } }, 409);
+      } else await reply(route, { detail: { code: "controlled_recheck_rejection", message: "受控拒绝；没有创建分析。" } }, 422);
+      return;
     }
     else {
       state.unexpected.push(`${method} ${endpoint}`);
@@ -254,6 +296,13 @@ async function confirmation(page: Page, action: () => Promise<unknown>, accept: 
 function expectNoUnexpected(state: Fixture) { expect(state.unexpected).toEqual([]); }
 function expectNoAnalysis(state: Fixture) { expect(state.requests.filter((item) => item.startsWith("POST ") && /analysis-runs|inference|model-provider/u.test(item))).toEqual([]); }
 
+async function inspectThenReturn(page: Page) {
+  await expect(page.getByRole("region", { name: "核对新版本", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "返回原报告的复检准备", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "返回原报告的复检准备", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "确认变化并启动复检", exact: true })).toBeVisible();
+}
+
 test("显式改名修订不自动选原稿，作者核对对应后保存同一逻辑版本", async ({ page }) => {
   const state = fixture(); state.requiredAuth = true;
   await mockApi(page, state);
@@ -272,13 +321,61 @@ test("显式改名修订不自动选原稿，作者核对对应后保存同一�
   await expect(page.locator(".revisionMappingPreview")).toContainText("章节一.md");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole("button", { name: "保存新版本", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "确认变化并启动复检", exact: true })).toBeVisible();
+  await inspectThenReturn(page);
   expect(state.uploads).toHaveLength(1);
   expect(state.uploads[0].payload).toContain('filename="001-外部改稿.md"');
   expect(state.uploads[0].payload).toContain(chapterId);
   expect(state.documents.filter(row => row.active && row.name === "章节一.md").map(row => row.version)).toEqual([2]);
   expect(state.documents.filter(row => row.name === "001-外部改稿.md")).toHaveLength(0);
   expectNoAnalysis(state); expectNoUnexpected(state);
+});
+
+test("handoff 所选历史版本只读，URL不恢复上传证明，截断无差异不称全文相同", async ({ page }) => {
+  const state = fixture(); state.requiredAuth = true; state.diffInputTruncated = true;
+  state.documents[0].active = false;
+  const saved = makeDocument("handoff-saved-two", "章节一.md", 2); saved.active = false;
+  const latest = makeDocument("handoff-newest-three", "章节一.md", 3);
+  state.documents.push(saved, latest);
+  await mockApi(page, state);
+  await page.setViewportSize({ width: 375, height: 1000 });
+  await page.goto(`/app/projects/${projectA}/runs/${runId}/revise?step=inspect&saved=${saved.id}&saved_version=2&previous=${chapterId}&previous_version=1`);
+  await expect(page.getByRole("region", { name: "核对新版本", exact: true })).toContainText("已读取所选版本原文");
+  await expect(page.getByRole("region", { name: "原目标与所选版本正文差异", exact: true })).toContainText("已比较范围内未见差异；未覆盖的正文不能确认。");
+  await expect(page.getByText("v2 已不是活动版本。", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "返回原报告的复检准备", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "保存并确认", exact: true })).toBeDisabled();
+  await expect(page.getByRole("status", { name: "修订稿上传状态", exact: true })).toHaveCount(0);
+  expect(state.requests.some(value => value.includes(`/documents/${latest.id}/preview`))).toBe(false);
+  expect(state.requests.some(value => value.includes(`/documents/${latest.id}/narrative-context`))).toBe(false);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expectNoAnalysis(state); expectNoUnexpected(state);
+});
+
+test("handoff 明确开始才携带当前签名，409重核且未知结果只重试同一操作", async ({ page }) => {
+  const state = fixture(); state.requiredAuth = true; state.signedImpact = true;
+  state.documents[0].active = false;
+  const saved = makeDocument("handoff-ready-two", "章节一.md", 2); state.documents.push(saved);
+  await mockApi(page, state);
+  await page.goto(`/app/projects/${projectA}/runs/${runId}/revise?step=run&saved=${saved.id}&saved_version=2&previous=${chapterId}&previous_version=1`);
+  const start = page.getByRole("button", { name: "开始复检", exact: true });
+  await expect(start).toBeEnabled(); expect(state.rechecks).toHaveLength(0);
+  await start.click();
+  await expect(page.getByRole("alert")).toContainText("资料在核对后发生了变化");
+  expect(state.rechecks).toHaveLength(1);
+  expect(state.rechecks[0].body).toEqual({ expected_input_signature: "a".repeat(64) });
+  await expect(start).toBeEnabled(); expect(state.rechecks).toHaveLength(1);
+  state.recheckMode = "unknown";
+  await start.click();
+  const retry = page.getByRole("button", { name: "安全重试同一复检", exact: true });
+  await expect(retry).toBeEnabled();
+  const original = state.rechecks[1]; expect(original.body).toEqual({ expected_input_signature: "b".repeat(64) });
+  expect(original.key).not.toBe(state.rechecks[0].key);
+  const getCount = state.requests.filter(value => value.endsWith("/material-impact")).length;
+  state.signature = "c".repeat(64); state.recheckMode = "reject";
+  await retry.click(); await expect(start).toBeEnabled();
+  expect(state.rechecks.slice(1).every(value => value.key === original.key && JSON.stringify(value.body) === JSON.stringify(original.body))).toBe(true);
+  expect(state.requests.filter(value => value.endsWith("/material-impact"))).toHaveLength(getCount);
+  expectNoUnexpected(state);
 });
 
 test("显式目标收据不符不能冒充保存成功，未知结果锁定文件和目标", async ({ page }) => {
@@ -293,7 +390,7 @@ test("显式目标收据不符不能冒充保存成功，未知结果锁定文�
   expect(state.uploads).toHaveLength(1);
   state.invalidMappingReceipt = false;
   await page.getByRole("button", { name: /安全重试同一/u }).click();
-  await expect(page.getByRole("heading", { name: "确认变化并启动复检", exact: true })).toBeVisible();
+  await inspectThenReturn(page);
   expect(state.uploads[1]).toEqual(state.uploads[0]);
   expect(state.receipts.size).toBe(1);
   expectNoAnalysis(state); expectNoUnexpected(state);
@@ -377,7 +474,7 @@ test("01 修订上传响应丢失后同键同内容手动核对，不生成重�
   await expect(revisionFile(page)).toBeDisabled();
   expect(state.uploads).toHaveLength(1);
   await page.getByRole("button", { name: /安全重试同一/u }).click();
-  await expect(page.getByRole("heading", { name: "确认变化并启动复检", exact: true })).toBeVisible();
+  await inspectThenReturn(page);
   expect(state.uploads).toHaveLength(2);
   expect(state.uploads[1]).toEqual(state.uploads[0]);
   expect(state.receipts.size).toBe(1);
@@ -393,7 +490,7 @@ test("02 明确拒收后作者修改内容，新的请求使用新操作键", as
   await expect(revisionFile(page)).toBeEnabled();
   await selectRevision(page, "核对后修改的修订内容。");
   await page.getByRole("button", { name: "保存新版本", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "确认变化并启动复检", exact: true })).toBeVisible();
+  await inspectThenReturn(page);
   expect(state.uploads).toHaveLength(2);
   expect(state.uploads[1].key).not.toBe(state.uploads[0].key);
   expect(state.uploads[1].payload).not.toBe(state.uploads[0].payload);
@@ -424,7 +521,7 @@ test("03 文稿确已保存而资料刷新失败时，只重新读取，不重�
   expect(state.uploads).toHaveLength(1);
   state.documentsUnavailable = false;
   await page.getByRole("button", { name: "重新读取项目资料", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "确认变化并启动复检", exact: true })).toBeVisible();
+  await inspectThenReturn(page);
   expect(state.uploads).toHaveLength(1);
   expect(state.receipts.size).toBe(1);
   expectNoAnalysis(state); expectNoUnexpected(state);
