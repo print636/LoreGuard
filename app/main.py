@@ -7049,6 +7049,7 @@ def export_markdown_report(
     run_id: str,
     context: AuthContext = Depends(get_auth_context),
 ) -> Response:
+    from .report_evidence_preview import export_issue_evidence_sources
     with SessionLocal() as db:
         run = _run_in_workspace(db, run_id, context.workspace_id)
         if run is None:
@@ -7066,6 +7067,10 @@ def export_markdown_report(
             ).all()
         ]
         issue_ids = [issue["id"] for issue in issues]
+        evidence_sources = export_issue_evidence_sources(
+            db, run, workspace_id=context.workspace_id, issues=issues,
+            safe_review_clue_payload=_safe_review_clue_payload,
+        )
         latest_feedback: dict[str, dict] = {}
         if issue_ids:
             feedback_rows = db.scalars(
@@ -7102,6 +7107,7 @@ def export_markdown_report(
             completed_at=run.completed_at,
             input_documents=run_input_metadata(db, run_id),
             issues=issues,
+            evidence_sources=evidence_sources,
             latest_feedback=latest_feedback,
             clarifications=clarifications,
             diagnostics=(

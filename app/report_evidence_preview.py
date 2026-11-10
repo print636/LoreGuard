@@ -41,9 +41,10 @@ NOT_FOUND_MESSAGE = "报告证据不存在"
 
 
 class EvidencePreviewUnavailable(Exception):
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: str, *, reason_code: str = "unavailable"):
         self.status_code = status_code
         self.detail = detail
+        self.reason_code = reason_code
         super().__init__(detail)
 
 
@@ -53,7 +54,8 @@ def _not_found() -> None:
 
 def _snapshot_unavailable(*, missing: bool = False) -> None:
     raise EvidencePreviewUnavailable(
-        409, "报告证据原文快照缺失" if missing else "报告证据原文快照无法核验"
+        409, "报告证据原文快照缺失" if missing else "报告证据原文快照无法核验",
+        reason_code="missing" if missing else "unverifiable",
     )
 
 
@@ -84,16 +86,23 @@ def _identity(span: dict[str, Any]) -> tuple[str, str, int, int, str]:
     ))
 
 
-def _verified_lines(source: AnalysisRunInputRow, reference: dict[str, Any]) -> list[str]:
+def _verified_lines(source: AnalysisRunInputRow, reference: dict[str, Any], *, cache: dict | None = None) -> list[str]:
     if (
         not isinstance(source.content, str)
-        or sha256(source.content.encode("utf-8")).hexdigest() != source.content_sha256
         or source.document_id != reference["document_id"]
         or source.document_name != reference["document_name"]
         or type(source.document_version) is not int or source.document_version < 1
     ):
         _snapshot_unavailable()
-    lines = source.content.splitlines()
+    cache_key = ("source_lines", source.id, source.document_id, source.document_name,
+                 source.document_version, source.content_sha256)
+    lines = cache.get(cache_key) if cache is not None else None
+    if lines is None:
+        if sha256(source.content.encode("utf-8")).hexdigest() != source.content_sha256:
+            _snapshot_unavailable()
+        lines = source.content.splitlines()
+        if cache is not None:
+            cache[cache_key] = lines
     start, end = reference["line_start"], reference["line_end"]
     if end > len(lines):
         _snapshot_unavailable()
@@ -107,6 +116,7 @@ def _confirmed_source(
     db, run: AnalysisRunRow, workspace_id: str, row: IssueRow,
     reference: dict[str, Any], evidence_index: int,
     verified_evidence: dict[str, frozenset] | None,
+    cache: dict | None = None,
 ) -> tuple[AnalysisRunInputRow | None, TraitEvidenceInput | None]:
     metadata = row.extra if isinstance(row.extra, dict) else {}
     candidate_id = metadata.get("confirmed_candidate_id")
@@ -131,9 +141,19 @@ def _confirmed_source(
             _snapshot_unavailable()
         return None, None
     if verified_evidence is None:
+        cache_key = ("confirmed_evidence", run.id)
         try:
-            verified_evidence = _character_review_snapshot_evidence_index(db, run.id)
+            if cache is not None and cache_key in cache:
+                verified_evidence = cache[cache_key]
+                if verified_evidence is None:
+                    _snapshot_unavailable()
+            else:
+                verified_evidence = _character_review_snapshot_evidence_index(db, run.id)
+                if cache is not None:
+                    cache[cache_key] = verified_evidence
         except (RuntimeError, TypeError, ValueError, AttributeError):
+            if cache is not None:
+                cache[cache_key] = None
             _snapshot_unavailable()
     if _identity(reference) not in verified_evidence.get(candidate_id, frozenset()):
         if baseline_selected:
@@ -367,6 +387,7 @@ def build_report_evidence_preview(
     db, run: AnalysisRunRow, *, workspace_id: str, kind: EvidencePreviewKind,
     item_id: str, evidence_index: int, offset: int | None, limit: int,
     safe_review_clue_payload: Callable[..., dict | None],
+    cache: dict | None = None,
 ) -> dict[str, Any]:
     """Resolve report-owned evidence against immutable bodies using SELECT only."""
     binding = None
@@ -395,10 +416,15 @@ def build_report_evidence_preview(
         source = note.baseline if evidence_index == 0 else note.draft
         binding = note.binding if evidence_index == 0 else None
     else:
-        row = db.scalar(select(IssueRow).where(
-            IssueRow.run_id == run.id, IssueRow.id == item_id,
-            IssueRow.report_class == ("formal" if kind == "issue" else "review_clue"),
-        ))
+        cache_key = ("issue", run.id, kind, item_id)
+        row = cache.get(cache_key) if cache is not None else None
+        if row is None:
+            row = db.scalar(select(IssueRow).where(
+                IssueRow.run_id == run.id, IssueRow.id == item_id,
+                IssueRow.report_class == ("formal" if kind == "issue" else "review_clue"),
+            ))
+            if cache is not None:
+                cache[cache_key] = row
         if row is None or not isinstance(row.evidence, list) or evidence_index >= len(row.evidence):
             _not_found()
         reference = _reference(row.evidence[evidence_index])
@@ -416,7 +442,7 @@ def build_report_evidence_preview(
             ) is None:
                 _not_found()
         source, binding = _confirmed_source(
-            db, run, workspace_id, row, reference, evidence_index, verified_evidence,
+            db, run, workspace_id, row, reference, evidence_index, verified_evidence, cache,
         )
         if binding is None:
             source = db.scalar(select(AnalysisRunInputRow).where(
@@ -447,7 +473,7 @@ def build_report_evidence_preview(
     if source is None:
         response["message"] = "完整原文快照已缺失，仅可查看已冻结的证据摘录。"
         return response
-    lines = _verified_lines(source, reference)
+    lines = _verified_lines(source, reference, cache=cache)
     offset = max(0, reference["line_start"] - 1 - 12) if offset is None else offset
     response["source"].update(char_count=len(source.content), line_count=len(lines))
     response["lines"] = [
@@ -462,3 +488,33 @@ def build_report_evidence_preview(
         "has_more": offset + len(response["lines"]) < len(lines),
     }
     return response
+
+
+def export_issue_evidence_sources(db, run: AnalysisRunRow, *, workspace_id: str,
+                                  issues: list[dict], safe_review_clue_payload: Callable[..., dict | None]) -> dict:
+    """Annotate formal export excerpts using the exact reader's source checks.
+
+    This is not a second resolver: old confirmed sources retain their original
+    binding, and missing/unreadable sources never fall back to live documents.
+    A failure leaves the report's saved excerpt intact. No private identifiers,
+    hashes, exception details or source bodies enter the annotation.
+    """
+    result, cache = {}, {}
+    for issue in issues:
+        annotations = []
+        for index, _ in enumerate(issue.get("evidence") or []):
+            try:
+                preview = build_report_evidence_preview(
+                    db, run, workspace_id=workspace_id, kind="issue", item_id=issue["id"],
+                    evidence_index=index, offset=0, limit=1,
+                    safe_review_clue_payload=safe_review_clue_payload,
+                    cache=cache,
+                )
+            except EvidencePreviewUnavailable as exc:
+                annotations.append({"document_version": None, "status": exc.reason_code})
+            else:
+                source = preview["source"]
+                annotations.append({"document_version": source["document_version"],
+                                    "status": "verified" if source["availability"] == "full_context" else "excerpt_only"})
+        result[issue["id"]] = annotations
+    return result

@@ -36,6 +36,13 @@ _TARGET_RESULTS = {
     "needs_review": "证据不足或待确认",
     "unprocessed": "未处理",
 }
+_SOURCE_STATUS = {
+    "verified": "已核对该版本原文",
+    "excerpt_only": "仅能核对已保存的引文，完整旧稿暂不可用",
+    "missing": "未核验：审查时保存的原文缺失",
+    "unverifiable": "未核验：审查时保存的原文或版本无法核对",
+    "unavailable": "未核验：来源不可用",
+}
 
 
 def _clean(value: Any) -> str:
@@ -52,14 +59,22 @@ def _quoted(value: Any) -> list[str]:
     return [f"> {_MARKDOWN_PUNCTUATION.sub(r'\\\1', line)}" if line else ">" for line in lines]
 
 
-def _evidence_lines(evidence: Sequence[Mapping[str, Any]]) -> list[str]:
+def _evidence_lines(evidence: Sequence[Mapping[str, Any]],
+                    source_checks: Sequence[Mapping[str, Any]] | None = None) -> list[str]:
     lines: list[str] = []
     for index, span in enumerate(evidence, start=1):
         start = span.get("line_start")
         end = span.get("line_end")
         location = str(start) if start == end else f"{start}–{end}"
+        source_note = ""
+        if source_checks is not None:
+            check = source_checks[index - 1] if index <= len(source_checks) else {}
+            version = check.get("document_version")
+            version_label = f"版本 {version}" if type(version) is int and version > 0 else "版本未核实"
+            status = _SOURCE_STATUS.get(check.get("status"), "未核验：尚未核对审查时保存的原文")
+            source_note = f"，{version_label}（{status}）"
         lines.extend([
-            f"- 证据 {index}：{_inline(span.get('document_name', '未知文档'))}，第 {location} 行",
+            f"- 证据 {index}：{_inline(span.get('document_name', '未知文档'))}，第 {location} 行{source_note}",
             *_quoted(span.get("text", "")),
         ])
     return lines
@@ -180,6 +195,7 @@ def render_markdown_report(
     latest_feedback: Mapping[str, Mapping[str, Any]],
     clarifications: Sequence[Mapping[str, Any]],
     diagnostics: Mapping[str, Any] | None,
+    evidence_sources: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> str:
     """Render a current feedback snapshot from immutable run results.
 
@@ -216,6 +232,8 @@ def render_markdown_report(
         _character_review_note(diagnostics),
         _target_assessment_note(diagnostics),
         "报告只列出本次运行发现且带原文证据的结果；0 条问题不代表故事绝对无误。",
+        "证据来源核验只核对出处与版本，不表示问题判断必然正确。未核验时仍保留报告原有引文。",
+        "行号对应 LoreGuard 解析后保存的原文，不是 Word 页码或排版行号；修订后请按证据所列版本核对。",
         "",
         "## 一致性问题",
         "",
@@ -238,7 +256,7 @@ def render_markdown_report(
             *_quoted(issue.get("explanation", "")),
             "",
             "**原文证据**",
-            *_evidence_lines(issue.get("evidence") or []),
+            *_evidence_lines(issue.get("evidence") or [], (evidence_sources or {}).get(str(issue.get("id")), [])),
         ])
         if feedback.get("comment"):
             lines.extend(["", "**审阅备注**", *_quoted(feedback["comment"])])
