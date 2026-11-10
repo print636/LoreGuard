@@ -1,0 +1,20 @@
+.sourceMaterialsExport { margin: 16px 0; min-width: 0; border-block: 1px solid var(--color-border); }
+.sourceMaterialsExport > summary { min-height: 44px; padding-block: 12px; color: var(--color-cyan); cursor: pointer; font-size: 14px; }
+.sourceMaterialsBody { padding: 0 0 16px; }
+.sourceMaterialsBody p { color: var(--color-text-secondary); font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.sourceMaterialsBody fieldset { min-width: 0; margin: 16px 0; padding: 12px 16px; border: 1px solid var(--color-border); border-radius: 8px; }
+.sourceMaterialsBody legend { padding-inline: 6px; font-size: 14px; }
+.sourceMaterialsBody ul { list-style: none; margin: 12px 0 0; padding: 0; max-height: 360px; overflow-y: auto; }
+.sourceMaterialsBody li + li { border-top: 1px solid var(--color-border); }
+.sourceMaterialsBody li label { display: flex; align-items: start; gap: 12px; min-height: 44px; padding: 10px 4px; cursor: pointer; }
+.sourceMaterialsBody li input[type="checkbox"] { flex: 0 0 auto; width: 18px; min-height: 18px; height: 18px; margin: 3px 0 0; accent-color: var(--color-cyan); }
+.sourceMaterialsBody li span { min-width: 0; }
+.sourceMaterialsBody li b { display: block; color: var(--color-text); font-size: 14px; overflow-wrap: anywhere; }
+.sourceMaterialsBody li small { display: block; margin-top: 4px; color: var(--color-text-muted); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.sourceMaterialsSelectionActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.sourceMaterialsBody button { min-height: 44px; }
+.sourceMaterialsBody .sourceMaterialsNotice[role="alert"] { color: var(--color-warning); }
+@media (max-width: 767px) {
+  .sourceMaterialsBody fieldset { padding-inline: 8px; }
+  .sourceMaterialsBody > button { width: 100%; }
+}
