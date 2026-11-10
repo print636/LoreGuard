@@ -2892,6 +2892,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       <button
                         className="revisionEntry reportExportButton"
                         type="button"
+                        aria-describedby="report-export-source-note"
                         disabled={exportPending}
                         onClick={exportMarkdownReport}
                       >
@@ -2960,6 +2961,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     )}
                   </div>
                 </div>
+                {runInfo?.status === "completed" && <p className="hint reportExportNote" id="report-export-source-note">
+                  导出沿用这次审查引用的原文，逐条标注冻结版本、行号和来源核对情况；来源缺失或无法核实会另作提示，不会换成当前新版。
+                  {runSnapshotDocuments(runInfo).length > 0 && "修改稿件后，可从“修订并复检”继续。"}
+                </p>}
                 <p className="formalIssueIntro">
                   查看角色问题时，请对照既有设定和新稿原文。即使只发生一次，证据完整且明确违背设定的行为也可以列为正式问题。仍有歧义的线索单列在待复核区。
                 </p>
