@@ -86,7 +86,7 @@ def _directory(project_name, sources):
              "- Word 来源是解析后的正文，不含原 Word 排版、批注和完整修订记录。",
              "- 这里核对的是出处与版本，不是新的事实确认或审查结论。", "", "## 资料清单", ""]
     for filename, source, metadata, _ in sources:
-        lines.extend([f"### {_inline(filename)}", "", f"- 原名称：{_inline(source.document_name)}",
+        lines.extend([f"### {_inline(filename)}", "", f"- 文稿名称：{_inline(source.document_name)}",
                       f"- 原版本：{source.document_version}", "- 原文核验：已核对审查时保存的该版本原文",
                       f"- 资料身份：{metadata['role']}", f"- 当次用途：{metadata['batch']}",
                       f"- 适用范围：{_inline(metadata['scope']) if metadata['scope'] is not None else '未保存'}",
@@ -107,9 +107,10 @@ def _directory(project_name, sources):
         lines.append("")
     lines.extend(["## 修改后如何返回", "",
         "- 本包是带出处的可读资料导出，不会修改旧报告、发布资料或自动更新已确认设定。",
-        "- 原 Markdown 文稿修改后，请恢复上列原名称，再在 LoreGuard 中明确替换该文稿；不要直接上传带安全编号的文件名并期待自动识别。",
-        "- 原 Word 文稿请在原 Word 文件中修改后，以原名称上传新版本。导出的 Markdown 不能自动转换回原 Word 文稿。",
-        "- TXT／JSON 来源也仅保留解析文本；返回时仍按原名称和格式提交。",
+        "- 上列文稿名称是 LoreGuard 保留的版本链名称，不一定是该次实际上传文件名或格式。",
+        "- 修改后可上传 Markdown、TXT、JSON 或标准 DOCX，并明确选择要替换的原文稿；改名或跨格式上传仍保留所选文稿名称和版本链。系统不会根据编号或相似名称猜测对应关系。",
+        "- 若未选择替换目标，仍按上传文件名执行原有同名版本规则；不要直接上传带安全编号的文件名并期待自动对应。",
+        "- 需要保留 Word 排版时，请在原 Word 文件中编辑后上传；导出的 Markdown 只有解析正文，不会自动转换回原 Word 排版。",
         "- 行号对应 LoreGuard 解析后保存的原文，不是 Word 页码或排版行号。报告引用请按所列版本核对。",
         "- 本包仅含所选本次审查资料；未勾选文稿及此前确认设定的其他来源不在包内，可在报告核对相关引用。",
         "- 本包不自动附带报告。完整报告请通过原有的报告下载入口另行获取。", ""])

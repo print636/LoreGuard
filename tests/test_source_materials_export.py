@@ -45,12 +45,13 @@ def test_selected_frozen_texts_keep_exact_utf8_and_context_without_implicit_old_
     assert files["001-draft.md"] == state.frozen.content.encode("utf-8")  # CRLF, blank line, Unicode.
     assert files["002-baseline.md"] == state.replacement.content.encode("utf-8")
     index = files["资料目录.md"].decode()
-    assert "原名称：draft\\.md" in index and "原版本：1" in index and "原版本：2" in index
+    assert "文稿名称：draft\\.md" in index and "原版本：1" in index and "原版本：2" in index
     assert "资料身份：故事正文" in index and "适用范围：main" in index
     assert "身份确认：作者已确认" in index and "发布状态：已发布" in index
     assert "分支：起点 → 分支甲" in index and "剧情版本：第一稿" in index
     assert "资料身份：未保存" in index and "结构化时间线／分支：历史记录未保存" in index
-    assert "恢复上列原名称" in index and "不能自动转换回原 Word" in index
+    assert "改名或跨格式上传仍保留所选文稿名称和版本链" in index
+    assert "不一定是该次实际上传文件名或格式" in index and "不会自动转换回原 Word 排版" in index
     assert "不是 Word 页码" in index
     assert state.original.content.encode() not in files.values()
     assert all(value not in index for value in (state.run.id,state.frozen.id,state.frozen.content_sha256,state.trait.id))

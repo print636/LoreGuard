@@ -117,7 +117,10 @@ from .report_material_review import MATERIAL_REVIEW_KEY, project_material_review
 from .docx_import import DocxImportError, extract_docx_text
 from .document_upload_receipts import (
     find_upload_receipt,
+    import_metadata,
+    replay_upload_fields,
     replay_upload_receipt,
+    upload_response_fields,
     upload_request_sha256,
 )
 from .domain import CertaintyLevel, ConsistencyIssue, DocumentRole, EvidenceSpan, GraphResponse, SemanticModality, SourceScope, TimelineResponse
@@ -2079,7 +2082,7 @@ def prepare_document_version(
     replace_document_id: str | None,
     document_role: DocumentRole | None = None,
     story_scope: str | None = None,
-) -> tuple[int, list[str], str, str]:
+) -> tuple[int, list[str], str, str, str, int | None]:
     # Serialize version allocation per project on PostgreSQL. The unique
     # logical-name/version and partial-active indexes remain authoritative and
     # also protect SQLite/tests where SELECT FOR UPDATE is advisory/no-op.
@@ -2088,12 +2091,7 @@ def prepare_document_version(
     )
     if locked_project is None:
         raise HTTPException(404, "项目不存在")
-    same_name = db.scalars(
-        select(DocumentRow).where(
-            DocumentRow.project_id == project_id,
-            func.lower(DocumentRow.name) == name.lower(),
-        )
-    ).all()
+    old = None
     if replace_document_id:
         old = db.scalar(
             select(DocumentRow).where(
@@ -2103,8 +2101,21 @@ def prepare_document_version(
         )
         if not old:
             raise HTTPException(404, "待替换文档不存在")
-        if old.name.lower() != name.lower():
-            raise HTTPException(409, "替换文档必须保持同名；如需新文件请直接上传")
+        if not old.active:
+            raise HTTPException(409, detail={
+                "code": "replacement_target_stale",
+                "message": "所选原文稿已不是当前活动版本，请刷新资料并重新核对替换目标。",
+            })
+        # The incoming filename selects the parser; only the selected document
+        # determines this logical version chain. Never match a second chain by
+        # the incoming filename when the author has explicitly chosen a target.
+        name = old.name
+    same_name = db.scalars(
+        select(DocumentRow).where(
+            DocumentRow.project_id == project_id,
+            func.lower(DocumentRow.name) == name.lower(),
+        )
+    ).all()
     resolved_role, resolved_scope = resolve_document_context(
         db,
         list(same_name),
@@ -2113,12 +2124,17 @@ def prepare_document_version(
         story_scope,
     )
     version = max((row.version for row in same_name), default=0) + 1
+    if old is not None and old.version + 1 != version:
+        raise HTTPException(409, detail={
+            "code": "replacement_target_stale",
+            "message": "所选原文稿的版本链已变化，请刷新资料并重新核对替换目标。",
+        })
     superseded = []
     for row in same_name:
         if row.active:
             row.active = False
             superseded.append(row.id)
-    return version, superseded, resolved_role, resolved_scope
+    return version, superseded, resolved_role, resolved_scope, name, old.version if old else None
 
 
 def add_initial_narrative_context(
@@ -3333,7 +3349,7 @@ def create_text_document(
         )
         if project is None:
             raise HTTPException(404, "项目不存在")
-        version, superseded, document_role, story_scope = prepare_document_version(
+        version, superseded, document_role, story_scope, logical_name, target_version = prepare_document_version(
             db,
             project_id,
             payload.name,
@@ -3346,7 +3362,7 @@ def create_text_document(
             narrative_context=payload.narrative_context,
             version=version,
         )
-        row = DocumentRow(project_id=project_id, name=payload.name, content=payload.content, version=version)
+        row = DocumentRow(project_id=project_id, name=logical_name, content=payload.content, version=version)
         try:
             db.add(row)
             db.flush()
@@ -3375,7 +3391,11 @@ def create_text_document(
                     "message": "同名文档版本正在被更新，请刷新后重试",
                 },
             ) from None
-        return {**serialize_document(row, db=db), "superseded_document_ids": superseded}
+        metadata = import_metadata(filename=payload.name, logical_name=logical_name,
+                                   replaces_document_id=payload.replace_document_id,
+                                   replaces_document_version=target_version)
+        return {**serialize_document(row, db=db), "superseded_document_ids": superseded,
+                **upload_response_fields(metadata, source="current_request")}
 
 
 @app.post("/api/v1/demo", status_code=201)
@@ -3524,8 +3544,10 @@ async def upload_document(
             return {
                 **serialize_document(original, db=db),
                 "superseded_document_ids": original_superseded, "deduplicated": True,
+                **replay_upload_fields(db, receipt, original, filename=file.filename,
+                                       replace_document_id=replace_document_id),
             }
-        version, superseded, resolved_role, resolved_scope = prepare_document_version(
+        version, superseded, resolved_role, resolved_scope, logical_name, target_version = prepare_document_version(
             db,
             project_id,
             file.filename,
@@ -3538,7 +3560,10 @@ async def upload_document(
             narrative_context=parsed_narrative_context,
             version=version,
         )
-        row = DocumentRow(project_id=project_id, name=file.filename, content=content, version=version)
+        metadata = import_metadata(filename=file.filename, logical_name=logical_name,
+                                   replaces_document_id=replace_document_id,
+                                   replaces_document_version=target_version)
+        row = DocumentRow(project_id=project_id, name=logical_name, content=content, version=version)
         try:
             db.add(row)
             db.flush()
@@ -3562,6 +3587,7 @@ async def upload_document(
                     project_id=project_id, idempotency_key=upload_key,
                     request_sha256=request_hash, document_id=row.id,
                     superseded_document_ids=list(superseded),
+                    import_metadata=metadata,
                 ))
             db.commit()
         except IntegrityError:
@@ -3575,6 +3601,8 @@ async def upload_document(
                 return {
                     **serialize_document(original, db=db),
                     "superseded_document_ids": original_superseded, "deduplicated": True,
+                    **replay_upload_fields(db, winner, original, filename=file.filename,
+                                           replace_document_id=replace_document_id),
                 }
             raise HTTPException(
                 409,
@@ -3583,7 +3611,8 @@ async def upload_document(
                     "message": "同名文档版本正在被更新，请刷新后重试",
                 },
             ) from None
-        result = {**serialize_document(row, db=db), "superseded_document_ids": superseded}
+        result = {**serialize_document(row, db=db), "superseded_document_ids": superseded,
+                  **upload_response_fields(metadata, source="stored_receipt" if upload_key else "current_request")}
         if upload_key is not None:
             result["deduplicated"] = False
         return result

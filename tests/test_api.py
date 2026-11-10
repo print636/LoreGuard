@@ -878,11 +878,15 @@ class ApiFlowTests(unittest.TestCase):
             self.assertEqual(1, len([row for row in history if row["active"]]))
             self.assertEqual(2, next(row for row in history if row["active"])["version"])
             self.assertTrue(all("content" not in row for row in history))
-            conflict = client.post(
+            mapped = client.post(
                 f"/api/v1/projects/{project['id']}/documents/text",
-                json={"name": "renamed.md", "content": "错误替换", "replace_document_id": second["id"]},
+                json={"name": "renamed.md", "content": "明确对应的新版本", "replace_document_id": second["id"]},
             )
-            self.assertEqual(409, conflict.status_code)
+            self.assertEqual(201, mapped.status_code)
+            self.assertEqual("chapter.md", mapped.json()["name"])
+            self.assertEqual("renamed.md", mapped.json()["uploaded_filename"])
+            self.assertEqual(second["id"], mapped.json()["replaces_document_id"])
+            self.assertEqual(3, mapped.json()["version"])
             projects = client.get("/api/v1/projects").json()
             summary = next(row for row in projects if row["id"] == project["id"])
             self.assertEqual(1, summary["active_document_count"])

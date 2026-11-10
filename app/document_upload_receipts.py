@@ -11,6 +11,51 @@ from .db import DocumentRow, DocumentUploadReceiptRow
 
 
 PARSER_VERSION = "multipart_document_parser_v1"
+IMPORT_METADATA_SCHEMA = "document-import-v1"
+
+
+def import_metadata(*, filename: str, logical_name: str, replaces_document_id: str | None,
+                    replaces_document_version: int | None) -> dict:
+    """Only server-owned, request-bound fields; never inferred from logical suffix."""
+    file_format = {"docx": "docx", "md": "markdown", "txt": "text", "json": "json"}[filename.rsplit(".", 1)[-1].lower()]
+    return {
+        "schema_version": IMPORT_METADATA_SCHEMA,
+        "uploaded_filename": filename, "uploaded_format": file_format,
+        "logical_name": logical_name,
+        "replaces_document_id": replaces_document_id,
+        "replaces_document_version": replaces_document_version,
+    }
+
+
+def upload_response_fields(metadata: dict, *, source: str) -> dict:
+    return {key: metadata[key] for key in (
+        "uploaded_filename", "uploaded_format", "replaces_document_id", "replaces_document_version",
+    )} | {"upload_metadata_source": source}
+
+
+def replay_upload_fields(db, receipt: DocumentUploadReceiptRow, row: DocumentRow,
+                         *, filename: str, replace_document_id: str | None) -> dict:
+    """Called only after replay_upload_receipt has verified the request digest.
+
+    Old null metadata stays null. The matching request may describe its upload,
+    but an old explicit target is certified only if the saved lineage proves it.
+    """
+    target = db.scalar(select(DocumentRow).where(
+        DocumentRow.project_id == receipt.project_id, DocumentRow.id == replace_document_id,
+    )) if replace_document_id else None
+    proven = (target is not None and target.id in receipt.superseded_document_ids
+              and target.name.lower() == row.name.lower() and target.version + 1 == row.version)
+    expected = import_metadata(filename=filename, logical_name=row.name,
+                               replaces_document_id=target.id if proven else None,
+                               replaces_document_version=target.version if proven else None)
+    if receipt.import_metadata is not None:
+        if receipt.import_metadata != expected or (replace_document_id is not None and not proven):
+            raise HTTPException(409, detail={
+                "reason_code": "document_upload_receipt_unavailable",
+                "message": "原上传的文件信息或替换关系无法安全核对。请刷新项目资料，不要直接重复创建版本。",
+            })
+        return upload_response_fields(expected, source="stored_receipt")
+    return upload_response_fields(expected, source="verified_request")
 
 
 def upload_request_sha256(*, filename: str, data: bytes, replace_document_id: str | None,

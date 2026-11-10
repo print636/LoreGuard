@@ -267,6 +267,7 @@ class DocumentUploadReceiptRow(Base):
     request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     document_id: Mapped[str] = mapped_column(String(36), nullable=False)
     superseded_document_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    import_metadata: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
