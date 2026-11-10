@@ -94,11 +94,12 @@ export function libraryPage(groups: DocumentGroup[], requestedPage: number) {
   return { page, pages, total: groups.length, start, items: groups.slice(start, start + LIBRARY_PAGE_SIZE) };
 }
 
+export const publicationStatusNames: Record<string, string> = {
+  unknown: "待确认", draft: "草稿", in_review: "审阅中", published: "已发布", retired: "已归档",
+};
+
 export function publicationLabel(document: LibraryDocument): string {
-  const names: Record<string, string> = {
-    unknown: "待确认", draft: "草稿", in_review: "审阅中", published: "已发布", retired: "已归档",
-  };
-  return names[document.narrative_context?.publication_status || "unknown"] || "待确认";
+  return publicationStatusNames[document.narrative_context?.publication_status || "unknown"] || "待确认";
 }
 
 export type PreviewRequest = {

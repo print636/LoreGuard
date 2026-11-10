@@ -1,0 +1,28 @@
+.materialImpact, .materialImpactCatalog { margin-block: 20px; padding: 18px 20px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); min-width: 0; overflow-wrap: anywhere; }
+.materialImpactCatalog { background: transparent; }
+.materialImpact h2, .materialImpactCatalog h2 { margin: 0; font-size: 19px; }
+.materialImpact h3 { font-size: 16px; margin-block: 20px 10px; }
+.materialImpact p, .materialImpactCatalog p { color: var(--color-text-secondary); line-height: 1.8; font-size: 14px; }
+.materialImpact .materialImpactHeadline { color: var(--color-text); font-weight: 600; }
+.materialImpactHeading, .materialImpactRun, .materialImpactPagination, .materialImpactActions { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.materialImpactHeading { justify-content: space-between; }
+.materialImpact button, .materialImpactCatalog button, .materialImpact a, .materialImpactCatalog a { min-height: 44px; }
+.materialImpact a, .materialImpactCatalog a { display: inline-flex; align-items: center; color: var(--color-cyan); }
+.materialImpact summary { cursor: pointer; padding-block: 12px; line-height: 1.7; }
+.materialImpact small, .materialImpactCatalog small, .materialImpactBoundary { color: var(--color-text-muted); font-size: 13px; }
+.materialImpactSources, .materialImpactReferences, .materialImpactCatalog > ul { margin: 0; padding: 0; list-style: none; }
+.materialImpactSources > li, .materialImpactReferences > li, .materialImpactCatalog > ul > li { padding-block: 14px; border-top: 1px solid var(--color-border); }
+.materialImpactVersions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 24px; margin-block: 12px; }
+.materialImpactVersions > div { display: grid; gap: 5px; min-width: 0; }
+.materialImpactVersions b { font-weight: 500; }
+.materialImpactVersions span, .materialImpactReferences > li > span { color: var(--color-text-secondary); font-size: 13px; }
+.materialImpactReferences > li { display: grid; gap: 4px; }
+.materialImpactActions { margin-top: 16px; border-top: 1px solid var(--color-border); padding-top: 12px; }
+.materialImpactActions > small { flex-basis: 100%; line-height: 1.7; }
+.materialImpactPagination { margin-top: 12px; font-size: 13px; }
+.materialImpact .materialImpactWarning { color: var(--color-warning); }
+@media (max-width: 767px) {
+  .materialImpact, .materialImpactCatalog { padding: 14px; }
+  .materialImpactVersions { grid-template-columns: minmax(0, 1fr); }
+  .materialImpactRun > span { flex-basis: 100%; }
+}

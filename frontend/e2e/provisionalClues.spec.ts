@@ -1,3 +1,4 @@
+import { fulfillLegacyMaterialImpact } from "./materialImpactFixture";
 import { expect, test, type Page } from "@playwright/test";
 import path from "node:path";
 
@@ -73,6 +74,7 @@ async function mockCompletedReport(page: Page, state: MockState) {
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
+    if (await fulfillLegacyMaterialImpact(route, (state.secondClueResponse ? [run, secondRun] : [run]).map(item => ({ projectId, runId: item.id })))) return;
     let body: unknown;
     if (path === "/api/v1/auth/me") body = {
       mode: "anonymous",

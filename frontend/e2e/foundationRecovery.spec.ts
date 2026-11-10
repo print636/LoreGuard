@@ -1,3 +1,4 @@
+import { fulfillLegacyMaterialImpact, fulfillLegacyRunCatalog } from "./materialImpactFixture";
 import path from "node:path";
 import { expect, test, type Dialog, type Page, type Route } from "@playwright/test";
 
@@ -97,6 +98,8 @@ async function mockApi(page: Page, state: Fixture) {
     const endpoint = decodeURIComponent(url.pathname);
     const method = request.method();
     state.requests.push(`${method} ${endpoint}`);
+    if (await fulfillLegacyMaterialImpact(route, [{ projectId: projectA, runId, changed: state.documents.some(item => item.active && item.name === "章节一.md" && item.version > 1) }])) return;
+    if (await fulfillLegacyRunCatalog(route, [{ projectId: projectA, runs: [baseline()] }, { projectId: projectB, runs: [] }])) return;
     let body: unknown;
     if (method === "GET" && endpoint === "/api/v1/auth/me") body = {
       mode: "anonymous", user: { id: "foundation-author", email: "", display_name: "作者" },

@@ -1954,12 +1954,12 @@ def run_narrative_context_fingerprint(db, run_id: str) -> str:
     )
 
 
-def frozen_run_source_signature(db, run_id: str) -> str:
+def frozen_run_source_state(db, run_id: str) -> dict:
     documents = run_input_metadata(db, run_id)
     # New private provenance is not a change to the author's source. Keep the
     # complete snapshot digest everywhere else, including storage references.
     traits = run_trait_snapshot_metadata(db, run_id, source_comparison=True)
-    return payload_sha256(
+    return (
         {
             "documents": [
                 {
@@ -1982,13 +1982,17 @@ def frozen_run_source_signature(db, run_id: str) -> str:
     )
 
 
-def current_project_source_signature(
+def frozen_run_source_signature(db, run_id: str) -> str:
+    return payload_sha256(frozen_run_source_state(db, run_id))
+
+
+def current_project_source_state(
     db,
     project_id: str,
     documents: list[DocumentRow],
     *,
     batch_roles: dict[str, str] | None = None,
-) -> str:
+) -> dict:
     resolved_batch_roles = batch_roles or {}
     contexts = {
         row.document_id: row
@@ -2062,12 +2066,16 @@ def current_project_source_signature(
             for ordinal, candidate in enumerate(candidates)
         ]
     )
-    return payload_sha256(
+    return (
         {
             "documents": document_rows,
             "character_profile_snapshot_sha256": trait_fingerprint,
         }
     )
+
+
+def current_project_source_signature(db, project_id: str, documents: list[DocumentRow], *, batch_roles: dict[str, str] | None = None) -> str:
+    return payload_sha256(current_project_source_state(db, project_id, documents, batch_roles=batch_roles))
 
 
 def emit(db, run_id: str, stage: str, progress: int, message: str) -> bool:

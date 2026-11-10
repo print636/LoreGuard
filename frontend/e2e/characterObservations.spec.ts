@@ -1,3 +1,4 @@
+import { fulfillLegacyMaterialImpact } from "./materialImpactFixture";
 import { expect, test, type Page } from "@playwright/test";
 
 const projectId = "observations-project", runId = "observations-old", nextRunId = "observations-next";
@@ -32,6 +33,7 @@ async function mockApi(page: Page, state: State) {
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url()), path = url.pathname, method = route.request().method();
     if (method !== "GET") state.writes.push(`${method} ${path}`);
+    if (await fulfillLegacyMaterialImpact(route, [runId, nextRunId].map(runId => ({ projectId, runId })))) return;
     let body: unknown;
     if (path === "/api/v1/auth/me") body = { mode: state.anonymous ? "anonymous" : "required", user: { id: "observations-author", email: "author@example.test", display_name: "作者" }, workspace: { id: "observations-workspace", name: "创作工作区", kind: "personal", role: "owner" } };
     else if (path === "/api/v1/auth/logout") { await route.fulfill({ status: 204 }); return; }

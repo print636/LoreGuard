@@ -6327,6 +6327,125 @@ def retry_run(
     return payload
 
 
+def _recheck_material_selection(db, baseline, character_choice: dict):
+    """Use the same logical targets and current authority for preview and POST."""
+    baseline_run_id = baseline.id
+    try:
+        _load_verified_snapshot(db, baseline_run_id)
+    except RuntimeError:
+        raise HTTPException(409, detail={"code": "snapshot_unavailable", "message": "冻结输入缺失或不完整，无法准备复检"}) from None
+    baseline_inputs = list(
+        db.scalars(
+            select(AnalysisRunInputRow)
+            .where(AnalysisRunInputRow.run_id == baseline_run_id)
+            .order_by(AnalysisRunInputRow.ordinal)
+        ).all()
+    )
+    if not baseline_inputs:
+        raise HTTPException(409, MISSING_SNAPSHOT_ERROR)
+    expected = (baseline.batch_coverage or {}).get("selected_document_ids")
+    if ([row.ordinal for row in baseline_inputs] != list(range(len(baseline_inputs)))
+            or isinstance(expected, list) and set(expected) != {row.document_id for row in baseline_inputs}):
+        raise HTTPException(409, detail={"code": "snapshot_unavailable", "message": "冻结输入不完整，无法准备复检"})
+    batch_mode = baseline.batch_mode or "full_review"
+    sensitivity = baseline.sensitivity or "balanced"
+    target_document_ids: list[str] | None = None
+    if batch_mode == "draft_review":
+        baseline_metadata = run_input_metadata(db, baseline_run_id)
+        logical_target_names = {
+            str(item["document_name"]).casefold()
+            for item in baseline_metadata
+            if item.get("batch_role") == "target"
+        }
+        if not logical_target_names:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "missing_draft_review_targets",
+                    "message": "基准运行缺少可复检的冻结目标",
+                },
+            )
+        current_targets = list(
+            db.scalars(
+                select(DocumentRow)
+                .where(
+                    DocumentRow.project_id == baseline.project_id,
+                    DocumentRow.active.is_(True),
+                    func.lower(DocumentRow.name).in_(logical_target_names),
+                )
+                .order_by(DocumentRow.created_at, DocumentRow.id)
+            ).all()
+        )
+        if {row.name.casefold() for row in current_targets} != logical_target_names:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "logical_target_missing",
+                    "message": "草稿目标的当前活动版本缺失，无法复检",
+                },
+            )
+        target_document_ids = [row.id for row in current_targets]
+    recheck_request = AnalysisRunIn(
+        **character_choice,
+        mode=batch_mode,
+        sensitivity=sensitivity,
+        target_document_ids=target_document_ids,
+        no_formal_context_expected=bool(
+            (baseline.batch_coverage or {}).get(
+                "no_formal_context_expected", False
+            )
+        ),
+    )
+    documents, batch_roles, coverage = _review_batch_selection(
+        db,
+        project_id=baseline.project_id,
+        payload=recheck_request,
+    )
+    return baseline_inputs, documents, batch_roles, coverage
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/material-impact")
+def get_material_impact(
+    run_id: str,
+    response: Response,
+    offset: int = Query(0, ge=0), limit: int = Query(30, ge=1, le=100),
+    issue_offset: int = Query(0, ge=0), issue_limit: int = Query(30, ge=1, le=100),
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    from .material_change_impact import material_impact
+    from .service import frozen_run_source_state, current_project_source_state
+
+    response.headers["Cache-Control"] = "no-store"
+    with SessionLocal() as db:
+        run = _run_in_workspace(db, run_id, context.workspace_id)
+        if run is None:
+            raise HTTPException(404, "分析任务不存在")
+        selected, roles, changed, traits_changed = None, {}, None, None
+        reason, comparison = None, "complete"
+        try:
+            _, selected, roles, _ = _recheck_material_selection(db, run, {})
+            before = frozen_run_source_state(db, run.id)
+            after = current_project_source_state(db, run.project_id, selected, batch_roles=roles)
+            changed = payload_sha256(before) != payload_sha256(after)
+            traits_changed = before["character_profile_snapshot_sha256"] != after["character_profile_snapshot_sha256"]
+            if not changed:
+                reason = "no_document_changes"
+        except HTTPException as exc:
+            reason = exc.detail.get("code", "current_sources_unavailable") if isinstance(exc.detail, dict) else "no_documents"
+            if reason == "snapshot_unavailable": comparison = "unavailable"
+        except CharacterTraitSnapshotLimitExceeded:
+            reason = "character_profile_snapshot_limit_exceeded"
+        except ValueError:
+            reason = "current_sources_unavailable"
+            comparison = "unavailable"
+        if run.status != "completed":
+            reason = "run_not_completed"
+        return material_impact(db, run, selected=selected, batch_roles=roles,
+            recheck=dict(inputs_changed=changed, can_prepare=reason is None, reason=reason),
+            comparison_status=comparison, traits_changed=traits_changed,
+            offset=offset, limit=limit, issue_offset=issue_offset, issue_limit=issue_limit)
+
+
 @app.post("/api/v1/analysis-runs/{baseline_run_id}/rechecks", status_code=202)
 def start_recheck(
     baseline_run_id: str,
@@ -6391,69 +6510,9 @@ def start_recheck(
         )
         if locked_project is None:
             raise HTTPException(404, "项目不存在")
-        baseline_inputs = list(
-            db.scalars(
-                select(AnalysisRunInputRow)
-                .where(AnalysisRunInputRow.run_id == baseline_run_id)
-                .order_by(AnalysisRunInputRow.ordinal)
-            ).all()
-        )
-        if not baseline_inputs:
-            raise HTTPException(409, MISSING_SNAPSHOT_ERROR)
+        baseline_inputs, documents, batch_roles, coverage = _recheck_material_selection(db, baseline, character_choice)
         batch_mode = baseline.batch_mode or "full_review"
         sensitivity = baseline.sensitivity or "balanced"
-        target_document_ids: list[str] | None = None
-        if batch_mode == "draft_review":
-            baseline_metadata = run_input_metadata(db, baseline_run_id)
-            logical_target_names = {
-                str(item["document_name"]).casefold()
-                for item in baseline_metadata
-                if item.get("batch_role") == "target"
-            }
-            if not logical_target_names:
-                raise HTTPException(
-                    409,
-                    detail={
-                        "code": "missing_draft_review_targets",
-                        "message": "基准运行缺少可复检的冻结目标",
-                    },
-                )
-            current_targets = list(
-                db.scalars(
-                    select(DocumentRow)
-                    .where(
-                        DocumentRow.project_id == baseline.project_id,
-                        DocumentRow.active.is_(True),
-                        func.lower(DocumentRow.name).in_(logical_target_names),
-                    )
-                    .order_by(DocumentRow.created_at, DocumentRow.id)
-                ).all()
-            )
-            if {row.name.casefold() for row in current_targets} != logical_target_names:
-                raise HTTPException(
-                    409,
-                    detail={
-                        "code": "logical_target_missing",
-                        "message": "草稿目标的当前活动版本缺失，无法复检",
-                    },
-                )
-            target_document_ids = [row.id for row in current_targets]
-        recheck_request = AnalysisRunIn(
-            **character_choice,
-            mode=batch_mode,
-            sensitivity=sensitivity,
-            target_document_ids=target_document_ids,
-            no_formal_context_expected=bool(
-                (baseline.batch_coverage or {}).get(
-                    "no_formal_context_expected", False
-                )
-            ),
-        )
-        documents, batch_roles, coverage = _review_batch_selection(
-            db,
-            project_id=baseline.project_id,
-            payload=recheck_request,
-        )
         coverage["recheck_baseline_run_id"] = baseline_run_id
         coverage["narrative_time_knowledge_policy"] = NARRATIVE_TIME_KNOWLEDGE_POLICY_V1
         coverage["semantic_state_policy"] = SEMANTIC_STATE_POLICY_V1

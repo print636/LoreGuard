@@ -127,6 +127,7 @@ import StoryNavigation from "./features/workbench/StoryNavigation";
 import ReportContents from "./features/workbench/ReportContents";
 import EvidenceWorkspace from "./features/workbench/EvidenceWorkspace";
 import OperationMessage from "./features/workbench/OperationMessage";
+import { MaterialImpactCatalog, MaterialImpactPanel } from "./features/material-impact/MaterialImpact";
 import { revealWorkbenchTarget } from "./features/workbench/revealTarget";
 import { isSituationalPattern, issueSeverityLabel, reviewStatusLabel, reviewTimeLabel } from "./productLanguage";
 
@@ -2043,6 +2044,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       />
                     </Suspense>
                   )}
+              {activeView === "projects" && !projectLoading && project && <MaterialImpactCatalog key={project} projectId={project} refreshKey={docs} />}
               {activeView === "projects" && (
                 <details className="projectSetup storyMaterialTools" ref={materialToolsRef} open={!project || docs.length === 0 || importQueue.entries.length > 0}>
                   <summary>导入与资料身份 <span>添加文稿、核对用途和发布状态</span></summary>
@@ -2823,6 +2825,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                 <span><small>模型用量</small><b>{selectedRunUsage.tokens}</b><small>{selectedRunUsage.cost}</small></span>
                 <button type="button" onClick={() => navigateWorkspace("audit")}>查看任务与记录</button>
               </div>
+              {!projectLoading && runInfo?.project_id === project && runInfo.id === run && <MaterialImpactPanel key={`${project}:${run}`} projectId={project} runId={run} refreshKey={docs} />}
               {runInfo && (runInfo.status === "completed" || runInfo.review_batch?.mode === "draft_review") && (
                 <section
                   className={`reviewCoverage ${runInfo.review_batch?.no_formal_context_expected ? "limited" : modelStatus.coverage}`}

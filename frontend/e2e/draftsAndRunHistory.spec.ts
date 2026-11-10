@@ -1,3 +1,4 @@
+import { fulfillLegacyMaterialImpact } from "./materialImpactFixture";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -64,6 +65,7 @@ async function mockApi(page: Page, state: Fixture) {
       await route.fulfill({ status: state.logout401 ? 401 : 200, json: state.logout401 ? { detail: "expired" } : {} }); return;
     }
     if (!state.authenticated) { await route.fulfill({ status: 401, json: { detail: "fixture session expired" } }); return; }
+    if (await fulfillLegacyMaterialImpact(route, history.map(item => ({ projectId, runId: item.id })))) return;
     let body: unknown;
     if (endpoint === "/api/v1/auth/me") body = identity(state);
     else if (endpoint === "/api/v1/account/model-provider") body = { configured: false, revision: 0 };

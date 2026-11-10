@@ -1,3 +1,4 @@
+import { fulfillLegacyMaterialImpact, fulfillLegacyRunCatalog } from "./materialImpactFixture";
 import { expect, test, type Page } from "@playwright/test";
 
 const projectId = "draft-only-project";
@@ -57,6 +58,8 @@ async function mockApi(page: Page, state: MockState) {
     const url = new URL(route.request().url());
     const path = url.pathname;
     const method = route.request().method();
+    if (await fulfillLegacyMaterialImpact(route, state.completedRun ? [{ projectId, runId: completedRunId }] : [])) return;
+    if (await fulfillLegacyRunCatalog(route, [{ projectId, runs: state.completedRun ? [state.completedRun] : [] }])) return;
     let body: unknown;
     if (path === "/api/v1/auth/me") body = {
       mode: "anonymous",

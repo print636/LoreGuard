@@ -18,7 +18,6 @@ import {
   mergeRevisionRouteState,
   pendingVisualizationKinds,
   recheckPath,
-  revisionDelta,
   revisionDocumentForIssue,
   revisionRouteStateFromSearch,
   revisionSearch,
@@ -34,6 +33,9 @@ import { supportedUploadAccept, supportedUploadLabel } from "../uploadFormats";
 import { importFailure, ImportResultUnknown, verifiedImportReceipt } from "../features/imports/importQueueModel";
 import { frozenRevisionUpload, revisionUploadBelongsTo, revisionUploadMatchesInput, revisionUploadMaySend, type RevisionUploadOperation } from "../revisionUploadRecovery";
 import { workspacePath } from "../routing";
+import { MaterialImpactView } from "../features/material-impact/MaterialImpact";
+import { useMaterialImpact } from "../features/material-impact/useMaterialImpact";
+import { canPrepareRecheck } from "../features/material-impact/materialImpactModel";
 
 type Evidence = {
   document_id: string;
@@ -278,10 +280,8 @@ export default function RevisionReview({
   const sourceBatch = baselineRun?.review_batch;
   const hasCharacterBaseline = baselineReady && sourceBatch?.mode === "draft_review" &&
     sourceBatch.character_review_enabled === true && Boolean(sourceBatch.character_baseline_run_id);
-  const delta = useMemo(
-    () => revisionDelta(baselineDocuments, documents),
-    [baselineDocuments, documents],
-  );
+  const impact = useMaterialImpact(projectId, baselineRun?.id || null, documents, route.step === "run");
+  const inputsReady = canPrepareRecheck(impact.value);
   const selectedIssue = baselineIssues.find((issue) => issue.id === route.issueId) || null;
   const activeDocuments = documents.filter((document) => document.active);
   const [file, setFile] = useState<File | null>(null);
@@ -689,7 +689,7 @@ export default function RevisionReview({
 
   async function startRecheck(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!baselineRun || !baselineReady || !delta.changed || !recheckGuard.current.tryBegin()) return;
+    if (!baselineRun || !baselineReady || !inputsReady || !recheckGuard.current.tryBegin()) return;
     const deepReview = hasCharacterBaseline && characterReview === "available" &&
       new FormData(event.currentTarget).has("character_review_enabled");
     try {
@@ -963,14 +963,8 @@ export default function RevisionReview({
 
       {route.step === "run" && (
         <div className="revisionStage">
-          <div className="revisionStageHead"><div><h2>确认变化并启动复检</h2><p>复检冻结此刻的 active 文档，并与上方基线运行逐项比较。</p></div></div>
-          <div className={`revisionDelta ${delta.changed ? "changed" : "unchanged"}`}>
-            <strong>{delta.changed ? "已检测到可复检的输入变化" : "尚未检测到输入变化"}</strong>
-            <span>更新 {delta.updated.length} · 新增 {delta.added.length} · 移除 {delta.removed.length}</span>
-            {delta.updated.map(({ before, after }) => <p key={after.id}>{before.document_name}：v{before.document_version} → v{after.version}</p>)}
-            {delta.added.map((document) => <p key={document.id}>新增：{document.name} · v{document.version}</p>)}
-            {delta.removed.map((document) => <p key={document.document_id}>移除：{document.document_name} · v{document.document_version}</p>)}
-          </div>
+          <div className="revisionStageHead"><div><h2>确认变化并启动复检</h2><p>复检会冻结当前符合范围的资料，并与上方原报告逐项比较。</p></div></div>
+          <MaterialImpactView model={impact} showPrepare={false} expanded />
           <fieldset className="revisionVisualOptions">
             <legend>复检完成后的按需视图</legend>
             <label><input type="checkbox" checked={route.generateGraph} onChange={(event) => updateRoute({ generateGraph: event.target.checked }, true)} />生成关系图</label>
@@ -1008,7 +1002,7 @@ export default function RevisionReview({
                   <label>
                     <input type="checkbox" name="character_review_enabled"
                       key={JSON.stringify([sourceBatch?.character_baseline_run_id, characterReview, activeDocuments.map(doc => doc.id)])}
-                      disabled={starting || !delta.changed || characterReview !== "available"}
+                      disabled={starting || !inputsReady || characterReview !== "available"}
                       aria-describedby="recheck-character-cost" autoComplete="off" />
                     角色深度审查
                   </label>
@@ -1021,9 +1015,9 @@ export default function RevisionReview({
                 <p>
                   {baselineReady && characterReview && sourceBatch?.mode === "draft_review" && !hasCharacterBaseline &&
                     "原审查没有可复用的角色基线，本次按普通复检运行。"}
-                  {!baselineReady ? "基线运行缺少可复现输入，不能复检。" : !delta.changed ? "先上传新版本，再启动复检。" : "复检可能调用模型并消耗 Token。"}
+                  {!baselineReady ? "基线运行缺少可复现输入，不能复检。" : !inputsReady ? "请先完成上方资料变化核对，再决定是否复检。" : "复检可能调用模型并消耗 Token，模型可用性与任务额度将在提交时核对。"}
                 </p>
-                <button className="revisionPrimaryAction" type="submit" disabled={!baselineReady || !delta.changed || starting}>
+                <button className="revisionPrimaryAction" type="submit" disabled={!baselineReady || !inputsReady || starting}>
                   {starting ? "提交复检中…" : "开始复检"}
                 </button>
               </div>

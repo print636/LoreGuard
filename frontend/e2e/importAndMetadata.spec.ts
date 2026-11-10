@@ -1,3 +1,4 @@
+import { fulfillLegacyMaterialImpact, fulfillLegacyRunCatalog } from "./materialImpactFixture";
 import path from "node:path";
 import { expect, test, type Locator, type Page, type Request } from "@playwright/test";
 
@@ -123,6 +124,8 @@ async function mockApi(page: Page, state: State) {
     const endpoint = url.pathname;
     const method = request.method();
     state.requests.push(`${method} ${endpoint}${url.search}`);
+    if (await fulfillLegacyMaterialImpact(route, [{ projectId, runId }])) return;
+    if (await fulfillLegacyRunCatalog(route, state.projects.filter(item => item.id !== projectId).map(item => ({ projectId: item.id, runs: [] })))) return;
     let body: unknown;
 
     if (method === "GET" && endpoint === "/api/v1/auth/me") body = {

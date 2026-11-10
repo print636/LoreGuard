@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { fulfillLegacyRunCatalog } from "./materialImpactFixture";
 
 const PROJECT_COUNT = 2191;
 const projectId = (index: number) =>
@@ -32,6 +33,9 @@ async function mockCatalog(page: Page) {
   });
   await page.route("**/api/v1/projects/*/documents?*", (route) => route.fulfill({ json: [] }));
   await page.route("**/api/v1/projects/*/analysis-runs", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/v1/projects/*/run-catalog?*", async route => {
+    expect(await fulfillLegacyRunCatalog(route, projects.map(item => ({ projectId: item.id, runs: [] })))).toBe(true);
+  });
   await page.route("**/api/v1/project-catalog?*", async (route) => {
     const url = new URL(route.request().url());
     requests.push(url);

@@ -1,3 +1,4 @@
+import { fulfillLegacyRunCatalog } from "./materialImpactFixture";
 import path from "node:path";
 import { expect, test, type Dialog, type Page, type Route } from "@playwright/test";
 
@@ -73,6 +74,7 @@ async function mockApi(page: Page, state: Fixture) {
     const endpoint = url.pathname;
     const method = request.method();
     state.requests.push(`${method} ${endpoint}`);
+    if (await fulfillLegacyRunCatalog(route, [{ projectId, runs: [] }])) return;
     let body: unknown;
     if (method === "GET" && endpoint === "/api/v1/auth/me") body = {
       mode: "anonymous", user: { id: "context-author", email: "", display_name: "作者" },

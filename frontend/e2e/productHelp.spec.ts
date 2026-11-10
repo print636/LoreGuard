@@ -1,3 +1,4 @@
+import { fulfillLegacyMaterialImpact, fulfillLegacyRunCatalog } from "./materialImpactFixture";
 import path from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
@@ -78,6 +79,8 @@ async function mockApi(page: Page, state: MockState) {
       await route.fulfill({ status: 503, json: { detail: "Read-only help fixture rejects writes" } });
       return;
     }
+    if (await fulfillLegacyMaterialImpact(route, [{ projectId, runId }])) return;
+    if (await fulfillLegacyRunCatalog(route, [{ projectId, runs: [run] }])) return;
     let body: unknown;
     if (endpoint === "/api/v1/auth/me") body = {
       mode: "anonymous", user: { id: "help-author", email: "", display_name: "首次作者" },

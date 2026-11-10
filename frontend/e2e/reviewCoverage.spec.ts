@@ -1,3 +1,4 @@
+import { fulfillLegacyMaterialImpact } from "./materialImpactFixture";
 import { expect, test, type Page } from "@playwright/test";
 
 const projectId = "coverage-project";
@@ -24,6 +25,7 @@ async function mockCompletedRun(page: Page, state: { character: CharacterDiagnos
     const url = new URL(route.request().url());
     const path = url.pathname;
     const method = route.request().method();
+    if (await fulfillLegacyMaterialImpact(route, [{ projectId, runId }])) return;
     let response: unknown;
     if (path === "/api/v1/auth/me") response = {
       mode: "anonymous",

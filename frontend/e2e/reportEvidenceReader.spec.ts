@@ -1,3 +1,4 @@
+import { fulfillLegacyMaterialImpact } from "./materialImpactFixture";
 import { expect, test, type Page } from "@playwright/test";
 
 const projectId = "evidence-reader-project";
@@ -161,6 +162,7 @@ async function mockApi(page: Page, state: MockState) {
     const method = route.request().method();
     state.requests.push(`${method} ${path}`);
     if (method !== "GET") state.writes.push(`${method} ${path}`);
+    if (await fulfillLegacyMaterialImpact(route, [{ projectId, runId }, { projectId, runId: nextRunId }, { projectId: otherProjectId, runId: otherRunId }])) return;
     let body: unknown;
     if (path === "/api/v1/auth/me") body = {
       mode: "anonymous", user: { id: "evidence-author", email: "", display_name: "作者" },
