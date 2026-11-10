@@ -157,13 +157,6 @@ export function validateRevisionUploadSelection(
         field: "document",
       };
     }
-    if (normalizedName !== replacement.name.toLocaleLowerCase()) {
-      return {
-        ok: false,
-        message: `文件名必须与替换目标“${replacement.name}”一致。改名会成为新文档，不能自动归入原版本链。`,
-        field: "file",
-      };
-    }
     return { ok: true, replacement };
   }
 

@@ -2170,7 +2170,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                       accept={supportedUploadAccept}
                       aria-label={`选择${supportedUploadLabel}文件`}
                       disabled={importQueue.busy || !project}
-                      onChange={(event) => { importQueue.add(event.target.files || [], { documentRole: uploadRole, storyScope: uploadScope, replaceDocumentId: replaceId }); event.target.value = ""; }}
+                      onChange={(event) => { importQueue.add(event.target.files || [], { documentRole: uploadRole, storyScope: uploadScope, replaceDocumentId: replaceId, replacement: docs.find(row => row.id === replaceId && row.active) || null }); event.target.value = ""; }}
                     />
                     <select
                       aria-label="文档版本处理方式"

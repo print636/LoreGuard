@@ -62,7 +62,10 @@ export function useImportQueue(scope: string) {
       for (const entry of batch) {
         if (!alive.current) { stopped = true; break; }
         let fields: Record<string, string>;
-        try { fields = importContextFields(entry); }
+        try {
+          if (entry.replaceDocumentId && entry.replacement?.id !== entry.replaceDocumentId) throw new TypeError("原文稿目标未能核对，请重新选择后上传。");
+          fields = importContextFields(entry);
+        }
         catch (error) {
           change(targetScope, (state) => ({ ...state, entries: state.entries.map((row) => row.id === entry.id ? { ...row, status: "failed", message: error instanceof Error ? error.message : "请检查故事作用域。" } : row) }));
           continue;
@@ -77,7 +80,7 @@ export function useImportQueue(scope: string) {
           const response = await apiJson(`/api/v1/projects/${projectId}/documents`, {
             method: "POST", headers: { "Idempotency-Key": entry.operationKey }, body: form, signal: controller.signal,
           });
-          const receipt = verifiedImportReceipt(response, projectId, entry.file.name);
+          const receipt = verifiedImportReceipt(response, projectId, entry.file.name, entry.replacement);
           if (!receipt) throw new ImportResultUnknown();
           uploaded += 1;
           change(targetScope, (state) => ({ ...state, entries: state.entries.map((row) => row.id === entry.id ? { ...row, status: "succeeded", message: receipt.deduplicated ? "已核对原导入记录，没有新增文档版本。" : "导入完成；资料身份和发布状态仍需核对。", receipt } : row) }));

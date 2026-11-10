@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { ApiError } from "../src/api/client.ts";
 import {
   appendImportEntries, emptyImportDefaults, importBatchEntries, importContextFields,
-  importCounts, importFailure, updateImportEntry, verifiedImportReceipt,
+  frozenImportReplacement, importCounts, importFailure, updateImportEntry, verifiedImportReceipt,
 } from "../src/features/imports/importQueueModel.ts";
 
 const files = [
@@ -78,4 +78,57 @@ test("explicit rejected input remains editable while permission/session boundari
 test("invalid story scope fails local validation before a document request is prepared", () => {
   assert.throws(() => importContextFields({ ...emptyImportDefaults, storyScope: "route / secret" }), /作用域/);
   assert.deepEqual(importContextFields({ ...emptyImportDefaults, storyScope: " global " }), { story_scope: "global" });
+});
+
+test("explicit renamed upload captures an immutable target separately from the unchanged File", () => {
+  const target = { id: "old-doc", name: "原章.docx", version: 3 };
+  const file = { name: "001-修订.md", size: 32, lastModified: 42 };
+  const entry = appendImportEntries([], [file], { ...emptyImportDefaults, replaceDocumentId: target.id, replacement: target }, () => "fixed").entries[0];
+  target.name = "late title"; target.version = 8;
+  assert.equal(entry.file, file);
+  assert.deepEqual(entry.replacement, { id: "old-doc", name: "原章.docx", version: 3 });
+  assert.equal(Object.isFrozen(entry.replacement), true);
+  assert.deepEqual(importContextFields(entry), { replace_document_id: "old-doc" });
+  assert.equal(frozenImportReplacement("other", entry.replacement), null);
+});
+
+test("changing an editable target is a new operation; unknown targets stay fixed including identity", () => {
+  const first = { id: "old", name: "原稿.docx", version: 1 };
+  const second = { id: "other", name: "另一稿.md", version: 7 };
+  const initial = appendImportEntries([], [files[0]], { ...emptyImportDefaults, replaceDocumentId: first.id, replacement: first }, () => "first-key").entries[0];
+  const changed = updateImportEntry(initial, { replaceDocumentId: second.id, replacement: second }, () => "new-key");
+  assert.equal(changed.operationKey, "new-key"); assert.deepEqual(changed.replacement, second);
+  assert.equal(updateImportEntry({ ...initial, status: "unknown" }, { replaceDocumentId: second.id, replacement: second }, () => "forbidden").replacement, initial.replacement);
+  assert.equal(updateImportEntry(initial, { replaceDocumentId: "" }, () => "clear").replacement, null);
+  assert.equal(updateImportEntry(initial, { replaceDocumentId: "other" }, () => "unverified").replacement, null);
+});
+
+test("explicit mapping receipt binds uploaded format, original logical target and its successor", () => {
+  const target = { id: "old-doc", name: "原章.docx", version: 3 };
+  const receipt = { id: "new-doc", project_id: "p", name: "原章.docx", version: 4, deduplicated: true,
+    uploaded_filename: "001-修订.md", uploaded_format: "markdown", replaces_document_id: "old-doc", replaces_document_version: 3,
+    superseded_document_ids: ["old-doc"], upload_metadata_source: "stored_receipt" };
+  const value = verifiedImportReceipt(receipt, "p", "001-修订.md", target);
+  assert.equal(value.name, "原章.docx"); assert.equal(value.uploaded_filename, "001-修订.md");
+  for (const source of ["stored_receipt", "verified_request", "current_request"]) {
+    assert.equal(verifiedImportReceipt({ ...receipt, upload_metadata_source: source }, "p", "001-修订.md", target).upload_metadata_source, source);
+  }
+  for (const patch of [{ id: "old-doc" }, { project_id: "other" }, { name: "001-修订.md" }, { version: 3 }, { version: 5 },
+    { uploaded_filename: "changed.md" }, { uploaded_format: "docx" }, { replaces_document_id: "other" },
+    { replaces_document_version: 2 }, { superseded_document_ids: ["other"] }, { upload_metadata_source: "guessed" }]) {
+    assert.equal(verifiedImportReceipt({ ...receipt, ...patch }, "p", "001-修订.md", target), null, JSON.stringify(patch));
+  }
+  for (const key of ["uploaded_filename", "uploaded_format", "replaces_document_id", "replaces_document_version", "superseded_document_ids"]) {
+    const missing = { ...receipt }; delete missing[key];
+    assert.equal(verifiedImportReceipt(missing, "p", "001-修订.md", target), null, key);
+  }
+});
+
+test("unmapped receipts retain old semantics and do not accept a hidden replacement claim", () => {
+  const old = { id: "new", project_id: "p", name: "new.md", version: 1 };
+  assert.deepEqual(verifiedImportReceipt(old, "p", "new.md"), old);
+  const receipt = { ...old, uploaded_filename: "new.md", uploaded_format: "markdown", replaces_document_id: null, replaces_document_version: null };
+  assert.equal(verifiedImportReceipt(receipt, "p", "new.md").name, "new.md");
+  assert.equal(verifiedImportReceipt({ ...receipt, replaces_document_id: "unexpected" }, "p", "new.md"), null);
+  assert.equal(verifiedImportReceipt({ ...receipt, uploaded_format: "docx" }, "p", "new.md"), null);
 });

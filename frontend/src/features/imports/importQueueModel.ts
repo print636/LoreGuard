@@ -4,12 +4,16 @@ import { ApiError, createIdempotencyKey } from "../../api/client.ts";
 import { apiErrorDetail } from "../../app/session.ts";
 
 export type ImportStatus = "queued" | "uploading" | "succeeded" | "failed" | "unknown";
+export type ImportReplacement = Readonly<{ id: string; name: string; version: number }>;
 export type ImportDefaults = {
   documentRole: DocumentRole | null;
   storyScope: string;
   replaceDocumentId: string;
+  replacement?: ImportReplacement | null;
 };
-export type ImportReceipt = { id: string; project_id: string; name: string; version: number; deduplicated?: boolean };
+export type ImportReceipt = { id: string; project_id: string; name: string; version: number; deduplicated?: boolean;
+  uploaded_filename?: string; uploaded_format?: string; replaces_document_id?: string | null; replaces_document_version?: number | null;
+  upload_metadata_source?: "stored_receipt" | "verified_request" | "current_request" };
 export type ImportFile = { name: string; size: number; lastModified: number };
 export type ImportEntry<TFile extends ImportFile = File> = ImportDefaults & {
   id: string;
@@ -20,6 +24,11 @@ export type ImportEntry<TFile extends ImportFile = File> = ImportDefaults & {
   receipt: ImportReceipt | null;
 };
 export const emptyImportDefaults: ImportDefaults = { documentRole: null, storyScope: "", replaceDocumentId: "" };
+
+export function frozenImportReplacement(id: string, value?: ImportReplacement | null): ImportReplacement | null {
+  return id && value?.id === id && value.name && Number.isSafeInteger(value.version) && value.version > 0
+    ? Object.freeze({ id: value.id, name: value.name, version: value.version }) : null;
+}
 
 export function appendImportEntries<TFile extends ImportFile>(
   current: ImportEntry<TFile>[], files: Iterable<TFile>, defaults: ImportDefaults = emptyImportDefaults,
@@ -33,7 +42,7 @@ export function appendImportEntries<TFile extends ImportFile>(
       continue;
     }
     const operationKey = key();
-    entries.push({ ...defaults, id: operationKey, operationKey, file, status: "queued", message: "", receipt: null });
+    entries.push({ ...defaults, replacement: frozenImportReplacement(defaults.replaceDocumentId, defaults.replacement), id: operationKey, operationKey, file, status: "queued", message: "", receipt: null });
   }
   return { entries, duplicates };
 }
@@ -43,8 +52,10 @@ export function updateImportEntry<TFile extends ImportFile>(
   entry: ImportEntry<TFile>, patch: Partial<ImportDefaults>, key: () => string = createIdempotencyKey,
 ): ImportEntry<TFile> {
   if (["uploading", "succeeded", "unknown"].includes(entry.status)) return entry;
-  const next = { ...entry, ...patch };
-  if (next.documentRole === entry.documentRole && next.storyScope === entry.storyScope && next.replaceDocumentId === entry.replaceDocumentId) return entry;
+  const next = { ...entry, ...patch, replacement: patch.replaceDocumentId !== undefined
+    ? frozenImportReplacement(patch.replaceDocumentId, patch.replacement) : entry.replacement };
+  if (next.documentRole === entry.documentRole && next.storyScope === entry.storyScope && next.replaceDocumentId === entry.replaceDocumentId &&
+    next.replacement?.name === entry.replacement?.name && next.replacement?.version === entry.replacement?.version) return entry;
   return { ...next, operationKey: key(), status: "queued", message: "", receipt: null };
 }
 
@@ -56,11 +67,24 @@ export function importContextFields(entry: ImportDefaults): Record<string, strin
   return fields;
 }
 
-export function verifiedImportReceipt(value: unknown, projectId: string, filename: string): ImportReceipt | null {
+export function verifiedImportReceipt(value: unknown, projectId: string, filename: string, replacement?: ImportReplacement | null): ImportReceipt | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
-  if (typeof row.id !== "string" || !row.id.trim() || row.project_id !== projectId || row.name !== filename || !Number.isSafeInteger(row.version) || Number(row.version) < 1) return null;
-  return { id: row.id, project_id: projectId, name: filename, version: Number(row.version), ...(typeof row.deduplicated === "boolean" ? { deduplicated: row.deduplicated } : {}) };
+  if (typeof row.id !== "string" || !row.id.trim() || row.project_id !== projectId || row.name !== (replacement?.name || filename) || !Number.isSafeInteger(row.version) || Number(row.version) < 1) return null;
+  const format = ({ md: "markdown", docx: "docx", txt: "text", json: "json" } as Record<string, string>)[filename.split(".").pop()?.toLowerCase() || ""];
+  const hasMapping = ["uploaded_filename", "uploaded_format", "replaces_document_id", "replaces_document_version"].some(key => key in row);
+  if (row.upload_metadata_source !== undefined && !["stored_receipt", "verified_request", "current_request"].includes(row.upload_metadata_source as string)) return null;
+  if (replacement || hasMapping) {
+    if (!format || row.uploaded_filename !== filename || row.uploaded_format !== format ||
+      row.replaces_document_id !== (replacement?.id || null) || row.replaces_document_version !== (replacement?.version ?? null)) return null;
+    if (replacement && (row.id === replacement.id || row.version !== replacement.version + 1 ||
+      !Array.isArray(row.superseded_document_ids) || !row.superseded_document_ids.includes(replacement.id))) return null;
+  }
+  return { id: row.id, project_id: projectId, name: row.name as string, version: Number(row.version),
+    ...(typeof row.deduplicated === "boolean" ? { deduplicated: row.deduplicated } : {}),
+    ...(row.upload_metadata_source !== undefined ? { upload_metadata_source: row.upload_metadata_source as ImportReceipt["upload_metadata_source"] } : {}),
+    ...(hasMapping ? { uploaded_filename: filename, uploaded_format: format,
+      replaces_document_id: replacement?.id || null, replaces_document_version: replacement?.version ?? null } : {}) };
 }
 
 export class ImportResultUnknown extends Error {

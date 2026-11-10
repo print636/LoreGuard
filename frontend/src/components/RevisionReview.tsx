@@ -652,7 +652,7 @@ export default function RevisionReview({
       const response = await apiJson<unknown>("/api/v1/projects/" + encodeURIComponent(target.projectId) + "/documents", {
         method: "POST", headers: { "Idempotency-Key": target.entry.operationKey }, body: form, signal: controller.signal,
       });
-      const receipt = verifiedImportReceipt(response, target.projectId, target.entry.file.name);
+      const receipt = verifiedImportReceipt(response, target.projectId, target.entry.file.name, target.entry.replacement);
       if (!receipt) throw new ImportResultUnknown();
       if (!currentUpload(target, epoch)) return;
       const saved: RevisionUploadOperation = { ...target, entry: { ...target.entry, status: "succeeded", receipt, message: "" } };
@@ -729,6 +729,8 @@ export default function RevisionReview({
   const uploadLocked = !baselineReady || uploading || !!visibleUpload && ["uploading", "unknown", "succeeded"].includes(visibleUpload.entry.status);
   const displayedMode = uploadLocked && visibleUpload ? visibleUpload.entry.replaceDocumentId ? "replace" : "related" : uploadMode;
   const displayedTarget = uploadLocked && visibleUpload ? visibleUpload.entry.replaceDocumentId : route.documentId || "";
+  const previewFile = uploadLocked && visibleUpload ? visibleUpload.entry.file : file;
+  const previewReplacement = uploadLocked && visibleUpload ? visibleUpload.entry.replacement : activeDocuments.find(document => document.id === displayedTarget);
   const visibleComparisonItems = safeComparison?.items || [];
 
   return (
@@ -787,7 +789,8 @@ export default function RevisionReview({
       {visibleUpload && (
         <aside className="revisionTarget" aria-label="修订稿上传状态" role="status" aria-live="polite">
           <small>{visibleUpload.entry.status === "succeeded" ? "上传已保存" : visibleUpload.entry.status === "unknown" ? "上传结果待核对" : visibleUpload.entry.status === "uploading" ? "正在上传" : "本次上传"}</small>
-          <b>{visibleUpload.entry.file.name}{visibleUpload.entry.receipt ? ` · v${visibleUpload.entry.receipt.version}` : ""}</b>
+          <b>{visibleUpload.entry.receipt?.name || visibleUpload.entry.file.name}{visibleUpload.entry.receipt ? ` · v${visibleUpload.entry.receipt.version}` : ""}</b>
+          <p>上传文件：{visibleUpload.entry.file.name}</p>
           <p>{visibleUpload.entry.replaceDocumentId ? `替换 ${visibleUpload.replacementName} · v${visibleUpload.replacementVersion}` : "新增相关文档"} · {visibleUpload.entry.documentRole} · {visibleUpload.entry.storyScope}</p>
           {visibleUpload.entry.status === "unknown" && (
             <>
@@ -941,8 +944,12 @@ export default function RevisionReview({
                   setProblem(validation.ok ? "" : validation.message);
                 }}
               />
-              <small>支持 {supportedUploadLabel}；一次上传 1 份。替换版本时文件名必须与目标相同；改名文件应选择“新增相关文档”。</small>
+              <small>支持 {supportedUploadLabel}；一次上传 1 份。改名或换格式后，请明确选择原文稿；保存时保留原文稿名称和版本链，不按新文件名猜测对应关系。</small>
             </label>
+            {previewFile && displayedMode === "replace" && <aside className="revisionTarget revisionMappingPreview" aria-label="上传目标对应">
+              <b>上传文件“{previewFile.name}” → {previewReplacement ? `将更新“${previewReplacement.name}” · v${previewReplacement.version}` : "请选择原文稿"}</b>
+              <p>请核对对应关系。点击“保存新版本”后保留原文稿名称；文件仍按本次上传格式解析，不还原原 Word 的排版或批注。</p>
+            </aside>}
             <label className="revisionField" htmlFor="revision-role">
               <span>文档类型</span>
               <select id="revision-role" name="role" value={uploadLocked && visibleUpload ? visibleUpload.entry.documentRole || role : role} disabled={uploadLocked} onChange={(event) => setRole(event.target.value as DocumentRole)}>

@@ -1,6 +1,6 @@
 import { createIdempotencyKey } from "./api/client.ts";
 import { documentContext, type DocumentRole } from "./documentContext.ts";
-import { importContextFields, type ImportEntry, type ImportFile } from "./features/imports/importQueueModel.ts";
+import { frozenImportReplacement, importContextFields, type ImportEntry, type ImportFile } from "./features/imports/importQueueModel.ts";
 
 export type RevisionUploadOperation<TFile extends ImportFile = File> = {
   projectId: string;
@@ -21,6 +21,7 @@ export function frozenRevisionUpload<TFile extends ImportFile>(input: {
   const entry: ImportEntry<TFile> = {
     id: operationKey, operationKey, file: input.file, documentRole: context.document_role,
     storyScope: context.story_scope, replaceDocumentId: input.replacement?.id || "",
+    replacement: frozenImportReplacement(input.replacement?.id || "", input.replacement),
     status: "queued", message: "", receipt: null,
   };
   return { projectId: input.projectId, baselineRunId: input.baselineRunId, entry,

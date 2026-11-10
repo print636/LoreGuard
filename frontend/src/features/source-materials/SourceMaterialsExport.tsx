@@ -56,7 +56,7 @@ function ScopedSourceMaterials({ runId, inputs }: Props) {
     <summary>导出本次资料</summary>
     <div className="sourceMaterialsBody">
       <p id={explanationId}>只导出你勾选的本次审查输入，不包含全项目资料或清单外的旧角色来源。下方是保存的输入清单；下载时会核对冻结原文与资料身份，无法核对则不生成压缩包。</p>
-      <p>ZIP 内含“资料目录.md”和逐份解析后的 Markdown 正文，正文不插入前言。Word 排版、批注请使用原文件；回传仍须与原文稿同名：Markdown 请对照目录按原名保存，Word 请修改原 Word 文件再上传。不会自动改名或跨格式替换。</p>
+      <p>ZIP 内含“资料目录.md”和逐份解析后的 Markdown 正文，正文不插入前言。Word 排版、批注请使用原文件；改名或转为 Markdown 后回传，可在导入或修订页明确选择原文稿，核对对应关系后保存新版本。系统保留原文稿名称，不自动猜测对应关系。</p>
       {inputs.length ? <>
         <p className="sourceMaterialsLimit">每次最多 100 份、正文合计 20 MiB；超出请分批选择，系统不会截断资料。</p>
         <fieldset disabled={busy} aria-describedby={explanationId}>

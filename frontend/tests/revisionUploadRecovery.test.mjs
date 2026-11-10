@@ -18,6 +18,24 @@ test("revision operation freezes canonical payload and exact target under one st
   assert.throws(() => { operation.fields.story_scope = "other"; }, TypeError);
   assert.equal(operation.replacementName, "chapter.md");
   assert.equal(operation.replacementVersion, 3);
+  assert.deepEqual(operation.entry.replacement, input.replacement);
+});
+
+test("renamed Markdown revision keeps actual bytes/name and Word logical target across unknown retry", () => {
+  const renamed = { name: "001-改稿.md", size: 60, lastModified: 55 };
+  const target = { id: "word-original", name: "原稿.docx", version: 2 };
+  const operation = frozenRevisionUpload({ ...input, file: renamed, replacement: target }, () => "same-operation");
+  assert.equal(operation.entry.file, renamed);
+  assert.equal(operation.replacementName, "原稿.docx");
+  assert.equal(operation.fields.replace_document_id, "word-original");
+  target.version = 20;
+  assert.equal(operation.entry.replacement.version, 2);
+  const unknown = { ...operation, entry: { ...operation.entry, status: "unknown" } };
+  assert.equal(revisionUploadMaySend(unknown, true), true);
+  assert.equal(unknown.entry.operationKey, "same-operation");
+  assert.equal(verifiedImportReceipt({ id: "next", project_id: input.projectId, name: "原稿.docx", version: 3,
+    uploaded_filename: renamed.name, uploaded_format: "markdown", replaces_document_id: "word-original", replaces_document_version: 2,
+    superseded_document_ids: ["word-original"], deduplicated: true }, input.projectId, renamed.name, unknown.entry.replacement)?.id, "next");
 });
 
 test("unchanged File/context may reuse key but new File or target/context is a different operation", () => {
