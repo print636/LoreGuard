@@ -16,7 +16,7 @@ export type MaterialImpact = {
   schema_version: "material-change-impact-v1"; run_id: string; project_id: string;
   comparison_status: "complete" | "unavailable"; semantic_impact_complete: false;
   confirmed_traits_auto_invalidated: false; confirmed_traits_changed: boolean | null;
-  recheck: { inputs_changed: boolean | null; can_prepare: boolean; reason: string | null };
+  recheck: { inputs_changed: boolean | null; can_prepare: boolean; reason: string | null; input_signature?: string | null };
   sources: ImpactPage<ImpactSource>; affected_issues: ImpactPage<ImpactIssue>;
   summary: { changed_sources: number; added_sources: number; not_included_sources: number; affected_issues: number; unresolved_evidence: number; unresolved_sources: number };
 };
@@ -41,6 +41,7 @@ export function normalizeMaterialImpact(raw: unknown, projectId: string, runId: 
       !["complete", "unavailable"].includes(value.comparison_status) || value.semantic_impact_complete !== false ||
       value.confirmed_traits_auto_invalidated !== false || !optionalBoolean(value.confirmed_traits_changed) ||
       !value.recheck || !optionalBoolean(value.recheck.inputs_changed) || typeof value.recheck.can_prepare !== "boolean" || !optionalString(value.recheck.reason) ||
+      (value.recheck.input_signature !== undefined && value.recheck.input_signature !== null && !/^[a-f0-9]{64}$/.test(value.recheck.input_signature)) ||
       !value.summary || ![value.summary.changed_sources, value.summary.added_sources, value.summary.not_included_sources, value.summary.affected_issues, value.summary.unresolved_evidence, value.summary.unresolved_sources].every(count) ||
       !page(value.sources, offset, item => !!item && typeof item.key === "string" && ["input", "confirmed_source", "added", "not_included"].includes(item.kind) &&
         source(item.frozen) && source(item.current) && Array.isArray(item.changes) && item.changes.every(c => changes.includes(c)) && optionalBoolean(item.selected_for_recheck) && optionalBoolean(item.content_changed) && typeof item.identity_comparison_available === "boolean") ||

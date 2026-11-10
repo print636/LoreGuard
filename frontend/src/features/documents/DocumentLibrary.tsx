@@ -20,6 +20,8 @@ type Props = {
   onStateChange: (state: LibraryState) => void;
   onCompare: (fromId: string, toId: string) => void;
   readingPositions?: Map<string, number>;
+  readerOnly?: boolean;
+  onPreview?: (document: DocumentPreview["document"]) => void;
 };
 
 type ReaderState = {
@@ -52,7 +54,9 @@ function readableDate(value: string): string {
   return Number.isNaN(date.getTime()) ? "时间未记录" : date.toLocaleString("zh-CN");
 }
 
-export default function DocumentLibrary({ projectId, documents, loading, state: savedState, onStateChange, onCompare, readingPositions }: Props) {
+export default function DocumentLibrary({ projectId, documents, loading, state: savedState, onStateChange, onCompare, readingPositions, readerOnly = false, onPreview }: Props) {
+  const previewCallback = useRef(onPreview);
+  previewCallback.current = onPreview;
   const state = savedState.projectId === projectId ? savedState : initialLibraryState(projectId);
   const groups = useMemo(() => groupDocuments(documents, projectId), [documents, projectId]);
   const filtered = useMemo(() => filterDocumentGroups(groups, state), [groups, state.appliedFilenameQuery, state.roleFilter, state.versionFilter]);
@@ -121,6 +125,7 @@ export default function DocumentLibrary({ projectId, documents, loading, state: 
         if (disposed || controller.signal.aborted || sequence !== requestSequence.current) return;
         const preview = normalizeDocumentPreview(response, request);
         setReader({ request, status: "ready", preview, error: "" });
+        previewCallback.current?.(preview.document);
       })
       .catch((error: unknown) => {
         if (disposed || sequence !== requestSequence.current) return;
@@ -135,13 +140,15 @@ export default function DocumentLibrary({ projectId, documents, loading, state: 
   const canCompare = Boolean(selected && !selected.active && currentVersion && currentVersion.id !== selected.id);
 
   return (
-    <section className="documentLibrary" aria-labelledby="document-library-title" aria-busy={loading}>
+    <section className={`documentLibrary ${readerOnly ? "documentLibraryReaderOnly" : ""}`} aria-label={readerOnly ? "所选版本原文" : undefined} aria-labelledby={readerOnly ? undefined : "document-library-title"} aria-busy={loading}>
+      {!readerOnly && <>
       <div className="documentLibraryHeading">
         <h3 id="document-library-title">资料库</h3>
         {!loading && projectId && <span>{groups.length} 份文稿，{documents.filter((document) => document.project_id === projectId).length} 个版本</span>}
       </div>
+      </>}
       <div className={`documentLibrarySurface ${readingOnMobile && selected ? "readingOnMobile" : ""}`}>
-        <div className="documentLibraryCatalog">
+        {!readerOnly && <div className="documentLibraryCatalog">
           <form className="documentLibrarySearch" onSubmit={(event) => {
             event.preventDefault();
             resetSelection({ appliedFilenameQuery: state.filenameQuery.trim() });
@@ -202,9 +209,9 @@ export default function DocumentLibrary({ projectId, documents, loading, state: 
                 </div>
               </nav>
             </>}
-        </div>
+        </div>}
         <section className="documentLibraryReader" id="document-library-reader" aria-labelledby="document-reader-heading" aria-busy={Boolean(request && (!currentReader || currentReader.status === "loading"))}>
-          {selected && <button type="button" className="documentLibraryBack" onClick={() => {
+          {selected && !readerOnly && <button type="button" className="documentLibraryBack" onClick={() => {
             setReadingOnMobile(false);
             const previousFocus = document.activeElement;
             if (focusFrame.current !== null) cancelAnimationFrame(focusFrame.current);
@@ -231,7 +238,7 @@ export default function DocumentLibrary({ projectId, documents, loading, state: 
                     </option>)}
                   </select>
                 </label>
-                {canCompare && <button type="button" onClick={() => { if (currentVersion) onCompare(selected.id, currentVersion.id); }}>与当前版本比较</button>}
+                {canCompare && !readerOnly && <button type="button" onClick={() => { if (currentVersion) onCompare(selected.id, currentVersion.id); }}>与当前版本比较</button>}
               </div>
               {metadata && <dl className="documentLibraryMetadata">
                 <div><dt>版本状态</dt><dd>v{metadata.version} · {metadata.active ? "当前版本（在用）" : "历史版本（仅阅读）"}</dd></div>

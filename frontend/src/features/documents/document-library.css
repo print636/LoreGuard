@@ -9,6 +9,8 @@
 .documentLibraryHeading > span { color: var(--color-text-secondary); font-size: 14px; }
 .documentLibrarySurface { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-field); overflow: hidden; }
 .documentLibraryCatalog { min-width: 0; border-right: 1px solid var(--color-border); background: var(--color-surface); }
+.documentLibraryReaderOnly .documentLibrarySurface { grid-template-columns: minmax(0, 1fr); }
+.documentLibraryReaderOnly .documentLibraryReader { display: block; }
 .documentLibraryCatalog > form, .documentLibraryFilters { padding: var(--space-4); }
 .documentLibrary label { display: grid; min-width: 0; gap: var(--space-2); color: var(--color-text-secondary); font-size: 14px; }
 .documentLibrary :is(input, select) { width: 100%; min-width: 0; min-height: 44px; margin: 0; padding: var(--space-2) var(--space-3); color: var(--color-text); font: inherit; border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-field); }

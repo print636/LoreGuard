@@ -1,3 +1,5 @@
+import DocumentDiffResult from "./features/documents/DocumentDiffResult";
+import { documentDiffPath, documentDiffMatches, type DocumentDiff } from "./features/documents/documentDiff";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   describeCombinedReviewStatus,
@@ -191,36 +193,6 @@ type Doc = {
   story_scope: string;
   context_explicit?: boolean;
   narrative_context?: NarrativeContext;
-};
-type DiffLine = {
-  type: "added" | "removed" | "unchanged";
-  content: string;
-  old_line: number | null;
-  new_line: number | null;
-};
-type DocumentDiff = {
-  from_document: Doc & { char_count: number; line_count: number };
-  to_document: Doc & { char_count: number; line_count: number };
-  summary: {
-    added_lines: number;
-    removed_lines: number;
-    unchanged_lines: number;
-    changed_hunks: number;
-    compared_old_lines: number;
-    compared_new_lines: number;
-    old_total_lines: number;
-    new_total_lines: number;
-    input_truncated: boolean;
-    output_truncated: boolean;
-  };
-  hunks: Array<{
-    old_start: number;
-    old_lines: number;
-    new_start: number;
-    new_lines: number;
-    lines: DiffLine[];
-  }>;
-  warnings: string[];
 };
 type RunInfo = RunUsageInfo & {
   id: string;
@@ -1628,13 +1600,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     try {
       setDiffBusy(true);
       const result = await apiJson<DocumentDiff>(
-        `/api/v1/projects/${projectId}/documents/diff?from_document_id=${encodeURIComponent(fromId)}&to_document_id=${encodeURIComponent(toId)}`,
+        documentDiffPath(projectId, fromId, toId),
         { signal: controller.signal },
       );
       if (controller.signal.aborted || sequence !== diffRequestRef.current || epoch !== viewEpochRef.current || currentProjectRef.current !== projectId) return;
-      if (!source || !destination || result.from_document?.id !== fromId || result.to_document?.id !== toId ||
-        result.from_document.project_id !== projectId || result.to_document.project_id !== projectId ||
-        result.from_document.version !== source.version || result.to_document.version !== destination.version) {
+      if (!source || !destination || !documentDiffMatches(result, projectId, source, destination)) {
         throw new TypeError("比较结果与所选文稿版本不一致，请重试。");
       }
       setDocumentDiff(result);
@@ -2315,69 +2285,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                     </button>
                   </div>
                   {diffError && <p role="alert">{diffError}</p>}
-                  {documentDiff && (
-                    <div className="diffResult">
-                      <div className="diffSummary">
-                        <b>
-                          v{documentDiff.from_document.version} → v
-                          {documentDiff.to_document.version}
-                        </b>
-                        <span className="diffAdded">
-                          +{documentDiff.summary.added_lines}
-                        </span>
-                        <span className="diffRemoved">
-                          −{documentDiff.summary.removed_lines}
-                        </span>
-                        <span>
-                          {documentDiff.summary.changed_hunks} 个变更区块
-                        </span>
-                        <small>
-                          比较 {documentDiff.summary.compared_old_lines}/
-                          {documentDiff.summary.old_total_lines} →{" "}
-                          {documentDiff.summary.compared_new_lines}/
-                          {documentDiff.summary.new_total_lines} 行
-                        </small>
-                      </div>
-                      {documentDiff.warnings.map((warning, index) => (
-                        <p className="visualWarning" key={index}>
-                          {warning}
-                        </p>
-                      ))}
-                      {documentDiff.hunks.length === 0 ? (
-                        <div className="visualEmpty">
-                          两个版本的文本内容相同。
-                        </div>
-                      ) : (
-                        <div className="diffHunks">
-                          {documentDiff.hunks.map((hunk, index) => (
-                            <div className="diffHunk" key={index}>
-                              <div className="diffHeader">
-                                @@ -{hunk.old_start},{hunk.old_lines} +
-                                {hunk.new_start},{hunk.new_lines} @@
-                              </div>
-                              {hunk.lines.map((line, lineIndex) => (
-                                <div
-                                  className={`diffLine ${line.type}`}
-                                  key={lineIndex}
-                                >
-                                  <code>{line.old_line ?? ""}</code>
-                                  <code>{line.new_line ?? ""}</code>
-                                  <b>
-                                    {line.type === "added"
-                                      ? "+"
-                                      : line.type === "removed"
-                                        ? "−"
-                                        : " "}
-                                  </b>
-                                  <pre>{line.content || " "}</pre>
-                                </div>
-                              ))}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  {documentDiff && <DocumentDiffResult result={documentDiff} />}
                 </div>
               )}
             </section>
@@ -2825,6 +2733,8 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   )
                 }
                 onDocumentsChanged={() => loadProject(project, false, run)}
+                onContextSaved={applyNarrativeContext}
+                onOpenProvider={() => navigateWorkspace("provider")}
               />
             </Suspense>
           )}

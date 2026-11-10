@@ -83,6 +83,17 @@ export type NarrativeContextDraft = {
   confirmed: boolean;
 };
 
+/** A revision handoff must never fall through to another active document. */
+export function selectedContextDocument(
+  documents: GuidedDocument[], selectedId: string, accepted: GuidedDocument | null,
+  fixed?: { id: string; version: number },
+): GuidedDocument | null {
+  if (fixed) return documents.find(document => document.id === fixed.id && document.version === fixed.version) ||
+    (accepted?.id === fixed.id && accepted.version === fixed.version ? accepted : null);
+  return documents.find(document => document.active && document.id === selectedId) ||
+    (accepted?.id === selectedId ? accepted : null) || documents.find(document => document.active) || null;
+}
+
 export type AnalysisRunRequest = {
   mode: ReviewMode;
   sensitivity: ReviewSensitivity;

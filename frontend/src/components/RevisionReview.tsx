@@ -5,6 +5,7 @@ import {
   apiJsonIdempotent,
   apiUrl,
   createBoundedSessionProbe,
+  createIdempotencyKey,
   SESSION_EXPIRED_EVENT,
 } from "../api/client";
 import { documentRoles, type DocumentRole } from "../documentContext";
@@ -35,6 +36,9 @@ import { workspacePath } from "../routing";
 import { MaterialImpactView } from "../features/material-impact/MaterialImpact";
 import { useMaterialImpact } from "../features/material-impact/useMaterialImpact";
 import { canPrepareRecheck } from "../features/material-impact/materialImpactModel";
+import RevisionInspection from "../features/documents/RevisionInspection";
+import { freshRecheckSignature, RecheckSelectionError, inspectionFromUpload, inspectionDocuments, type InspectionDocument } from "../features/documents/revisionInspectionModel";
+import type { GuidedDocument, NarrativeContext } from "../features/workflow/guidedReview";
 
 type Evidence = {
   document_id: string;
@@ -136,16 +140,19 @@ type RevisionReviewProps = {
   projectName: string;
   baselineRun: RevisionRun | null;
   characterReview?: ProviderConnectionView["characterReview"];
-  documents: RevisionDocument[];
+  documents: InspectionDocument[];
   baselineIssues: RevisionIssue[];
   routeSearch: string;
   onRouteChange: (search: string, replace?: boolean) => void;
   onDocumentsChanged: () => Promise<boolean>;
+  onContextSaved: (id: string, role: GuidedDocument["document_role"], context: NarrativeContext) => void;
+  onOpenProvider: () => void;
 };
 
 const stepLabels: Record<RevisionRouteState["step"], string> = {
   review: "确认待修订问题",
   upload: "上传新版本",
+  inspect: "核对新版本",
   run: "启动复检",
   compare: "查看复检差异",
 };
@@ -272,6 +279,8 @@ export default function RevisionReview({
   routeSearch,
   onRouteChange,
   onDocumentsChanged,
+  onContextSaved,
+  onOpenProvider,
 }: RevisionReviewProps) {
   const route = useMemo(() => revisionRouteStateFromSearch(routeSearch), [routeSearch]);
   const baselineDocuments = baselineRun ? runSnapshotDocuments(baselineRun) : [];
@@ -280,7 +289,9 @@ export default function RevisionReview({
   const hasCharacterBaseline = baselineReady && sourceBatch?.mode === "draft_review" &&
     sourceBatch.character_review_enabled === true && Boolean(sourceBatch.character_baseline_run_id);
   const impact = useMaterialImpact(projectId, baselineRun?.id || null, documents, route.step === "run");
-  const inputsReady = canPrepareRecheck(impact.value);
+  const inspectionPair = route.inspection ? inspectionDocuments(projectId, route.inspection, documents) : null;
+  const inspectionCurrent = !route.inspection || Boolean(inspectionPair?.saved.active);
+  const inputsReady = canPrepareRecheck(impact.value) && inspectionCurrent;
   const selectedIssue = baselineIssues.find((issue) => issue.id === route.issueId) || null;
   const activeDocuments = documents.filter((document) => document.active);
   const [file, setFile] = useState<File | null>(null);
@@ -294,6 +305,7 @@ export default function RevisionReview({
   const uploadAliveRef = useRef(true);
   const uploadControllerRef = useRef<AbortController | null>(null);
   const [starting, setStarting] = useState(false);
+  const [pendingRecheck, setPendingRecheck] = useState<{ key: string; body: string | null } | null>(null);
   const [comparison, setComparison] = useState<ComparisonResponse | null>(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonRefresh, setComparisonRefresh] = useState(0);
@@ -580,7 +592,9 @@ export default function RevisionReview({
       setNotice(operation.entry.receipt.deduplicated
         ? "已核对原上传记录，没有新增文档版本。项目资料已重新读取；请核对输入变化后自行启动复检。"
         : "新版本已保存，项目资料已重新读取。请核对输入变化后自行启动复检。");
-      updateRoute({ step: "run", recheckRunId: null, outcome: "all", page: 1 });
+      const inspection = inspectionFromUpload(operation);
+      if (!inspection) throw new Error("Cannot bind saved version to upload receipt");
+      updateRoute({ step: "inspect", inspection, recheckRunId: null, outcome: "all", page: 1 });
     } catch {
       if (!currentUpload(operation, epoch)) return;
       changeUpload({ ...operation, refresh: "failed" });
@@ -680,21 +694,33 @@ export default function RevisionReview({
 
   async function startRecheck(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!baselineRun || !baselineReady || !inputsReady || !recheckGuard.current.tryBegin()) return;
+    if (!baselineRun || !baselineReady || (!inputsReady && !pendingRecheck) || !recheckGuard.current.tryBegin()) return;
     const deepReview = hasCharacterBaseline && characterReview === "available" &&
       new FormData(event.currentTarget).has("character_review_enabled");
     try {
       setStarting(true);
       setProblem("");
+      setNotice(pendingRecheck ? "正在核对同一次复检提交…" : "正在核对当前选材…");
+      let operation = pendingRecheck;
+      if (!operation) {
+        const signature = route.inspection || impact.value?.recheck.input_signature
+          ? await freshRecheckSignature(projectId, baselineRun.id, route.inspection, path => apiJson(path)) : null;
+        if (!uploadAliveRef.current || fileContextRef.current !== fileContext) return;
+        operation = { key: createIdempotencyKey(), body: deepReview || signature ? JSON.stringify({
+          ...(deepReview ? { character_review_enabled: true } : {}),
+          ...(signature ? { expected_input_signature: signature } : {}),
+        }) : null };
+        setPendingRecheck(operation);
+      }
       setNotice("正在创建复检运行…");
       setRecheckProgress(0);
       setRecheckMessage("任务已提交，等待执行队列接收");
       const created = await apiJsonIdempotent<RecheckCreated>(
         recheckPath(baselineRun.id),
-        deepReview
-          ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ character_review_enabled: true }) }
-          : { method: "POST" },
+        { method: "POST", headers: { ...(operation.body ? { "Content-Type": "application/json" } : {}), "Idempotency-Key": operation.key }, ...(operation.body ? { body: operation.body } : {}) },
       );
+      if (!uploadAliveRef.current || fileContextRef.current !== fileContext) return;
+      setPendingRecheck(null);
       setNotice(
         created.deduplicated
           ? "相同复检请求已经存在，已恢复原运行。"
@@ -702,8 +728,17 @@ export default function RevisionReview({
       );
       updateRoute({ step: "run", recheckRunId: created.id, page: 1 });
     } catch (error) {
+      if (!uploadAliveRef.current || fileContextRef.current !== fileContext) return;
       const code = error instanceof ApiError ? (error.detail as { detail?: { code?: string } } | null)?.detail?.code : null;
-      if (deepReview && (code === "character_baseline_not_ready" || code === "character_formal_context_unconfirmed")) {
+      if (error instanceof ApiError && error.status < 500) setPendingRecheck(null);
+      if (error instanceof RecheckSelectionError) {
+        setProblem(error.message);
+        impact.refresh();
+      } else if (code === "recheck_inputs_changed") {
+        setPendingRecheck(null);
+        setProblem("资料在核对后发生了变化，尚未创建复检。请重新核对当前版本与资料身份，再决定是否开始。");
+        impact.refresh();
+      } else if (deepReview && (code === "character_baseline_not_ready" || code === "character_formal_context_unconfirmed")) {
         setProblem("角色基线已无法用于本次复检。你可以取消勾选角色深度审查，继续普通复检。");
       } else if (deepReview && code === "character_review_model_unavailable") {
         setProblem("账户模型暂不可用。请检查模型设置，或取消勾选角色深度审查后复检。");
@@ -711,7 +746,7 @@ export default function RevisionReview({
         setProblem(`无法启动复检：${errorCopy(error)}`);
       }
     } finally {
-      setStarting(false);
+      if (uploadAliveRef.current && fileContextRef.current === fileContext) setStarting(false);
       recheckGuard.current.end();
     }
   }
@@ -749,7 +784,7 @@ export default function RevisionReview({
             type="button"
             className={route.step === step ? "active" : ""}
             aria-current={route.step === step ? "step" : undefined}
-            disabled={step === "compare" && !route.recheckRunId}
+            disabled={(step === "compare" && !route.recheckRunId) || (step === "inspect" && !route.inspection)}
             onClick={() => updateRoute({ step })}
           >
             <span>{index + 1}</span>
@@ -959,9 +994,20 @@ export default function RevisionReview({
         </div>
       )}
 
+      {route.step === "inspect" && (route.inspection
+        ? <RevisionInspection key={JSON.stringify([projectId, baselineRun?.id, route.inspection])}
+            projectId={projectId} coordinates={route.inspection} documents={documents}
+            onRefresh={onDocumentsChanged} onContextSaved={onContextSaved} onOpenProvider={onOpenProvider}
+            onContinue={() => updateRoute({ step: "run" })} />
+        : <div className="revisionStage"><h2>尚未指定要核对的版本</h2><p>请从本次保存收据进入核对；不会自动选择最新文稿或恢复上传成功状态。</p></div>)}
+
       {route.step === "run" && (
         <div className="revisionStage">
           <div className="revisionStageHead"><div><h2>确认变化并启动复检</h2><p>复检会冻结当前符合范围的资料，并与上方原报告逐项比较。</p></div></div>
+          {route.inspection && <div className="revisionTarget">
+            <p>{inspectionCurrent ? `已选择核对 v${route.inspection.savedVersion}；启动前还会核对当前选材。` : "所选版本已不可用或不再是活动稿。本旅程不能改用其他新版继续复检，请明确另选文稿。"}</p>
+            <button type="button" onClick={() => updateRoute({ step: "inspect" })}>返回所选版本原文与身份</button>
+          </div>}
           <MaterialImpactView model={impact} showPrepare={false} expanded />
           <fieldset className="revisionVisualOptions">
             <legend>复检完成后的按需视图</legend>
@@ -1000,7 +1046,7 @@ export default function RevisionReview({
                   <label>
                     <input type="checkbox" name="character_review_enabled"
                       key={JSON.stringify([sourceBatch?.character_baseline_run_id, characterReview, activeDocuments.map(doc => doc.id)])}
-                      disabled={starting || !inputsReady || characterReview !== "available"}
+                      disabled={starting || !!pendingRecheck || !inputsReady || characterReview !== "available"}
                       aria-describedby="recheck-character-cost" autoComplete="off" />
                     角色深度审查
                   </label>
@@ -1010,13 +1056,14 @@ export default function RevisionReview({
                 </fieldset>
               )}
               <div className="revisionLaunch">
+                {pendingRecheck && !starting && <p role="status">提交结果尚待核对。安全重试沿用同一次操作、选材签名和深审选择，不自动换用新的资料；刷新页面不会恢复这次提交记录。</p>}
                 <p>
                   {baselineReady && characterReview && sourceBatch?.mode === "draft_review" && !hasCharacterBaseline &&
                     "原审查没有可复用的角色基线，本次按普通复检运行。"}
                   {!baselineReady ? "基线运行缺少可复现输入，不能复检。" : !inputsReady ? "请先完成上方资料变化核对，再决定是否复检。" : "复检可能调用模型并消耗 Token，模型可用性与任务额度将在提交时核对。"}
                 </p>
-                <button className="revisionPrimaryAction" type="submit" disabled={!baselineReady || !inputsReady || starting}>
-                  {starting ? "提交复检中…" : "开始复检"}
+                <button className="revisionPrimaryAction" type="submit" disabled={!baselineReady || (!inputsReady && !pendingRecheck) || starting}>
+                  {starting ? "提交复检中…" : pendingRecheck ? "安全重试同一复检" : "开始复检"}
                 </button>
               </div>
             </form>

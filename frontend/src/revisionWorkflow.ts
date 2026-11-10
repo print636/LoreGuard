@@ -1,6 +1,6 @@
 import type { RunInputSnapshot } from "./runSnapshot";
 
-export const revisionSteps = ["review", "upload", "run", "compare"] as const;
+export const revisionSteps = ["review", "upload", "inspect", "run", "compare"] as const;
 export const comparisonOutcomes = [
   "all",
   "no_longer_detected",
@@ -21,6 +21,15 @@ export type RevisionRouteState = {
   generateGraph: boolean;
   generateTimeline: boolean;
   page: number;
+  inspection?: RevisionInspection;
+};
+
+/** Navigation coordinates, never an upload receipt or a recovered mutation. */
+export type RevisionInspection = {
+  savedDocumentId: string;
+  savedVersion: number;
+  previousDocumentId: string | null;
+  previousVersion: number | null;
 };
 
 export type RevisionDocument = {
@@ -59,6 +68,7 @@ export function revisionRouteStateFromSearch(search: string): RevisionRouteState
   const params = new URLSearchParams(search);
   const rawStep = params.get("step") || "review";
   const rawOutcome = params.get("outcome") || "all";
+  const inspection = inspectionFromParams(params);
   return {
     step: revisionSteps.includes(rawStep as RevisionStep)
       ? (rawStep as RevisionStep)
@@ -74,7 +84,22 @@ export function revisionRouteStateFromSearch(search: string): RevisionRouteState
     page: /^\d{1,4}$/.test(params.get("page") || "")
       ? Math.max(1, Number(params.get("page")))
       : 1,
+    ...(inspection ? { inspection } : {}),
   };
+}
+
+function inspectionFromParams(params: URLSearchParams): RevisionInspection | null {
+  const savedDocumentId = identifier(params.get("saved"));
+  const savedVersion = Number(params.get("saved_version"));
+  const previousDocumentId = identifier(params.get("previous"));
+  const previousVersion = Number(params.get("previous_version"));
+  if (!savedDocumentId || !Number.isSafeInteger(savedVersion) || savedVersion < 1) return null;
+  if (params.has("previous") || params.has("previous_version")) {
+    if (!previousDocumentId || previousDocumentId === savedDocumentId ||
+      !Number.isSafeInteger(previousVersion) || previousVersion < 1 || previousVersion + 1 !== savedVersion) return null;
+  }
+  return { savedDocumentId, savedVersion, previousDocumentId,
+    previousVersion: previousDocumentId ? previousVersion : null };
 }
 
 export function revisionSearch(state: RevisionRouteState): string {
@@ -88,6 +113,14 @@ export function revisionSearch(state: RevisionRouteState): string {
   if (state.generateGraph) params.set("graph", "1");
   if (state.generateTimeline) params.set("timeline", "1");
   if (state.page > 1) params.set("page", String(state.page));
+  if (state.inspection) {
+    params.set("saved", state.inspection.savedDocumentId);
+    params.set("saved_version", String(state.inspection.savedVersion));
+    if (state.inspection.previousDocumentId) {
+      params.set("previous", state.inspection.previousDocumentId);
+      params.set("previous_version", String(state.inspection.previousVersion));
+    }
+  }
   return `?${params.toString()}`;
 }
 

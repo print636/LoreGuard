@@ -14,6 +14,7 @@ import {
   readableNarrativeContext,
   publicationStatuses,
   requiresDedicatedChapterPublish,
+  selectedContextDocument,
   type GuidedDocument,
   type NarrativeContext,
   type NarrativeContextDraft,
@@ -29,6 +30,7 @@ type Props = {
   projectId: string;
   documents: GuidedDocument[];
   disabled?: boolean;
+  fixedDocument?: { id: string; version: number };
   onSaved: (
     documentId: string,
     documentRole: GuidedDocument["document_role"],
@@ -185,6 +187,7 @@ export default function NarrativeContextWorkbench({
   projectId,
   documents,
   disabled = false,
+  fixedDocument,
   onSaved,
   onOpenProvider,
   onLeaveGuardChange,
@@ -195,11 +198,7 @@ export default function NarrativeContextWorkbench({
   );
   const [selectedId, setSelectedId] = useState("");
   const [acceptedDocument, setAcceptedDocument] = useState<GuidedDocument | null>(null);
-  const selected =
-    activeDocuments.find((document) => document.id === selectedId) ||
-    (acceptedDocument?.id === selectedId ? acceptedDocument : null) ||
-    activeDocuments[0] ||
-    null;
+  const selected = selectedContextDocument(documents, selectedId, acceptedDocument, fixedDocument);
   const selectedIdRef = useRef("");
   selectedIdRef.current = selected?.id || "";
   const [remoteContext, setRemoteContext] = useState<NarrativeContext | null>(null);
@@ -604,13 +603,15 @@ export default function NarrativeContextWorkbench({
           <p>先说明每份资料是什么、位于哪条时间线。系统只采用你已确认的上下文。</p>
         </div>
         <span className="contextCount">
+          {fixedDocument && selected ? `${selected.name} · v${selected.version}` : <>
           {activeDocuments.filter((document) => document.narrative_context?.resolution_state === "confirmed").length}
           /{activeDocuments.length} 已确认
+          </>}
         </span>
       </header>
 
-      <div className="contextWorkbenchLayout">
-        <nav aria-label="活动资料列表" className="contextDocumentList">
+      <div className="contextWorkbenchLayout" style={fixedDocument ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}>
+        {!fixedDocument && <nav aria-label="活动资料列表" className="contextDocumentList">
           {activeDocuments.map((document) => {
             const documentStatus = contextStatus(document.narrative_context);
             return (
@@ -630,7 +631,7 @@ export default function NarrativeContextWorkbench({
               </button>
             );
           })}
-        </nav>
+        </nav>}
 
         <div className="contextEditor" aria-busy={loading || inferring}>
           {dirty && (
@@ -640,7 +641,7 @@ export default function NarrativeContextWorkbench({
             <section className="contextObsoleteNotice" aria-label="旧版本资料身份修改">
               <b>正在保留旧文档“{selected.name}”v{selected.version} 的本页字段</b>
               <p>这份文档已不再是活动版本。字段没有套用到新稿，当前不能保存、AI 识别或发布；请先核对，再明确放弃旧字段并选择活动资料。</p>
-              {activeDocuments.length > 0 && <button type="button" disabled={navigationLocked} onClick={() => chooseDocument(activeDocuments[0])}>放弃旧字段并选择活动资料</button>}
+              {!fixedDocument && activeDocuments.length > 0 && <button type="button" disabled={navigationLocked} onClick={() => chooseDocument(activeDocuments[0])}>放弃旧字段并选择活动资料</button>}
             </section>
           )}
           {error && (
