@@ -7044,6 +7044,30 @@ def get_review_clues(
         }
 
 
+@app.get("/api/v1/analysis-runs/{run_id}/source-materials.zip")
+def export_source_materials(
+    run_id: str,
+    document_id: Annotated[list[str], Query(min_length=1, max_length=100)],
+    context: AuthContext = Depends(get_auth_context),
+) -> Response:
+    from .source_materials_export import (SOURCE_MATERIAL_HEADERS, SourceMaterialsUnavailable,
+                                          build_source_materials_zip)
+    with SessionLocal() as db:
+        run = _run_in_workspace(db, run_id, context.workspace_id)
+        if run is None:
+            raise HTTPException(404, detail={"code": "run_not_found", "message": "分析任务不存在"},
+                                headers=SOURCE_MATERIAL_HEADERS)
+        project = db.get(ProjectRow, run.project_id)
+        try:
+            archive = build_source_materials_zip(db, run, project_name=project.name,
+                                                document_ids=document_id)
+        except SourceMaterialsUnavailable as exc:
+            raise HTTPException(exc.status_code, detail=exc.detail, headers=SOURCE_MATERIAL_HEADERS) from None
+    return Response(content=archive, media_type="application/zip", headers={
+        **SOURCE_MATERIAL_HEADERS, "Content-Disposition": 'attachment; filename="LoreGuard-source-materials.zip"',
+    })
+
+
 @app.get("/api/v1/analysis-runs/{run_id}/export.md")
 def export_markdown_report(
     run_id: str,
