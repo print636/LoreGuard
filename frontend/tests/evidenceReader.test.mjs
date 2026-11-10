@@ -172,3 +172,15 @@ test("a frozen source cannot change between context pages", () => {
     assert.equal(sameEvidenceSource(source, { ...source, [key]: value }), false, key);
   }
 });
+
+test("record reader needs no formal issue and keeps its own frozen source/version binding", () => {
+  const input = request({ selection: selection({ kind: "record", itemId: "record-1", evidenceIndex: 0, expectedVersion: 1 }) });
+  assert.match(evidenceKindLabel("record"), /不代表已形成一致性问题/);
+  assert.equal(new URL(evidencePreviewPath(input), "https://example.test").searchParams.get("kind"), "record");
+  assert.equal(normalizeEvidencePreview(fullPreview(input), input).reference.kind, "record");
+  for (const mutate of [v => v.reference.kind = "issue", v => v.reference.item_id = "other-record",
+    v => v.reference.text = "当前新版", v => v.source.document_version = 2,
+    v => v.source.source_run_id = "other-run", v => v.run.project_id = "other-project"]) {
+    const raw = fullPreview(input); mutate(raw); assert.throws(() => normalizeEvidencePreview(raw, input), TypeError);
+  }
+});

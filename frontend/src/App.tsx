@@ -128,10 +128,12 @@ import ReportContents from "./features/workbench/ReportContents";
 import EvidenceWorkspace from "./features/workbench/EvidenceWorkspace";
 import OperationMessage from "./features/workbench/OperationMessage";
 import { MaterialImpactCatalog, MaterialImpactPanel } from "./features/material-impact/MaterialImpact";
+import { journeyRoute, journeySearch } from "./features/item-journey/itemJourneyModel";
 import { revealWorkbenchTarget } from "./features/workbench/revealTarget";
 import { isSituationalPattern, issueSeverityLabel, reviewStatusLabel, reviewTimeLabel } from "./productLanguage";
 
 const RelationGraph = lazy(() => import("./components/RelationGraph"));
+const ItemJourney = lazy(() => import("./features/item-journey/ItemJourney"));
 const RevisionReview = lazy(() => import("./components/RevisionReview"));
 const CharacterWorkspace = lazy(
   () => import("./features/characters/CharacterWorkspace"),
@@ -534,7 +536,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   const [clarifications, setClarifications] = useState<ClarificationView[]>([]);
   const [graph, setGraph] = useState<GraphResponse | null>(null);
   const [timeline, setTimeline] = useState<TimelineResponse | null>(null);
-  const [visualTab, setVisualTab] = useState<"graph" | "timeline">("graph");
+  const [visualTab, setVisualTab] = useState<"graph" | "timeline" | "items">("graph");
   const focusedReportLocation = useRef("");
   const [focusedIssue, setFocusedIssue] = useState<string | null>(null);
   const [evidenceReaderSelection, setEvidenceReaderSelection] = useState<EvidenceReaderSelection | null>(null);
@@ -1666,6 +1668,10 @@ export default function App({ identity, onLoggedOut }: AppProps) {
   }
   async function loadVisualization(kind: "graph" | "timeline") {
     setVisualTab(kind);
+    if (activeView === "visual") {
+      const params = new URLSearchParams(routeSearch); params.set("view", kind);
+      browserNavigate(`${workspacePath("visual", project, run)}?${params}`, { replace: true });
+    }
     if (!run || runInfo?.status !== "completed") return;
     if ((kind === "graph" && graph) || (kind === "timeline" && timeline))
       return;
@@ -1734,6 +1740,12 @@ export default function App({ identity, onLoggedOut }: AppProps) {
     }
     setActiveView(view);
   }
+
+  useEffect(() => {
+    if (activeView !== "visual") return;
+    const view = new URLSearchParams(routeSearch).get("view");
+    if (view === "items" || view === "graph" || view === "timeline") setVisualTab(view);
+  }, [activeView, routeSearch]);
 
   function openEvidenceReader(kind: EvidenceKind, itemId: string, evidenceIndex: number, expected: Evidence, trigger: HTMLButtonElement, expectedVersion?: number) {
     if (!project || !run || projectLoading || routeProblem || runInfo?.id !== run || runInfo.project_id !== project || runInfo.status !== "completed") return;
@@ -2691,10 +2703,11 @@ export default function App({ identity, onLoggedOut }: AppProps) {
             <section className="visualization workspaceView">
               <div className="sectionHead">
                 <div>
-                  <p className="eyebrow">NARRATIVE VIEW</p>
-                  <h2>按需查看关系图与时间线</h2>
+                  <h2>关系与时间</h2>
                 </div>
                 <div className="visualTabs">
+                  <button type="button" className={visualTab === "items" ? "active" : ""} aria-pressed={visualTab === "items"}
+                    onClick={() => { const selection = journeyRoute(routeSearch); setVisualTab("items"); browserNavigate(`${workspacePath("visual", project || null, run || null)}${journeySearch(selection.item, selection.issue)}`); }}>物品去向</button>
                   <button
                     className={visualTab === "graph" && graph ? "active" : ""}
                     disabled={
@@ -2729,10 +2742,15 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                   </button>
                 </div>
               </div>
-              {visualError && (
+              {visualTab !== "items" && visualError && (
                 <div className="visualWarning">{visualError}</div>
               )}
-              {visualTab === "graph" && graph ? (
+              {visualTab === "items" ? <Suspense fallback={<p role="status">正在打开物品历程…</p>}>
+                <ItemJourney key={`${project}:${run}`} projectId={project} runId={run} createdAt={runInfo?.created_at}
+                  status={!projectLoading && runInfo?.id === run && runInfo.project_id === project ? runInfo.status : undefined}
+                  search={routeSearch} refreshKey={docs} onChooseRun={() => navigateWorkspace("audit")}
+                  onRouteChange={(search, replace) => browserNavigate(`${workspacePath("visual", project, run)}${search}`, { replace })} />
+              </Suspense> : visualTab === "graph" && graph ? (
                 <Suspense
                   fallback={
                     <div className="visualEmpty">正在加载关系图组件…</div>
@@ -2984,6 +3002,7 @@ export default function App({ identity, onLoggedOut }: AppProps) {
                           {(issue.confidence * 100).toFixed(0)}%
                         </p>
                         <h3>{issue.title}</h3>
+                        {issue.category === "item_ownership" && <button type="button" onClick={() => browserNavigate(`${workspacePath("visual", project, run)}${journeySearch(null, issue.id)}`)}>查看相关物品去向</button>}
                         <button
                           className="issuePermalink"
                           type="button"

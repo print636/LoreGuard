@@ -7120,6 +7120,46 @@ def export_markdown_report(
     )
 
 
+@app.get("/api/v1/analysis-runs/{run_id}/item-journeys")
+def get_item_journeys(
+    run_id: str, response: Response,
+    q: Annotated[str, Query(max_length=160)] = "",
+    issue_id: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    from .item_journey import ItemJourneyNotFound, list_item_journeys
+    response.headers["Cache-Control"] = "no-store"
+    with SessionLocal() as db:
+        run = _run_in_workspace(db, run_id, context.workspace_id)
+        if run is None:
+            raise HTTPException(404, "分析任务不存在", headers={"Cache-Control": "no-store"})
+        try:
+            return list_item_journeys(db, run, q=q, issue_id=issue_id, offset=offset, limit=limit)
+        except ItemJourneyNotFound:
+            raise HTTPException(404, "物品历程不存在", headers={"Cache-Control": "no-store"}) from None
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/item-journeys/{item_key}")
+def get_item_journey_detail(
+    run_id: str, item_key: str, response: Response,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    context: AuthContext = Depends(get_auth_context),
+) -> dict:
+    from .item_journey import ItemJourneyNotFound, get_item_journey
+    response.headers["Cache-Control"] = "no-store"
+    with SessionLocal() as db:
+        run = _run_in_workspace(db, run_id, context.workspace_id)
+        if run is None:
+            raise HTTPException(404, "分析任务不存在", headers={"Cache-Control": "no-store"})
+        try:
+            return get_item_journey(db, run, item_key, offset=offset, limit=limit)
+        except ItemJourneyNotFound:
+            raise HTTPException(404, "物品历程不存在", headers={"Cache-Control": "no-store"}) from None
+
+
 @app.get("/api/v1/analysis-runs/{run_id}/records")
 def get_records(
     run_id: str,

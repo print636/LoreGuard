@@ -18,6 +18,7 @@ from .narrative_context import classify_character_source_kind, payload_sha256
 from .report_material_review import project_material_review
 from .db import (
     AnalysisDiagnosticRow,
+    AnalysisRecordRow,
     AnalysisRunCharacterTraitInputRow,
     AnalysisRunInputRow,
     AnalysisRunRow,
@@ -33,7 +34,7 @@ from .service import (
 )
 
 
-EvidencePreviewKind = Literal["issue", "review_clue", "provisional_clue", "habit_scope", "material_gap"]
+EvidencePreviewKind = Literal["issue", "review_clue", "provisional_clue", "habit_scope", "material_gap", "record"]
 HABIT_SCOPE_REFS_KEY = "habit_scope_refs_v1"
 NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 NOT_FOUND_MESSAGE = "报告证据不存在"
@@ -369,7 +370,20 @@ def build_report_evidence_preview(
 ) -> dict[str, Any]:
     """Resolve report-owned evidence against immutable bodies using SELECT only."""
     binding = None
-    if kind == "provisional_clue":
+    if kind == "record":
+        row = db.scalar(select(AnalysisRecordRow).where(
+            AnalysisRecordRow.run_id == run.id, AnalysisRecordRow.id == item_id,
+        ))
+        if row is None or evidence_index != 0:
+            _not_found()
+        reference = _reference(row.evidence)
+        source = db.scalar(select(AnalysisRunInputRow).where(
+            AnalysisRunInputRow.run_id == run.id,
+            AnalysisRunInputRow.document_id == reference["document_id"],
+        ))
+        if source is None:
+            _snapshot_unavailable(missing=True)
+    elif kind == "provisional_clue":
         reference, source = _provisional_reference(db, run, item_id, evidence_index)
     elif kind == "material_gap":
         reference, source = _material_gap_reference(db, run, item_id, evidence_index, safe_review_clue_payload)
